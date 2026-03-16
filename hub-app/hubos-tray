@@ -339,6 +339,46 @@ class HubOSTray:
         ss_item.set_submenu(ss_menu)
         tools_menu.append(ss_item)
 
+        # Game Profiles
+        gp_item = Gtk.MenuItem(label="Game Profiles")
+        gp_menu = Gtk.Menu()
+        for action, desc in [("list", "List Profiles"), ("create", "Create New Profile")]:
+            gi = Gtk.MenuItem(label=desc)
+            gi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-game-profiles", a]))
+            gp_menu.append(gi)
+        gp_item.set_submenu(gp_menu)
+        tools_menu.append(gp_item)
+
+        # Controller
+        ctrl_item = Gtk.MenuItem(label="Controller")
+        ctrl_menu = Gtk.Menu()
+        for action, desc in [("list", "Detect Controllers"), ("status", "Controller Status"), ("fix", "Fix Common Issues")]:
+            ci = Gtk.MenuItem(label=desc)
+            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-controller", a]))
+            ctrl_menu.append(ci)
+        ctrl_item.set_submenu(ctrl_menu)
+        tools_menu.append(ctrl_item)
+
+        # Streaming
+        strm_item = Gtk.MenuItem(label="Streaming")
+        strm_menu = Gtk.Menu()
+        for action, desc in [("setup", "Setup Streaming"), ("start", "Start Stream"), ("stop", "Stop Stream"), ("status", "Stream Status")]:
+            si = Gtk.MenuItem(label=desc)
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-stream", a]))
+            strm_menu.append(si)
+        strm_item.set_submenu(strm_menu)
+        tools_menu.append(strm_item)
+
+        # Shader Cache
+        shader_item = Gtk.MenuItem(label="Shader Cache")
+        shader_menu = Gtk.Menu()
+        for action, desc in [("status", "Cache Status"), ("optimize", "Optimize Settings"), ("size", "Disk Usage")]:
+            shi = Gtk.MenuItem(label=desc)
+            shi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-shader-cache", a]))
+            shader_menu.append(shi)
+        shader_item.set_submenu(shader_menu)
+        tools_menu.append(shader_item)
+
         tools_item.set_submenu(tools_menu)
         menu.append(tools_item)
 
@@ -352,6 +392,14 @@ class HubOSTray:
         bench = Gtk.MenuItem(label="Benchmark")
         bench.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-benchmark", "full"]))
         menu.append(bench)
+
+        playtime = Gtk.MenuItem(label="Playtime Stats")
+        playtime.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-game-timer", "stats"]))
+        menu.append(playtime)
+
+        proton_upd = Gtk.MenuItem(label="Update Proton-GE")
+        proton_upd.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-proton-updater", "update"]))
+        menu.append(proton_upd)
 
         backup = Gtk.MenuItem(label="Backup Game Saves")
         backup.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-backup", "create"]))

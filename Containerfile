@@ -47,6 +47,12 @@ COPY scripts/hubos-backup /tmp/hubos-build/bin/hubos-backup
 COPY scripts/hubos-nightlight /tmp/hubos-build/bin/hubos-nightlight
 COPY scripts/hubos-benchmark /tmp/hubos-build/bin/hubos-benchmark
 COPY scripts/hubos-hub-bridge /tmp/hubos-build/bin/hubos-hub-bridge
+COPY scripts/hubos-game-profiles /tmp/hubos-build/bin/hubos-game-profiles
+COPY scripts/hubos-controller /tmp/hubos-build/bin/hubos-controller
+COPY scripts/hubos-proton-updater /tmp/hubos-build/bin/hubos-proton-updater
+COPY scripts/hubos-game-timer /tmp/hubos-build/bin/hubos-game-timer
+COPY scripts/hubos-stream /tmp/hubos-build/bin/hubos-stream
+COPY scripts/hubos-shader-cache /tmp/hubos-build/bin/hubos-shader-cache
 COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
 COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
 COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
@@ -170,6 +176,12 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-nightlight /usr/bin/hubos-nightlight \
     && install -m 755 /tmp/hubos-build/bin/hubos-benchmark /usr/bin/hubos-benchmark \
     && install -m 755 /tmp/hubos-build/bin/hubos-hub-bridge /usr/bin/hubos-hub-bridge \
+    && install -m 755 /tmp/hubos-build/bin/hubos-game-profiles /usr/bin/hubos-game-profiles \
+    && install -m 755 /tmp/hubos-build/bin/hubos-controller /usr/bin/hubos-controller \
+    && install -m 755 /tmp/hubos-build/bin/hubos-proton-updater /usr/bin/hubos-proton-updater \
+    && install -m 755 /tmp/hubos-build/bin/hubos-game-timer /usr/bin/hubos-game-timer \
+    && install -m 755 /tmp/hubos-build/bin/hubos-stream /usr/bin/hubos-stream \
+    && install -m 755 /tmp/hubos-build/bin/hubos-shader-cache /usr/bin/hubos-shader-cache \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/hubos \
@@ -189,11 +201,16 @@ RUN rpm-ostree install \
     && cp /tmp/hubos-build/systemd-user/hubos-backup.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/hubos-build/systemd-user/hubos-backup.timer /etc/skel/.config/systemd/user/ \
     && cp /tmp/hubos-build/systemd-user/hubos-hub-bridge.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-game-timer.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-proton-updater.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-proton-updater.timer /etc/skel/.config/systemd/user/ \
     && ln -sf ../hubos-server-status.service /etc/skel/.config/systemd/user/default.target.wants/hubos-server-status.service \
     && ln -sf ../hubos-discord-fix.service /etc/skel/.config/systemd/user/default.target.wants/hubos-discord-fix.service \
     && ln -sf ../hubos-hub-bridge.service /etc/skel/.config/systemd/user/default.target.wants/hubos-hub-bridge.service \
+    && ln -sf ../hubos-game-timer.service /etc/skel/.config/systemd/user/default.target.wants/hubos-game-timer.service \
     && mkdir -p /etc/skel/.config/systemd/user/timers.target.wants \
     && ln -sf ../hubos-backup.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-backup.timer \
+    && ln -sf ../hubos-proton-updater.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-proton-updater.timer \
     \
     # ── PipeWire gaming config ── \
     && mkdir -p /etc/pipewire/pipewire.conf.d \

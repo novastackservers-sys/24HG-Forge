@@ -98,3 +98,11 @@ alias status='hubos-server-status --once'
 alias hub-login='hubos-hub-bridge login'
 alias hub-logout='hubos-hub-bridge logout'
 alias hub-status='hubos-hub-bridge status'
+
+# Wave 5 tool aliases
+alias game-profiles='hubos-game-profiles'
+alias controller='hubos-controller'
+alias proton-update='hubos-proton-updater update'
+alias playtime='hubos-game-timer stats'
+alias stream='hubos-stream'
+alias shaders='hubos-shader-cache'

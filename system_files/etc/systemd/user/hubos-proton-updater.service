@@ -1,0 +1,8 @@
+[Unit]
+Description=HubOS Proton-GE Auto-Update Check
+Documentation=https://os.24hgaming.com
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hubos-proton-updater auto

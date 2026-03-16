@@ -90,6 +90,8 @@ echo "  - hubos-server-status (live server monitoring)"
 echo "  - hubos-discord-fix (Rich Presence bridge)"
 echo "  - hubos-backup.timer (weekly game save backup)"
 echo "  - hubos-hub-bridge (Hub notifications, DMs, friend status)"
+echo "  - hubos-game-timer (playtime tracking across all launchers)"
+echo "  - hubos-proton-updater.timer (daily Proton-GE update check)"
 
 # Enable Chromium desktop notifications for the Hub
 mkdir -p /etc/skel/.config/chromium/Default
