@@ -2,7 +2,6 @@ name: Build HubOS ISO
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -14,18 +13,16 @@ on:
         options:
           - desktop
           - nvidia
+          - both
 
 env:
   IMAGE_NAME: hubos
-  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  IMAGE_REGISTRY: git.raggi.is/24hg
 
 jobs:
   build-image:
-    name: Build OCI Image
+    name: Build OCI Image (${{ matrix.variant }})
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
     strategy:
       matrix:
         variant: [desktop, nvidia]
@@ -33,49 +30,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to Registry
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" | podman login git.raggi.is -u ${{ secrets.REGISTRY_USER }} --password-stdin
 
       - name: Set base image
         id: base
         run: |
           if [ "${{ matrix.variant }}" = "nvidia" ]; then
             echo "image=ghcr.io/ublue-os/bazzite-nvidia" >> "$GITHUB_OUTPUT"
+            echo "containerfile=Containerfile.nvidia" >> "$GITHUB_OUTPUT"
           else
             echo "image=ghcr.io/ublue-os/bazzite" >> "$GITHUB_OUTPUT"
+            echo "containerfile=Containerfile" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build Image
-        id: build
-        uses: redhat-actions/buildah-build@v2
-        with:
-          image: ${{ env.IMAGE_NAME }}
-          tags: |
-            latest
-            ${{ github.sha }}
-            ${{ github.ref_name }}
-          containerfiles: ./Containerfile
-          build-args: |
-            BASE_IMAGE=${{ steps.base.outputs.image }}
-            BASE_TAG=stable
+        run: |
+          podman build \
+            --build-arg BASE_IMAGE=${{ steps.base.outputs.image }} \
+            --build-arg BASE_TAG=stable \
+            -f ${{ steps.base.outputs.containerfile }} \
+            -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest \
+            .
 
-      - name: Push to GHCR
-        uses: redhat-actions/push-to-registry@v2
-        with:
-          image: ${{ steps.build.outputs.image }}
-          tags: ${{ steps.build.outputs.tags }}
-          registry: ${{ env.IMAGE_REGISTRY }}
+      - name: Push to Registry
+        run: |
+          podman push ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest
 
   build-iso:
     name: Build ISO (${{ matrix.variant }})
     needs: build-image
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     strategy:
       matrix:
         variant: [desktop, nvidia]
@@ -89,7 +75,7 @@ jobs:
         with:
           image_name: ${{ env.IMAGE_NAME }}
           image_repo: ${{ env.IMAGE_REGISTRY }}
-          image_tag: latest
+          image_tag: ${{ matrix.variant }}-latest
           variant: Kinoite
           iso_name: hubos-${{ matrix.variant }}-${{ github.ref_name }}.iso
           enrollment_password: hubos
@@ -110,24 +96,33 @@ jobs:
 
       - name: Create Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ${{ steps.build-iso.outputs.iso_path }}/*.iso
-            ${{ steps.build-iso.outputs.iso_path }}/SHA256SUMS
-          body: |
-            ## HubOS ${{ github.ref_name }}
+        run: |
+          # Use Gitea API for release creation
+          ISO_PATH="${{ steps.build-iso.outputs.iso_path }}"
+          TAG="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
 
-            ### Downloads
-            - **Desktop** (AMD/Intel GPU): `hubos-desktop-${{ github.ref_name }}.iso`
-            - **NVIDIA** (GTX 900+): `hubos-nvidia-${{ github.ref_name }}.iso`
+          # Create release if it doesn't exist
+          RELEASE_ID=$(curl -s \
+            -H "Authorization: token ${{ secrets.REGISTRY_TOKEN }}" \
+            "https://git.raggi.is/api/v1/repos/${REPO}/releases/tags/${TAG}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
 
-            ### Verify download
-            ```bash
-            sha256sum -c SHA256SUMS
-            ```
+          if [ -z "$RELEASE_ID" ]; then
+            RELEASE_ID=$(curl -s -X POST \
+              -H "Authorization: token ${{ secrets.REGISTRY_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              "https://git.raggi.is/api/v1/repos/${REPO}/releases" \
+              -d "{\"tag_name\":\"${TAG}\",\"name\":\"HubOS ${TAG}\",\"body\":\"## HubOS ${TAG}\\n\\n### Downloads\\n- **Desktop** (AMD/Intel GPU)\\n- **NVIDIA** (GTX 900+)\\n\\nSee [Roadmap](https://os.24hgaming.com/roadmap.html) for changelog.\"}" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          fi
 
-            ### What's new
-            See [Roadmap](https://os.24hgaming.com/roadmap.html) for full changelog.
-          draft: false
-          prerelease: false
+          # Upload ISO and checksums
+          for f in "${ISO_PATH}"/*.iso "${ISO_PATH}"/SHA256SUMS; do
+            if [ -f "$f" ]; then
+              curl -s -X POST \
+                -H "Authorization: token ${{ secrets.REGISTRY_TOKEN }}" \
+                "https://git.raggi.is/api/v1/repos/${REPO}/releases/${RELEASE_ID}/assets?name=$(basename $f)" \
+                -F "attachment=@$f"
+            fi
+          done

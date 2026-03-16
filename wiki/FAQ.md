@@ -98,7 +98,7 @@ systemctl reboot
 Yes:
 
 ```bash
-rpm-ostree rebase ostree-unverified-registry:ghcr.io/24hgaming/hubos:latest
+rpm-ostree rebase ostree-unverified-registry:git.raggi.is/24hg/hubos:latest
 systemctl reboot
 ```
 
@@ -232,7 +232,7 @@ This links your 24HG account to your HubOS installation and activates benefits a
 ### How do I report a bug?
 
 1. Generate a diagnostic: `hubos-diag --paste`
-2. Open an issue on [GitHub](https://github.com/24hgaming/hubos/issues) with the diagnostic link.
+2. Open an issue on [Gitea](https://git.raggi.is/24hg/hubos/issues) with the diagnostic link.
 3. Or share it in the [Discord](https://discord.gg/ymfEjH6EJN) support channel.
 
 ### How do I contribute?

@@ -1,8 +1,11 @@
 *.iso
+*.iso-CHECKSUM
 *.tar
 *.img
 *.oci
 build/
+iso-output/
+landing-page/iso/
 .cache/
 *.pyc
 __pycache__/

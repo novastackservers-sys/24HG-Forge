@@ -65,6 +65,10 @@ declare -A GAME_MODS=(
     ["346110"]="ARK: Survival Evolved|ShooterGame/Content/Mods|ShooterGame/Saved|"
     ["379720"]="DOOM 2016|mods||"
     ["782330"]="DOOM Eternal|mods||"
+    ["1716740"]="Starfield|Data|AppData/Local/Starfield|My Documents/My Games/Starfield"
+    ["990080"]="Hogwarts Legacy|~mods|AppData/Local/Hogwarts Legacy|"
+    ["1551360"]="Forza Horizon 5|media/Mods|AppData/Local/ForzaHorizon5|"
+    ["230410"]="Warframe|Tools|AppData/Local/Warframe|"
 )
 
 # Reverse lookup: lowercase game name -> app ID
@@ -1469,6 +1473,9 @@ nexus_search() {
         ["22380"]="newvegas"
         ["72850"]="skyrim"
         ["22330"]="oblivion"
+        ["1716740"]="starfield"
+        ["990080"]="hogwartslegacy"
+        ["230410"]="warframe"
         ["281990"]="stellaris"
         ["394360"]="heartsofiron4"
         ["236850"]="europauniversalis4"

@@ -822,6 +822,151 @@ cmd_fix() {
             ;;
     esac
 
+    # ── Game-specific fixes ──────────────────────────────────────────────
+    case "$appid" in
+        271590)  # GTA V
+            log_info "Applying GTA V specific fixes..."
+            # GTA V needs dinput8 override for ScriptHookV/mods
+            local prefix_dir
+            prefix_dir="$(get_compatdata_dir "$appid")"
+            if [[ -n "$prefix_dir" ]]; then
+                # Fix Social Club launcher crash
+                if [[ ! -f "$prefix_dir/pfx/drive_c/users/steamuser/Documents/Rockstar Games/Social Club/Profiles" ]]; then
+                    mkdir -p "$prefix_dir/pfx/drive_c/users/steamuser/Documents/Rockstar Games/Social Club" 2>/dev/null
+                    log_fix "Created Social Club directories for GTA V"
+                    any_fix=true
+                fi
+                # Ensure d3dcompiler_47 is present
+                if ! find "$prefix_dir/pfx/drive_c/windows/system32" -name "d3dcompiler_47.dll" -print -quit 2>/dev/null | grep -q .; then
+                    log_info "d3dcompiler_47 missing — run: hubos-proton-fix install-dll $appid d3dcompiler_47"
+                fi
+            fi
+            ;;
+        990080)  # Hogwarts Legacy
+            log_info "Applying Hogwarts Legacy specific fixes..."
+            # Shader compilation stutter fix
+            local hl_prefix
+            hl_prefix="$(get_compatdata_dir "$appid")"
+            if [[ -n "$hl_prefix" ]]; then
+                # Clear shader cache to force fresh compilation
+                local hl_cache="$hl_prefix/pfx/drive_c/users/steamuser/AppData/Local/Hogwarts Legacy/Saved/Shaders"
+                if [[ -d "$hl_cache" ]]; then
+                    local cache_size
+                    cache_size=$(du -sm "$hl_cache" 2>/dev/null | awk '{print $1}')
+                    if (( cache_size > 2000 )); then
+                        log_info "Shader cache is ${cache_size}MB — clearing stale shaders"
+                        find "$hl_cache" -name "*.bin" -mtime +30 -delete 2>/dev/null
+                        log_fix "Cleaned old Hogwarts Legacy shader cache"
+                        any_fix=true
+                    fi
+                fi
+                # Enable NVAPI for DLSS
+                log_info "Tip: Enable DLSS with: PROTON_ENABLE_NVAPI=1 (set in smart-launch profile)"
+            fi
+            ;;
+        1716740)  # Starfield
+            log_info "Applying Starfield specific fixes..."
+            local sf_prefix
+            sf_prefix="$(get_compatdata_dir "$appid")"
+            if [[ -n "$sf_prefix" ]]; then
+                # Starfield needs high VRAM — warn if < 6GB
+                local vram_mb
+                vram_mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
+                if [[ -n "$vram_mb" ]] && (( vram_mb < 6000 )); then
+                    log_warn "Starfield needs 6GB+ VRAM, your GPU has ${vram_mb}MB — expect crashes"
+                    log_info "Lower texture quality to Medium in game settings"
+                fi
+                # Fix ini for better stability
+                local sf_ini_dir="$sf_prefix/pfx/drive_c/users/steamuser/Documents/My Games/Starfield"
+                if [[ -d "$sf_ini_dir" ]]; then
+                    if ! grep -q "bBorderless=0" "$sf_ini_dir/StarfieldPrefs.ini" 2>/dev/null; then
+                        echo -e "\n[Display]\nbBorderless=0\nbFull Screen=1" >> "$sf_ini_dir/StarfieldPrefs.ini" 2>/dev/null
+                        log_fix "Set Starfield to exclusive fullscreen (more stable on Linux)"
+                        any_fix=true
+                    fi
+                fi
+            fi
+            ;;
+        1551360)  # Forza Horizon 5
+            log_info "Applying Forza Horizon 5 specific fixes..."
+            local fh5_prefix
+            fh5_prefix="$(get_compatdata_dir "$appid")"
+            if [[ -n "$fh5_prefix" ]]; then
+                # Forza needs media foundation for intro videos
+                log_info "If intro video crashes, add PROTON_VERB=waitforexitandrun to skip"
+                # Fix controller detection issue
+                if [[ -d /dev/input ]]; then
+                    local js_count
+                    js_count=$(ls /dev/input/js* 2>/dev/null | wc -l)
+                    if (( js_count > 1 )); then
+                        log_warn "Multiple joystick devices detected ($js_count) — Forza may pick the wrong one"
+                        log_info "Use 'hubos-controller' to configure the correct device"
+                    fi
+                fi
+            fi
+            ;;
+        230410)  # Warframe
+            log_info "Applying Warframe specific fixes..."
+            local wf_prefix
+            wf_prefix="$(get_compatdata_dir "$appid")"
+            if [[ -n "$wf_prefix" ]]; then
+                # Warframe launcher can hang — use directx11
+                local wf_cfg="$wf_prefix/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.cfg"
+                if [[ -f "$wf_cfg" ]]; then
+                    if grep -q "Graphics.Renderer=DX12" "$wf_cfg" 2>/dev/null; then
+                        sed -i 's/Graphics.Renderer=DX12/Graphics.Renderer=DX11/' "$wf_cfg"
+                        log_fix "Switched Warframe from DX12 to DX11 (more stable on Proton)"
+                        any_fix=true
+                    fi
+                fi
+                # xaudio2 fix for audio crackling
+                log_info "Audio fix: WINEDLLOVERRIDES=\"xaudio2_7=n,b\" (set in smart-launch profile)"
+            fi
+            ;;
+        minecraft|"minecraft")  # Minecraft Java
+            log_info "Applying Minecraft specific fixes..."
+            local mc_dir="$HOME/.minecraft"
+            if [[ -d "$mc_dir" ]]; then
+                # Check Java version
+                local java_ver
+                java_ver=$(java -version 2>&1 | head -1 | awk -F'"' '{print $2}')
+                if [[ -n "$java_ver" ]]; then
+                    local major
+                    major=$(echo "$java_ver" | cut -d. -f1)
+                    if (( major < 17 )); then
+                        log_warn "Minecraft 1.20+ needs Java 17+, you have $java_ver"
+                        log_info "Install: sudo rpm-ostree install java-17-openjdk"
+                    else
+                        log_ok "Java version $java_ver is compatible"
+                    fi
+                fi
+                # Check JVM memory
+                local jvm_args=""
+                if [[ -f "$mc_dir/launcher_profiles.json" ]]; then
+                    jvm_args=$(python3 -c "
+import json
+with open('$mc_dir/launcher_profiles.json') as f:
+    d = json.load(f)
+for p in d.get('profiles',{}).values():
+    args = p.get('javaArgs','')
+    if args: print(args); break
+" 2>/dev/null)
+                fi
+                if [[ -n "$jvm_args" ]] && echo "$jvm_args" | grep -qP '\-Xmx[12]G'; then
+                    log_warn "Minecraft allocated only 1-2GB RAM — increase to 4GB for modded"
+                    log_info "In launcher: JVM args → -Xmx4G -Xms2G"
+                fi
+                # LWJGL native library path fix
+                if [[ ! -d "$mc_dir/libraries/org/lwjgl" ]]; then
+                    log_info "LWJGL libraries may need refresh — try re-downloading in launcher"
+                fi
+            else
+                log_info "Minecraft directory not found at $mc_dir"
+                log_info "Install via: flatpak install flathub com.mojang.Minecraft"
+            fi
+            ;;
+    esac
+
     separator
     if [[ ${#FIXES_APPLIED[@]} -gt 0 ]]; then
         echo -e "  ${GREEN}${BOLD}Fixes applied:${NC}"

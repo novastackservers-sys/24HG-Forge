@@ -502,6 +502,17 @@ class HubOSTray:
         games_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-games", "list"]))
         menu.append(games_item)
 
+        # ── Game Setup ──
+        setup_item = Gtk.MenuItem(label="Game Setup")
+        setup_menu = Gtk.Menu()
+        for game, label in [("gtav", "GTA V"), ("hogwarts", "Hogwarts Legacy"), ("starfield", "Starfield"),
+                            ("forza", "Forza Horizon 5"), ("warframe", "Warframe"), ("minecraft", "Minecraft")]:
+            gi = Gtk.MenuItem(label=label)
+            gi.connect("activate", lambda w, g=game: subprocess.Popen(["konsole", "-e", "hubos-game-setup", g]))
+            setup_menu.append(gi)
+        setup_item.set_submenu(setup_menu)
+        menu.append(setup_item)
+
         # ── Save Manager ──
         saves_item = Gtk.MenuItem(label="Save Games")
         saves_menu = Gtk.Menu()

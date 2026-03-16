@@ -278,10 +278,10 @@ If you already run Bazzite or Fedora Atomic, you can rebase to HubOS without rei
 
 ```bash
 # From Bazzite (Desktop/AMD/Intel)
-rpm-ostree rebase ostree-unverified-registry:ghcr.io/24hgaming/hubos:latest
+rpm-ostree rebase ostree-unverified-registry:git.raggi.is/24hg/hubos:latest
 
 # From Bazzite (NVIDIA)
-rpm-ostree rebase ostree-unverified-registry:ghcr.io/24hgaming/hubos-nvidia:latest
+rpm-ostree rebase ostree-unverified-registry:git.raggi.is/24hg/hubos-nvidia:latest
 
 # Reboot to apply
 systemctl reboot

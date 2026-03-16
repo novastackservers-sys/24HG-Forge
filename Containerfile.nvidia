@@ -56,6 +56,7 @@ COPY scripts/hubos-nightlight /tmp/hubos-build/bin/hubos-nightlight
 COPY scripts/hubos-benchmark /tmp/hubos-build/bin/hubos-benchmark
 COPY scripts/hubos-hub-bridge /tmp/hubos-build/bin/hubos-hub-bridge
 COPY scripts/hubos-game-profiles /tmp/hubos-build/bin/hubos-game-profiles
+COPY scripts/hubos-game-setup /tmp/hubos-build/bin/hubos-game-setup
 COPY scripts/hubos-controller /tmp/hubos-build/bin/hubos-controller
 COPY scripts/hubos-proton-updater /tmp/hubos-build/bin/hubos-proton-updater
 COPY scripts/hubos-game-timer /tmp/hubos-build/bin/hubos-game-timer
@@ -130,6 +131,7 @@ RUN rpm-ostree install \
     vulkan-tools \
     libappindicator-gtk3 \
     conky \
+    java-21-openjdk \
     && rpm-ostree cleanup -m \
     \
     # ── Sysctl gaming tweaks ── \
@@ -261,6 +263,7 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-benchmark /usr/bin/hubos-benchmark \
     && install -m 755 /tmp/hubos-build/bin/hubos-hub-bridge /usr/bin/hubos-hub-bridge \
     && install -m 755 /tmp/hubos-build/bin/hubos-game-profiles /usr/bin/hubos-game-profiles \
+    && install -m 755 /tmp/hubos-build/bin/hubos-game-setup /usr/bin/hubos-game-setup \
     && install -m 755 /tmp/hubos-build/bin/hubos-controller /usr/bin/hubos-controller \
     && install -m 755 /tmp/hubos-build/bin/hubos-proton-updater /usr/bin/hubos-proton-updater \
     && install -m 755 /tmp/hubos-build/bin/hubos-game-timer /usr/bin/hubos-game-timer \

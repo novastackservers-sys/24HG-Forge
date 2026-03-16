@@ -301,7 +301,7 @@ ANTICHEAT_DB = {
     311210: {"name": "Call of Duty: Black Ops III", "ac": "none", "status": "supported"},
     377160: {"name": "Fallout 4", "ac": "none", "status": "supported"},
     489830: {"name": "The Elder Scrolls V: Skyrim SE", "ac": "none", "status": "supported"},
-    1938010: {"name": "Starfield", "ac": "none", "status": "supported"},
+    1716740: {"name": "Starfield", "ac": "none", "status": "supported"},
     814380: {"name": "Sekiro", "ac": "none", "status": "supported"},
     1145350: {"name": "Hades", "ac": "none", "status": "supported"},
     990080: {"name": "Hogwarts Legacy", "ac": "none", "status": "supported"},

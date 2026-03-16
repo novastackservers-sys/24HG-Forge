@@ -35,7 +35,7 @@ podman build \
     --tag "${IMAGE_REF}" \
     --build-arg BASE_IMAGE="${BASE_IMAGE}" \
     --build-arg BASE_TAG=stable \
-    --file "${SCRIPT_DIR}/Containerfile" \
+    --file "${SCRIPT_DIR}/$([ "${VARIANT}" = "nvidia" ] && echo Containerfile.nvidia || echo Containerfile)" \
     "${SCRIPT_DIR}"
 
 echo "✓ Image built: ${IMAGE_REF}"

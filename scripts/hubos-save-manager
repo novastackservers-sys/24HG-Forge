@@ -135,7 +135,7 @@ SAVE_PATHS = {
             "userdata/{steamid}/1145360/remote/"
         ]
     },
-    1817070: {
+    990080: {
         "name": "Hogwarts Legacy",
         "paths": [
             "AppData/Local/Hogwarts Legacy/Saved/SaveGames/",
@@ -171,7 +171,7 @@ SAVE_PATHS = {
             "AppData/Local/Blizzard Entertainment/Diablo IV/",
         ]
     },
-    1332010: {
+    1716740: {
         "name": "Starfield",
         "paths": [
             "Documents/My Games/Starfield/Saves/",
@@ -743,13 +743,13 @@ SAVE_PATHS = {
     },
 
     # ── Racing / Sports ──────────────────────────────────────────────────
-    1293830: {
+    1551360: {
         "name": "Forza Horizon 5",
         "paths": [
             "AppData/Local/ForzaHorizon5/User_SteamLocalStorageDirectory/",
         ]
     },
-    1551360: {
+    2023630: {
         "name": "Forza Motorsport",
         "paths": [
             "AppData/Local/ForzaMotorsport/User_SteamLocalStorageDirectory/",

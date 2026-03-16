@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'Containerfile'
+      - 'Containerfile.nvidia'
       - 'system_files/**'
       - 'scripts/**'
       - 'hub-app/**'
@@ -14,59 +15,52 @@ on:
 
 env:
   IMAGE_NAME: hubos
-  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  IMAGE_REGISTRY: git.raggi.is/24hg
 
 jobs:
   build:
     name: Build & Push OCI Image
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
+    strategy:
+      matrix:
+        variant: [desktop, nvidia]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Login to GHCR
+      - name: Login to Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" | podman login git.raggi.is -u ${{ secrets.REGISTRY_USER }} --password-stdin
 
-      - name: Generate metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha
-            type=ref,event=branch
-            type=ref,event=tag
-            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Set build args
+        id: args
+        run: |
+          if [ "${{ matrix.variant }}" = "nvidia" ]; then
+            echo "base_image=ghcr.io/ublue-os/bazzite-nvidia" >> "$GITHUB_OUTPUT"
+            echo "containerfile=Containerfile.nvidia" >> "$GITHUB_OUTPUT"
+          else
+            echo "base_image=ghcr.io/ublue-os/bazzite" >> "$GITHUB_OUTPUT"
+            echo "containerfile=Containerfile" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build Image
-        id: build
-        uses: redhat-actions/buildah-build@v2
-        with:
-          image: ${{ env.IMAGE_NAME }}
-          tags: ${{ steps.meta.outputs.tags }}
-          containerfiles: ./Containerfile
-          build-args: |
-            BASE_IMAGE=ghcr.io/ublue-os/bazzite
-            BASE_TAG=stable
+        run: |
+          podman build \
+            --build-arg BASE_IMAGE=${{ steps.args.outputs.base_image }} \
+            --build-arg BASE_TAG=stable \
+            -f ${{ steps.args.outputs.containerfile }} \
+            -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest \
+            -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-${{ github.sha }} \
+            .
 
-      - name: Push to GHCR
+      - name: Push to Registry
         if: github.event_name != 'pull_request'
-        uses: redhat-actions/push-to-registry@v2
-        with:
-          image: ${{ steps.build.outputs.image }}
-          tags: ${{ steps.build.outputs.tags }}
-          registry: ${{ env.IMAGE_REGISTRY }}
+        run: |
+          podman push ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest
+          podman push ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-${{ github.sha }}
 
       - name: Summary
         run: |
-          echo "### HubOS Image Built" >> $GITHUB_STEP_SUMMARY
-          echo "**Image:** \`${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "### HubOS Image Built (${{ matrix.variant }})" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest\`" >> $GITHUB_STEP_SUMMARY

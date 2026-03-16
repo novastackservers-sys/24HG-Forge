@@ -144,3 +144,12 @@ alias flatpak-fix='hubos-flatpak-fix scan'
 alias update-guard='hubos-update-guard status'
 alias saves='hubos-save-manager list'
 alias nvidia-fix='hubos-nvidia-wayland fix'
+
+# Wave 12 game setup aliases
+alias game-setup='hubos-game-setup'
+alias setup-gtav='hubos-game-setup gtav'
+alias setup-hogwarts='hubos-game-setup hogwarts'
+alias setup-starfield='hubos-game-setup starfield'
+alias setup-forza='hubos-game-setup forza'
+alias setup-warframe='hubos-game-setup warframe'
+alias setup-minecraft='hubos-game-setup minecraft'

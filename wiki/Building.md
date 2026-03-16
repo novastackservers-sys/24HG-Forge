@@ -31,7 +31,7 @@ sudo apt install podman git qemu-kvm virt-manager
 ## Clone the Repository
 
 ```bash
-git clone https://github.com/24hgaming/hubos.git
+git clone https://git.raggi.is/24hg/hubos.git
 cd hubos
 ```
 
@@ -206,7 +206,7 @@ qemu-img create -f qcow2 hubos-test.qcow2 50G
 HubOS uses GitHub Actions for automated builds. The workflow:
 
 1. Push to `main` triggers a build.
-2. The OCI image is built and pushed to `ghcr.io/24hgaming/hubos`.
+2. The OCI image is built and pushed to `git.raggi.is/24hg/hubos`.
 3. The ISO is built from the pushed image.
 4. The ISO is attached to a GitHub Release.
 
@@ -224,9 +224,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build OCI image
-        run: podman build -t ghcr.io/24hgaming/hubos:latest .
+        run: podman build -t git.raggi.is/24hg/hubos:latest .
       - name: Push to GHCR
-        run: podman push ghcr.io/24hgaming/hubos:latest
+        run: podman push git.raggi.is/24hg/hubos:latest
       - name: Build ISO
         run: ./build-iso.sh
       - name: Upload ISO

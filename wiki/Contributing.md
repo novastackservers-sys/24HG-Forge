@@ -17,7 +17,7 @@ Thank you for your interest in contributing to HubOS. This guide covers everythi
 
 ```bash
 # Clone the repository
-git clone https://github.com/24hgaming/hubos.git
+git clone https://git.raggi.is/24hg/hubos.git
 cd hubos
 
 # Install build dependencies
@@ -37,7 +37,7 @@ Read the [Building from Source](Building) page for the full project structure. K
 
 ### 3. Pick Something to Work On
 
-Check the GitHub Issues for items tagged `good first issue` or `help wanted`. Or pick something from the roadmap.
+Check the Gitea Issues for items tagged `good first issue` or `help wanted`. Or pick something from the roadmap.
 
 ## Adding a New Tool
 
@@ -308,5 +308,5 @@ By contributing to HubOS, you agree that your contributions will be licensed und
 ## Contact
 
 - **Discord:** [discord.gg/ymfEjH6EJN](https://discord.gg/ymfEjH6EJN)
-- **GitHub Issues:** [github.com/24hgaming/hubos/issues](https://github.com/24hgaming/hubos/issues)
+- **Gitea Issues:** [git.raggi.is/24hg/hubos/issues](https://git.raggi.is/24hg/hubos/issues)
 - **Hub:** [hub.24hgaming.com](https://hub.24hgaming.com)

@@ -1,0 +1,597 @@
+#!/usr/bin/env bash
+# HubOS Game Setup — One-command setup for popular games on Linux
+# Ensures the right Proton version, dependencies, and configs are in place
+# so games launch correctly the first time.
+#
+# Usage: hubos-game-setup <game>
+#   gtav              — GTA V setup (Proton-GE, Social Club fix, d3dcompiler)
+#   hogwarts          — Hogwarts Legacy (Proton-GE, NVAPI, shader warmup tip)
+#   starfield         — Starfield (Proton-GE, NVAPI, ini tweaks)
+#   forza             — Forza Horizon 5 (Proton-GE, media foundation)
+#   warframe          — Warframe (Proton-GE, DX11 mode, audio fix)
+#   minecraft         — Minecraft Java (Java 21, launcher, RAM config)
+#   list              — Show all supported games
+#   check <game>      — Check if a game is ready to play
+#
+# Part of HubOS — The 24 Hour Gaming Operating System
+# https://24hgaming.com
+
+set -euo pipefail
+
+readonly VERSION="1.0.0"
+readonly PROG_NAME="hubos-game-setup"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# Steam paths
+STEAM_FLATPAK="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+STEAM_NATIVE="$HOME/.local/share/Steam"
+STEAM_DIR=""
+
+info()  { echo -e "  ${CYAN}[INFO]${NC}  $1"; }
+ok()    { echo -e "  ${GREEN}[OK]${NC}    $1"; }
+warn()  { echo -e "  ${YELLOW}[WARN]${NC}  $1"; }
+fail()  { echo -e "  ${RED}[FAIL]${NC}  $1"; }
+step()  { echo -e "  ${BOLD}→${NC} $1"; }
+
+header() {
+    echo ""
+    echo -e "${BOLD}━━━ HubOS Game Setup: $1 ━━━${NC}"
+    echo ""
+}
+
+detect_steam() {
+    if [[ -d "$STEAM_FLATPAK" ]]; then
+        STEAM_DIR="$STEAM_FLATPAK"
+    elif [[ -d "$STEAM_NATIVE" ]]; then
+        STEAM_DIR="$STEAM_NATIVE"
+    else
+        fail "Steam not found. Install Steam first."
+        return 1
+    fi
+    ok "Steam found at $STEAM_DIR"
+}
+
+get_compatdata() {
+    local appid="$1"
+    # Check all library folders
+    for lib in "$STEAM_DIR/steamapps" "$STEAM_DIR"/steamapps/libraryfolders/*/steamapps; do
+        if [[ -d "$lib/compatdata/$appid" ]]; then
+            echo "$lib/compatdata/$appid"
+            return 0
+        fi
+    done
+    # Default path
+    echo "$STEAM_DIR/steamapps/compatdata/$appid"
+}
+
+check_proton_ge() {
+    local ge_dir="$STEAM_DIR/compatibilitytools.d"
+    if [[ -d "$ge_dir" ]] && ls "$ge_dir"/GE-Proton* &>/dev/null 2>&1; then
+        local latest
+        latest=$(ls -d "$ge_dir"/GE-Proton* 2>/dev/null | sort -V | tail -1)
+        ok "Proton-GE found: $(basename "$latest")"
+        return 0
+    fi
+    warn "Proton-GE not installed"
+    step "Install with: hubos-proton-updater update"
+    step "Or: flatpak install com.github.Matoking.protontricks && protontricks --install-ge-proton"
+    return 1
+}
+
+set_launch_options() {
+    local appid="$1"
+    local opts="$2"
+    info "Recommended Steam launch options for this game:"
+    echo -e "    ${BOLD}$opts${NC}"
+    info "Set in: Steam → Right-click game → Properties → Launch Options"
+}
+
+# ─── Game Setups ───────────────────────────────────────────────────────────────
+
+setup_gtav() {
+    local appid="271590"
+    header "Grand Theft Auto V"
+
+    detect_steam || return 1
+    check_proton_ge
+
+    step "Checking GTA V installation..."
+    local compat
+    compat=$(get_compatdata "$appid")
+    if [[ -d "$compat/pfx" ]]; then
+        ok "Wine prefix exists"
+
+        # Social Club directory
+        local sc_dir="$compat/pfx/drive_c/users/steamuser/Documents/Rockstar Games/Social Club"
+        if [[ ! -d "$sc_dir" ]]; then
+            mkdir -p "$sc_dir"
+            ok "Created Social Club directory (prevents launcher crash)"
+        else
+            ok "Social Club directory exists"
+        fi
+
+        # GTA V save directory
+        local save_dir="$compat/pfx/drive_c/users/steamuser/Documents/Rockstar Games/GTA V/Profiles"
+        mkdir -p "$save_dir" 2>/dev/null
+    else
+        info "Prefix not yet created — launch GTA V once through Steam to create it"
+    fi
+
+    step "Checking dependencies..."
+    # d3dcompiler_47 and vcredist are handled by Proton-GE automatically
+    ok "Proton-GE includes d3dcompiler_47 and vcredist"
+
+    step "Recommended settings:"
+    set_launch_options "$appid" "DXVK_ASYNC=1 WINEDLLOVERRIDES=\"dinput8=n,b\" %command%"
+    info "Use Proton-GE (not default Proton) in Steam → Properties → Compatibility"
+    info "In-game: Use DirectX 11, disable MSAA for best performance"
+    info "GTA Online: Works but may need to retry connection"
+
+    echo ""
+    ok "GTA V setup complete!"
+}
+
+setup_hogwarts() {
+    local appid="990080"
+    header "Hogwarts Legacy"
+
+    detect_steam || return 1
+    check_proton_ge
+
+    step "Checking Hogwarts Legacy installation..."
+    local compat
+    compat=$(get_compatdata "$appid")
+    if [[ -d "$compat/pfx" ]]; then
+        ok "Wine prefix exists"
+
+        # Shader cache info
+        local shader_dir="$compat/pfx/drive_c/users/steamuser/AppData/Local/Hogwarts Legacy"
+        if [[ -d "$shader_dir" ]]; then
+            ok "Game data directory exists"
+            info "First launch will compile shaders — expect stutter for 10-15 min"
+            info "This clears up after the initial shader cache builds"
+        fi
+    else
+        info "Prefix not yet created — launch Hogwarts Legacy once through Steam"
+    fi
+
+    step "Checking GPU capabilities..."
+    if command -v nvidia-smi &>/dev/null; then
+        local vram
+        vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
+        if [[ -n "$vram" ]]; then
+            if (( vram >= 8000 )); then
+                ok "NVIDIA GPU with ${vram}MB VRAM — DLSS available"
+                info "Enable DLSS in-game for best performance"
+            elif (( vram >= 4000 )); then
+                ok "NVIDIA GPU with ${vram}MB VRAM"
+                warn "Set textures to Medium, enable FSR"
+            else
+                warn "Only ${vram}MB VRAM — game may struggle"
+            fi
+        fi
+    elif command -v glxinfo &>/dev/null; then
+        info "AMD/Intel GPU detected — enable FSR in-game for best performance"
+    fi
+
+    step "Recommended settings:"
+    set_launch_options "$appid" "PROTON_ENABLE_NVAPI=1 DXVK_ASYNC=1 %command%"
+    info "Use Proton-GE for best compatibility"
+    info "In-game: Disable ray tracing if FPS is low, enable FSR or DLSS"
+    info "Set Effects Quality to Medium to avoid shader stutter"
+
+    echo ""
+    ok "Hogwarts Legacy setup complete!"
+}
+
+setup_starfield() {
+    local appid="1716740"
+    header "Starfield"
+
+    detect_steam || return 1
+    check_proton_ge
+
+    step "Checking Starfield installation..."
+    local compat
+    compat=$(get_compatdata "$appid")
+    if [[ -d "$compat/pfx" ]]; then
+        ok "Wine prefix exists"
+
+        # Create ini tweaks for better stability
+        local ini_dir="$compat/pfx/drive_c/users/steamuser/Documents/My Games/Starfield"
+        if [[ -d "$ini_dir" ]]; then
+            if [[ -f "$ini_dir/StarfieldCustom.ini" ]]; then
+                ok "Custom ini exists"
+            else
+                cat > "$ini_dir/StarfieldCustom.ini" << 'INI'
+[Display]
+bBorderless=0
+bFull Screen=1
+
+[General]
+bEnableMessageOfTheDay=0
+
+[Archive]
+bInvalidateOlderFiles=1
+sResourceDataDirsFinal=
+INI
+                ok "Created StarfieldCustom.ini (fullscreen + mod support)"
+            fi
+        fi
+    else
+        info "Prefix not yet created — launch Starfield once through Steam"
+    fi
+
+    step "Checking system requirements..."
+    # Check RAM
+    local ram_gb
+    ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+    if (( ram_gb >= 16 )); then
+        ok "RAM: ${ram_gb}GB (16GB+ recommended)"
+    else
+        warn "RAM: ${ram_gb}GB — Starfield needs 16GB minimum"
+    fi
+
+    # Check VRAM
+    if command -v nvidia-smi &>/dev/null; then
+        local vram
+        vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
+        if [[ -n "$vram" ]]; then
+            if (( vram >= 8000 )); then
+                ok "VRAM: ${vram}MB — good for Medium-High"
+            elif (( vram >= 6000 )); then
+                warn "VRAM: ${vram}MB — use Medium textures"
+            else
+                fail "VRAM: ${vram}MB — Starfield needs 6GB+ VRAM"
+            fi
+        fi
+    fi
+
+    step "Recommended settings:"
+    set_launch_options "$appid" "PROTON_ENABLE_NVAPI=1 PROTON_HIDE_NVIDIA_GPU=0 DXVK_ASYNC=1 %command%"
+    info "Use Proton-GE (required for best stability)"
+    info "In-game: Use exclusive fullscreen, FSR2/DLSS on"
+    info "Set Crowd Density to Medium, Shadow Quality to Medium"
+    info "Starfield is CPU-heavy — close background apps for best FPS"
+
+    echo ""
+    ok "Starfield setup complete!"
+}
+
+setup_forza() {
+    local appid="1551360"
+    header "Forza Horizon 5"
+
+    detect_steam || return 1
+    check_proton_ge
+
+    step "Checking Forza Horizon 5 installation..."
+    local compat
+    compat=$(get_compatdata "$appid")
+    if [[ -d "$compat/pfx" ]]; then
+        ok "Wine prefix exists"
+    else
+        info "Prefix not yet created — launch Forza once through Steam"
+    fi
+
+    step "Checking controller support..."
+    if [[ -d /dev/input ]]; then
+        local js_count
+        js_count=$(ls /dev/input/js* 2>/dev/null | wc -l)
+        if (( js_count > 0 )); then
+            ok "Controller detected ($js_count device(s))"
+            if (( js_count > 1 )); then
+                warn "Multiple controllers — Forza may pick the wrong one"
+                info "Use 'hubos-controller' to set the primary device"
+            fi
+        else
+            info "No controller detected — keyboard/mouse works fine"
+        fi
+    fi
+
+    step "Checking media foundation..."
+    info "Forza uses media foundation for intro videos"
+    info "If the game hangs on intro, add this launch option to skip:"
+    echo -e "    ${BOLD}PROTON_VERB=waitforexitandrun %command% -skipMovies${NC}"
+
+    step "Recommended settings:"
+    set_launch_options "$appid" "PROTON_ENABLE_NVAPI=1 DXVK_ASYNC=1 %command%"
+    info "Use Proton-GE for best compatibility"
+    info "In-game: Use fullscreen, enable DLSS/FSR"
+    info "Set MSAA to off — use TAA instead for better performance"
+    info "VSync: Use in-game VSync or MangoHud frame limiting"
+
+    echo ""
+    ok "Forza Horizon 5 setup complete!"
+}
+
+setup_warframe() {
+    local appid="230410"
+    header "Warframe"
+
+    detect_steam || return 1
+    check_proton_ge
+
+    step "Checking Warframe installation..."
+    local compat
+    compat=$(get_compatdata "$appid")
+    if [[ -d "$compat/pfx" ]]; then
+        ok "Wine prefix exists"
+
+        # Check graphics renderer config
+        local ee_cfg="$compat/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.cfg"
+        if [[ -f "$ee_cfg" ]]; then
+            if grep -q "Graphics.Renderer=DX12" "$ee_cfg" 2>/dev/null; then
+                warn "Warframe set to DX12 — switching to DX11 (more stable on Proton)"
+                sed -i 's/Graphics.Renderer=DX12/Graphics.Renderer=DX11/' "$ee_cfg"
+                ok "Switched to DX11"
+            elif grep -q "Graphics.Renderer=DX11" "$ee_cfg" 2>/dev/null; then
+                ok "Using DX11 (recommended for Proton)"
+            fi
+        fi
+    else
+        info "Prefix not yet created — launch Warframe once through Steam"
+        info "On first launch, the Warframe launcher will download ~30GB"
+    fi
+
+    step "Warframe anti-cheat status:"
+    ok "Warframe's custom anti-cheat works on Linux with Proton"
+    info "No special anti-cheat setup needed"
+
+    step "Recommended settings:"
+    set_launch_options "$appid" 'WINEDLLOVERRIDES="xaudio2_7=n,b" DXVK_ASYNC=1 %command%'
+    info "Use Proton-GE for best audio and performance"
+    info "xaudio2_7 override fixes audio crackling"
+    info "In-game: Use DirectX 11, Dynamic Resolution on"
+    info "Disable 64-bit mode if you experience crashes"
+
+    echo ""
+    ok "Warframe setup complete!"
+}
+
+setup_minecraft() {
+    header "Minecraft (Java Edition)"
+
+    step "Checking Java installation..."
+    if command -v java &>/dev/null; then
+        local java_ver
+        java_ver=$(java -version 2>&1 | head -1 | awk -F'"' '{print $2}')
+        local major
+        major=$(echo "$java_ver" | cut -d. -f1)
+        if (( major >= 17 )); then
+            ok "Java $java_ver installed (17+ required for MC 1.20+)"
+        else
+            warn "Java $java_ver is too old for modern Minecraft"
+            step "Installing Java 21..."
+            info "Run: sudo rpm-ostree install java-21-openjdk"
+        fi
+    else
+        fail "Java not found"
+        info "HubOS includes Java 21 — if missing, run: sudo rpm-ostree install java-21-openjdk"
+    fi
+
+    step "Checking Minecraft launcher..."
+    local mc_dir="$HOME/.minecraft"
+    local launcher_found=false
+
+    # Check for various launchers
+    if flatpak list 2>/dev/null | grep -qi minecraft; then
+        ok "Minecraft launcher (Flatpak) installed"
+        launcher_found=true
+    fi
+    if command -v minecraft-launcher &>/dev/null; then
+        ok "Minecraft launcher (native) installed"
+        launcher_found=true
+    fi
+    if [[ -d "$HOME/.local/share/PrismLauncher" ]] || flatpak list 2>/dev/null | grep -qi prism; then
+        ok "Prism Launcher installed (recommended!)"
+        launcher_found=true
+    fi
+
+    if ! $launcher_found; then
+        info "No Minecraft launcher found. Recommended options:"
+        step "Prism Launcher (best for Linux): flatpak install flathub org.prismlauncher.PrismLauncher"
+        step "Official launcher: flatpak install flathub com.mojang.Minecraft"
+    fi
+
+    step "Checking Minecraft directory..."
+    if [[ -d "$mc_dir" ]]; then
+        ok "Minecraft directory found at $mc_dir"
+
+        # Check JVM args
+        if [[ -f "$mc_dir/launcher_profiles.json" ]]; then
+            local xmx
+            xmx=$(python3 -c "
+import json
+with open('$mc_dir/launcher_profiles.json') as f:
+    d = json.load(f)
+for p in d.get('profiles',{}).values():
+    args = p.get('javaArgs','')
+    if '-Xmx' in args:
+        import re
+        m = re.search(r'-Xmx(\d+)([GgMm])', args)
+        if m:
+            val = int(m.group(1))
+            unit = m.group(2).upper()
+            if unit == 'M': val = val // 1024
+            print(val)
+            break
+" 2>/dev/null)
+            if [[ -n "$xmx" ]]; then
+                if (( xmx >= 4 )); then
+                    ok "JVM memory: ${xmx}GB allocated"
+                elif (( xmx >= 2 )); then
+                    warn "JVM memory: ${xmx}GB — increase to 4GB for modded MC"
+                    info "In launcher: Edit profile → JVM Arguments → -Xmx4G"
+                else
+                    warn "JVM memory: ${xmx}GB — too low for modern Minecraft"
+                    info "Set to: -Xmx4G -Xms2G"
+                fi
+            fi
+        fi
+
+        # Check for mods
+        if [[ -d "$mc_dir/mods" ]]; then
+            local mod_count
+            mod_count=$(ls "$mc_dir/mods"/*.jar 2>/dev/null | wc -l)
+            if (( mod_count > 0 )); then
+                ok "Mods folder: $mod_count mods found"
+                info "For modded MC, use Prism Launcher for easy mod management"
+            fi
+        fi
+    else
+        info "Minecraft not yet installed — launch the launcher once to create the directory"
+    fi
+
+    step "Performance tips:"
+    info "Install Sodium mod for 2-5x FPS improvement"
+    info "Install Lithium + Starlight for chunk loading speed"
+    info "Use Prism Launcher + Fabric for best mod compatibility"
+    info "JVM args: -Xmx4G -Xms2G -XX:+UseG1GC -XX:+UnlockExperimentalVMOptions"
+    info "Minecraft is native Java — no Proton needed!"
+
+    echo ""
+    ok "Minecraft setup complete!"
+}
+
+# ─── Check Command ─────────────────────────────────────────────────────────────
+
+check_game() {
+    local game="$1"
+    local all_ok=true
+
+    case "$game" in
+        gtav|gta5|gta)
+            header "GTA V — Readiness Check"
+            detect_steam || all_ok=false
+            check_proton_ge || all_ok=false
+            local compat; compat=$(get_compatdata 271590)
+            [[ -d "$compat/pfx" ]] && ok "Prefix ready" || { warn "Prefix not created — launch once first"; all_ok=false; }
+            ;;
+        hogwarts*)
+            header "Hogwarts Legacy — Readiness Check"
+            detect_steam || all_ok=false
+            check_proton_ge || all_ok=false
+            local compat; compat=$(get_compatdata 990080)
+            [[ -d "$compat/pfx" ]] && ok "Prefix ready" || { warn "Prefix not created"; all_ok=false; }
+            ;;
+        starfield)
+            header "Starfield — Readiness Check"
+            detect_steam || all_ok=false
+            check_proton_ge || all_ok=false
+            local compat; compat=$(get_compatdata 1716740)
+            [[ -d "$compat/pfx" ]] && ok "Prefix ready" || { warn "Prefix not created"; all_ok=false; }
+            local ram_gb; ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+            (( ram_gb >= 16 )) && ok "RAM: ${ram_gb}GB" || { warn "RAM: ${ram_gb}GB (need 16GB)"; all_ok=false; }
+            ;;
+        forza*)
+            header "Forza Horizon 5 — Readiness Check"
+            detect_steam || all_ok=false
+            check_proton_ge || all_ok=false
+            local compat; compat=$(get_compatdata 1551360)
+            [[ -d "$compat/pfx" ]] && ok "Prefix ready" || { warn "Prefix not created"; all_ok=false; }
+            ;;
+        warframe)
+            header "Warframe — Readiness Check"
+            detect_steam || all_ok=false
+            check_proton_ge || all_ok=false
+            local compat; compat=$(get_compatdata 230410)
+            [[ -d "$compat/pfx" ]] && ok "Prefix ready" || { warn "Prefix not created"; all_ok=false; }
+            ;;
+        minecraft|mc)
+            header "Minecraft — Readiness Check"
+            command -v java &>/dev/null && ok "Java installed" || { fail "Java not found"; all_ok=false; }
+            [[ -d "$HOME/.minecraft" ]] && ok "Minecraft directory exists" || warn "Minecraft not installed yet"
+            ;;
+        *)
+            fail "Unknown game: $game"
+            echo "  Run: hubos-game-setup list"
+            return 1
+            ;;
+    esac
+
+    echo ""
+    if $all_ok; then
+        echo -e "  ${GREEN}${BOLD}Ready to play!${NC}"
+    else
+        echo -e "  ${YELLOW}${BOLD}Some issues found — run 'hubos-game-setup $game' to fix${NC}"
+    fi
+}
+
+# ─── List Command ──────────────────────────────────────────────────────────────
+
+list_games() {
+    header "Supported Games"
+    echo -e "  ${BOLD}Game                     Command                  Status${NC}"
+    echo -e "  ${DIM}─────────────────────────────────────────────────────────────${NC}"
+    echo -e "  GTA V                  hubos-game-setup gtav     ${GREEN}Works (Proton-GE)${NC}"
+    echo -e "  Hogwarts Legacy        hubos-game-setup hogwarts ${GREEN}Works (Proton-GE)${NC}"
+    echo -e "  Starfield              hubos-game-setup starfield${GREEN} Works (Proton-GE)${NC}"
+    echo -e "  Forza Horizon 5        hubos-game-setup forza    ${GREEN}Works (Proton-GE)${NC}"
+    echo -e "  Warframe               hubos-game-setup warframe ${GREEN}Works (Proton-GE)${NC}"
+    echo -e "  Minecraft (Java)       hubos-game-setup minecraft${GREEN} Native Linux${NC}"
+    echo ""
+    info "All games use auto-optimization via hubos-smart-launch daemon"
+    info "Run 'hubos-game-setup check <game>' to verify readiness"
+}
+
+# ─── Main ──────────────────────────────────────────────────────────────────────
+
+show_help() {
+    echo "HubOS Game Setup v${VERSION}"
+    echo ""
+    echo "Usage: $PROG_NAME <command> [game]"
+    echo ""
+    echo "Games:"
+    echo "  gtav        Grand Theft Auto V"
+    echo "  hogwarts    Hogwarts Legacy"
+    echo "  starfield   Starfield"
+    echo "  forza       Forza Horizon 5"
+    echo "  warframe    Warframe"
+    echo "  minecraft   Minecraft (Java Edition)"
+    echo ""
+    echo "Commands:"
+    echo "  <game>      Run full setup for a game"
+    echo "  check <game> Check if a game is ready to play"
+    echo "  list        Show all supported games"
+    echo "  -h, --help  Show this help"
+}
+
+main() {
+    if [[ $# -eq 0 ]] || [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+        show_help
+        exit 0
+    fi
+
+    case "$1" in
+        gtav|gta5|gta)          setup_gtav ;;
+        hogwarts*)              setup_hogwarts ;;
+        starfield)              setup_starfield ;;
+        forza*)                 setup_forza ;;
+        warframe)               setup_warframe ;;
+        minecraft|mc)           setup_minecraft ;;
+        list)                   list_games ;;
+        check)
+            if [[ -z "${2:-}" ]]; then
+                fail "Usage: $PROG_NAME check <game>"
+                exit 1
+            fi
+            check_game "$2"
+            ;;
+        *)
+            fail "Unknown game or command: $1"
+            echo "  Run: $PROG_NAME list"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

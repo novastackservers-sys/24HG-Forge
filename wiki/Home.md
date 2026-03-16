@@ -68,7 +68,7 @@ HubOS ships with a built-in server list connecting to 88+ game servers across:
 - **Discord:** https://discord.gg/ymfEjH6EJN
 - **Hub:** https://hub.24hgaming.com
 - **Website:** https://24hgaming.com/os
-- **Issues:** https://github.com/24hgaming/hubos/issues
+- **Issues:** https://git.raggi.is/24hg/hubos/issues
 
 ## License
 
