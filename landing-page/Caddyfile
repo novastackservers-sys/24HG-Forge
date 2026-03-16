@@ -1,0 +1,19 @@
+# Caddyfile for os.24hgaming.com
+# If using Coolify with Caddy, add these rules to your site config
+
+os.24hgaming.com {
+    # Proxy download URLs to Gitea releases (looks like 24hgaming.com downloads)
+    handle /download/* {
+        redir /download/hubos-desktop-latest.iso https://git.raggi.is/24hg/hubos/releases/download/latest/hubos-desktop-latest.iso 302
+        redir /download/hubos-desktop-latest.iso.sha256 https://git.raggi.is/24hg/hubos/releases/download/latest/hubos-desktop-latest.iso.sha256 302
+        redir /download/hubos-nvidia-latest.iso https://git.raggi.is/24hg/hubos/releases/download/latest/hubos-nvidia-latest.iso 302
+        redir /download/hubos-nvidia-latest.iso.sha256 https://git.raggi.is/24hg/hubos/releases/download/latest/hubos-nvidia-latest.iso.sha256 302
+    }
+
+    # Serve static landing page
+    handle {
+        root * /srv/landing-page
+        file_server
+        try_files {path} {path}.html
+    }
+}
