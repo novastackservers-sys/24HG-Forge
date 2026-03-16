@@ -66,6 +66,12 @@ COPY scripts/hubos-display /tmp/hubos-build/bin/hubos-display
 COPY scripts/hubos-discord-screen /tmp/hubos-build/bin/hubos-discord-screen
 COPY scripts/hubos-prefix /tmp/hubos-build/bin/hubos-prefix
 COPY scripts/hubos-dualboot /tmp/hubos-build/bin/hubos-dualboot
+COPY scripts/hubos-migrate /tmp/hubos-build/bin/hubos-migrate
+COPY scripts/hubos-benchmark-compare /tmp/hubos-build/bin/hubos-benchmark-compare
+COPY scripts/hubos-perks /tmp/hubos-build/bin/hubos-perks
+COPY scripts/hubos-creator-kit /tmp/hubos-build/bin/hubos-creator-kit
+COPY scripts/hubos-demo /tmp/hubos-build/bin/hubos-demo
+COPY scripts/hubos-demo.desktop /tmp/hubos-build/desktop/hubos-demo.desktop
 COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
 COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
 COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
@@ -250,6 +256,12 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-discord-screen /usr/bin/hubos-discord-screen \
     && install -m 755 /tmp/hubos-build/bin/hubos-prefix /usr/bin/hubos-prefix \
     && install -m 755 /tmp/hubos-build/bin/hubos-dualboot /usr/bin/hubos-dualboot \
+    && install -m 755 /tmp/hubos-build/bin/hubos-migrate /usr/bin/hubos-migrate \
+    && install -m 755 /tmp/hubos-build/bin/hubos-benchmark-compare /usr/bin/hubos-benchmark-compare \
+    && install -m 755 /tmp/hubos-build/bin/hubos-perks /usr/bin/hubos-perks \
+    && install -m 755 /tmp/hubos-build/bin/hubos-creator-kit /usr/bin/hubos-creator-kit \
+    && install -m 755 /tmp/hubos-build/bin/hubos-demo /usr/bin/hubos-demo \
+    && cp /tmp/hubos-build/desktop/hubos-demo.desktop /usr/share/applications/ \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/hubos \
@@ -282,6 +294,8 @@ RUN rpm-ostree install \
     && cp /tmp/hubos-build/systemd-user/hubos-achievements.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/hubos-build/systemd-user/hubos-achievements.timer /etc/skel/.config/systemd/user/ \
     && ln -sf ../hubos-achievements.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-achievements.timer \
+    && cp /tmp/hubos-build/systemd-user/hubos-perks-claim.service /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-perks-claim.service /etc/skel/.config/systemd/user/default.target.wants/hubos-perks-claim.service \
     && cp /tmp/hubos-build/systemd-user/hubos-wallpaper.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/hubos-build/systemd-user/hubos-wallpaper.timer /etc/skel/.config/systemd/user/ \
     && ln -sf ../hubos-wallpaper.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-wallpaper.timer \

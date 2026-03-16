@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game Compatibility — HubOS</title>
+    <meta name="description" content="Honest game compatibility info for HubOS. See what works, what needs tweaks, and what doesn't — no surprises.">
+    <link rel="icon" href="favicon.ico" type="image/x-icon">
+    <link rel="stylesheet" href="style.css">
+    <style>
+        .stats-bar {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin: 2rem 0 3rem;
+        }
+        .stat-item {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1rem 1.5rem;
+            text-align: center;
+            flex: 1;
+            min-width: 200px;
+            max-width: 300px;
+        }
+        .stat-item strong {
+            display: block;
+            font-size: 1.1rem;
+            color: var(--text-bright);
+            margin-bottom: 0.25rem;
+        }
+        .stat-item span {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+        }
+
+        .compat-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0 2rem;
+            font-size: 0.9rem;
+        }
+        .compat-table th {
+            text-align: left;
+            padding: 0.75rem 1rem;
+            color: var(--text-bright);
+            font-weight: 600;
+            border-bottom: 2px solid var(--border);
+            white-space: nowrap;
+        }
+        .compat-table td {
+            padding: 0.6rem 1rem;
+            border-bottom: 1px solid var(--border);
+            vertical-align: middle;
+        }
+        .compat-table tr:hover {
+            background: var(--bg-card);
+        }
+        .compat-table td:first-child {
+            color: var(--text-bright);
+            font-weight: 500;
+        }
+
+        .status-works { color: #50fa7b; font-weight: 600; }
+        .status-tweaks { color: #f1fa8c; font-weight: 600; }
+        .status-blocked { color: #ff5555; font-weight: 600; }
+
+        .category-label {
+            background: var(--bg-elevated);
+            padding: 0.5rem 1rem;
+            font-weight: 700;
+            color: var(--text-dim);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        .category-label td {
+            padding: 0.5rem 1rem !important;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .ac-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1rem;
+            margin: 1.5rem 0 2rem;
+        }
+        .ac-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.25rem;
+        }
+        .ac-card h3 {
+            font-size: 1rem;
+            color: var(--text-bright);
+            margin: 0 0 0.5rem;
+        }
+        .ac-card p {
+            font-size: 0.9rem;
+            margin: 0;
+        }
+        .ac-card .ac-status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-bottom: 0.5rem;
+        }
+        .ac-status.green { background: #50fa7b20; color: #50fa7b; }
+        .ac-status.yellow { background: #f1fa8c20; color: #f1fa8c; }
+        .ac-status.red { background: #ff555520; color: #ff5555; }
+
+        .check-section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem 2rem;
+            margin: 2rem 0;
+        }
+        .check-section h3 {
+            margin-top: 0;
+        }
+        .check-section ul {
+            list-style: none;
+            padding: 0;
+        }
+        .check-section li {
+            padding: 0.4rem 0;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .check-section li::before {
+            content: '\2192';
+            color: var(--accent);
+            font-weight: bold;
+        }
+
+        @media (max-width: 768px) {
+            .compat-table { font-size: 0.8rem; }
+            .compat-table th, .compat-table td { padding: 0.5rem 0.5rem; }
+            .stat-item { min-width: 150px; }
+        }
+    </style>
+</head>
+<body>
+
+<nav class="nav">
+    <a href="index.html" class="nav-logo">HubOS</a>
+    <div class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="install.html">Install Guide</a>
+        <a href="compatibility.html" class="active">Compatibility</a>
+        <a href="roadmap.html">Roadmap</a>
+        <a href="faq.html">FAQ</a>
+        <a href="https://hub.24hgaming.com">Hub</a>
+        <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+    </div>
+</nav>
+
+<main class="page">
+    <h1>Game Compatibility</h1>
+    <p class="subtitle">Honest answers. No surprises. Here's what works on HubOS.</p>
+
+    <!-- Quick Stats -->
+    <div class="stats-bar">
+        <div class="stat-item">
+            <strong>85%+ of top Steam games work</strong>
+            <span>Native or via Proton</span>
+        </div>
+        <div class="stat-item">
+            <strong>Proton makes Windows games run on Linux</strong>
+            <span>Valve's compatibility layer</span>
+        </div>
+        <div class="stat-item">
+            <strong>Anti-cheat support growing monthly</strong>
+            <span>EAC &amp; BattlEye now Linux-ready</span>
+        </div>
+    </div>
+
+    <!-- 24HG Server Games -->
+    <h2>24HG Server Games &mdash; All Work</h2>
+    <p>Every game we run servers for works on HubOS. We tested them ourselves.</p>
+
+    <table class="compat-table">
+        <thead>
+            <tr>
+                <th>Game</th>
+                <th>Runtime</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Counter-Strike 2</td>
+                <td>Native Linux</td>
+                <td class="status-works">&#10003; Works perfectly</td>
+            </tr>
+            <tr>
+                <td>Counter-Strike 1.6</td>
+                <td>Native Linux</td>
+                <td class="status-works">&#10003; Works perfectly</td>
+            </tr>
+            <tr>
+                <td>Counter-Strike: Source</td>
+                <td>Native Linux</td>
+                <td class="status-works">&#10003; Works perfectly</td>
+            </tr>
+            <tr>
+                <td>Team Fortress 2</td>
+                <td>Native Linux</td>
+                <td class="status-works">&#10003; Works perfectly</td>
+            </tr>
+            <tr>
+                <td>Rust</td>
+                <td>Proton (EAC enabled)</td>
+                <td class="status-works">&#10003; Works perfectly</td>
+            </tr>
+            <tr>
+                <td>FiveM / GTA V</td>
+                <td>Proton (FiveM has Linux support)</td>
+                <td class="status-works">&#10003; Works</td>
+            </tr>
+            <tr>
+                <td>Garry's Mod</td>
+                <td>Native Linux</td>
+                <td class="status-works">&#10003; Works perfectly</td>
+            </tr>
+            <tr>
+                <td>Left 4 Dead 2</td>
+                <td>Native Linux</td>
+                <td class="status-works">&#10003; Works perfectly</td>
+            </tr>
+            <tr>
+                <td>Insurgency</td>
+                <td>Native Linux</td>
+                <td class="status-works">&#10003; Works perfectly</td>
+            </tr>
+            <tr>
+                <td>Day of Defeat: Source</td>
+                <td>Native Linux</td>
+                <td class="status-works">&#10003; Works perfectly</td>
+            </tr>
+            <tr>
+                <td>Quake Live</td>
+                <td>Native Linux</td>
+                <td class="status-works">&#10003; Works perfectly</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <!-- Popular Games Table -->
+    <h2>Popular Games Compatibility</h2>
+    <p>A broader look at ~50 popular titles. This is not exhaustive &mdash; check <a href="https://www.protondb.com">ProtonDB</a> for any game not listed here.</p>
+
+    <table class="compat-table">
+        <thead>
+            <tr>
+                <th>Game</th>
+                <th>Status</th>
+                <th>Anti-Cheat</th>
+                <th>Notes</th>
+            </tr>
+        </thead>
+        <tbody>
+            <!-- Works Perfectly -->
+            <tr class="category-label"><td colspan="4">Works Perfectly</td></tr>
+            <tr>
+                <td>Elden Ring</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>EAC (enabled)</td>
+                <td>Platinum on ProtonDB</td>
+            </tr>
+            <tr>
+                <td>Cyberpunk 2077</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Excellent with latest Proton</td>
+            </tr>
+            <tr>
+                <td>Baldur's Gate 3</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux build available</td>
+            </tr>
+            <tr>
+                <td>Stardew Valley</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux</td>
+            </tr>
+            <tr>
+                <td>Terraria</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux</td>
+            </tr>
+            <tr>
+                <td>Minecraft Java</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux (Java)</td>
+            </tr>
+            <tr>
+                <td>Hades</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux</td>
+            </tr>
+            <tr>
+                <td>Hollow Knight</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux</td>
+            </tr>
+            <tr>
+                <td>Celeste</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux</td>
+            </tr>
+            <tr>
+                <td>Dead Cells</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux</td>
+            </tr>
+            <tr>
+                <td>Risk of Rain 2</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux</td>
+            </tr>
+            <tr>
+                <td>Deep Rock Galactic</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux</td>
+            </tr>
+            <tr>
+                <td>Lethal Company</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, runs great</td>
+            </tr>
+            <tr>
+                <td>Palworld</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>EAC (enabled)</td>
+                <td>Proton with EAC support</td>
+            </tr>
+            <tr>
+                <td>Satisfactory</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux</td>
+            </tr>
+            <tr>
+                <td>No Man's Sky</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, excellent performance</td>
+            </tr>
+            <tr>
+                <td>Valheim</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Native Linux</td>
+            </tr>
+            <tr>
+                <td>The Witcher 3</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, flawless</td>
+            </tr>
+            <tr>
+                <td>Red Dead Redemption 2</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, some launcher quirks</td>
+            </tr>
+            <tr>
+                <td>God of War</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, platinum rated</td>
+            </tr>
+            <tr>
+                <td>Spider-Man Remastered</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, great performance</td>
+            </tr>
+            <tr>
+                <td>Horizon Zero Dawn</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, runs well</td>
+            </tr>
+            <tr>
+                <td>Death Stranding</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, platinum rated</td>
+            </tr>
+            <tr>
+                <td>Monster Hunter World</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, smooth gameplay</td>
+            </tr>
+            <tr>
+                <td>Monster Hunter Rise</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, excellent</td>
+            </tr>
+            <tr>
+                <td>Sekiro</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, flawless</td>
+            </tr>
+            <tr>
+                <td>Dark Souls III</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, platinum rated</td>
+            </tr>
+            <tr>
+                <td>Resident Evil Village</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, runs great</td>
+            </tr>
+            <tr>
+                <td>Devil May Cry 5</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>None</td>
+                <td>Proton, flawless</td>
+            </tr>
+            <tr>
+                <td>Apex Legends</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>EAC (enabled)</td>
+                <td>Proton with EAC support</td>
+            </tr>
+            <tr>
+                <td>Rust</td>
+                <td class="status-works">&#10003; Works</td>
+                <td>EAC (enabled)</td>
+                <td>Proton with EAC support</td>
+            </tr>
+
+            <!-- Works with Tweaks -->
+            <tr class="category-label"><td colspan="4">Works with Tweaks</td></tr>
+            <tr>
+                <td>GTA V</td>
+                <td class="status-tweaks">~ Tweaks needed</td>
+                <td>None (single-player)</td>
+                <td>Use Proton-GE for best results</td>
+            </tr>
+            <tr>
+                <td>Hogwarts Legacy</td>
+                <td class="status-tweaks">~ Tweaks needed</td>
+                <td>None</td>
+                <td>Shader stutter on first run; clears up</td>
+            </tr>
+            <tr>
+                <td>Starfield</td>
+                <td class="status-tweaks">~ Tweaks needed</td>
+                <td>None</td>
+                <td>Needs latest Proton, performance varies</td>
+            </tr>
+            <tr>
+                <td>Forza Horizon 5</td>
+                <td class="status-tweaks">~ Tweaks needed</td>
+                <td>None</td>
+                <td>Occasional stutter, mostly solid</td>
+            </tr>
+            <tr>
+                <td>Warframe</td>
+                <td class="status-tweaks">~ Tweaks needed</td>
+                <td>Custom</td>
+                <td>Native build exists but Proton often better</td>
+            </tr>
+
+            <!-- Doesn't Work -->
+            <tr class="category-label"><td colspan="4">Doesn't Work &mdash; Blocked by Developer</td></tr>
+            <tr>
+                <td>Valorant</td>
+                <td class="status-blocked">&#10007; Blocked</td>
+                <td>Vanguard</td>
+                <td>Kernel-level anti-cheat, no Linux support</td>
+            </tr>
+            <tr>
+                <td>Fortnite</td>
+                <td class="status-blocked">&#10007; Blocked</td>
+                <td>EAC (disabled by Epic)</td>
+                <td>Epic chose not to enable Linux EAC</td>
+            </tr>
+            <tr>
+                <td>PUBG</td>
+                <td class="status-blocked">&#10007; Blocked</td>
+                <td>Custom</td>
+                <td>Anti-cheat blocks Linux</td>
+            </tr>
+            <tr>
+                <td>Destiny 2</td>
+                <td class="status-blocked">&#10007; Blocked</td>
+                <td>BattlEye (disabled)</td>
+                <td>Bungie disabled Linux BattlEye support</td>
+            </tr>
+            <tr>
+                <td>Rainbow Six Siege</td>
+                <td class="status-blocked">&#10007; Blocked</td>
+                <td>BattlEye (disabled)</td>
+                <td>Ubisoft disabled Linux BattlEye support</td>
+            </tr>
+            <tr>
+                <td>Call of Duty: Warzone</td>
+                <td class="status-blocked">&#10007; Blocked</td>
+                <td>Ricochet</td>
+                <td>Kernel anti-cheat, no Linux support</td>
+            </tr>
+            <tr>
+                <td>Roblox</td>
+                <td class="status-blocked">&#10007; Blocked</td>
+                <td>Hyperion</td>
+                <td>Actively blocks Linux</td>
+            </tr>
+            <tr>
+                <td>Dead by Daylight</td>
+                <td class="status-blocked">&#10007; Blocked</td>
+                <td>EAC (disabled)</td>
+                <td>Developer disabled Linux EAC</td>
+            </tr>
+            <tr>
+                <td>FACEIT CS2</td>
+                <td class="status-blocked">&#10007; Blocked</td>
+                <td>FACEIT AC</td>
+                <td>FACEIT client requires Windows</td>
+            </tr>
+            <tr>
+                <td>Genshin Impact</td>
+                <td class="status-blocked">&#10007; Blocked</td>
+                <td>Custom</td>
+                <td>Anti-cheat blocks Linux</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <!-- Anti-Cheat Breakdown -->
+    <h2>Anti-Cheat Breakdown</h2>
+    <p>When a game doesn't work on Linux, it's almost always the <strong>developer's choice</strong>, not a Linux limitation. Here's how each anti-cheat system works:</p>
+
+    <div class="ac-cards">
+        <div class="ac-card">
+            <span class="ac-status green">Supported</span>
+            <h3>VAC (Valve)</h3>
+            <p>Works perfectly on Linux. Always has. CS2, TF2, Dota 2 &mdash; all flawless.</p>
+        </div>
+        <div class="ac-card">
+            <span class="ac-status yellow">Developer's Choice</span>
+            <h3>EasyAntiCheat (EAC)</h3>
+            <p>Works if the developer enables Linux support. Rust, Apex Legends, Elden Ring, Palworld all work. Fortnite and Dead by Daylight don't &mdash; because their devs chose not to enable it.</p>
+        </div>
+        <div class="ac-card">
+            <span class="ac-status yellow">Developer's Choice</span>
+            <h3>BattlEye</h3>
+            <p>Same story. Works if the dev opts in. DayZ and ARK: Survival Evolved work. Destiny 2 and R6 Siege don't &mdash; their developers declined.</p>
+        </div>
+        <div class="ac-card">
+            <span class="ac-status red">Not Supported</span>
+            <h3>Vanguard (Riot Games)</h3>
+            <p>Does not work. Requires Windows kernel-level access. No Linux path exists. Valorant is the main affected title.</p>
+        </div>
+        <div class="ac-card">
+            <span class="ac-status red">Not Supported</span>
+            <h3>Ricochet (Activision)</h3>
+            <p>Does not work. Kernel-level anti-cheat with no Linux support. Blocks Call of Duty titles.</p>
+        </div>
+        <div class="ac-card">
+            <span class="ac-status red">Not Supported</span>
+            <h3>FACEIT Anti-Cheat</h3>
+            <p>Does not work on Linux. The FACEIT client requires Windows. Regular CS2 matchmaking works fine &mdash; just not FACEIT.</p>
+        </div>
+    </div>
+
+    <div class="info-box">
+        <strong>The bottom line:</strong> EAC and BattlEye both have official Linux support. Whether a game works depends on the game's developer flipping the switch. If a game you play is blocked, the best thing you can do is ask the developer to enable Linux support.
+    </div>
+
+    <!-- How to Check -->
+    <h2>How to Check Your Games</h2>
+
+    <div class="check-section">
+        <h3>Before you install</h3>
+        <ul>
+            <li>Search your games on <a href="https://www.protondb.com">ProtonDB.com</a> &mdash; community-tested compatibility reports for every Steam game</li>
+            <li>Check <a href="https://areweanticheatyet.com">AreWeAntiCheatYet.com</a> &mdash; tracks anti-cheat Linux support status</li>
+            <li>Not sure about a specific game? Ask in our <a href="https://discord.gg/ymfEjH6EJN">Discord #support channel</a></li>
+        </ul>
+
+        <h3>After you install HubOS</h3>
+        <ul>
+            <li>Run <code>hubos-compat scan</code> in a terminal &mdash; scans your Steam library and reports compatibility for every installed game</li>
+            <li>The built-in Game Compatibility Checker (v1.6) cross-references ProtonDB ratings, anti-cheat databases, and your hardware to give you a per-game verdict</li>
+        </ul>
+    </div>
+
+    <!-- CTA -->
+    <div class="roadmap-cta">
+        <h2>Most games work. The few that don't are blocked by their developers, not by Linux.</h2>
+        <p>85% of the top 100 Steam games run on HubOS out of the box. That number goes up every month.</p>
+        <div class="cta-group">
+            <a href="install.html" class="btn btn-primary">Install HubOS</a>
+            <a href="https://discord.gg/ymfEjH6EJN" class="btn btn-secondary">Ask in Discord</a>
+        </div>
+    </div>
+</main>
+
+<footer>
+    <p>
+        HubOS is made by <a href="https://24hgaming.com">24 Hour Gaming</a> &middot;
+        <a href="https://discord.gg/ymfEjH6EJN">Discord</a> &middot;
+        <a href="https://hub.24hgaming.com">Hub</a>
+    </p>
+    <p style="margin-top: 0.5rem;">Built on Bazzite / Universal Blue / Fedora Atomic. MIT License.</p>
+</footer>
+
+</body>
+</html>

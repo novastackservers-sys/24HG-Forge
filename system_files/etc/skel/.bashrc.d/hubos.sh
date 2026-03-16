@@ -121,3 +121,10 @@ alias display='hubos-display'
 alias discord-share='hubos-discord-screen'
 alias prefix='hubos-prefix'
 alias dualboot='hubos-dualboot'
+
+# Wave 9 adoption aliases
+alias migrate='hubos-migrate'
+alias bench-compare='hubos-benchmark-compare'
+alias perks='hubos-perks'
+alias creator='hubos-creator-kit'
+alias demo='hubos-demo'

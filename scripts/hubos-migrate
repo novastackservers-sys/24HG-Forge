@@ -1,0 +1,1986 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# HubOS Windows Migration Assistant
+# Migrate game settings, keybinds, and configs from Windows to HubOS (Linux)
+# Part of the HubOS gaming distribution (based on Bazzite/Fedora Atomic)
+
+###############################################################################
+# Constants & Globals
+###############################################################################
+
+VERSION="1.0.0"
+PROGRAM_NAME="hubos-migrate"
+HUBOS_DATA_DIR="${HOME}/.local/share/hubos"
+MIGRATE_DIR="${HUBOS_DATA_DIR}/migrate"
+BACKUP_DIR="${HUBOS_DATA_DIR}/migrate-backups"
+SCAN_CACHE="${MIGRATE_DIR}/last-scan.json"
+IMPORT_LOG="${MIGRATE_DIR}/import-history.log"
+GUI_MODE=false
+VERBOSE=false
+DRY_RUN=false
+WINDOWS_ROOT=""
+
+# Steam paths (Linux)
+STEAM_NATIVE="${HOME}/.local/share/Steam"
+STEAM_FLATPAK="${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+STEAM_LEGACY="${HOME}/.steam/steam"
+
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# Supported games and their migration status
+declare -A GAME_NAMES=(
+    [cs2]="Counter-Strike 2"
+    [cs16]="Counter-Strike 1.6"
+    [tf2]="Team Fortress 2"
+    [rust]="Rust"
+    [fivem]="FiveM"
+    [valorant]="VALORANT"
+    [obs]="OBS Studio"
+    [discord]="Discord"
+    [steam]="Steam (global)"
+    [nvidia]="NVIDIA Settings"
+    [peripherals]="Peripheral Profiles"
+)
+
+# Migration status: full, partial, reference-only
+declare -A GAME_LINUX_SUPPORT=(
+    [cs2]="full"
+    [cs16]="full"
+    [tf2]="full"
+    [rust]="full"
+    [fivem]="partial"
+    [valorant]="reference"
+    [obs]="full"
+    [discord]="full"
+    [steam]="full"
+    [nvidia]="partial"
+    [peripherals]="partial"
+)
+
+# Track what was found during scan
+declare -A FOUND_GAMES=()
+declare -A FOUND_PATHS=()
+declare -A FOUND_SIZES=()
+
+###############################################################################
+# Utility Functions
+###############################################################################
+
+log_info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $*"; }
+log_warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+log_debug()   { [[ "$VERBOSE" == true ]] && echo -e "${DIM}[DEBUG] $*${NC}" || true; }
+
+die() { log_error "$@"; exit 1; }
+
+# Print a colored status tag
+status_tag() {
+    local support="$1"
+    case "$support" in
+        full)      echo -e "${GREEN}[MIGRATE]${NC}" ;;
+        partial)   echo -e "${YELLOW}[PARTIAL]${NC}" ;;
+        reference) echo -e "${RED}[NO LINUX]${NC}" ;;
+        *)         echo -e "${DIM}[UNKNOWN]${NC}" ;;
+    esac
+}
+
+# Human-readable file size
+human_size() {
+    local bytes="${1:-0}"
+    if (( bytes >= 1073741824 )); then
+        echo "$(awk "BEGIN{printf \"%.1f\", $bytes/1073741824}")G"
+    elif (( bytes >= 1048576 )); then
+        echo "$(awk "BEGIN{printf \"%.1f\", $bytes/1048576}")M"
+    elif (( bytes >= 1024 )); then
+        echo "$(awk "BEGIN{printf \"%.1f\", $bytes/1024}")K"
+    else
+        echo "${bytes}B"
+    fi
+}
+
+# Calculate directory size in bytes
+dir_size_bytes() {
+    local dir="$1"
+    if [[ -d "$dir" ]]; then
+        du -sb "$dir" 2>/dev/null | awk '{print $1}' || echo "0"
+    else
+        echo "0"
+    fi
+}
+
+# Progress bar
+progress_bar() {
+    local current="$1" total="$2" width=40
+    local pct=$(( current * 100 / total ))
+    local filled=$(( current * width / total ))
+    local empty=$(( width - filled ))
+    printf "\r  ${CYAN}["
+    printf "%${filled}s" | tr ' ' '#'
+    printf "%${empty}s" | tr ' ' '-'
+    printf "] %3d%% (%d/%d)${NC}" "$pct" "$current" "$total"
+    [[ "$current" -eq "$total" ]] && echo
+}
+
+# Spinner for long operations
+spinner() {
+    local pid=$1 msg="${2:-Working...}"
+    local chars='|/-\'
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r  ${CYAN}%s %s${NC}" "${chars:i++%4:1}" "$msg"
+        sleep 0.15
+    done
+    printf "\r  %-60s\r" ""
+}
+
+# Ensure required directories exist
+ensure_dirs() {
+    mkdir -p "$MIGRATE_DIR" "$BACKUP_DIR"
+}
+
+# Get timestamp for backups
+timestamp() { date +"%Y%m%d-%H%M%S"; }
+
+# Convert Windows path separators inside config files
+convert_path_separators() {
+    local file="$1"
+    if [[ -f "$file" ]]; then
+        sed -i 's|\\|/|g' "$file"
+    fi
+}
+
+# Detect active Steam installation on Linux
+detect_linux_steam() {
+    if [[ -d "$STEAM_FLATPAK/userdata" ]]; then
+        echo "$STEAM_FLATPAK"
+    elif [[ -d "$STEAM_NATIVE/userdata" ]]; then
+        echo "$STEAM_NATIVE"
+    elif [[ -d "$STEAM_LEGACY/userdata" ]]; then
+        echo "$STEAM_LEGACY"
+    else
+        echo ""
+    fi
+}
+
+# Parse Steam loginusers.vdf to get Steam IDs
+parse_steam_users() {
+    local vdf_file="$1"
+    [[ -f "$vdf_file" ]] || return
+    # Extract Steam3 IDs (numeric folder names under userdata)
+    grep -oP '"\d{8,20}"' "$vdf_file" | tr -d '"' | head -10
+}
+
+# Find Steam userdata directories for a given app ID
+find_steam_userdata() {
+    local steam_root="$1" app_id="$2"
+    local result=()
+    if [[ -d "${steam_root}/userdata" ]]; then
+        for user_dir in "${steam_root}/userdata"/*/; do
+            if [[ -d "${user_dir}${app_id}" ]]; then
+                result+=("${user_dir}${app_id}")
+            fi
+        done
+    fi
+    printf '%s\n' "${result[@]}"
+}
+
+# Parse libraryfolders.vdf to find all Steam library paths
+parse_library_folders() {
+    local vdf_file="$1"
+    [[ -f "$vdf_file" ]] || return
+    grep -oP '"path"\s+"\K[^"]+' "$vdf_file" 2>/dev/null || true
+}
+
+# Zenity wrapper for GUI mode
+gui_info()  { zenity --info --title="HubOS Migrate" --text="$1" --width=400 2>/dev/null || true; }
+gui_error() { zenity --error --title="HubOS Migrate" --text="$1" --width=400 2>/dev/null || true; }
+gui_ask()   { zenity --question --title="HubOS Migrate" --text="$1" --width=400 2>/dev/null; }
+gui_progress() { zenity --progress --title="HubOS Migrate" --text="$1" --auto-close --width=400 2>/dev/null || true; }
+
+gui_select_game() {
+    local games=("$@")
+    local items=()
+    for g in "${games[@]}"; do
+        items+=(FALSE "$g" "${GAME_NAMES[$g]:-$g}")
+    done
+    zenity --list --checklist --title="HubOS Migrate - Select Games" \
+        --column="Select" --column="ID" --column="Game" \
+        --width=500 --height=400 "${items[@]}" 2>/dev/null | tr '|' '\n'
+}
+
+###############################################################################
+# Scan Functions
+###############################################################################
+
+# Find Windows partitions / USB drives
+find_windows_roots() {
+    local roots=()
+
+    # Check mounted NTFS/exFAT partitions
+    while IFS= read -r line; do
+        local dev mount_point fstype
+        dev=$(echo "$line" | awk '{print $1}')
+        mount_point=$(echo "$line" | awk '{print $2}')
+        fstype=$(echo "$line" | awk '{print $3}')
+
+        case "$fstype" in
+            ntfs|ntfs3|fuseblk|exfat|vfat)
+                # Check if it looks like a Windows installation
+                if [[ -d "${mount_point}/Users" ]] || [[ -d "${mount_point}/Program Files" ]]; then
+                    roots+=("$mount_point")
+                    log_debug "Found Windows root at $mount_point ($fstype on $dev)"
+                fi
+                ;;
+        esac
+    done < <(mount | awk '{print $1, $3, $5}' 2>/dev/null || true)
+
+    # Also check common mount points
+    for mnt in /mnt/* /media/"${USER}"/* /run/media/"${USER}"/*; do
+        [[ -d "$mnt/Users" ]] || continue
+        local already=false
+        for r in "${roots[@]+"${roots[@]}"}"; do
+            [[ "$r" == "$mnt" ]] && already=true && break
+        done
+        [[ "$already" == false ]] && roots+=("$mnt")
+    done
+
+    printf '%s\n' "${roots[@]+"${roots[@]}"}"
+}
+
+# Find Windows user profile directories
+find_windows_profiles() {
+    local win_root="$1"
+    local profiles=()
+    if [[ -d "${win_root}/Users" ]]; then
+        for profile in "${win_root}/Users"/*/; do
+            local name
+            name=$(basename "$profile")
+            # Skip system profiles
+            case "$name" in
+                Public|Default|"Default User"|"All Users"|desktop.ini) continue ;;
+            esac
+            if [[ -d "${profile}AppData" ]]; then
+                profiles+=("$profile")
+            fi
+        done
+    fi
+    printf '%s\n' "${profiles[@]+"${profiles[@]}"}"
+}
+
+# Scan for specific game configs
+scan_game_configs() {
+    local win_root="$1"
+    local profile_dirs=()
+
+    log_info "Scanning Windows installation at ${BOLD}${win_root}${NC}"
+    echo ""
+
+    # Find user profiles
+    while IFS= read -r p; do
+        [[ -n "$p" ]] && profile_dirs+=("$p")
+    done < <(find_windows_profiles "$win_root")
+
+    if [[ ${#profile_dirs[@]} -eq 0 ]]; then
+        log_warn "No Windows user profiles found"
+        return 1
+    fi
+
+    log_info "Found ${#profile_dirs[@]} user profile(s):"
+    for p in "${profile_dirs[@]}"; do
+        echo -e "  ${DIM}$(basename "$p")${NC}"
+    done
+    echo ""
+
+    local steam_root="${win_root}/Program Files (x86)/Steam"
+    local found_count=0
+    local total_size=0
+
+    # --- Steam Global ---
+    scan_steam_global "$steam_root" && ((found_count++)) || true
+
+    # --- CS2 ---
+    scan_cs2 "$steam_root" && ((found_count++)) || true
+
+    # --- CS 1.6 ---
+    scan_cs16 "$steam_root" "$win_root" && ((found_count++)) || true
+
+    # --- TF2 ---
+    scan_tf2 "$steam_root" && ((found_count++)) || true
+
+    # --- Rust ---
+    for profile in "${profile_dirs[@]}"; do
+        scan_rust "$steam_root" "$profile" && ((found_count++)) || true
+    done
+
+    # --- FiveM ---
+    for profile in "${profile_dirs[@]}"; do
+        scan_fivem "$profile" && ((found_count++)) || true
+    done
+
+    # --- Valorant ---
+    for profile in "${profile_dirs[@]}"; do
+        scan_valorant "$profile" && ((found_count++)) || true
+    done
+
+    # --- OBS Studio ---
+    for profile in "${profile_dirs[@]}"; do
+        scan_obs "$profile" && ((found_count++)) || true
+    done
+
+    # --- Discord ---
+    for profile in "${profile_dirs[@]}"; do
+        scan_discord "$profile" && ((found_count++)) || true
+    done
+
+    # --- NVIDIA ---
+    for profile in "${profile_dirs[@]}"; do
+        scan_nvidia "$profile" && ((found_count++)) || true
+    done
+
+    # --- Peripherals ---
+    for profile in "${profile_dirs[@]}"; do
+        scan_peripherals "$profile" && ((found_count++)) || true
+    done
+
+    echo ""
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD} Scan Summary${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    if [[ ${#FOUND_GAMES[@]} -eq 0 ]]; then
+        log_warn "No game configurations found"
+        return 0
+    fi
+
+    printf "  %-14s %-24s %-10s %s\n" "ID" "Game" "Size" "Status"
+    printf "  %-14s %-24s %-10s %s\n" "---" "---" "---" "---"
+
+    for game_id in $(echo "${!FOUND_GAMES[@]}" | tr ' ' '\n' | sort); do
+        local support="${GAME_LINUX_SUPPORT[$game_id]:-unknown}"
+        local tag
+        tag=$(status_tag "$support")
+        local size="${FOUND_SIZES[$game_id]:-0}"
+        printf "  %-14s %-24s %-10s %b\n" \
+            "$game_id" "${GAME_NAMES[$game_id]:-$game_id}" \
+            "$(human_size "$size")" "$tag"
+    done
+
+    echo ""
+    echo -e "  ${GREEN}[MIGRATE]${NC} = Full migration supported"
+    echo -e "  ${YELLOW}[PARTIAL]${NC} = Some settings can be migrated"
+    echo -e "  ${RED}[NO LINUX]${NC} = Game not available on Linux (saved for reference)"
+    echo ""
+    log_info "Run ${BOLD}hubos-migrate import all${NC} to migrate everything, or ${BOLD}hubos-migrate import <game>${NC} for a specific game"
+
+    # Save scan results
+    save_scan_cache "$win_root"
+
+    return 0
+}
+
+scan_steam_global() {
+    local steam_root="$1"
+    local config_dir="${steam_root}/config"
+
+    [[ -d "$config_dir" ]] || return 1
+
+    local found_files=()
+    for f in loginusers.vdf config.vdf libraryfolders.vdf DialogConfig.vdf; do
+        [[ -f "${config_dir}/${f}" ]] && found_files+=("$f")
+    done
+
+    [[ ${#found_files[@]} -eq 0 ]] && return 1
+
+    local size
+    size=$(dir_size_bytes "$config_dir")
+    FOUND_GAMES[steam]=1
+    FOUND_PATHS[steam]="$config_dir"
+    FOUND_SIZES[steam]="$size"
+
+    log_success "Steam global config: ${#found_files[*]} files ($(human_size "$size"))"
+    for f in "${found_files[@]}"; do
+        echo -e "    ${DIM}${f}${NC}"
+    done
+    return 0
+}
+
+scan_cs2() {
+    local steam_root="$1"
+    local userdata="${steam_root}/userdata"
+    [[ -d "$userdata" ]] || return 1
+
+    local total_size=0
+    local found=false
+    local cfg_dirs=()
+
+    for user_dir in "${userdata}"/*/; do
+        local cfg_path="${user_dir}730/local/cfg"
+        if [[ -d "$cfg_path" ]]; then
+            found=true
+            cfg_dirs+=("$cfg_path")
+            local s
+            s=$(dir_size_bytes "$cfg_path")
+            total_size=$((total_size + s))
+        fi
+    done
+
+    [[ "$found" == false ]] && return 1
+
+    FOUND_GAMES[cs2]=1
+    FOUND_PATHS[cs2]="${cfg_dirs[0]}"
+    FOUND_SIZES[cs2]="$total_size"
+
+    local file_list=""
+    for cfg_dir in "${cfg_dirs[@]}"; do
+        for f in "$cfg_dir"/*.cfg "$cfg_dir"/*.txt "$cfg_dir"/*.vcfg; do
+            [[ -f "$f" ]] && file_list+="    ${DIM}$(basename "$f")${NC}\n"
+        done
+    done
+
+    log_success "CS2: configs found ($(human_size "$total_size"))"
+    [[ -n "$file_list" ]] && echo -e "$file_list"
+    return 0
+}
+
+scan_cs16() {
+    local steam_root="$1" win_root="$2"
+    local found=false
+    local total_size=0
+    local search_paths=(
+        "${steam_root}/steamapps/common/Half-Life/cstrike"
+        "${steam_root}/steamapps/common/Half-Life/cstrike_downloads"
+    )
+
+    # Also check standalone installations
+    for drive_dir in "$win_root" "${win_root}/Games" "${win_root}/Program Files"/*; do
+        [[ -d "${drive_dir}/cstrike" ]] && search_paths+=("${drive_dir}/cstrike")
+    done
+
+    local cfg_files=()
+    for sp in "${search_paths[@]}"; do
+        [[ -d "$sp" ]] || continue
+        for f in config.cfg autoexec.cfg userconfig.cfg valve.rc; do
+            if [[ -f "${sp}/${f}" ]]; then
+                found=true
+                cfg_files+=("${sp}/${f}")
+            fi
+        done
+        local s
+        s=$(dir_size_bytes "$sp")
+        total_size=$((total_size + s))
+    done
+
+    [[ "$found" == false ]] && return 1
+
+    FOUND_GAMES[cs16]=1
+    FOUND_PATHS[cs16]="${search_paths[0]}"
+    FOUND_SIZES[cs16]="$total_size"
+
+    log_success "CS 1.6: configs found ($(human_size "$total_size"))"
+    for f in "${cfg_files[@]}"; do
+        echo -e "    ${DIM}$(basename "$f")${NC}"
+    done
+    return 0
+}
+
+scan_tf2() {
+    local steam_root="$1"
+    local found=false
+    local total_size=0
+
+    # Check userdata
+    local userdata="${steam_root}/userdata"
+    if [[ -d "$userdata" ]]; then
+        for user_dir in "${userdata}"/*/; do
+            local cfg_path="${user_dir}440/remote/cfg"
+            if [[ -d "$cfg_path" ]]; then
+                found=true
+                local s
+                s=$(dir_size_bytes "$cfg_path")
+                total_size=$((total_size + s))
+            fi
+        done
+    fi
+
+    # Check game installation cfg
+    local tf2_cfg="${steam_root}/steamapps/common/Team Fortress 2/tf/cfg"
+    if [[ -d "$tf2_cfg" ]]; then
+        found=true
+        local s
+        s=$(dir_size_bytes "$tf2_cfg")
+        total_size=$((total_size + s))
+    fi
+
+    [[ "$found" == false ]] && return 1
+
+    FOUND_GAMES[tf2]=1
+    FOUND_PATHS[tf2]="${tf2_cfg:-${userdata}}"
+    FOUND_SIZES[tf2]="$total_size"
+
+    log_success "TF2: configs found ($(human_size "$total_size"))"
+    if [[ -d "$tf2_cfg" ]]; then
+        for f in "$tf2_cfg"/*.cfg; do
+            [[ -f "$f" ]] && echo -e "    ${DIM}$(basename "$f")${NC}"
+        done
+    fi
+    return 0
+}
+
+scan_rust() {
+    local steam_root="$1" profile="$2"
+    local found=false
+    local total_size=0
+
+    # Steam userdata for Rust (252490)
+    local userdata="${steam_root}/userdata"
+    if [[ -d "$userdata" ]]; then
+        for user_dir in "${userdata}"/*/; do
+            if [[ -d "${user_dir}252490" ]]; then
+                found=true
+                local s
+                s=$(dir_size_bytes "${user_dir}252490")
+                total_size=$((total_size + s))
+            fi
+        done
+    fi
+
+    # AppData/LocalLow/Facepunch Studios/Rust
+    local rust_appdata="${profile}AppData/LocalLow/Facepunch Studios/Rust"
+    if [[ -d "$rust_appdata" ]]; then
+        found=true
+        # Only count cfg directory, not huge cache files
+        for sub in cfg; do
+            if [[ -d "${rust_appdata}/${sub}" ]]; then
+                local s
+                s=$(dir_size_bytes "${rust_appdata}/${sub}")
+                total_size=$((total_size + s))
+            fi
+        done
+        # Count individual config files
+        for f in "${rust_appdata}"/*.cfg "${rust_appdata}"/*.db; do
+            [[ -f "$f" ]] && total_size=$((total_size + $(stat -c%s "$f" 2>/dev/null || echo 0)))
+        done
+    fi
+
+    [[ "$found" == false ]] && return 1
+
+    FOUND_GAMES[rust]=1
+    FOUND_PATHS[rust]="${rust_appdata:-${userdata}}"
+    FOUND_SIZES[rust]="$total_size"
+
+    log_success "Rust: configs found ($(human_size "$total_size"))"
+    return 0
+}
+
+scan_fivem() {
+    local profile="$1"
+    local fivem_dir="${profile}AppData/Local/FiveM/FiveM.app"
+
+    [[ -d "$fivem_dir" ]] || return 1
+
+    local total_size=0
+    local found_items=()
+
+    # citLaunchery config
+    if [[ -f "${fivem_dir}/CitizenFX.ini" ]]; then
+        found_items+=("CitizenFX.ini")
+    fi
+
+    # Server history / favorites
+    for f in "${fivem_dir}"/*.json "${fivem_dir}/data/"*.json; do
+        [[ -f "$f" ]] && found_items+=("$(basename "$f")")
+    done
+
+    [[ ${#found_items[@]} -eq 0 ]] && return 1
+
+    total_size=$(dir_size_bytes "$fivem_dir")
+    FOUND_GAMES[fivem]=1
+    FOUND_PATHS[fivem]="$fivem_dir"
+    FOUND_SIZES[fivem]="$total_size"
+
+    log_success "FiveM: configs found ($(human_size "$total_size"))"
+    for f in "${found_items[@]}"; do
+        echo -e "    ${DIM}${f}${NC}"
+    done
+    return 0
+}
+
+scan_valorant() {
+    local profile="$1"
+    local val_dir="${profile}AppData/Local/VALORANT/Saved/Config"
+
+    [[ -d "$val_dir" ]] || return 1
+
+    local total_size
+    total_size=$(dir_size_bytes "$val_dir")
+    FOUND_GAMES[valorant]=1
+    FOUND_PATHS[valorant]="$val_dir"
+    FOUND_SIZES[valorant]="$total_size"
+
+    log_success "VALORANT: configs found ($(human_size "$total_size")) ${RED}(no Linux support)${NC}"
+    return 0
+}
+
+scan_obs() {
+    local profile="$1"
+    local obs_dir="${profile}AppData/Roaming/obs-studio"
+
+    [[ -d "$obs_dir" ]] || return 1
+
+    local total_size
+    total_size=$(dir_size_bytes "$obs_dir")
+    local found_items=()
+
+    [[ -d "${obs_dir}/basic/scenes" ]] && found_items+=("scenes")
+    [[ -d "${obs_dir}/basic/profiles" ]] && found_items+=("profiles")
+    [[ -f "${obs_dir}/global.ini" ]] && found_items+=("global.ini")
+    [[ -d "${obs_dir}/plugin_config" ]] && found_items+=("plugin configs")
+
+    [[ ${#found_items[@]} -eq 0 ]] && return 1
+
+    FOUND_GAMES[obs]=1
+    FOUND_PATHS[obs]="$obs_dir"
+    FOUND_SIZES[obs]="$total_size"
+
+    log_success "OBS Studio: ${#found_items[*]} components ($(human_size "$total_size"))"
+    for f in "${found_items[@]}"; do
+        echo -e "    ${DIM}${f}${NC}"
+    done
+    return 0
+}
+
+scan_discord() {
+    local profile="$1"
+    local discord_dir="${profile}AppData/Roaming/discord"
+
+    [[ -d "$discord_dir" ]] || return 1
+
+    # Only care about settings, not tokens/cache
+    local settings_file="${discord_dir}/settings.json"
+    [[ -f "$settings_file" ]] || return 1
+
+    local total_size
+    total_size=$(stat -c%s "$settings_file" 2>/dev/null || echo 0)
+
+    FOUND_GAMES[discord]=1
+    FOUND_PATHS[discord]="$discord_dir"
+    FOUND_SIZES[discord]="$total_size"
+
+    log_success "Discord: settings found ($(human_size "$total_size"))"
+    echo -e "    ${DIM}settings.json (keybinds, appearance — tokens excluded)${NC}"
+    return 0
+}
+
+scan_nvidia() {
+    local profile="$1"
+    local found=false
+    local total_size=0
+
+    # NVIDIA Profile Inspector exports
+    local nv_dir="${profile}AppData/Local/NVIDIA Corporation"
+    if [[ -d "$nv_dir" ]]; then
+        found=true
+        total_size=$(dir_size_bytes "$nv_dir")
+    fi
+
+    # Also check for nvidiaProfileInspector in common locations
+    local npi_dir="${profile}Desktop/nvidiaProfileInspector"
+    if [[ -d "$npi_dir" ]]; then
+        found=true
+        local s
+        s=$(dir_size_bytes "$npi_dir")
+        total_size=$((total_size + s))
+    fi
+
+    [[ "$found" == false ]] && return 1
+
+    FOUND_GAMES[nvidia]=1
+    FOUND_PATHS[nvidia]="$nv_dir"
+    FOUND_SIZES[nvidia]="$total_size"
+
+    log_success "NVIDIA settings found ($(human_size "$total_size")) ${YELLOW}(partial — Linux uses different drivers)${NC}"
+    return 0
+}
+
+scan_peripherals() {
+    local profile="$1"
+    local found=false
+    local total_size=0
+    local found_items=()
+
+    # Logitech G Hub
+    local logi_dir="${profile}AppData/Local/LGHUB"
+    if [[ -d "$logi_dir" ]]; then
+        found=true
+        found_items+=("Logitech G Hub")
+        local s
+        s=$(dir_size_bytes "$logi_dir")
+        total_size=$((total_size + s))
+    fi
+
+    # Razer Synapse
+    local razer_dir="${profile}AppData/Local/Razer"
+    if [[ -d "$razer_dir" ]]; then
+        found=true
+        found_items+=("Razer Synapse")
+        local s
+        s=$(dir_size_bytes "$razer_dir")
+        total_size=$((total_size + s))
+    fi
+
+    # SteelSeries GG / Engine
+    local ss_dir="${profile}AppData/Roaming/SteelSeries"
+    if [[ -d "$ss_dir" ]]; then
+        found=true
+        found_items+=("SteelSeries")
+        local s
+        s=$(dir_size_bytes "$ss_dir")
+        total_size=$((total_size + s))
+    fi
+
+    [[ "$found" == false ]] && return 1
+
+    FOUND_GAMES[peripherals]=1
+    FOUND_PATHS[peripherals]="${logi_dir:-${razer_dir:-$ss_dir}}"
+    FOUND_SIZES[peripherals]="$total_size"
+
+    log_success "Peripheral profiles: ${#found_items[*]} found ($(human_size "$total_size"))"
+    for f in "${found_items[@]}"; do
+        echo -e "    ${DIM}${f}${NC}"
+    done
+    return 0
+}
+
+# Save scan results to cache
+save_scan_cache() {
+    local win_root="$1"
+    ensure_dirs
+
+    {
+        echo "{"
+        echo "  \"scan_date\": \"$(date -Iseconds)\","
+        echo "  \"windows_root\": \"${win_root}\","
+        echo "  \"hubos_version\": \"${VERSION}\","
+        echo "  \"games\": {"
+        local first=true
+        for game_id in $(echo "${!FOUND_GAMES[@]}" | tr ' ' '\n' | sort); do
+            [[ "$first" == true ]] && first=false || echo ","
+            printf '    "%s": {"path": "%s", "size": %s, "support": "%s"}' \
+                "$game_id" \
+                "${FOUND_PATHS[$game_id]:-}" \
+                "${FOUND_SIZES[$game_id]:-0}" \
+                "${GAME_LINUX_SUPPORT[$game_id]:-unknown}"
+        done
+        echo ""
+        echo "  }"
+        echo "}"
+    } > "$SCAN_CACHE"
+
+    log_debug "Scan results cached to $SCAN_CACHE"
+}
+
+# Load scan results from cache
+load_scan_cache() {
+    [[ -f "$SCAN_CACHE" ]] || return 1
+
+    # Simple parsing of our JSON cache
+    WINDOWS_ROOT=$(grep '"windows_root"' "$SCAN_CACHE" | sed 's/.*: "//;s/".*//')
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ \"([a-z0-9]+)\":\{\"path\":\"([^\"]*)\",\"size\":([0-9]+) ]]; then
+            local gid="${BASH_REMATCH[1]}"
+            local gpath="${BASH_REMATCH[2]}"
+            local gsize="${BASH_REMATCH[3]}"
+            FOUND_GAMES[$gid]=1
+            FOUND_PATHS[$gid]="$gpath"
+            FOUND_SIZES[$gid]="$gsize"
+        fi
+    done < "$SCAN_CACHE"
+
+    [[ ${#FOUND_GAMES[@]} -gt 0 ]] && return 0 || return 1
+}
+
+###############################################################################
+# Import Functions
+###############################################################################
+
+# Create a backup of existing Linux configs
+backup_existing() {
+    local game_id="$1" target_dir="$2"
+    [[ -d "$target_dir" ]] || return 0
+
+    local backup_name="${game_id}-$(timestamp)"
+    local backup_path="${BACKUP_DIR}/${backup_name}"
+
+    mkdir -p "$backup_path"
+    cp -a "$target_dir" "${backup_path}/" 2>/dev/null || true
+
+    log_info "Backed up existing ${GAME_NAMES[$game_id]:-$game_id} config to ${DIM}${backup_path}${NC}"
+    return 0
+}
+
+# Log an import action
+log_import() {
+    local game_id="$1" action="$2" details="${3:-}"
+    ensure_dirs
+    echo "[$(date -Iseconds)] ${game_id}: ${action} ${details}" >> "$IMPORT_LOG"
+}
+
+# Import all found games
+import_all() {
+    if [[ ${#FOUND_GAMES[@]} -eq 0 ]]; then
+        if ! load_scan_cache; then
+            log_error "No scan results found. Run ${BOLD}hubos-migrate scan${NC} first."
+            return 1
+        fi
+    fi
+
+    local imported=0
+    local skipped=0
+    local failed=0
+
+    echo ""
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD} Importing All Game Settings${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    local total=${#FOUND_GAMES[@]}
+    local current=0
+
+    for game_id in $(echo "${!FOUND_GAMES[@]}" | tr ' ' '\n' | sort); do
+        ((current++))
+        local support="${GAME_LINUX_SUPPORT[$game_id]:-unknown}"
+
+        if [[ "$support" == "reference" ]]; then
+            log_warn "Skipping ${GAME_NAMES[$game_id]:-$game_id} (not available on Linux)"
+            save_reference_config "$game_id"
+            ((skipped++))
+            continue
+        fi
+
+        echo -e "\n${CYAN}[$current/$total]${NC} Importing ${BOLD}${GAME_NAMES[$game_id]:-$game_id}${NC}..."
+
+        if import_game "$game_id"; then
+            ((imported++))
+        else
+            ((failed++))
+        fi
+    done
+
+    echo ""
+    echo -e "${BOLD}Import Complete:${NC}"
+    echo -e "  ${GREEN}Imported:${NC} $imported"
+    echo -e "  ${YELLOW}Skipped:${NC}  $skipped (no Linux support)"
+    [[ $failed -gt 0 ]] && echo -e "  ${RED}Failed:${NC}   $failed"
+    echo ""
+    echo -e "Backups stored in: ${DIM}${BACKUP_DIR}${NC}"
+}
+
+# Import a specific game
+import_game() {
+    local game_id="$1"
+
+    # Ensure we have scan data
+    if [[ -z "${FOUND_GAMES[$game_id]+x}" ]]; then
+        if ! load_scan_cache || [[ -z "${FOUND_GAMES[$game_id]+x}" ]]; then
+            log_error "No data for ${game_id}. Run ${BOLD}hubos-migrate scan${NC} first."
+            return 1
+        fi
+    fi
+
+    local linux_steam
+    linux_steam=$(detect_linux_steam)
+
+    case "$game_id" in
+        steam)   import_steam "$linux_steam" ;;
+        cs2)     import_cs2 "$linux_steam" ;;
+        cs16)    import_cs16 "$linux_steam" ;;
+        tf2)     import_tf2 "$linux_steam" ;;
+        rust)    import_rust "$linux_steam" ;;
+        fivem)   import_fivem ;;
+        obs)     import_obs ;;
+        discord) import_discord ;;
+        nvidia)  save_reference_config "$game_id"; log_info "NVIDIA settings saved for reference (Linux uses different drivers)" ;;
+        peripherals) import_peripherals ;;
+        valorant) save_reference_config "$game_id"; log_info "VALORANT settings saved for reference (not available on Linux)" ;;
+        *)       log_error "Unknown game: $game_id"; return 1 ;;
+    esac
+}
+
+import_steam() {
+    local linux_steam="$1"
+    local win_config="${FOUND_PATHS[steam]}"
+
+    if [[ -z "$linux_steam" ]]; then
+        log_warn "No Steam installation found on Linux"
+        log_info "Saving Steam configs to ${MIGRATE_DIR}/steam-config/ for manual import"
+        mkdir -p "${MIGRATE_DIR}/steam-config"
+        # Copy safe files only (skip auth tokens)
+        for f in loginusers.vdf config.vdf libraryfolders.vdf DialogConfig.vdf; do
+            if [[ -f "${win_config}/${f}" ]]; then
+                cp "$win_config/$f" "${MIGRATE_DIR}/steam-config/"
+                # Strip sensitive fields from loginusers.vdf
+                if [[ "$f" == "loginusers.vdf" ]]; then
+                    sed -i '/"Timestamp"/d;/"WantsOfflineMode"/d' "${MIGRATE_DIR}/steam-config/$f" 2>/dev/null || true
+                fi
+            fi
+        done
+        log_import "steam" "saved" "to ${MIGRATE_DIR}/steam-config/"
+        return 0
+    fi
+
+    local target_config="${linux_steam}/config"
+    backup_existing "steam" "$target_config"
+
+    # Copy controller configs and safe settings
+    for f in config.vdf DialogConfig.vdf; do
+        if [[ -f "${win_config}/${f}" ]]; then
+            cp "${win_config}/${f}" "${target_config}/"
+            convert_path_separators "${target_config}/${f}"
+            log_success "Imported ${f}"
+        fi
+    done
+
+    # Import user list (strip tokens)
+    if [[ -f "${win_config}/loginusers.vdf" ]]; then
+        local tmp
+        tmp=$(mktemp)
+        # Copy but remove sensitive auth data
+        grep -v -i '"auth\|"token\|"remember\|"Timestamp"' "${win_config}/loginusers.vdf" > "$tmp" || true
+        cp "$tmp" "${target_config}/loginusers.vdf"
+        rm -f "$tmp"
+        log_success "Imported loginusers.vdf (auth tokens stripped)"
+    fi
+
+    # Controller configs
+    if [[ -d "${win_config}/../controller_config" ]]; then
+        local ctrl_src="${win_config}/../controller_config"
+        local ctrl_dst="${linux_steam}/controller_config"
+        mkdir -p "$ctrl_dst"
+        cp -r "$ctrl_src"/* "$ctrl_dst/" 2>/dev/null || true
+        log_success "Imported controller configurations"
+    fi
+
+    log_import "steam" "imported" "global config"
+    return 0
+}
+
+import_cs2() {
+    local linux_steam="$1"
+    if [[ -z "$linux_steam" ]]; then
+        log_warn "No Steam installation found on Linux — saving CS2 configs to migrate dir"
+        mkdir -p "${MIGRATE_DIR}/cs2-cfg"
+        cp -r "${FOUND_PATHS[cs2]}"/* "${MIGRATE_DIR}/cs2-cfg/" 2>/dev/null || true
+        log_import "cs2" "saved" "${MIGRATE_DIR}/cs2-cfg/"
+        return 0
+    fi
+
+    # Find matching Steam user IDs
+    local win_cfg_root="${FOUND_PATHS[cs2]}"
+    local win_userdata
+    win_userdata=$(echo "$win_cfg_root" | grep -oP '.*/userdata/\d+' || echo "")
+    local steam_userid
+    steam_userid=$(basename "$win_userdata" 2>/dev/null || echo "")
+
+    # Determine target paths (check Flatpak and native)
+    local target_base="${linux_steam}/userdata"
+    local imported=false
+
+    for user_dir in "${target_base}"/*/; do
+        [[ -d "$user_dir" ]] || continue
+        local target_cfg="${user_dir}730/local/cfg"
+        mkdir -p "$target_cfg"
+        backup_existing "cs2" "$target_cfg"
+
+        # Copy cfg files
+        for f in "${win_cfg_root}"/*.cfg "${win_cfg_root}"/*.txt "${win_cfg_root}"/*.vcfg; do
+            [[ -f "$f" ]] || continue
+            local fname
+            fname=$(basename "$f")
+            cp "$f" "${target_cfg}/${fname}"
+            convert_path_separators "${target_cfg}/${fname}"
+            log_debug "Copied $fname"
+        done
+
+        imported=true
+        show_config_diff "cs2" "$win_cfg_root" "$target_cfg"
+        break
+    done
+
+    if [[ "$imported" == false ]]; then
+        # No existing userdata — create in migrate dir
+        log_warn "No CS2 userdata directory found on Linux"
+        mkdir -p "${MIGRATE_DIR}/cs2-cfg"
+        cp -r "$win_cfg_root"/* "${MIGRATE_DIR}/cs2-cfg/" 2>/dev/null || true
+        log_info "Configs saved to ${MIGRATE_DIR}/cs2-cfg/ — they'll be applied when CS2 is first run"
+    fi
+
+    log_success "CS2 settings imported"
+    log_import "cs2" "imported"
+    return 0
+}
+
+import_cs16() {
+    local linux_steam="$1"
+    local win_cstrike="${FOUND_PATHS[cs16]}"
+
+    local target=""
+    # Check multiple possible paths
+    for base in "$linux_steam" "${HOME}/.steam/steam"; do
+        local t="${base}/steamapps/common/Half-Life/cstrike"
+        if [[ -d "$t" ]]; then
+            target="$t"
+            break
+        fi
+    done
+
+    if [[ -z "$target" ]]; then
+        log_warn "CS 1.6 not installed on Linux — saving configs to migrate dir"
+        target="${MIGRATE_DIR}/cs16-cfg"
+    fi
+
+    mkdir -p "$target"
+    backup_existing "cs16" "$target"
+
+    # Copy config files
+    local count=0
+    for f in config.cfg autoexec.cfg userconfig.cfg valve.rc; do
+        if [[ -f "${win_cstrike}/${f}" ]]; then
+            cp "${win_cstrike}/${f}" "${target}/${f}"
+            convert_path_separators "${target}/${f}"
+            ((count++))
+            log_debug "Copied $f"
+        fi
+    done
+
+    # Copy custom spray if present
+    if [[ -f "${win_cstrike}/logos/remapped.bmp" ]]; then
+        mkdir -p "${target}/logos"
+        cp "${win_cstrike}/logos/remapped.bmp" "${target}/logos/"
+        log_debug "Copied custom spray"
+    fi
+
+    show_config_diff "cs16" "$win_cstrike" "$target"
+    log_success "CS 1.6: $count config files imported"
+    log_import "cs16" "imported" "$count files"
+    return 0
+}
+
+import_tf2() {
+    local linux_steam="$1"
+    local win_cfg="${FOUND_PATHS[tf2]}"
+
+    # Target: userdata cfg and game cfg
+    local target_game=""
+    for base in "$linux_steam" "${HOME}/.steam/steam"; do
+        local t="${base}/steamapps/common/Team Fortress 2/tf/cfg"
+        if [[ -d "$t" ]] || [[ -d "$(dirname "$t")" ]]; then
+            target_game="$t"
+            break
+        fi
+    done
+
+    if [[ -z "$target_game" ]]; then
+        target_game="${MIGRATE_DIR}/tf2-cfg"
+    fi
+
+    mkdir -p "$target_game"
+    backup_existing "tf2" "$target_game"
+
+    local count=0
+    for f in "$win_cfg"/*.cfg; do
+        [[ -f "$f" ]] || continue
+        local fname
+        fname=$(basename "$f")
+        cp "$f" "${target_game}/${fname}"
+        convert_path_separators "${target_game}/${fname}"
+        ((count++))
+    done
+
+    # Also import userdata configs
+    local win_steam
+    win_steam=$(echo "$win_cfg" | grep -oP '.*/Steam' || echo "")
+    if [[ -n "$win_steam" && -d "${win_steam}/userdata" ]]; then
+        for user_dir in "${win_steam}/userdata"/*/; do
+            local src="${user_dir}440/remote/cfg"
+            [[ -d "$src" ]] || continue
+            # Find corresponding Linux user dir
+            local uid
+            uid=$(basename "$user_dir")
+            local linux_ud="${linux_steam}/userdata/${uid}/440/remote/cfg"
+            if [[ -d "$(dirname "$linux_ud")" ]]; then
+                mkdir -p "$linux_ud"
+                cp -r "$src"/* "$linux_ud/" 2>/dev/null || true
+                log_debug "Copied userdata configs for user $uid"
+            fi
+        done
+    fi
+
+    show_config_diff "tf2" "$win_cfg" "$target_game"
+    log_success "TF2: $count config files imported"
+    log_import "tf2" "imported" "$count files"
+    return 0
+}
+
+import_rust() {
+    local linux_steam="$1"
+    local win_path="${FOUND_PATHS[rust]}"
+
+    # Rust userdata (Steam cloud saves)
+    local win_steam
+    win_steam=$(echo "$win_path" | grep -oP '.*/Steam' || echo "")
+    if [[ -n "$win_steam" && -d "${win_steam}/userdata" ]]; then
+        for user_dir in "${win_steam}/userdata"/*/; do
+            local src="${user_dir}252490"
+            [[ -d "$src" ]] || continue
+            local uid
+            uid=$(basename "$user_dir")
+            local linux_ud="${linux_steam}/userdata/${uid}/252490"
+            if [[ -n "$linux_steam" ]]; then
+                mkdir -p "$linux_ud"
+                backup_existing "rust" "$linux_ud"
+                cp -r "$src"/* "$linux_ud/" 2>/dev/null || true
+                log_debug "Copied Rust userdata for user $uid"
+            fi
+        done
+    fi
+
+    # Rust AppData configs
+    if [[ -d "$win_path" && "$win_path" == *"Facepunch"* ]]; then
+        local rust_linux_cfg="${MIGRATE_DIR}/rust-cfg"
+        mkdir -p "$rust_linux_cfg"
+
+        # Copy config files (not caches)
+        for f in "$win_path"/*.cfg "$win_path"/*.db; do
+            [[ -f "$f" ]] || continue
+            cp "$f" "$rust_linux_cfg/"
+        done
+
+        [[ -d "$win_path/cfg" ]] && cp -r "$win_path/cfg" "$rust_linux_cfg/"
+
+        log_info "Rust AppData configs saved to ${DIM}${rust_linux_cfg}${NC}"
+        log_info "These will be used by Rust running through Proton"
+    fi
+
+    log_success "Rust settings imported"
+    log_import "rust" "imported"
+    return 0
+}
+
+import_fivem() {
+    local win_path="${FOUND_PATHS[fivem]}"
+    local target="${MIGRATE_DIR}/fivem-cfg"
+
+    mkdir -p "$target"
+
+    # Copy launcher config
+    [[ -f "${win_path}/CitizenFX.ini" ]] && cp "${win_path}/CitizenFX.ini" "$target/"
+
+    # Copy server history and settings
+    for f in "${win_path}"/*.json "${win_path}/data/"*.json; do
+        [[ -f "$f" ]] || continue
+        cp "$f" "$target/"
+    done
+
+    log_success "FiveM: configs saved to ${DIM}${target}${NC}"
+    log_info "FiveM on Linux requires manual setup — these configs are saved for reference"
+    log_import "fivem" "imported" "partial"
+    return 0
+}
+
+import_obs() {
+    local win_path="${FOUND_PATHS[obs]}"
+
+    # Determine target: Flatpak or native
+    local target=""
+    if [[ -d "${HOME}/.var/app/com.obsproject.Studio/config/obs-studio" ]]; then
+        target="${HOME}/.var/app/com.obsproject.Studio/config/obs-studio"
+    elif [[ -d "${HOME}/.config/obs-studio" ]]; then
+        target="${HOME}/.config/obs-studio"
+    else
+        target="${HOME}/.config/obs-studio"
+    fi
+
+    mkdir -p "$target"
+    backup_existing "obs" "$target"
+
+    # Copy scenes
+    if [[ -d "${win_path}/basic/scenes" ]]; then
+        mkdir -p "${target}/basic/scenes"
+        cp -r "${win_path}/basic/scenes"/* "${target}/basic/scenes/" 2>/dev/null || true
+        # Fix paths in scene files
+        for scene_file in "${target}/basic/scenes"/*.json; do
+            [[ -f "$scene_file" ]] || continue
+            convert_path_separators "$scene_file"
+            # Convert Windows-specific capture sources to Linux equivalents
+            sed -i 's/"window_capture"/"xcomposite_input"/g' "$scene_file" 2>/dev/null || true
+            sed -i 's/"game_capture"/"xcomposite_input"/g' "$scene_file" 2>/dev/null || true
+            sed -i 's/"monitor_capture"/"pipewire-desktop-capture-source"/g' "$scene_file" 2>/dev/null || true
+        done
+        log_success "Imported OBS scenes (capture sources converted to Linux equivalents)"
+    fi
+
+    # Copy profiles
+    if [[ -d "${win_path}/basic/profiles" ]]; then
+        mkdir -p "${target}/basic/profiles"
+        cp -r "${win_path}/basic/profiles"/* "${target}/basic/profiles/" 2>/dev/null || true
+        log_success "Imported OBS profiles"
+    fi
+
+    # Copy global config
+    if [[ -f "${win_path}/global.ini" ]]; then
+        cp "${win_path}/global.ini" "${target}/"
+        convert_path_separators "${target}/global.ini"
+        log_success "Imported OBS global settings"
+    fi
+
+    # Copy plugin configs
+    if [[ -d "${win_path}/plugin_config" ]]; then
+        mkdir -p "${target}/plugin_config"
+        cp -r "${win_path}/plugin_config"/* "${target}/plugin_config/" 2>/dev/null || true
+        log_success "Imported OBS plugin configurations"
+    fi
+
+    log_import "obs" "imported" "scenes, profiles, global config"
+    return 0
+}
+
+import_discord() {
+    local win_path="${FOUND_PATHS[discord]}"
+
+    # Determine target: Flatpak or native
+    local target=""
+    if [[ -d "${HOME}/.var/app/com.discordapp.Discord/config/discord" ]]; then
+        target="${HOME}/.var/app/com.discordapp.Discord/config/discord"
+    elif [[ -d "${HOME}/.config/discord" ]]; then
+        target="${HOME}/.config/discord"
+    else
+        target="${HOME}/.config/discord"
+    fi
+
+    mkdir -p "$target"
+    backup_existing "discord" "$target"
+
+    # ONLY copy settings.json — never copy tokens, cache, etc.
+    if [[ -f "${win_path}/settings.json" ]]; then
+        cp "${win_path}/settings.json" "${target}/settings.json"
+        # Remove any token-like fields just to be safe
+        if command -v jq &>/dev/null; then
+            local tmp
+            tmp=$(mktemp)
+            jq 'del(.DANGEROUS_ENABLE_DEVTOOLS_ONLY_ENABLE_IF_YOU_KNOW_WHAT_YOURE_DOING) | del(.chromiumSwitches)' \
+                "${target}/settings.json" > "$tmp" 2>/dev/null && mv "$tmp" "${target}/settings.json" || rm -f "$tmp"
+        fi
+        log_success "Imported Discord settings (tokens/cache excluded)"
+    fi
+
+    log_import "discord" "imported" "settings.json only"
+    return 0
+}
+
+import_peripherals() {
+    local win_path="${FOUND_PATHS[peripherals]}"
+    local target="${MIGRATE_DIR}/peripheral-profiles"
+
+    mkdir -p "$target"
+
+    # Copy what we can find
+    if [[ -d "$win_path" ]]; then
+        cp -r "$win_path" "${target}/" 2>/dev/null || true
+    fi
+
+    log_success "Peripheral profiles saved to ${DIM}${target}${NC}"
+    log_info "DPI and macro settings will need manual re-entry in Piper/libratbag or OpenRGB"
+    echo ""
+    echo -e "  ${BOLD}Linux peripheral tools:${NC}"
+    echo -e "    ${CYAN}Piper${NC}      — Mouse DPI/button config (supports Logitech, SteelSeries, etc.)"
+    echo -e "    ${CYAN}OpenRGB${NC}    — RGB lighting control (replaces iCUE, Synapse, G Hub lighting)"
+    echo -e "    ${CYAN}libratbag${NC}  — Low-level mouse config backend"
+    echo -e "    ${CYAN}input-remapper${NC} — Advanced key/button remapping"
+
+    log_import "peripherals" "saved" "reference profiles"
+    return 0
+}
+
+# Save configs that can't run on Linux but the user may want for reference
+save_reference_config() {
+    local game_id="$1"
+    local win_path="${FOUND_PATHS[$game_id]:-}"
+    [[ -n "$win_path" && -d "$win_path" ]] || return 0
+
+    local target="${MIGRATE_DIR}/reference/${game_id}"
+    mkdir -p "$target"
+    cp -r "$win_path"/* "$target/" 2>/dev/null || true
+
+    log_info "${GAME_NAMES[$game_id]:-$game_id} configs saved for reference at ${DIM}${target}${NC}"
+    log_import "$game_id" "reference" "$target"
+}
+
+# Show before/after diff of key settings
+show_config_diff() {
+    local game_id="$1" src_dir="$2" dst_dir="$3"
+
+    local cfg_file=""
+    case "$game_id" in
+        cs2)  cfg_file="autoexec.cfg" ;;
+        cs16) cfg_file="config.cfg" ;;
+        tf2)  cfg_file="config.cfg" ;;
+        *)    return 0 ;;
+    esac
+
+    local src_file="${src_dir}/${cfg_file}"
+    local dst_file="${dst_dir}/${cfg_file}"
+
+    [[ -f "$src_file" && -f "$dst_file" ]] || return 0
+
+    echo ""
+    echo -e "  ${BOLD}Key settings from ${cfg_file}:${NC}"
+
+    # Extract interesting settings
+    local settings=("sensitivity" "volume" "cl_crosshairsize" "cl_crosshaircolor" "fps_max" "rate" "cl_interp" "cl_cmdrate" "cl_updaterate" "resolution" "mat_monitorgamma")
+
+    for setting in "${settings[@]}"; do
+        local val
+        val=$(grep -i "^${setting}\b\|^\"${setting}\"" "$src_file" 2>/dev/null | head -1 | tr -d '"' | awk '{print $2}')
+        if [[ -n "$val" ]]; then
+            echo -e "    ${setting}: ${GREEN}${val}${NC}"
+        fi
+    done
+    echo ""
+}
+
+###############################################################################
+# Sensitivity Converter
+###############################################################################
+
+convert_sensitivity() {
+    local game="$1" windows_sens="$2" dpi="${3:-800}"
+
+    echo ""
+    echo -e "${BOLD}Sensitivity Conversion${NC} (${GAME_NAMES[$game]:-$game})"
+    echo -e "  Windows sensitivity: ${GREEN}${windows_sens}${NC}"
+    echo -e "  Mouse DPI: ${GREEN}${dpi}${NC}"
+
+    # Calculate eDPI
+    local edpi
+    edpi=$(awk "BEGIN{printf \"%.1f\", $windows_sens * $dpi}")
+    echo -e "  eDPI: ${CYAN}${edpi}${NC}"
+
+    # The same sensitivity value typically works on Linux (identical engine)
+    echo -e "  Linux sensitivity: ${GREEN}${windows_sens}${NC} ${DIM}(same value — Source/Unity engines are platform-independent)${NC}"
+
+    # Convert to cm/360
+    local cm360=""
+    case "$game" in
+        cs2|cs16|tf2)
+            cm360=$(awk "BEGIN{printf \"%.1f\", (360 / (($windows_sens * $dpi) * 0.022)) * 2.54}")
+            echo -e "  cm/360: ${CYAN}${cm360}${NC}"
+            ;;
+    esac
+    echo ""
+}
+
+###############################################################################
+# Resolution Mapper
+###############################################################################
+
+map_resolution() {
+    local game="$1"
+
+    # Detect current Linux display resolution
+    local linux_res=""
+    if command -v xrandr &>/dev/null; then
+        linux_res=$(xrandr --current 2>/dev/null | grep '\*' | awk '{print $1}' | head -1)
+    elif command -v wlr-randr &>/dev/null; then
+        linux_res=$(wlr-randr 2>/dev/null | grep 'current' | grep -oP '\d+x\d+' | head -1)
+    elif [[ -f /sys/class/drm/card0-*/modes ]]; then
+        linux_res=$(head -1 /sys/class/drm/card0-*/modes 2>/dev/null | head -1)
+    fi
+
+    if [[ -z "$linux_res" ]]; then
+        log_debug "Could not detect Linux display resolution"
+        return 0
+    fi
+
+    echo -e "  ${BOLD}Display:${NC} Linux resolution is ${GREEN}${linux_res}${NC}"
+
+    # Check if the game config has a different resolution
+    local cfg_path="${FOUND_PATHS[$game]:-}"
+    [[ -n "$cfg_path" ]] || return 0
+
+    local win_res=""
+    case "$game" in
+        cs2)
+            local video_file="${cfg_path}/video.txt"
+            if [[ -f "$video_file" ]]; then
+                local w h
+                w=$(grep -oP '"setting.defaultreswidth"\s+"\K\d+' "$video_file" 2>/dev/null || echo "")
+                h=$(grep -oP '"setting.defaultresheight"\s+"\K\d+' "$video_file" 2>/dev/null || echo "")
+                [[ -n "$w" && -n "$h" ]] && win_res="${w}x${h}"
+            fi
+            ;;
+        cs16|tf2)
+            local cfg_file="${cfg_path}/config.cfg"
+            if [[ -f "$cfg_file" ]]; then
+                local w h
+                w=$(grep -oP '^"?vid_config_x"?\s+"?\K\d+' "$cfg_file" 2>/dev/null || echo "")
+                h=$(grep -oP '^"?vid_config_y"?\s+"?\K\d+' "$cfg_file" 2>/dev/null || echo "")
+                [[ -n "$w" && -n "$h" ]] && win_res="${w}x${h}"
+            fi
+            ;;
+    esac
+
+    if [[ -n "$win_res" && "$win_res" != "$linux_res" ]]; then
+        echo -e "  ${YELLOW}Note:${NC} Windows was using ${YELLOW}${win_res}${NC}, Linux display is ${GREEN}${linux_res}${NC}"
+        echo -e "  ${DIM}The game config will use the Windows resolution — change in-game if needed${NC}"
+    elif [[ -n "$win_res" ]]; then
+        echo -e "  ${GREEN}Resolution matches${NC}: ${win_res}"
+    fi
+}
+
+###############################################################################
+# Export Function
+###############################################################################
+
+do_export() {
+    local output_path="${1:-}"
+    local export_name="hubos-settings-$(timestamp)"
+
+    if [[ -z "$output_path" ]]; then
+        # Default to current directory or home
+        output_path="${PWD}/${export_name}.tar.gz"
+    elif [[ -d "$output_path" ]]; then
+        output_path="${output_path}/${export_name}.tar.gz"
+    fi
+
+    local staging_dir
+    staging_dir=$(mktemp -d "/tmp/hubos-export-XXXXXX")
+    local meta_dir="${staging_dir}/metadata"
+    mkdir -p "$meta_dir"
+
+    echo ""
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD} Exporting Linux Game Settings${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    local linux_steam
+    linux_steam=$(detect_linux_steam)
+    local exported=0
+
+    # Export metadata
+    {
+        echo "export_date: $(date -Iseconds)"
+        echo "hubos_version: ${VERSION}"
+        echo "hostname: $(hostname)"
+        echo "kernel: $(uname -r)"
+        echo "steam_path: ${linux_steam:-none}"
+        echo "display_resolution: $(xrandr --current 2>/dev/null | grep '\*' | awk '{print $1}' | head -1 || echo 'unknown')"
+    } > "${meta_dir}/export-info.txt"
+
+    # Export each game that has configs on Linux
+    export_game_cfg() {
+        local game_id="$1" src_path="$2" label="$3"
+        if [[ -d "$src_path" ]]; then
+            local dst="${staging_dir}/${game_id}"
+            mkdir -p "$dst"
+            cp -r "$src_path"/* "$dst/" 2>/dev/null || true
+            echo "$label" > "${meta_dir}/${game_id}.txt"
+            log_success "Exported $label"
+            ((exported++))
+        fi
+    }
+
+    # CS2
+    if [[ -n "$linux_steam" ]]; then
+        for ud in "${linux_steam}/userdata"/*/730/local/cfg; do
+            [[ -d "$ud" ]] && export_game_cfg "cs2" "$ud" "Counter-Strike 2"
+        done
+
+        # TF2
+        local tf2_cfg="${linux_steam}/steamapps/common/Team Fortress 2/tf/cfg"
+        export_game_cfg "tf2" "$tf2_cfg" "Team Fortress 2"
+
+        # CS 1.6
+        local cs16_cfg="${linux_steam}/steamapps/common/Half-Life/cstrike"
+        export_game_cfg "cs16" "$cs16_cfg" "Counter-Strike 1.6"
+
+        # Rust userdata
+        for ud in "${linux_steam}/userdata"/*/252490; do
+            [[ -d "$ud" ]] && export_game_cfg "rust" "$ud" "Rust"
+        done
+
+        # Steam global
+        export_game_cfg "steam" "${linux_steam}/config" "Steam Global Config"
+    fi
+
+    # OBS
+    for obs_dir in "${HOME}/.config/obs-studio" "${HOME}/.var/app/com.obsproject.Studio/config/obs-studio"; do
+        export_game_cfg "obs" "$obs_dir" "OBS Studio" && break
+    done
+
+    # Discord
+    for discord_dir in "${HOME}/.config/discord" "${HOME}/.var/app/com.discordapp.Discord/config/discord"; do
+        if [[ -f "${discord_dir}/settings.json" ]]; then
+            local dst="${staging_dir}/discord"
+            mkdir -p "$dst"
+            cp "${discord_dir}/settings.json" "$dst/"
+            echo "Discord" > "${meta_dir}/discord.txt"
+            log_success "Exported Discord settings"
+            ((exported++))
+            break
+        fi
+    done
+
+    # Previously migrated configs from our migrate dir
+    if [[ -d "$MIGRATE_DIR" ]]; then
+        for sub in "$MIGRATE_DIR"/*/; do
+            [[ -d "$sub" ]] || continue
+            local name
+            name=$(basename "$sub")
+            [[ "$name" == "migrate-backups" ]] && continue
+            local dst="${staging_dir}/migrated-${name}"
+            mkdir -p "$dst"
+            cp -r "$sub"/* "$dst/" 2>/dev/null || true
+        done
+    fi
+
+    if [[ $exported -eq 0 ]]; then
+        log_warn "No game configurations found to export"
+        rm -rf "$staging_dir"
+        return 1
+    fi
+
+    # Create tarball
+    log_info "Packaging ${exported} game config(s)..."
+    tar czf "$output_path" -C "$(dirname "$staging_dir")" "$(basename "$staging_dir")" 2>/dev/null
+    rm -rf "$staging_dir"
+
+    local archive_size
+    archive_size=$(human_size "$(stat -c%s "$output_path" 2>/dev/null || echo 0)")
+
+    echo ""
+    log_success "Export complete: ${BOLD}${output_path}${NC} (${archive_size})"
+    echo -e "  ${DIM}Contains $exported game configuration(s) with metadata${NC}"
+    echo ""
+    return 0
+}
+
+###############################################################################
+# Status Function
+###############################################################################
+
+show_status() {
+    echo ""
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD} HubOS Migration Status${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Check for scan cache
+    if [[ -f "$SCAN_CACHE" ]]; then
+        local scan_date
+        scan_date=$(grep '"scan_date"' "$SCAN_CACHE" | sed 's/.*: "//;s/".*//' || echo "unknown")
+        local scan_root
+        scan_root=$(grep '"windows_root"' "$SCAN_CACHE" | sed 's/.*: "//;s/".*//' || echo "unknown")
+        echo -e "  ${BOLD}Last Scan:${NC}"
+        echo -e "    Date:     ${scan_date}"
+        echo -e "    Source:   ${scan_root}"
+
+        if load_scan_cache; then
+            echo -e "    Found:    ${#FOUND_GAMES[@]} game(s)"
+            for game_id in $(echo "${!FOUND_GAMES[@]}" | tr ' ' '\n' | sort); do
+                local support="${GAME_LINUX_SUPPORT[$game_id]:-unknown}"
+                local tag
+                tag=$(status_tag "$support")
+                printf "      %-14s %-24s %b\n" "$game_id" "${GAME_NAMES[$game_id]:-$game_id}" "$tag"
+            done
+        fi
+    else
+        echo -e "  ${DIM}No scan performed yet. Run: hubos-migrate scan${NC}"
+    fi
+
+    echo ""
+
+    # Check import history
+    if [[ -f "$IMPORT_LOG" ]]; then
+        echo -e "  ${BOLD}Import History:${NC}"
+        local count
+        count=$(wc -l < "$IMPORT_LOG")
+        echo -e "    Total imports: $count"
+        echo -e "    Recent:"
+        tail -5 "$IMPORT_LOG" | while IFS= read -r line; do
+            echo -e "      ${DIM}${line}${NC}"
+        done
+    else
+        echo -e "  ${DIM}No imports performed yet.${NC}"
+    fi
+
+    echo ""
+
+    # Check backups
+    if [[ -d "$BACKUP_DIR" ]]; then
+        local backup_count
+        backup_count=$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        if [[ "$backup_count" -gt 0 ]]; then
+            local backup_size
+            backup_size=$(human_size "$(du -sb "$BACKUP_DIR" 2>/dev/null | awk '{print $1}')")
+            echo -e "  ${BOLD}Backups:${NC} $backup_count backup(s) stored (${backup_size})"
+            echo -e "    Location: ${DIM}${BACKUP_DIR}${NC}"
+        fi
+    fi
+
+    echo ""
+
+    # Check current Linux game installations
+    echo -e "  ${BOLD}Linux Game Installations:${NC}"
+    local linux_steam
+    linux_steam=$(detect_linux_steam)
+
+    if [[ -n "$linux_steam" ]]; then
+        local steam_type="native"
+        [[ "$linux_steam" == *"flatpak"* || "$linux_steam" == *".var/app"* ]] && steam_type="Flatpak"
+        echo -e "    Steam: ${GREEN}installed${NC} ($steam_type)"
+        echo -e "    Path:  ${DIM}${linux_steam}${NC}"
+
+        # Check for installed games
+        for game_info in "730:CS2" "440:TF2" "252490:Rust" "10:CS 1.6"; do
+            local app_id="${game_info%%:*}"
+            local game_name="${game_info#*:}"
+            local found=false
+            for ud in "${linux_steam}/userdata"/*/; do
+                [[ -d "${ud}${app_id}" ]] && found=true && break
+            done
+            if [[ "$found" == true ]]; then
+                echo -e "    ${game_name}: ${GREEN}detected${NC}"
+            fi
+        done
+    else
+        echo -e "    Steam: ${YELLOW}not found${NC}"
+    fi
+
+    # Check OBS
+    for obs_path in "${HOME}/.config/obs-studio" "${HOME}/.var/app/com.obsproject.Studio/config/obs-studio"; do
+        if [[ -d "$obs_path" ]]; then
+            echo -e "    OBS:   ${GREEN}installed${NC}"
+            break
+        fi
+    done
+
+    # Check Discord
+    for discord_path in "${HOME}/.config/discord" "${HOME}/.var/app/com.discordapp.Discord/config/discord"; do
+        if [[ -d "$discord_path" ]]; then
+            echo -e "    Discord: ${GREEN}installed${NC}"
+            break
+        fi
+    done
+
+    echo ""
+}
+
+###############################################################################
+# GUI Mode (zenity)
+###############################################################################
+
+run_gui() {
+    if ! command -v zenity &>/dev/null; then
+        die "zenity is not installed. Install it with: sudo dnf install zenity"
+    fi
+
+    local action
+    action=$(zenity --list --title="HubOS Windows Migration Assistant" \
+        --column="Action" --column="Description" \
+        --width=500 --height=350 \
+        "scan"   "Scan for Windows game settings" \
+        "import" "Import settings from Windows" \
+        "export" "Export Linux settings to backup" \
+        "status" "Show migration status" \
+        2>/dev/null) || exit 0
+
+    case "$action" in
+        scan)
+            # Run scan and capture output
+            local scan_output
+            scan_output=$(cmd_scan 2>&1) || true
+            gui_info "$scan_output"
+            ;;
+        import)
+            if ! load_scan_cache; then
+                gui_error "No scan results found. Please run Scan first."
+                return 1
+            fi
+            local games=()
+            for g in "${!FOUND_GAMES[@]}"; do
+                games+=("$g")
+            done
+            local selected
+            selected=$(gui_select_game "${games[@]}") || return 0
+            if [[ -n "$selected" ]]; then
+                while IFS= read -r game_id; do
+                    [[ -n "$game_id" ]] && import_game "$game_id"
+                done <<< "$selected"
+                gui_info "Import complete! Check the terminal for details."
+            fi
+            ;;
+        export)
+            local dest
+            dest=$(zenity --file-selection --save --title="Export settings to..." \
+                --filename="hubos-settings.tar.gz" 2>/dev/null) || return 0
+            do_export "$dest"
+            gui_info "Export complete: $dest"
+            ;;
+        status)
+            local status_output
+            status_output=$(show_status 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+            gui_info "$status_output"
+            ;;
+    esac
+}
+
+###############################################################################
+# Command Handlers
+###############################################################################
+
+cmd_scan() {
+    echo ""
+    echo -e "${BOLD}${CYAN}"
+    echo "  ╦ ╦╦ ╦╔╗ ╔═╗╔═╗  ╔╦╗┬┌─┐┬─┐┌─┐┌┬┐┌─┐"
+    echo "  ╠═╣║ ║╠╩╗║ ║╚═╗  ║║║││ ┬├┬┘├─┤ │ ├┤ "
+    echo "  ╩ ╩╚═╝╚═╝╚═╝╚═╝  ╩ ╩┴└─┘┴└─┴ ┴ ┴ └─┘"
+    echo -e "${NC}"
+    echo -e "  ${DIM}Windows → HubOS Game Settings Scanner${NC}"
+    echo ""
+
+    ensure_dirs
+
+    # Check for --path argument
+    if [[ -n "$WINDOWS_ROOT" ]]; then
+        if [[ ! -d "$WINDOWS_ROOT" ]]; then
+            die "Specified path does not exist: $WINDOWS_ROOT"
+        fi
+        scan_game_configs "$WINDOWS_ROOT"
+        return $?
+    fi
+
+    # Auto-detect Windows partitions
+    log_info "Searching for Windows installations..."
+    echo ""
+
+    local roots=()
+    while IFS= read -r r; do
+        [[ -n "$r" ]] && roots+=("$r")
+    done < <(find_windows_roots)
+
+    if [[ ${#roots[@]} -eq 0 ]]; then
+        log_warn "No Windows partitions found"
+        echo ""
+        echo -e "  ${BOLD}Tips:${NC}"
+        echo -e "    1. Mount your Windows partition:  ${CYAN}sudo mount /dev/sdXN /mnt/windows${NC}"
+        echo -e "    2. Plug in a USB drive with Windows configs"
+        echo -e "    3. Specify a path manually:  ${CYAN}hubos-migrate scan --path /mnt/windows${NC}"
+        echo ""
+        return 1
+    fi
+
+    if [[ ${#roots[@]} -gt 1 ]]; then
+        log_info "Found ${#roots[@]} Windows installations:"
+        local i=1
+        for r in "${roots[@]}"; do
+            echo -e "  ${BOLD}${i})${NC} $r"
+            ((i++))
+        done
+        echo ""
+
+        if [[ "$GUI_MODE" == true ]] && command -v zenity &>/dev/null; then
+            local items=()
+            for r in "${roots[@]}"; do
+                items+=("$r")
+            done
+            WINDOWS_ROOT=$(zenity --list --title="Select Windows Installation" \
+                --column="Path" "${items[@]}" --width=400 --height=300 2>/dev/null) || exit 0
+        else
+            echo -n "  Select (1-${#roots[@]}): "
+            local choice
+            read -r choice
+            if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#roots[@]} )); then
+                WINDOWS_ROOT="${roots[$((choice-1))]}"
+            else
+                WINDOWS_ROOT="${roots[0]}"
+            fi
+        fi
+    else
+        WINDOWS_ROOT="${roots[0]}"
+    fi
+
+    log_info "Using Windows installation at: ${BOLD}${WINDOWS_ROOT}${NC}"
+    echo ""
+
+    scan_game_configs "$WINDOWS_ROOT"
+}
+
+cmd_import() {
+    local target="${1:-}"
+
+    ensure_dirs
+
+    if [[ -z "$target" ]]; then
+        echo ""
+        echo -e "${BOLD}Usage:${NC}"
+        echo -e "  hubos-migrate import all       Import all found settings"
+        echo -e "  hubos-migrate import <game>     Import specific game"
+        echo ""
+        echo -e "${BOLD}Available games:${NC}"
+        for game_id in $(echo "${!GAME_NAMES[@]}" | tr ' ' '\n' | sort); do
+            printf "  %-14s %s\n" "$game_id" "${GAME_NAMES[$game_id]}"
+        done
+        echo ""
+        return 1
+    fi
+
+    case "$target" in
+        all) import_all ;;
+        *)
+            if [[ -n "${GAME_NAMES[$target]+x}" ]]; then
+                echo ""
+                echo -e "Importing ${BOLD}${GAME_NAMES[$target]}${NC}..."
+                echo ""
+                import_game "$target"
+            else
+                die "Unknown game: $target. Run ${BOLD}hubos-migrate import${NC} to see available games."
+            fi
+            ;;
+    esac
+}
+
+cmd_export() {
+    local output_path="${1:-}"
+    ensure_dirs
+    do_export "$output_path"
+}
+
+cmd_status() {
+    ensure_dirs
+    show_status
+}
+
+###############################################################################
+# Help & Usage
+###############################################################################
+
+show_help() {
+    echo ""
+    echo -e "${BOLD}${CYAN}HubOS Windows Migration Assistant${NC} v${VERSION}"
+    echo -e "${DIM}Migrate game settings and configs from Windows to HubOS${NC}"
+    echo ""
+    echo -e "${BOLD}USAGE:${NC}"
+    echo "  hubos-migrate <command> [options]"
+    echo ""
+    echo -e "${BOLD}COMMANDS:${NC}"
+    echo "  scan              Scan for Windows game settings on mounted partitions"
+    echo "  import <target>   Import settings (all, or a specific game ID)"
+    echo "  export [path]     Export current Linux configs to a backup archive"
+    echo "  status            Show migration status and history"
+    echo ""
+    echo -e "${BOLD}OPTIONS:${NC}"
+    echo "  --path <dir>      Specify Windows root directory for scan"
+    echo "  --gui             Use graphical interface (requires zenity)"
+    echo "  --dry-run         Show what would be done without making changes"
+    echo "  --verbose         Enable detailed output"
+    echo "  --help, -h        Show this help message"
+    echo "  --version, -v     Show version"
+    echo ""
+    echo -e "${BOLD}EXAMPLES:${NC}"
+    echo "  hubos-migrate scan                          # Auto-detect and scan"
+    echo "  hubos-migrate scan --path /mnt/windows      # Scan specific partition"
+    echo "  hubos-migrate import all                    # Import everything found"
+    echo "  hubos-migrate import cs2                    # Import CS2 configs only"
+    echo "  hubos-migrate import steam                  # Import Steam configs"
+    echo "  hubos-migrate export                        # Export to current directory"
+    echo "  hubos-migrate export /media/usb/            # Export to USB drive"
+    echo "  hubos-migrate status                        # Show what's been done"
+    echo "  hubos-migrate --gui                         # Graphical mode"
+    echo ""
+    echo -e "${BOLD}SUPPORTED GAMES:${NC}"
+    for game_id in $(echo "${!GAME_NAMES[@]}" | tr ' ' '\n' | sort); do
+        local support="${GAME_LINUX_SUPPORT[$game_id]:-unknown}"
+        local tag
+        tag=$(status_tag "$support")
+        printf "  %-14s %-24s %b\n" "$game_id" "${GAME_NAMES[$game_id]}" "$tag"
+    done
+    echo ""
+    echo -e "${BOLD}BACKUP LOCATION:${NC}"
+    echo "  ${BACKUP_DIR}"
+    echo ""
+    echo -e "${DIM}Part of HubOS — the gaming-first Linux distribution by 24 Hour Gaming${NC}"
+    echo ""
+}
+
+###############################################################################
+# Argument Parsing
+###############################################################################
+
+main() {
+    local command=""
+    local args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)    show_help; exit 0 ;;
+            --version|-v) echo "hubos-migrate v${VERSION}"; exit 0 ;;
+            --gui)        GUI_MODE=true; shift ;;
+            --verbose)    VERBOSE=true; shift ;;
+            --dry-run)    DRY_RUN=true; shift ;;
+            --path)
+                shift
+                [[ $# -gt 0 ]] || die "--path requires an argument"
+                WINDOWS_ROOT="$1"
+                shift
+                ;;
+            --path=*)
+                WINDOWS_ROOT="${1#--path=}"
+                shift
+                ;;
+            -*)
+                die "Unknown option: $1. Run hubos-migrate --help for usage."
+                ;;
+            *)
+                if [[ -z "$command" ]]; then
+                    command="$1"
+                else
+                    args+=("$1")
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # GUI mode override
+    if [[ "$GUI_MODE" == true && -z "$command" ]]; then
+        run_gui
+        exit 0
+    fi
+
+    # Dispatch command
+    case "${command:-}" in
+        scan)    cmd_scan ;;
+        import)  cmd_import "${args[0]:-}" ;;
+        export)  cmd_export "${args[0]:-}" ;;
+        status)  cmd_status ;;
+        "")      show_help; exit 0 ;;
+        *)       die "Unknown command: $command. Run hubos-migrate --help for usage." ;;
+    esac
+}
+
+main "$@"

@@ -465,6 +465,36 @@ class HubOSTray:
         backup.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-backup", "create"]))
         menu.append(backup)
 
+        migrate = Gtk.MenuItem(label="Migrate from Windows")
+        migrate.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-migrate", "scan"]))
+        menu.append(migrate)
+
+        bench_cmp = Gtk.MenuItem(label="Benchmark vs Windows")
+        bench_cmp.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-benchmark-compare", "quick"]))
+        menu.append(bench_cmp)
+
+        # ── Perks ──
+        perks_item = Gtk.MenuItem(label="HubOS Perks")
+        perks_menu = Gtk.Menu()
+        for action, desc in [("status", "View My Perks"), ("claim", "Claim Welcome Package"), ("referral show", "Referral Code"), ("rewards show", "Earn More VIP")]:
+            pi = Gtk.MenuItem(label=desc)
+            pi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-perks"] + a.split()))
+            perks_menu.append(pi)
+        perks_item.set_submenu(perks_menu)
+        menu.append(perks_item)
+
+        # ── Creator Kit ──
+        creator_item = Gtk.MenuItem(label="Creator Kit")
+        creator_menu = Gtk.Menu()
+        for action, desc in [("setup", "Setup OBS Profile"), ("scenes", "Generate Stream Scenes"), ("overlay", "Generate Overlays"), ("clip last 30", "Save Last 30s Clip")]:
+            ci = Gtk.MenuItem(label=desc)
+            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-creator-kit"] + a.split()))
+            creator_menu.append(ci)
+        creator_item.set_submenu(creator_menu)
+        menu.append(creator_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
         # ── Hub Account ──
         hub_acct = Gtk.MenuItem(label="Hub Account")
         hub_acct_menu = Gtk.Menu()
