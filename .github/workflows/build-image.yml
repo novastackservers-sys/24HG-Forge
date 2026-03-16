@@ -1,0 +1,72 @@
+name: Build HubOS Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Containerfile'
+      - 'system_files/**'
+      - 'scripts/**'
+      - 'hub-app/**'
+      - 'branding/**'
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: hubos
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build:
+    name: Build & Push OCI Image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build Image
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ env.IMAGE_NAME }}
+          tags: ${{ steps.meta.outputs.tags }}
+          containerfiles: ./Containerfile
+          build-args: |
+            BASE_IMAGE=ghcr.io/ublue-os/bazzite
+            BASE_TAG=stable
+
+      - name: Push to GHCR
+        if: github.event_name != 'pull_request'
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: ${{ env.IMAGE_REGISTRY }}
+
+      - name: Summary
+        run: |
+          echo "### HubOS Image Built" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY

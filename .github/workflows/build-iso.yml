@@ -1,0 +1,133 @@
+name: Build HubOS ISO
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'ISO Variant'
+        required: true
+        default: 'desktop'
+        type: choice
+        options:
+          - desktop
+          - nvidia
+
+env:
+  IMAGE_NAME: hubos
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build-image:
+    name: Build OCI Image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        variant: [desktop, nvidia]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set base image
+        id: base
+        run: |
+          if [ "${{ matrix.variant }}" = "nvidia" ]; then
+            echo "image=ghcr.io/ublue-os/bazzite-nvidia" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=ghcr.io/ublue-os/bazzite" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Image
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ env.IMAGE_NAME }}
+          tags: |
+            latest
+            ${{ github.sha }}
+            ${{ github.ref_name }}
+          containerfiles: ./Containerfile
+          build-args: |
+            BASE_IMAGE=${{ steps.base.outputs.image }}
+            BASE_TAG=stable
+
+      - name: Push to GHCR
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: ${{ env.IMAGE_REGISTRY }}
+
+  build-iso:
+    name: Build ISO (${{ matrix.variant }})
+    needs: build-image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        variant: [desktop, nvidia]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build ISO
+        uses: jasonn3/build-container-installer@main
+        id: build-iso
+        with:
+          image_name: ${{ env.IMAGE_NAME }}
+          image_repo: ${{ env.IMAGE_REGISTRY }}
+          image_tag: latest
+          variant: Kinoite
+          iso_name: hubos-${{ matrix.variant }}-${{ github.ref_name }}.iso
+          enrollment_password: hubos
+
+      - name: Generate checksum
+        run: |
+          cd ${{ steps.build-iso.outputs.iso_path }}
+          sha256sum *.iso > SHA256SUMS
+
+      - name: Upload ISO as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hubos-${{ matrix.variant }}-iso
+          path: |
+            ${{ steps.build-iso.outputs.iso_path }}/*.iso
+            ${{ steps.build-iso.outputs.iso_path }}/SHA256SUMS
+          retention-days: 30
+
+      - name: Create Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.build-iso.outputs.iso_path }}/*.iso
+            ${{ steps.build-iso.outputs.iso_path }}/SHA256SUMS
+          body: |
+            ## HubOS ${{ github.ref_name }}
+
+            ### Downloads
+            - **Desktop** (AMD/Intel GPU): `hubos-desktop-${{ github.ref_name }}.iso`
+            - **NVIDIA** (GTX 900+): `hubos-nvidia-${{ github.ref_name }}.iso`
+
+            ### Verify download
+            ```bash
+            sha256sum -c SHA256SUMS
+            ```
+
+            ### What's new
+            See [Roadmap](https://os.24hgaming.com/roadmap.html) for full changelog.
+          draft: false
+          prerelease: false

@@ -1,0 +1,373 @@
+## HubOS NVIDIA Variant
+## Includes proprietary NVIDIA drivers via Bazzite-NVIDIA base
+##
+## This is a convenience wrapper. The main Containerfile supports both variants
+## via the BASE_IMAGE build arg. Use this file for explicit NVIDIA builds:
+##
+##   podman build -f Containerfile.nvidia -t hubos-nvidia:latest .
+##
+## Or use the main Containerfile directly:
+##
+##   podman build --build-arg BASE_IMAGE=ghcr.io/ublue-os/bazzite-nvidia -t hubos-nvidia:latest .
+
+ARG BASE_IMAGE="ghcr.io/ublue-os/bazzite-nvidia"
+ARG BASE_TAG="stable"
+
+FROM ${BASE_IMAGE}:${BASE_TAG}
+
+LABEL org.opencontainers.image.title="HubOS NVIDIA"
+LABEL org.opencontainers.image.description="24HG Gaming Distribution — NVIDIA GPU variant"
+LABEL org.opencontainers.image.vendor="24 Hour Gaming"
+
+# The NVIDIA drivers come from the bazzite-nvidia base image.
+# All HubOS customizations are identical to the desktop variant.
+# Re-include the full build from the main Containerfile.
+
+# ── Copy ALL files first (single context layer) ──
+COPY system_files/etc/ /tmp/hubos-build/etc/
+COPY system_files/usr/ /tmp/hubos-build/usr/
+COPY branding/ /tmp/hubos-build/branding/
+COPY hub-app/hubos-hub /tmp/hubos-build/bin/hubos-hub
+COPY hub-app/hubos-hub.desktop /tmp/hubos-build/desktop/hubos-hub.desktop
+COPY hub-app/hubos-session.desktop /tmp/hubos-build/desktop/hubos-session.desktop
+COPY hub-app/hubos-tray /tmp/hubos-build/bin/hubos-tray
+COPY hub-app/hubos-tray.desktop /tmp/hubos-build/desktop/hubos-tray.desktop
+COPY hub-app/hubos-gamescope-session /tmp/hubos-build/bin/hubos-gamescope-session
+COPY scripts/hubos-first-boot /tmp/hubos-build/bin/hubos-first-boot
+COPY scripts/hubos-first-boot.desktop /tmp/hubos-build/desktop/hubos-first-boot.desktop
+COPY scripts/hubos-first-boot-setup.sh /tmp/hubos-build/lib/first-boot-setup.sh
+COPY scripts/configure-steam-servers.sh /tmp/hubos-build/lib/configure-steam-servers.sh
+COPY scripts/hubos-auto-update.sh /tmp/hubos-build/lib/auto-update.sh
+COPY scripts/hubos-game-configs.sh /tmp/hubos-build/lib/hubos-game-configs.sh
+COPY scripts/hubos-obs-setup.sh /tmp/hubos-build/lib/hubos-obs-setup.sh
+COPY scripts/hubos-neofetch /tmp/hubos-build/bin/hubos-neofetch
+COPY scripts/hubos-diag /tmp/hubos-build/bin/hubos-diag
+COPY scripts/hubos-performance /tmp/hubos-build/bin/hubos-performance
+COPY scripts/hubos-server-status /tmp/hubos-build/bin/hubos-server-status
+COPY scripts/hubos-netguard /tmp/hubos-build/bin/hubos-netguard
+COPY scripts/hubos-proton-fix /tmp/hubos-build/bin/hubos-proton-fix
+COPY scripts/hubos-replay /tmp/hubos-build/bin/hubos-replay
+COPY scripts/hubos-input /tmp/hubos-build/bin/hubos-input
+COPY scripts/hubos-audio /tmp/hubos-build/bin/hubos-audio
+COPY scripts/hubos-discord-fix /tmp/hubos-build/bin/hubos-discord-fix
+COPY scripts/hubos-screenshot /tmp/hubos-build/bin/hubos-screenshot
+COPY scripts/hubos-backup /tmp/hubos-build/bin/hubos-backup
+COPY scripts/hubos-nightlight /tmp/hubos-build/bin/hubos-nightlight
+COPY scripts/hubos-benchmark /tmp/hubos-build/bin/hubos-benchmark
+COPY scripts/hubos-hub-bridge /tmp/hubos-build/bin/hubos-hub-bridge
+COPY scripts/hubos-game-profiles /tmp/hubos-build/bin/hubos-game-profiles
+COPY scripts/hubos-controller /tmp/hubos-build/bin/hubos-controller
+COPY scripts/hubos-proton-updater /tmp/hubos-build/bin/hubos-proton-updater
+COPY scripts/hubos-game-timer /tmp/hubos-build/bin/hubos-game-timer
+COPY scripts/hubos-stream /tmp/hubos-build/bin/hubos-stream
+COPY scripts/hubos-shader-cache /tmp/hubos-build/bin/hubos-shader-cache
+COPY scripts/hubos-sounds /tmp/hubos-build/bin/hubos-sounds
+COPY scripts/hubos-tips /tmp/hubos-build/bin/hubos-tips
+COPY scripts/hubos-achievements /tmp/hubos-build/bin/hubos-achievements
+COPY scripts/hubos-wallpaper /tmp/hubos-build/bin/hubos-wallpaper
+COPY scripts/hubos-notify-style /tmp/hubos-build/bin/hubos-notify-style
+COPY scripts/hubos-desktop-setup /tmp/hubos-build/bin/hubos-desktop-setup
+COPY scripts/hubos-lock-info /tmp/hubos-build/bin/hubos-lock-info
+COPY scripts/hubos-compat /tmp/hubos-build/bin/hubos-compat
+COPY scripts/hubos-crash-fix /tmp/hubos-build/bin/hubos-crash-fix
+COPY scripts/hubos-display /tmp/hubos-build/bin/hubos-display
+COPY scripts/hubos-discord-screen /tmp/hubos-build/bin/hubos-discord-screen
+COPY scripts/hubos-prefix /tmp/hubos-build/bin/hubos-prefix
+COPY scripts/hubos-dualboot /tmp/hubos-build/bin/hubos-dualboot
+COPY scripts/hubos-migrate /tmp/hubos-build/bin/hubos-migrate
+COPY scripts/hubos-benchmark-compare /tmp/hubos-build/bin/hubos-benchmark-compare
+COPY scripts/hubos-perks /tmp/hubos-build/bin/hubos-perks
+COPY scripts/hubos-creator-kit /tmp/hubos-build/bin/hubos-creator-kit
+COPY scripts/hubos-demo /tmp/hubos-build/bin/hubos-demo
+COPY scripts/hubos-demo.desktop /tmp/hubos-build/desktop/hubos-demo.desktop
+COPY scripts/hubos-smart-launch /tmp/hubos-build/bin/hubos-smart-launch
+COPY scripts/hubos-session-summary /tmp/hubos-build/bin/hubos-session-summary
+COPY scripts/hubos-crash-recovery /tmp/hubos-build/bin/hubos-crash-recovery
+COPY scripts/hubos-download-mgr /tmp/hubos-build/bin/hubos-download-mgr
+COPY scripts/hubos-games /tmp/hubos-build/bin/hubos-games
+COPY scripts/hubos-thermal /tmp/hubos-build/bin/hubos-thermal
+COPY scripts/hubos-anticheat-tracker /tmp/hubos-build/bin/hubos-anticheat-tracker
+COPY scripts/hubos-mod-manager /tmp/hubos-build/bin/hubos-mod-manager
+COPY scripts/hubos-nxm-handler.desktop /tmp/hubos-build/desktop/hubos-nxm-handler.desktop
+COPY scripts/hubos-hdr /tmp/hubos-build/bin/hubos-hdr
+COPY scripts/hubos-flatpak-fix /tmp/hubos-build/bin/hubos-flatpak-fix
+COPY scripts/hubos-update-guard /tmp/hubos-build/bin/hubos-update-guard
+COPY scripts/hubos-update-guard-hook.sh /tmp/hubos-build/lib/hubos-update-guard-hook.sh
+COPY scripts/hubos-save-manager /tmp/hubos-build/bin/hubos-save-manager
+COPY scripts/hubos-nvidia-wayland /tmp/hubos-build/bin/hubos-nvidia-wayland
+COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
+COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
+COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
+COPY system_files/usr/share/hubos/servers.json /tmp/hubos-build/data/servers.json
+COPY system_files/usr/share/hubos/offline.html /tmp/hubos-build/data/offline.html
+COPY system_files/usr/share/sounds/hubos/ /tmp/hubos-build/sounds/hubos/
+COPY system_files/usr/share/plasma/look-and-feel/com.hubos.splash/ /tmp/hubos-build/plasma-splash/
+COPY system_files/etc/skel/.config/conky/ /tmp/hubos-build/conky/
+COPY system_files/etc/skel/.config/plasmanotifyrc /tmp/hubos-build/plasmanotifyrc
+COPY system_files/etc/skel/.config/dolphinrc /tmp/hubos-build/skel-dolphinrc
+COPY system_files/etc/skel/.config/kwinrulesrc /tmp/hubos-build/skel-kwinrulesrc
+COPY system_files/etc/skel/.config/kscreenlockerrc /tmp/hubos-build/skel-kscreenlockerrc
+COPY system_files/etc/skel/.config/kwinrc.d/ /tmp/hubos-build/skel-kwinrc.d/
+COPY system_files/etc/skel/.local/share/user-places.xbel /tmp/hubos-build/skel-user-places.xbel
+COPY system_files/etc/skel/.local/share/kservices5/ /tmp/hubos-build/skel-kservices5/
+COPY system_files/etc/skel/Desktop/ /tmp/hubos-build/skel-desktop/
+COPY installer/ /tmp/hubos-build/installer/
+
+# ── Single RUN: install packages, deploy files, configure, cleanup ──
+RUN rpm-ostree install \
+    chromium \
+    libnotify \
+    wmctrl \
+    xdotool \
+    python3-gobject \
+    python3-dbus \
+    gtk3 \
+    zenity \
+    gamemode \
+    papirus-icon-theme \
+    lm_sensors \
+    pciutils \
+    vulkan-tools \
+    libappindicator-gtk3 \
+    conky \
+    && rpm-ostree cleanup -m \
+    \
+    # ── Sysctl gaming tweaks ── \
+    && cp /tmp/hubos-build/etc/hubos-gaming-tweaks.conf /etc/sysctl.d/99-hubos-gaming.conf \
+    \
+    # ── Systemd services ── \
+    && cp /tmp/hubos-build/etc/systemd/system/hubos-gaming-tweaks.service /etc/systemd/system/ \
+    && cp /tmp/hubos-build/etc/systemd/system/hubos-first-boot-setup.service /etc/systemd/system/ \
+    && cp /tmp/hubos-build/etc/systemd/system/hubos-auto-update.service /etc/systemd/system/ \
+    && cp /tmp/hubos-build/etc/systemd/system/hubos-auto-update.timer /etc/systemd/system/ \
+    && systemctl enable hubos-gaming-tweaks.service \
+    && systemctl enable hubos-first-boot-setup.service \
+    && systemctl enable hubos-auto-update.timer \
+    \
+    # ── Plymouth boot splash ── \
+    && cp -r /tmp/hubos-build/usr/share/plymouth/themes/hubos /usr/share/plymouth/themes/hubos \
+    && (plymouth-set-default-theme hubos 2>/dev/null || true) \
+    \
+    # ── GRUB theme ── \
+    && mkdir -p /usr/share/hubos/grub /etc/default/grub.d \
+    && cp -r /tmp/hubos-build/branding/grub/* /usr/share/hubos/grub/ \
+    && cp /tmp/hubos-build/etc/default-grub-config /etc/default/grub.d/50-hubos.cfg \
+    \
+    # ── Wallpapers ── \
+    && mkdir -p /usr/share/hubos/wallpapers \
+    && cp /tmp/hubos-build/branding/wallpapers/*.png /usr/share/hubos/wallpapers/ \
+    && cp /tmp/hubos-build/usr/share/gnome-background-properties/hubos-wallpapers.xml \
+          /usr/share/gnome-background-properties/hubos-wallpapers.xml \
+    \
+    # ── Icons ── \
+    && mkdir -p /usr/share/icons/hubos \
+    && cp -r /tmp/hubos-build/branding/icons/* /usr/share/icons/hubos/ \
+    && cp /tmp/hubos-build/branding/icons/hubos-logo.svg /usr/share/pixmaps/hubos-logo.svg \
+    \
+    # ── KDE / Konsole / shell theming ── \
+    && mkdir -p /etc/skel/.config/autostart /etc/skel/.config/MangoHud \
+               /etc/skel/.config/flatpak-overrides /etc/skel/.local/share/konsole \
+               /etc/skel/.bashrc.d \
+    && cp /tmp/hubos-build/etc/skel/.config/kdeglobals /etc/skel/.config/ \
+    && cp /tmp/hubos-build/etc/skel/.config/plasma-org.kde.plasma.desktop-appletsrc /etc/skel/.config/ \
+    && cp /tmp/hubos-build/etc/skel/.config/konsolerc /etc/skel/.config/ \
+    && cp /tmp/hubos-build/etc/skel/.local/share/konsole/* /etc/skel/.local/share/konsole/ \
+    && cp /tmp/hubos-build/etc/skel/.bashrc.d/hubos.sh /etc/skel/.bashrc.d/ \
+    && cp /tmp/hubos-build/etc/skel/.config/MangoHud/MangoHud.conf /etc/skel/.config/MangoHud/ \
+    && cp /tmp/hubos-build/etc/skel/.config/flatpak-overrides/* /etc/skel/.config/flatpak-overrides/ \
+    && mkdir -p /etc/skel/.config/kglobalshortcutsrc.d \
+    && cp /tmp/hubos-build/etc/skel/.config/kglobalshortcutsrc.d/hubos.conf /etc/skel/.config/kglobalshortcutsrc.d/ \
+    \
+    # ── Conky desktop widget ── \
+    && mkdir -p /etc/skel/.config/conky \
+    && cp /tmp/hubos-build/conky/hubos.conf /etc/skel/.config/conky/ \
+    && cp /tmp/hubos-build/conky/hubos-json.lua /etc/skel/.config/conky/ \
+    && cp /tmp/hubos-build/etc/skel/.config/autostart/hubos-conky.desktop /etc/skel/.config/autostart/ \
+    \
+    # ── Notification config ── \
+    && cp /tmp/hubos-build/plasmanotifyrc /etc/skel/.config/plasmanotifyrc \
+    \
+    # ── Dolphin + KWin + Lock screen + Desktop shortcuts ── \
+    && cp /tmp/hubos-build/skel-dolphinrc /etc/skel/.config/dolphinrc \
+    && cp /tmp/hubos-build/skel-kwinrulesrc /etc/skel/.config/kwinrulesrc \
+    && cp /tmp/hubos-build/skel-kscreenlockerrc /etc/skel/.config/kscreenlockerrc \
+    && mkdir -p /etc/skel/.config/kwinrc.d \
+    && cp /tmp/hubos-build/skel-kwinrc.d/* /etc/skel/.config/kwinrc.d/ \
+    && mkdir -p /etc/skel/.local/share \
+    && cp /tmp/hubos-build/skel-user-places.xbel /etc/skel/.local/share/user-places.xbel \
+    && mkdir -p /etc/skel/.local/share/kservices5/ServiceMenus \
+    && cp -r /tmp/hubos-build/skel-kservices5/* /etc/skel/.local/share/kservices5/ \
+    && mkdir -p /etc/skel/Desktop \
+    && cp /tmp/hubos-build/skel-desktop/*.desktop /etc/skel/Desktop/ \
+    \
+    # ── Sound theme ── \
+    && mkdir -p /usr/share/sounds/hubos/stereo \
+    && cp -r /tmp/hubos-build/sounds/hubos/* /usr/share/sounds/hubos/ \
+    \
+    # ── KDE Plasma splash screen ── \
+    && mkdir -p /usr/share/plasma/look-and-feel/com.hubos.splash/contents/splash \
+    && cp -r /tmp/hubos-build/plasma-splash/* /usr/share/plasma/look-and-feel/com.hubos.splash/ \
+    \
+    # ── SDDM login theme ── \
+    && mkdir -p /usr/share/sddm/themes/hubos/icons /etc/sddm.conf.d \
+    && cp -r /tmp/hubos-build/usr/share/sddm/themes/hubos/* /usr/share/sddm/themes/hubos/ \
+    && cp /tmp/hubos-build/etc/sddm.conf.d/hubos.conf /etc/sddm.conf.d/ \
+    \
+    # ── GameMode config ── \
+    && cp /tmp/hubos-build/etc/gamemode.ini /etc/gamemode.ini \
+    \
+    # ── Firewall (install service + activate in default zone) ── \
+    && mkdir -p /etc/firewalld/services \
+    && cp /tmp/hubos-build/etc/firewalld/services/hubos-gaming.xml /etc/firewalld/services/ \
+    && mkdir -p /etc/firewalld/zones \
+    && (firewall-offline-cmd --zone=FedoraWorkstation --add-service=hubos-gaming 2>/dev/null || true) \
+    \
+    # ── Hub app + session ── \
+    && install -m 755 /tmp/hubos-build/bin/hubos-hub /usr/bin/hubos-hub \
+    && install -m 755 /tmp/hubos-build/bin/hubos-tray /usr/bin/hubos-tray \
+    && install -m 755 /tmp/hubos-build/bin/hubos-gamescope-session /usr/bin/hubos-gamescope-session \
+    && cp /tmp/hubos-build/desktop/hubos-hub.desktop /usr/share/applications/ \
+    && mkdir -p /usr/share/wayland-sessions \
+    && cp /tmp/hubos-build/desktop/hubos-session.desktop /usr/share/wayland-sessions/ \
+    && printf '[Desktop Entry]\nName=24HG Protocol Handler\nExec=/usr/bin/hubos-hub %%u\nType=Application\nNoDisplay=true\nMimeType=x-scheme-handler/24hg;\n' \
+       > /usr/share/applications/hubos-protocol.desktop \
+    \
+    # ── HubOS data (server list, offline page) ── \
+    && mkdir -p /usr/share/hubos \
+    && cp /tmp/hubos-build/data/servers.json /usr/share/hubos/servers.json \
+    && cp /tmp/hubos-build/data/offline.html /usr/share/hubos/offline.html \
+    \
+    # ── First-boot wizard + autostart ── \
+    && install -m 755 /tmp/hubos-build/bin/hubos-first-boot /usr/bin/hubos-first-boot \
+    && cp /tmp/hubos-build/desktop/hubos-first-boot.desktop /usr/share/applications/ \
+    && cp /tmp/hubos-build/desktop/hubos-hub.desktop /etc/skel/.config/autostart/ \
+    && cp /tmp/hubos-build/desktop/hubos-tray.desktop /etc/skel/.config/autostart/ \
+    && cp /tmp/hubos-build/desktop/hubos-first-boot.desktop /etc/skel/.config/autostart/ \
+    \
+    # ── CLI tools ── \
+    && install -m 755 /tmp/hubos-build/bin/hubos-neofetch /usr/bin/hubos-neofetch \
+    && install -m 755 /tmp/hubos-build/bin/hubos-diag /usr/bin/hubos-diag \
+    && install -m 755 /tmp/hubos-build/bin/hubos-performance /usr/bin/hubos-performance \
+    && install -m 755 /tmp/hubos-build/bin/hubos-server-status /usr/bin/hubos-server-status \
+    && install -m 755 /tmp/hubos-build/bin/hubos-netguard /usr/bin/hubos-netguard \
+    && install -m 755 /tmp/hubos-build/bin/hubos-proton-fix /usr/bin/hubos-proton-fix \
+    && install -m 755 /tmp/hubos-build/bin/hubos-replay /usr/bin/hubos-replay \
+    && install -m 755 /tmp/hubos-build/bin/hubos-input /usr/bin/hubos-input \
+    && install -m 755 /tmp/hubos-build/bin/hubos-audio /usr/bin/hubos-audio \
+    && install -m 755 /tmp/hubos-build/bin/hubos-discord-fix /usr/bin/hubos-discord-fix \
+    && install -m 755 /tmp/hubos-build/bin/hubos-screenshot /usr/bin/hubos-screenshot \
+    && install -m 755 /tmp/hubos-build/bin/hubos-backup /usr/bin/hubos-backup \
+    && install -m 755 /tmp/hubos-build/bin/hubos-nightlight /usr/bin/hubos-nightlight \
+    && install -m 755 /tmp/hubos-build/bin/hubos-benchmark /usr/bin/hubos-benchmark \
+    && install -m 755 /tmp/hubos-build/bin/hubos-hub-bridge /usr/bin/hubos-hub-bridge \
+    && install -m 755 /tmp/hubos-build/bin/hubos-game-profiles /usr/bin/hubos-game-profiles \
+    && install -m 755 /tmp/hubos-build/bin/hubos-controller /usr/bin/hubos-controller \
+    && install -m 755 /tmp/hubos-build/bin/hubos-proton-updater /usr/bin/hubos-proton-updater \
+    && install -m 755 /tmp/hubos-build/bin/hubos-game-timer /usr/bin/hubos-game-timer \
+    && install -m 755 /tmp/hubos-build/bin/hubos-stream /usr/bin/hubos-stream \
+    && install -m 755 /tmp/hubos-build/bin/hubos-shader-cache /usr/bin/hubos-shader-cache \
+    && install -m 755 /tmp/hubos-build/bin/hubos-sounds /usr/bin/hubos-sounds \
+    && install -m 755 /tmp/hubos-build/bin/hubos-tips /usr/bin/hubos-tips \
+    && install -m 755 /tmp/hubos-build/bin/hubos-achievements /usr/bin/hubos-achievements \
+    && install -m 755 /tmp/hubos-build/bin/hubos-wallpaper /usr/bin/hubos-wallpaper \
+    && install -m 755 /tmp/hubos-build/bin/hubos-notify-style /usr/bin/hubos-notify-style \
+    && install -m 755 /tmp/hubos-build/bin/hubos-desktop-setup /usr/bin/hubos-desktop-setup \
+    && install -m 755 /tmp/hubos-build/bin/hubos-lock-info /usr/bin/hubos-lock-info \
+    && install -m 755 /tmp/hubos-build/bin/hubos-compat /usr/bin/hubos-compat \
+    && install -m 755 /tmp/hubos-build/bin/hubos-crash-fix /usr/bin/hubos-crash-fix \
+    && install -m 755 /tmp/hubos-build/bin/hubos-display /usr/bin/hubos-display \
+    && install -m 755 /tmp/hubos-build/bin/hubos-discord-screen /usr/bin/hubos-discord-screen \
+    && install -m 755 /tmp/hubos-build/bin/hubos-prefix /usr/bin/hubos-prefix \
+    && install -m 755 /tmp/hubos-build/bin/hubos-dualboot /usr/bin/hubos-dualboot \
+    && install -m 755 /tmp/hubos-build/bin/hubos-migrate /usr/bin/hubos-migrate \
+    && install -m 755 /tmp/hubos-build/bin/hubos-benchmark-compare /usr/bin/hubos-benchmark-compare \
+    && install -m 755 /tmp/hubos-build/bin/hubos-perks /usr/bin/hubos-perks \
+    && install -m 755 /tmp/hubos-build/bin/hubos-creator-kit /usr/bin/hubos-creator-kit \
+    && install -m 755 /tmp/hubos-build/bin/hubos-demo /usr/bin/hubos-demo \
+    && cp /tmp/hubos-build/desktop/hubos-demo.desktop /usr/share/applications/ \
+    && install -m 755 /tmp/hubos-build/bin/hubos-smart-launch /usr/bin/hubos-smart-launch \
+    && install -m 755 /tmp/hubos-build/bin/hubos-session-summary /usr/bin/hubos-session-summary \
+    && install -m 755 /tmp/hubos-build/bin/hubos-crash-recovery /usr/bin/hubos-crash-recovery \
+    && install -m 755 /tmp/hubos-build/bin/hubos-download-mgr /usr/bin/hubos-download-mgr \
+    && install -m 755 /tmp/hubos-build/bin/hubos-games /usr/bin/hubos-games \
+    && install -m 755 /tmp/hubos-build/bin/hubos-thermal /usr/bin/hubos-thermal \
+    && install -m 755 /tmp/hubos-build/bin/hubos-anticheat-tracker /usr/bin/hubos-anticheat-tracker \
+    && install -m 755 /tmp/hubos-build/bin/hubos-mod-manager /usr/bin/hubos-mod-manager \
+    && cp /tmp/hubos-build/desktop/hubos-nxm-handler.desktop /usr/share/applications/ \
+    && install -m 755 /tmp/hubos-build/bin/hubos-hdr /usr/bin/hubos-hdr \
+    && install -m 755 /tmp/hubos-build/bin/hubos-flatpak-fix /usr/bin/hubos-flatpak-fix \
+    && install -m 755 /tmp/hubos-build/bin/hubos-update-guard /usr/bin/hubos-update-guard \
+    && install -m 755 /tmp/hubos-build/bin/hubos-save-manager /usr/bin/hubos-save-manager \
+    && install -m 755 /tmp/hubos-build/bin/hubos-nvidia-wayland /usr/bin/hubos-nvidia-wayland \
+    \
+    # ── Lib scripts ── \
+    && mkdir -p /usr/lib/hubos \
+    && install -m 755 /tmp/hubos-build/lib/first-boot-setup.sh /usr/lib/hubos/ \
+    && install -m 755 /tmp/hubos-build/lib/configure-steam-servers.sh /usr/lib/hubos/ \
+    && install -m 755 /tmp/hubos-build/lib/auto-update.sh /usr/lib/hubos/ \
+    && install -m 755 /tmp/hubos-build/lib/hubos-game-configs.sh /usr/lib/hubos/ \
+    && install -m 755 /tmp/hubos-build/lib/hubos-obs-setup.sh /usr/lib/hubos/ \
+    && install -m 755 /tmp/hubos-build/lib/gamemode-start.sh /usr/lib/hubos/ \
+    && install -m 755 /tmp/hubos-build/lib/gamemode-end.sh /usr/lib/hubos/ \
+    && install -m 755 /tmp/hubos-build/lib/hubos-update-guard-hook.sh /usr/lib/hubos/ \
+    \
+    # ── User systemd services ── \
+    && mkdir -p /etc/skel/.config/systemd/user/default.target.wants \
+    && cp /tmp/hubos-build/systemd-user/hubos-server-status.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-replay.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-discord-fix.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-backup.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-backup.timer /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-hub-bridge.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-game-timer.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-proton-updater.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-proton-updater.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-server-status.service /etc/skel/.config/systemd/user/default.target.wants/hubos-server-status.service \
+    && ln -sf ../hubos-discord-fix.service /etc/skel/.config/systemd/user/default.target.wants/hubos-discord-fix.service \
+    && ln -sf ../hubos-hub-bridge.service /etc/skel/.config/systemd/user/default.target.wants/hubos-hub-bridge.service \
+    && ln -sf ../hubos-game-timer.service /etc/skel/.config/systemd/user/default.target.wants/hubos-game-timer.service \
+    && mkdir -p /etc/skel/.config/systemd/user/timers.target.wants \
+    && ln -sf ../hubos-backup.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-backup.timer \
+    && ln -sf ../hubos-proton-updater.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-proton-updater.timer \
+    && cp /tmp/hubos-build/systemd-user/hubos-achievements.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-achievements.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-achievements.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-achievements.timer \
+    && cp /tmp/hubos-build/systemd-user/hubos-perks-claim.service /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-perks-claim.service /etc/skel/.config/systemd/user/default.target.wants/hubos-perks-claim.service \
+    && cp /tmp/hubos-build/systemd-user/hubos-smart-launch.service /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-smart-launch.service /etc/skel/.config/systemd/user/default.target.wants/hubos-smart-launch.service \
+    && cp /tmp/hubos-build/systemd-user/hubos-anticheat-tracker.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-anticheat-tracker.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-anticheat-tracker.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-anticheat-tracker.timer \
+    && cp /tmp/hubos-build/systemd-user/hubos-wallpaper.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-wallpaper.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-wallpaper.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-wallpaper.timer \
+    \
+    # ── PipeWire gaming config ── \
+    && mkdir -p /etc/pipewire/pipewire.conf.d \
+    && cp /tmp/hubos-build/pipewire/pipewire.conf.d/99-hubos-defaults.conf /etc/pipewire/pipewire.conf.d/ \
+    \
+    # ── libinput gaming quirks ── \
+    && mkdir -p /etc/libinput \
+    && cp /tmp/hubos-build/libinput/local-overrides.quirks /etc/libinput/ \
+    \
+    # ── Calamares installer ── \
+    && mkdir -p /usr/share/calamares/branding/hubos /etc/calamares \
+    && cp -r /tmp/hubos-build/installer/branding/* /usr/share/calamares/branding/hubos/ \
+    && cp /tmp/hubos-build/installer/settings.conf /etc/calamares/settings.conf \
+    \
+    # ── TTY branding ── \
+    && cp /tmp/hubos-build/etc/issue /etc/issue \
+    \
+    # ── OS identity ── \
+    && sed -i 's/^NAME=.*/NAME="HubOS"/' /usr/lib/os-release \
+    && sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="HubOS NVIDIA (24 Hour Gaming)"/' /usr/lib/os-release \
+    && sed -i 's|^HOME_URL=.*|HOME_URL="https://24hgaming.com/os"|' /usr/lib/os-release \
+    && sed -i 's|^SUPPORT_URL=.*|SUPPORT_URL="https://discord.gg/ymfEjH6EJN"|' /usr/lib/os-release \
+    && sed -i 's|^BUG_REPORT_URL=.*|BUG_REPORT_URL="https://discord.gg/ymfEjH6EJN"|' /usr/lib/os-release \
+    && echo 'VARIANT="24HG Gaming NVIDIA"' >> /usr/lib/os-release \
+    && echo 'VARIANT_ID=hubos-nvidia' >> /usr/lib/os-release \
+    \
+    # ── Cleanup build staging ── \
+    && rm -rf /tmp/hubos-build \
+    && ostree container commit

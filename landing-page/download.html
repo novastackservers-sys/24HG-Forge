@@ -3,9 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Download HubOS — 24 Hour Gaming</title>
-    <meta name="description" content="Download HubOS — try it live from USB or install permanently.">
+    <title>Download HubOS — Free Gaming Linux</title>
+    <meta name="description" content="Download HubOS for free. Choose Desktop, NVIDIA, or Steam Deck edition. The gaming Linux that boots into the 24HG ecosystem.">
+    <meta property="og:title" content="Download HubOS">
+    <meta property="og:description" content="Free, open source gaming Linux. 53 tools, 88+ servers, 30-day free VIP.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://os.24hgaming.com/download.html">
     <link rel="icon" href="favicon.ico" type="image/x-icon">
+    <link rel="apple-touch-icon" href="logo-192.png">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,6 +20,7 @@
     <div class="nav-links">
         <a href="index.html">Home</a>
         <a href="install.html">Install Guide</a>
+        <a href="compatibility.html">Compatibility</a>
         <a href="roadmap.html">Roadmap</a>
         <a href="faq.html">FAQ</a>
         <a href="https://hub.24hgaming.com">Hub</a>
@@ -22,110 +28,138 @@
     </div>
 </nav>
 
-<main class="page">
+<section class="hero">
     <h1>Download HubOS</h1>
-    <p class="subtitle">Boot it live from USB to try it out, or install it permanently.</p>
+    <p>The gaming Linux that boots into the 24HG ecosystem. Free, open source, built for gamers.</p>
+    <p style="font-size: 0.95rem; color: var(--text-dim);">Current version: <strong>v1.9</strong></p>
+</section>
 
-    <!-- Option 1: Live ISO -->
-    <div class="download-option">
-        <div class="option-badge available">Available Now</div>
-        <h2>Download ISO (Live + Install)</h2>
-        <p>Download the ISO, flash it to a USB drive, and boot from it. <strong>Try HubOS live</strong> without touching your hard drive — when you're ready, click "Install" to make it permanent.</p>
+<main class="page">
 
-        <div class="iso-grid">
-            <div class="iso-card">
-                <h3>Desktop</h3>
-                <p>AMD / Intel GPU</p>
-                <span class="iso-size">6.6 GB</span>
-                <a class="btn btn-primary" href="/iso/hubos-desktop.iso" download>Download ISO</a>
-                <a class="checksum-link" href="/iso/hubos-desktop.iso-CHECKSUM">SHA256 Checksum</a>
+    <section>
+        <h2>Choose your edition</h2>
+        <p class="subtitle">Pick the ISO that matches your GPU. Not sure? Desktop works for most people.</p>
+
+        <div class="tool-cards" style="margin-top: 2rem;">
+            <div class="tool-card" style="flex: 1; min-width: 260px; text-align: center;">
+                <h3>Desktop Edition</h3>
+                <p style="color: var(--text-dim); font-size: 0.9rem; margin-bottom: 0.5rem;">AMD, Intel, or integrated GPU</p>
+                <p>Includes Mesa drivers, Vulkan, and the full HubOS toolkit.</p>
+                <p style="font-size: 0.85rem; color: var(--text-dim);">~4 GB</p>
+                <a href="https://github.com/24hgaming/hubos/releases/latest/download/hubos-desktop-latest.iso" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">Download Desktop ISO</a>
+                <br>
+                <a href="https://github.com/24hgaming/hubos/releases/latest/download/hubos-desktop-latest.iso.sha256" style="font-size: 0.8rem; margin-top: 0.5rem; display: inline-block;">SHA256 checksum</a>
             </div>
-            <div class="iso-card">
-                <h3>NVIDIA</h3>
-                <p>NVIDIA GPU (GTX 900+)</p>
-                <span class="iso-size">Coming Soon</span>
-                <button class="btn btn-secondary" disabled>Coming Soon</button>
+            <div class="tool-card" style="flex: 1; min-width: 260px; text-align: center;">
+                <h3>NVIDIA Edition</h3>
+                <p style="color: var(--text-dim); font-size: 0.9rem; margin-bottom: 0.5rem;">NVIDIA GTX 900 series and newer</p>
+                <p>Includes proprietary NVIDIA drivers, CUDA, and NVENC.</p>
+                <p style="font-size: 0.85rem; color: var(--text-dim);">~4.5 GB</p>
+                <a href="https://github.com/24hgaming/hubos/releases/latest/download/hubos-nvidia-latest.iso" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">Download NVIDIA ISO</a>
+                <br>
+                <a href="https://github.com/24hgaming/hubos/releases/latest/download/hubos-nvidia-latest.iso.sha256" style="font-size: 0.8rem; margin-top: 0.5rem; display: inline-block;">SHA256 checksum</a>
             </div>
-            <div class="iso-card">
-                <h3>Steam Deck</h3>
-                <p>Handhelds / HTPC</p>
-                <span class="iso-size">Coming Soon</span>
-                <button class="btn btn-secondary" disabled>Coming Soon</button>
+            <div class="tool-card" style="flex: 1; min-width: 260px; text-align: center; opacity: 0.5;">
+                <h3>Steam Deck Edition</h3>
+                <p style="color: var(--text-dim); font-size: 0.9rem; margin-bottom: 0.5rem;">Steam Deck and handheld PCs</p>
+                <p>Optimized for handheld gaming with touch-friendly UI.</p>
+                <p style="font-size: 0.85rem; color: var(--text-dim);">Coming in v2.0</p>
+                <span class="btn btn-secondary" style="display: inline-block; margin-top: 0.75rem; cursor: not-allowed;">Coming Soon</span>
             </div>
         </div>
+    </section>
 
-        <div class="info-box">
-            <strong>How it works:</strong> Boot from USB and you'll get a full HubOS desktop running in RAM. Browse the Hub, check your hardware, test game performance — all without installing anything. When you're ready, click the installer on the desktop.
+    <section>
+        <h2>Verify your download</h2>
+        <p>After downloading, verify the file integrity with a SHA256 checksum:</p>
+        <code class="code-block">sha256sum hubos-desktop-latest.iso
+# Compare the output with the .sha256 file</code>
+    </section>
+
+    <section>
+        <h2>What's included</h2>
+        <div class="features-grid" style="grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));">
+            <div class="feature-card">
+                <div class="icon">&#x1f527;</div>
+                <h3>53 Gaming Tools</h3>
+                <p>Performance tuning, Proton management, shader caching, crash diagnostics, and more — all pre-installed.</p>
+            </div>
+            <div class="feature-card">
+                <div class="icon">&#x1f3ae;</div>
+                <h3>88+ Game Servers</h3>
+                <p>One-click connect to every 24HG server. CS2, TF2, Rust, FiveM, and more.</p>
+            </div>
+            <div class="feature-card">
+                <div class="icon">&#x1f381;</div>
+                <h3>30-Day Free VIP</h3>
+                <p>Every HubOS install gets 30 days of VIP on all 24HG servers, plus a permanent [HubOS] badge.</p>
+            </div>
+            <div class="feature-card">
+                <div class="icon">&#x1f5a5;&#xfe0f;</div>
+                <h3>Drivers Pre-Configured</h3>
+                <p>NVIDIA, AMD, and Intel drivers are set up out of the box. Vulkan, VAAPI, NVENC — all ready.</p>
+            </div>
+            <div class="feature-card">
+                <div class="icon">&#x1f3af;</div>
+                <h3>Auto-Installed on First Boot</h3>
+                <p>Steam, Lutris, Heroic, and Discord deploy automatically during the first-boot wizard.</p>
+            </div>
+            <div class="feature-card">
+                <div class="icon">&#x1f512;</div>
+                <h3>Atomic Updates</h3>
+                <p>Immutable OS with one-click rollback. Updates can never break your system.</p>
+            </div>
         </div>
+    </section>
 
-        <div class="info-box">
-            <strong>Flash with:</strong> <a href="https://ventoy.net">Ventoy</a> (recommended), <a href="https://rufus.ie">Rufus</a>, <a href="https://etcher.balena.io">balenaEtcher</a>, or <code>dd</code>. Then follow the <a href="install.html">Install Guide</a>.
-        </div>
-    </div>
-
-    <!-- Option 2: Rebase (advanced) -->
-    <div class="download-option">
-        <h2>Already on Fedora Atomic? Rebase Instead</h2>
-        <p>Running <strong>Bazzite</strong>, <strong>Silverblue</strong>, or <strong>Kinoite</strong>? Switch to HubOS in one command — no reinstall needed.</p>
-
-        <h3>Desktop (AMD / Intel GPU)</h3>
-        <div class="code-wrapper">
-            <code class="code-block" id="cmd-desktop">rpm-ostree rebase ostree-unverified-registry:registry.24hgaming.com/hubos-desktop:latest</code>
-            <button class="copy-btn" onclick="copyCode('cmd-desktop')">Copy</button>
-        </div>
-
-        <h3>NVIDIA</h3>
-        <div class="code-wrapper">
-            <code class="code-block" id="cmd-nvidia">rpm-ostree rebase ostree-unverified-registry:registry.24hgaming.com/hubos-nvidia:latest</code>
-            <button class="copy-btn" onclick="copyCode('cmd-nvidia')">Copy</button>
-        </div>
-
-        <h3>Steam Deck / Handheld</h3>
-        <div class="code-wrapper">
-            <code class="code-block" id="cmd-deck">rpm-ostree rebase ostree-unverified-registry:registry.24hgaming.com/hubos-deck:latest</code>
-            <button class="copy-btn" onclick="copyCode('cmd-deck')">Copy</button>
-        </div>
-
-        <p style="margin-top: 1rem;">Then reboot:</p>
-        <div class="code-wrapper">
-            <code class="code-block" id="cmd-reboot">systemctl reboot</code>
-            <button class="copy-btn" onclick="copyCode('cmd-reboot')">Copy</button>
-        </div>
-
-        <div class="info-box">
-            <strong>What is rebasing?</strong> It replaces your OS image with HubOS while keeping your user data. It's atomic — if anything fails, your current system is untouched. Roll back anytime with <code>rpm-ostree rollback</code>.
-        </div>
-    </div>
-
-    <!-- System Requirements -->
-    <div class="download-option">
+    <section class="requirements">
         <h2>System Requirements</h2>
         <table class="command-table">
-            <tr><td><strong>CPU</strong></td><td>64-bit x86_64 (Intel or AMD)</td></tr>
+            <tr><td><strong>CPU</strong></td><td>64-bit (x86_64) — Intel or AMD</td></tr>
             <tr><td><strong>RAM</strong></td><td>4 GB minimum, 8 GB+ recommended</td></tr>
-            <tr><td><strong>Storage</strong></td><td>50 GB minimum, 100 GB+ recommended (games need space)</td></tr>
-            <tr><td><strong>GPU</strong></td><td>AMD (any), NVIDIA (GTX 900+), Intel (UHD 600+)</td></tr>
-            <tr><td><strong>Internet</strong></td><td>Required for first-boot setup</td></tr>
-            <tr><td><strong>Live USB</strong></td><td>8 GB+ USB drive (for trying before installing)</td></tr>
+            <tr><td><strong>Storage</strong></td><td>50 GB minimum, 100 GB+ recommended</td></tr>
+            <tr><td><strong>GPU</strong></td><td>AMD, NVIDIA (GTX 900+), or Intel (UHD 600+)</td></tr>
+            <tr><td><strong>USB</strong></td><td>8 GB+ for installer</td></tr>
+            <tr><td><strong>Internet</strong></td><td>Required for first-boot setup and Hub access</td></tr>
         </table>
-    </div>
+    </section>
 
-    <!-- Verify -->
-    <div class="download-option">
-        <h2>After Install</h2>
-        <p>Verify you're running HubOS:</p>
-        <div class="code-wrapper">
-            <code class="code-block" id="cmd-verify">cat /etc/os-release | grep PRETTY_NAME</code>
-            <button class="copy-btn" onclick="copyCode('cmd-verify')">Copy</button>
-        </div>
-        <p>Should output: <code>PRETTY_NAME="HubOS (24 Hour Gaming)"</code></p>
+    <section>
+        <h2>Alternative install methods</h2>
+        <p class="subtitle">Already on Fedora Atomic? Rebase directly — no ISO needed.</p>
 
-        <p style="margin-top: 1rem;">Run diagnostics:</p>
-        <div class="code-wrapper">
-            <code class="code-block" id="cmd-diag">hubos-diag</code>
-            <button class="copy-btn" onclick="copyCode('cmd-diag')">Copy</button>
+        <h3>Rebase from Bazzite or any Fedora Atomic</h3>
+        <p>Run this single command to replace your current OS image with HubOS:</p>
+        <code class="code-block">rpm-ostree rebase ostree-image-signed:docker://ghcr.io/24hgaming/hubos:latest</code>
+        <p>Then reboot:</p>
+        <code class="code-block">systemctl reboot</code>
+
+        <div class="info-box" style="margin-top: 1rem;">
+            <strong>Note:</strong> Rebasing preserves your home directory and user data but replaces the OS layer entirely. Your installed Flatpak apps are also kept.
         </div>
-    </div>
+    </section>
+
+    <section>
+        <h2>Next steps</h2>
+        <div class="tool-cards">
+            <div class="tool-card" style="flex: 1; min-width: 200px; text-align: center;">
+                <h3>Install Guide</h3>
+                <p>Step-by-step instructions to flash, boot, and install HubOS.</p>
+                <a href="install.html" class="btn btn-small btn-primary">Read the Guide</a>
+            </div>
+            <div class="tool-card" style="flex: 1; min-width: 200px; text-align: center;">
+                <h3>FAQ</h3>
+                <p>Common questions about hardware, dual-boot, updates, and more.</p>
+                <a href="faq.html" class="btn btn-small btn-secondary">View FAQ</a>
+            </div>
+            <div class="tool-card" style="flex: 1; min-width: 200px; text-align: center;">
+                <h3>Get Support</h3>
+                <p>Join the Discord for help, bug reports, and community discussion.</p>
+                <a href="https://discord.gg/ymfEjH6EJN" class="btn btn-small btn-secondary">Join Discord</a>
+            </div>
+        </div>
+    </section>
+
 </main>
 
 <footer>
@@ -134,23 +168,8 @@
         <a href="https://discord.gg/ymfEjH6EJN">Discord</a> &middot;
         <a href="https://hub.24hgaming.com">Hub</a>
     </p>
+    <p style="margin-top: 0.5rem;">Built on Bazzite / Universal Blue / Fedora Atomic. MIT License.</p>
 </footer>
-
-<script>
-function copyCode(id) {
-    const el = document.getElementById(id);
-    const text = el.textContent.trim();
-    navigator.clipboard.writeText(text).then(() => {
-        const btn = el.parentElement.querySelector('.copy-btn');
-        btn.textContent = 'Copied!';
-        btn.classList.add('copied');
-        setTimeout(() => {
-            btn.textContent = 'Copy';
-            btn.classList.remove('copied');
-        }, 2000);
-    });
-}
-</script>
 
 </body>
 </html>
