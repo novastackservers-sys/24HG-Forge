@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=HubOS Mod Download Handler
+Comment=Handle nxm:// links from Nexus Mods
+Exec=/usr/bin/hubos-mod-manager nexus handle %u
+Type=Application
+NoDisplay=true
+MimeType=x-scheme-handler/nxm;
+Categories=Utility;

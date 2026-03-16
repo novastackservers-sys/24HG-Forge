@@ -135,3 +135,12 @@ alias game-search='hubos-games search'
 alias thermal='hubos-thermal status'
 alias downloads='hubos-download-mgr status'
 alias session='hubos-session-summary last'
+
+# Wave 11 gap-filler aliases
+alias anticheat='hubos-anticheat-tracker scan'
+alias mods='hubos-mod-manager'
+alias hdr='hubos-hdr status'
+alias flatpak-fix='hubos-flatpak-fix scan'
+alias update-guard='hubos-update-guard status'
+alias saves='hubos-save-manager list'
+alias nvidia-fix='hubos-nvidia-wayland fix'

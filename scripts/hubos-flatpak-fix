@@ -1,0 +1,1372 @@
+#!/usr/bin/env bash
+# HubOS Flatpak Gaming Permission Fixer — Auto-fix sandbox issues for gaming apps
+# Part of HubOS — a custom Linux gaming distro based on Bazzite/Fedora Atomic
+set -euo pipefail
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+readonly VERSION="1.0.0"
+readonly SCRIPT_NAME="hubos-flatpak-fix"
+readonly OVERRIDES_DIR="$HOME/.local/share/flatpak/overrides"
+
+# Color codes
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly CYAN='\033[0;36m'
+readonly BOLD='\033[1m'
+readonly DIM='\033[2m'
+readonly RESET='\033[0m'
+
+# Known gaming Flatpaks — app ID : friendly name
+declare -A GAMING_APPS=(
+    [com.valvesoftware.Steam]="Steam"
+    [net.lutris.Lutris]="Lutris"
+    [com.heroicgameslauncher.hgl]="Heroic Games Launcher"
+    [com.usebottles.bottles]="Bottles"
+    [com.discordapp.Discord]="Discord"
+    [com.obsproject.Studio]="OBS Studio"
+    [org.prismlauncher.PrismLauncher]="PrismLauncher"
+    [io.github.ArcanePlugins.NexusModManager]="Nexus Mod Manager"
+)
+
+# Ordered list for consistent display
+readonly APP_ORDER=(
+    com.valvesoftware.Steam
+    net.lutris.Lutris
+    com.heroicgameslauncher.hgl
+    com.usebottles.bottles
+    com.discordapp.Discord
+    com.obsproject.Studio
+    org.prismlauncher.PrismLauncher
+    io.github.ArcanePlugins.NexusModManager
+)
+
+# ─── Global state ────────────────────────────────────────────────────────────
+
+DRY_RUN=false
+GUI_MODE=false
+FIRST_BOOT=false
+ISSUE_COUNT=0
+FIX_COUNT=0
+declare -a INSTALLED_GAMING_APPS=()
+declare -a SCAN_ISSUES=()
+declare -a SCAN_WARNINGS=()
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+print_header() {
+    echo -e "\n${BOLD}${BLUE}╔══════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${BLUE}║${RESET} ${BOLD}$1${RESET}"
+    echo -e "${BOLD}${BLUE}╚══════════════════════════════════════════════════════╝${RESET}"
+}
+
+print_section() {
+    echo -e "\n${BOLD}${CYAN}── $1 ──${RESET}"
+}
+
+ok()      { echo -e "  ${GREEN}✓${RESET} $1"; }
+warn()    { echo -e "  ${YELLOW}⚠${RESET} $1"; }
+fail()    { echo -e "  ${RED}✗${RESET} $1"; }
+info()    { echo -e "  ${BLUE}ℹ${RESET} $1"; }
+dimtext() { echo -e "  ${DIM}$1${RESET}"; }
+
+gui_notify() {
+    if $GUI_MODE && command -v zenity &>/dev/null; then
+        zenity --info --title="HubOS Flatpak Fix" --text="$1" --no-wrap 2>/dev/null || true
+    fi
+}
+
+gui_confirm() {
+    if $GUI_MODE && command -v zenity &>/dev/null; then
+        zenity --question --title="HubOS Flatpak Fix" --text="$1" --no-wrap 2>/dev/null
+        return $?
+    else
+        read -rp "  $1 [y/N] " answer
+        [[ "$answer" =~ ^[Yy] ]]
+    fi
+}
+
+# Resolve a friendly name (e.g. "steam") to an app ID
+resolve_app_id() {
+    local input="${1,,}"  # lowercase
+    for app_id in "${APP_ORDER[@]}"; do
+        local name="${GAMING_APPS[$app_id]}"
+        local name_lower="${name,,}"
+        local short="${app_id##*.}"
+        short="${short,,}"
+        if [[ "$input" == "$app_id" || "$input" == "$name_lower" || "$input" == "$short" ]]; then
+            echo "$app_id"
+            return 0
+        fi
+    done
+    # Try partial match
+    for app_id in "${APP_ORDER[@]}"; do
+        if [[ "${app_id,,}" == *"$input"* || "${GAMING_APPS[$app_id],,}" == *"$input"* ]]; then
+            echo "$app_id"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ─── Detection ───────────────────────────────────────────────────────────────
+
+detect_installed_apps() {
+    INSTALLED_GAMING_APPS=()
+    local all_flatpaks
+    all_flatpaks=$(flatpak list --app --columns=application 2>/dev/null || true)
+    for app_id in "${APP_ORDER[@]}"; do
+        if echo "$all_flatpaks" | grep -qx "$app_id"; then
+            INSTALLED_GAMING_APPS+=("$app_id")
+        fi
+    done
+}
+
+detect_gpu_vendor() {
+    # Returns: nvidia, amd, intel, or unknown
+    if lspci 2>/dev/null | grep -qi 'nvidia'; then
+        echo "nvidia"
+    elif lspci 2>/dev/null | grep -qi 'amd.*radeon\|amd.*navi\|amd.*vega\|advanced micro'; then
+        echo "amd"
+    elif lspci 2>/dev/null | grep -qi 'intel.*graphics\|intel.*iris\|intel.*arc'; then
+        echo "intel"
+    else
+        echo "unknown"
+    fi
+}
+
+detect_nvidia_driver_version() {
+    local ver=""
+    if [[ -f /sys/module/nvidia/version ]]; then
+        ver=$(cat /sys/module/nvidia/version)
+    elif command -v nvidia-smi &>/dev/null; then
+        ver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d '[:space:]')
+    fi
+    echo "$ver"
+}
+
+get_mounted_drives() {
+    # Return non-root, non-tmpfs, non-snap mounted filesystems
+    lsblk -nro MOUNTPOINT,FSTYPE,NAME 2>/dev/null | while read -r mount fstype name; do
+        [[ -z "$mount" || "$mount" == "/" ]] && continue
+        [[ "$mount" == /boot* || "$mount" == /snap* ]] && continue
+        [[ "$fstype" == "tmpfs" || "$fstype" == "squashfs" || "$fstype" == "devtmpfs" ]] && continue
+        echo "$mount"
+    done | sort -u
+}
+
+# ─── Permission checking ────────────────────────────────────────────────────
+
+get_app_permissions() {
+    local app_id="$1"
+    flatpak info --show-permissions "$app_id" 2>/dev/null || true
+}
+
+get_app_overrides() {
+    local app_id="$1"
+    local override_file="$OVERRIDES_DIR/$app_id"
+    if [[ -f "$override_file" ]]; then
+        cat "$override_file"
+    fi
+}
+
+check_permission() {
+    # Check if a permission string exists in the app's effective permissions
+    local app_id="$1"
+    local section="$2"  # e.g., "filesystems", "devices"
+    local value="$3"    # e.g., "host", "all"
+    local perms
+    perms=$(get_app_permissions "$app_id")
+    local overrides
+    overrides=$(get_app_overrides "$app_id")
+
+    # Check both base permissions and overrides
+    local combined="${perms}${overrides}"
+    if echo "$combined" | grep -qi "\[$section\]" 2>/dev/null; then
+        local in_section=false
+        while IFS= read -r line; do
+            if [[ "$line" == "[$section]" ]]; then
+                in_section=true
+                continue
+            elif [[ "$line" == "["* ]]; then
+                in_section=false
+                continue
+            fi
+            if $in_section && [[ "$line" == *"$value"* ]]; then
+                return 0
+            fi
+        done <<< "$combined"
+    fi
+    return 1
+}
+
+has_filesystem_access() {
+    local app_id="$1"
+    local path="$2"
+    check_permission "$app_id" "Context" "filesystems=$path" 2>/dev/null ||
+    check_permission "$app_id" "Context" "filesystems=host" 2>/dev/null ||
+    check_permission "$app_id" "Session Bus Policy" "" 2>/dev/null  # dummy to avoid set -e
+    # More thorough check via metadata + overrides
+    local perms overrides
+    perms=$(get_app_permissions "$app_id")
+    overrides=$(get_app_overrides "$app_id")
+    if echo "$perms" "$overrides" | grep -qE "filesystems=(host|$path)" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+has_device_access() {
+    local app_id="$1"
+    local perms overrides
+    perms=$(get_app_permissions "$app_id")
+    overrides=$(get_app_overrides "$app_id")
+    echo "$perms" "$overrides" | grep -qE "devices=(all|dri)" 2>/dev/null
+}
+
+has_socket() {
+    local app_id="$1"
+    local socket="$2"
+    local perms overrides
+    perms=$(get_app_permissions "$app_id")
+    overrides=$(get_app_overrides "$app_id")
+    echo "$perms" "$overrides" | grep -qE "sockets=.*$socket" 2>/dev/null
+}
+
+has_network() {
+    local app_id="$1"
+    local perms overrides
+    perms=$(get_app_permissions "$app_id")
+    overrides=$(get_app_overrides "$app_id")
+    echo "$perms" "$overrides" | grep -qE "shared=.*network" 2>/dev/null
+}
+
+has_dbus_access() {
+    local app_id="$1"
+    local bus_name="$2"
+    local perms overrides
+    perms=$(get_app_permissions "$app_id")
+    overrides=$(get_app_overrides "$app_id")
+    echo "$perms" "$overrides" | grep -q "$bus_name" 2>/dev/null
+}
+
+# ─── Scan engine ─────────────────────────────────────────────────────────────
+
+scan_app() {
+    local app_id="$1"
+    local name="${GAMING_APPS[$app_id]}"
+    local issues=0
+    local warnings=0
+
+    print_section "$name ($app_id)"
+
+    # --- Filesystem access ---
+    if has_filesystem_access "$app_id" "host"; then
+        ok "Filesystem: host access"
+    else
+        # Check specific paths
+        local missing_fs=()
+        for dir in /mnt /run/media "$HOME/Games"; do
+            if ! has_filesystem_access "$app_id" "$dir"; then
+                missing_fs+=("$dir")
+            fi
+        done
+        if [[ ${#missing_fs[@]} -gt 0 ]]; then
+            fail "$name can't access: ${missing_fs[*]} — games on those drives won't launch"
+            SCAN_ISSUES+=("$app_id:filesystem:${missing_fs[*]}")
+            ((issues++))
+        else
+            ok "Filesystem: essential paths accessible"
+        fi
+    fi
+
+    # Check external drives specifically
+    local drives
+    drives=$(get_mounted_drives)
+    if [[ -n "$drives" ]]; then
+        while read -r drive; do
+            if ! has_filesystem_access "$app_id" "$drive"; then
+                warn "$name can't see drive: $drive"
+                SCAN_WARNINGS+=("$app_id:drive:$drive")
+                ((warnings++))
+            fi
+        done <<< "$drives"
+    fi
+
+    # --- Device access ---
+    if has_device_access "$app_id"; then
+        ok "Device access: all devices (controllers, GPU)"
+    else
+        fail "$name has no device access — controllers and GPU won't work properly"
+        SCAN_ISSUES+=("$app_id:device:all")
+        ((issues++))
+    fi
+
+    # --- GPU / DRI ---
+    local gpu_vendor
+    gpu_vendor=$(detect_gpu_vendor)
+    if [[ "$gpu_vendor" == "nvidia" ]]; then
+        if [[ -e /dev/nvidia0 ]]; then
+            # NVIDIA devices exist
+            if has_device_access "$app_id"; then
+                ok "NVIDIA GPU: accessible"
+            else
+                fail "$name can't access NVIDIA GPU — games will use software rendering"
+                SCAN_ISSUES+=("$app_id:nvidia:devices")
+                ((issues++))
+            fi
+        fi
+    fi
+
+    # --- Socket access ---
+    local socket_ok=true
+    if has_socket "$app_id" "x11"; then
+        ok "Socket: X11"
+    else
+        warn "$name has no X11 socket — some games may not display"
+        SCAN_WARNINGS+=("$app_id:socket:x11")
+        ((warnings++))
+        socket_ok=false
+    fi
+
+    if has_socket "$app_id" "wayland"; then
+        ok "Socket: Wayland"
+    else
+        warn "$name has no Wayland socket — may fall back to XWayland"
+        SCAN_WARNINGS+=("$app_id:socket:wayland")
+        ((warnings++))
+    fi
+
+    if has_socket "$app_id" "pulseaudio"; then
+        ok "Socket: Audio (PulseAudio/PipeWire)"
+    else
+        fail "$name has no audio socket — no game audio"
+        SCAN_ISSUES+=("$app_id:socket:pulseaudio")
+        ((issues++))
+    fi
+
+    # --- Network ---
+    if has_network "$app_id"; then
+        ok "Network: enabled"
+    else
+        fail "$name has no network access — online features won't work"
+        SCAN_ISSUES+=("$app_id:network:share")
+        ((issues++))
+    fi
+
+    # --- D-Bus (app-specific) ---
+    case "$app_id" in
+        com.valvesoftware.Steam)
+            if has_dbus_access "$app_id" "com.feralinteractive.GameMode"; then
+                ok "D-Bus: GameMode"
+            else
+                warn "GameMode integration not configured — no automatic CPU governor switching"
+                SCAN_WARNINGS+=("$app_id:dbus:com.feralinteractive.GameMode")
+                ((warnings++))
+            fi
+            if has_dbus_access "$app_id" "org.freedesktop.Notifications"; then
+                ok "D-Bus: Notifications"
+            else
+                warn "Notification access missing — no desktop notifications from Steam"
+                SCAN_WARNINGS+=("$app_id:dbus:org.freedesktop.Notifications")
+                ((warnings++))
+            fi
+            ;;
+        com.discordapp.Discord)
+            if has_filesystem_access "$app_id" "xdg-run/pipewire-0"; then
+                ok "PipeWire: screen share audio"
+            else
+                fail "Discord can't access PipeWire — screen sharing will have no audio"
+                SCAN_ISSUES+=("$app_id:filesystem:xdg-run/pipewire-0")
+                ((issues++))
+            fi
+            if has_dbus_access "$app_id" "org.freedesktop.portal.ScreenCast"; then
+                ok "D-Bus: ScreenCast portal"
+            else
+                fail "Discord can't use ScreenCast portal — screen sharing won't work on Wayland"
+                SCAN_ISSUES+=("$app_id:dbus:org.freedesktop.portal.ScreenCast")
+                ((issues++))
+            fi
+            ;;
+        com.obsproject.Studio)
+            if has_filesystem_access "$app_id" "xdg-run/pipewire-0"; then
+                ok "PipeWire: capture access"
+            else
+                fail "OBS can't access PipeWire — screen/audio capture will fail"
+                SCAN_ISSUES+=("$app_id:filesystem:xdg-run/pipewire-0")
+                ((issues++))
+            fi
+            if has_dbus_access "$app_id" "org.freedesktop.portal.ScreenCast"; then
+                ok "D-Bus: ScreenCast portal"
+            else
+                fail "OBS can't use ScreenCast portal — window/screen capture won't work"
+                SCAN_ISSUES+=("$app_id:dbus:org.freedesktop.portal.ScreenCast")
+                ((issues++))
+            fi
+            ;;
+    esac
+
+    # --- Summary for this app ---
+    if [[ $issues -eq 0 && $warnings -eq 0 ]]; then
+        echo -e "\n  ${GREEN}${BOLD}All clear!${RESET} No permission issues detected."
+    else
+        [[ $issues -gt 0 ]] && echo -e "\n  ${RED}${BOLD}$issues issue(s)${RESET} need fixing."
+        [[ $warnings -gt 0 ]] && echo -e "  ${YELLOW}${BOLD}$warnings warning(s)${RESET} — recommended fixes available."
+    fi
+
+    ISSUE_COUNT=$((ISSUE_COUNT + issues))
+    return 0
+}
+
+# ─── Fix engine ──────────────────────────────────────────────────────────────
+
+apply_override() {
+    local app_id="$1"
+    shift
+    local args=("$@")
+
+    if $DRY_RUN; then
+        dimtext "[dry-run] flatpak override --user $app_id ${args[*]}"
+    else
+        flatpak override --user "$app_id" "${args[@]}" 2>/dev/null
+    fi
+}
+
+fix_steam() {
+    local app_id="com.valvesoftware.Steam"
+    print_section "Fixing Steam"
+
+    local overrides=(
+        --filesystem=host
+        --filesystem=/mnt
+        --filesystem=/run/media
+        "--filesystem=xdg-run/app/com.discordapp.Discord:create"
+        --device=all
+        --share=network
+        --socket=wayland
+        --socket=x11
+        --socket=pulseaudio
+        --env=MANGOHUD=1
+        --env=PROTON_ENABLE_NVAPI=1
+        --talk-name=org.freedesktop.Notifications
+        --talk-name=com.feralinteractive.GameMode
+    )
+
+    apply_override "$app_id" "${overrides[@]}"
+    ok "Host filesystem, all drives, devices"
+    ok "Wayland + X11 + audio sockets"
+    ok "MangoHud + NVAPI environment"
+    ok "Notifications + GameMode D-Bus"
+    ok "Discord Rich Presence socket"
+    ((FIX_COUNT++))
+}
+
+fix_discord() {
+    local app_id="com.discordapp.Discord"
+    print_section "Fixing Discord"
+
+    local overrides=(
+        --filesystem=xdg-run/pipewire-0
+        --socket=wayland
+        --socket=x11
+        --socket=pulseaudio
+        --device=all
+        --share=network
+        --env=DISCORD_DISABLE_GPU_SANDBOX=1
+        --talk-name=org.freedesktop.ScreenCast
+        --talk-name=org.freedesktop.portal.ScreenCast
+        --talk-name=org.freedesktop.Notifications
+    )
+
+    apply_override "$app_id" "${overrides[@]}"
+    ok "PipeWire access for screen share audio"
+    ok "Wayland + X11 + audio sockets"
+    ok "ScreenCast portal for Wayland screen sharing"
+    ok "GPU sandbox workaround"
+    ((FIX_COUNT++))
+}
+
+fix_lutris() {
+    local app_id="net.lutris.Lutris"
+    print_section "Fixing Lutris"
+
+    local overrides=(
+        --filesystem=host
+        --filesystem=/mnt
+        --filesystem=/run/media
+        --device=all
+        --share=network
+        --socket=wayland
+        --socket=x11
+        --socket=pulseaudio
+        --env=MANGOHUD=1
+        --talk-name=com.feralinteractive.GameMode
+        --talk-name=org.freedesktop.Notifications
+    )
+
+    apply_override "$app_id" "${overrides[@]}"
+    ok "Host filesystem, all drives, devices"
+    ok "Wayland + X11 + audio sockets"
+    ok "MangoHud + GameMode + Notifications"
+    ((FIX_COUNT++))
+}
+
+fix_heroic() {
+    local app_id="com.heroicgameslauncher.hgl"
+    print_section "Fixing Heroic Games Launcher"
+
+    local overrides=(
+        --filesystem=host
+        --filesystem=/mnt
+        --filesystem=/run/media
+        --device=all
+        --share=network
+        --socket=wayland
+        --socket=x11
+        --socket=pulseaudio
+        --env=MANGOHUD=1
+        --talk-name=com.feralinteractive.GameMode
+        --talk-name=org.freedesktop.Notifications
+    )
+
+    apply_override "$app_id" "${overrides[@]}"
+    ok "Host filesystem, all drives, devices"
+    ok "Wayland + X11 + audio sockets"
+    ok "MangoHud + GameMode"
+    ((FIX_COUNT++))
+}
+
+fix_bottles() {
+    local app_id="com.usebottles.bottles"
+    print_section "Fixing Bottles"
+
+    local overrides=(
+        --filesystem=host
+        --filesystem=/mnt
+        --filesystem=/run/media
+        --device=all
+        --share=network
+        --socket=wayland
+        --socket=x11
+        --socket=pulseaudio
+        --env=MANGOHUD=1
+        --talk-name=com.feralinteractive.GameMode
+        --talk-name=org.freedesktop.Notifications
+    )
+
+    apply_override "$app_id" "${overrides[@]}"
+    ok "Host filesystem, all drives, devices"
+    ok "Wayland + X11 + audio sockets"
+    ok "MangoHud + GameMode"
+    ((FIX_COUNT++))
+}
+
+fix_obs() {
+    local app_id="com.obsproject.Studio"
+    print_section "Fixing OBS Studio"
+
+    local overrides=(
+        --filesystem=xdg-run/pipewire-0
+        --filesystem=host
+        --socket=wayland
+        --socket=x11
+        --socket=pulseaudio
+        --device=all
+        --share=network
+        --talk-name=org.kde.KWin
+        --talk-name=org.freedesktop.portal.ScreenCast
+        --talk-name=org.freedesktop.ScreenCast
+        --talk-name=org.freedesktop.Notifications
+    )
+
+    apply_override "$app_id" "${overrides[@]}"
+    ok "PipeWire access for capture"
+    ok "ScreenCast portal (Wayland capture)"
+    ok "KWin integration"
+    ok "All sockets + devices"
+    ((FIX_COUNT++))
+}
+
+fix_prismlauncher() {
+    local app_id="org.prismlauncher.PrismLauncher"
+    print_section "Fixing PrismLauncher (Minecraft)"
+
+    local overrides=(
+        --filesystem=host
+        --filesystem=/mnt
+        --filesystem=/run/media
+        --device=all
+        --share=network
+        --socket=wayland
+        --socket=x11
+        --socket=pulseaudio
+        --env=MANGOHUD=1
+        --talk-name=org.freedesktop.Notifications
+    )
+
+    apply_override "$app_id" "${overrides[@]}"
+    ok "Host filesystem, all drives, devices"
+    ok "Wayland + X11 + audio sockets"
+    ok "MangoHud overlay"
+    ((FIX_COUNT++))
+}
+
+fix_nexusmods() {
+    local app_id="io.github.ArcanePlugins.NexusModManager"
+    print_section "Fixing Nexus Mod Manager"
+
+    local overrides=(
+        --filesystem=host
+        --filesystem=/mnt
+        --filesystem=/run/media
+        --device=dri
+        --share=network
+        --socket=wayland
+        --socket=x11
+        --talk-name=org.freedesktop.Notifications
+    )
+
+    apply_override "$app_id" "${overrides[@]}"
+    ok "Host filesystem access for mod installation"
+    ok "Network + display sockets"
+    ((FIX_COUNT++))
+}
+
+# Map app IDs to fix functions
+fix_app() {
+    local app_id="$1"
+    case "$app_id" in
+        com.valvesoftware.Steam)                    fix_steam ;;
+        net.lutris.Lutris)                          fix_lutris ;;
+        com.heroicgameslauncher.hgl)                fix_heroic ;;
+        com.usebottles.bottles)                     fix_bottles ;;
+        com.discordapp.Discord)                     fix_discord ;;
+        com.obsproject.Studio)                      fix_obs ;;
+        org.prismlauncher.PrismLauncher)            fix_prismlauncher ;;
+        io.github.ArcanePlugins.NexusModManager)    fix_nexusmods ;;
+        *) warn "No fix profile for $app_id" ;;
+    esac
+}
+
+# ─── NVIDIA runtime check ───────────────────────────────────────────────────
+
+check_nvidia_runtime() {
+    local gpu_vendor
+    gpu_vendor=$(detect_gpu_vendor)
+
+    if [[ "$gpu_vendor" != "nvidia" ]]; then
+        return 0
+    fi
+
+    print_section "NVIDIA Runtime Check"
+
+    local driver_ver
+    driver_ver=$(detect_nvidia_driver_version)
+    if [[ -z "$driver_ver" ]]; then
+        warn "NVIDIA GPU detected but couldn't determine driver version"
+        return 0
+    fi
+
+    info "NVIDIA driver version: $driver_ver"
+
+    # Convert driver version to Flatpak GL runtime format (e.g., 550.54.14 -> nvidia-550-54-14)
+    local runtime_suffix
+    runtime_suffix=$(echo "$driver_ver" | tr '.' '-')
+    local runtime_id="org.freedesktop.Platform.GL.nvidia-${runtime_suffix}"
+
+    # Check if runtime is installed
+    if flatpak list --runtime --columns=application 2>/dev/null | grep -q "org.freedesktop.Platform.GL.nvidia"; then
+        local installed_runtime
+        installed_runtime=$(flatpak list --runtime --columns=application 2>/dev/null | grep "org.freedesktop.Platform.GL.nvidia" | head -1)
+        ok "NVIDIA Flatpak GL runtime installed: $installed_runtime"
+
+        # Check version match
+        if flatpak list --runtime --columns=application 2>/dev/null | grep -q "$runtime_id"; then
+            ok "Runtime matches driver version ($driver_ver)"
+        else
+            warn "Runtime version mismatch — installed runtime may not match driver $driver_ver"
+            warn "Expected: $runtime_id"
+            if ! $DRY_RUN; then
+                info "Run: flatpak install flathub $runtime_id"
+            fi
+        fi
+    else
+        fail "NVIDIA Flatpak GL runtime NOT installed — GPU acceleration won't work in Flatpaks"
+        if $DRY_RUN; then
+            dimtext "[dry-run] flatpak install -y flathub $runtime_id"
+        else
+            info "Installing: $runtime_id"
+            if flatpak install -y flathub "$runtime_id" 2>/dev/null; then
+                ok "NVIDIA runtime installed successfully"
+            else
+                # Try the 32-bit variant too
+                warn "Could not install runtime — try manually: flatpak install flathub $runtime_id"
+            fi
+        fi
+    fi
+
+    # Check 32-bit runtime (needed for many games)
+    local runtime_id_32="org.freedesktop.Platform.GL32.nvidia-${runtime_suffix}"
+    if flatpak list --runtime --columns=application 2>/dev/null | grep -q "org.freedesktop.Platform.GL32.nvidia"; then
+        ok "NVIDIA 32-bit GL runtime installed (needed for many games)"
+    else
+        warn "NVIDIA 32-bit GL runtime missing — some 32-bit games may not work"
+        info "Install: flatpak install flathub $runtime_id_32"
+    fi
+}
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+cmd_scan() {
+    print_header "Flatpak Gaming Permission Scan"
+
+    detect_installed_apps
+
+    if [[ ${#INSTALLED_GAMING_APPS[@]} -eq 0 ]]; then
+        warn "No gaming Flatpaks detected."
+        info "Install gaming apps: flatpak install flathub com.valvesoftware.Steam"
+        return 0
+    fi
+
+    info "Found ${#INSTALLED_GAMING_APPS[@]} gaming Flatpak(s) installed"
+    echo ""
+
+    ISSUE_COUNT=0
+    SCAN_ISSUES=()
+    SCAN_WARNINGS=()
+
+    for app_id in "${INSTALLED_GAMING_APPS[@]}"; do
+        scan_app "$app_id"
+    done
+
+    # GPU runtime check
+    check_nvidia_runtime
+
+    # Overall summary
+    print_section "Summary"
+    if [[ $ISSUE_COUNT -eq 0 ]]; then
+        echo -e "\n  ${GREEN}${BOLD}All gaming Flatpaks look healthy!${RESET}"
+    else
+        echo -e "\n  ${RED}${BOLD}$ISSUE_COUNT issue(s) found.${RESET}"
+        echo -e "  Run ${BOLD}$SCRIPT_NAME fix${RESET} to auto-fix all issues."
+    fi
+    if [[ ${#SCAN_WARNINGS[@]} -gt 0 ]]; then
+        echo -e "  ${YELLOW}${#SCAN_WARNINGS[@]} warning(s)${RESET} — recommended improvements available."
+    fi
+}
+
+cmd_fix() {
+    local target="${1:-all}"
+
+    if [[ "$target" == "all" ]]; then
+        print_header "Fixing All Gaming Flatpaks"
+    else
+        print_header "Fixing: $target"
+    fi
+
+    $DRY_RUN && info "DRY RUN — no changes will be made"
+
+    detect_installed_apps
+
+    if [[ ${#INSTALLED_GAMING_APPS[@]} -eq 0 ]]; then
+        warn "No gaming Flatpaks detected."
+        return 0
+    fi
+
+    # Ensure overrides directory exists
+    if ! $DRY_RUN; then
+        mkdir -p "$OVERRIDES_DIR"
+    fi
+
+    FIX_COUNT=0
+
+    if [[ "$target" == "all" ]]; then
+        for app_id in "${INSTALLED_GAMING_APPS[@]}"; do
+            fix_app "$app_id"
+        done
+        # Also fix NVIDIA runtime
+        check_nvidia_runtime
+        # Fix drive access
+        fix_drives_silent
+    else
+        local app_id
+        if app_id=$(resolve_app_id "$target"); then
+            # Verify it's installed
+            local found=false
+            for installed in "${INSTALLED_GAMING_APPS[@]}"; do
+                if [[ "$installed" == "$app_id" ]]; then
+                    found=true
+                    break
+                fi
+            done
+            if $found; then
+                fix_app "$app_id"
+            else
+                fail "${GAMING_APPS[$app_id]:-$app_id} is not installed"
+                return 1
+            fi
+        else
+            fail "Unknown app: $target"
+            info "Known apps: steam, discord, lutris, heroic, bottles, obs, prismlauncher"
+            return 1
+        fi
+    fi
+
+    print_section "Done"
+    if $DRY_RUN; then
+        info "$FIX_COUNT app(s) would be fixed. Run without --dry-run to apply."
+    else
+        ok "$FIX_COUNT app(s) fixed successfully"
+        info "Changes take effect next time you launch the app."
+    fi
+
+    gui_notify "Fixed permissions for $FIX_COUNT gaming app(s). Restart apps to apply."
+}
+
+cmd_status() {
+    print_header "Flatpak Gaming Health Status"
+
+    detect_installed_apps
+
+    if [[ ${#INSTALLED_GAMING_APPS[@]} -eq 0 ]]; then
+        warn "No gaming Flatpaks installed."
+        return 0
+    fi
+
+    # App status table
+    print_section "Installed Gaming Apps"
+    printf "  ${BOLD}%-35s %-12s %-10s${RESET}\n" "App" "Overrides" "Health"
+    printf "  %-35s %-12s %-10s\n" "---" "---" "---"
+
+    for app_id in "${INSTALLED_GAMING_APPS[@]}"; do
+        local name="${GAMING_APPS[$app_id]}"
+        local override_file="$OVERRIDES_DIR/$app_id"
+        local override_status="${DIM}none${RESET}"
+        local health=""
+
+        if [[ -f "$override_file" ]]; then
+            local line_count
+            line_count=$(wc -l < "$override_file")
+            override_status="${GREEN}$line_count rules${RESET}"
+        fi
+
+        # Quick health check
+        local issues=0
+        has_device_access "$app_id" || ((issues++))
+        has_network "$app_id" || ((issues++))
+        has_socket "$app_id" "pulseaudio" || ((issues++))
+
+        if [[ $issues -eq 0 ]]; then
+            health="${GREEN}OK${RESET}"
+        elif [[ $issues -le 1 ]]; then
+            health="${YELLOW}Fair${RESET}"
+        else
+            health="${RED}Issues${RESET}"
+        fi
+
+        printf "  %-35s %-22b %-20b\n" "$name" "$override_status" "$health"
+    done
+
+    # Drive access
+    print_section "Drive Access"
+    local drives
+    drives=$(get_mounted_drives)
+    if [[ -n "$drives" ]]; then
+        while read -r drive; do
+            local accessible_by=()
+            for app_id in "${INSTALLED_GAMING_APPS[@]}"; do
+                if has_filesystem_access "$app_id" "$drive"; then
+                    accessible_by+=("${GAMING_APPS[$app_id]}")
+                fi
+            done
+            if [[ ${#accessible_by[@]} -gt 0 ]]; then
+                ok "$drive — accessible by: ${accessible_by[*]}"
+            else
+                warn "$drive — no gaming apps can access this drive"
+            fi
+        done <<< "$drives"
+    else
+        dimtext "No additional drives detected"
+    fi
+
+    # GPU info
+    print_section "GPU"
+    local gpu_vendor
+    gpu_vendor=$(detect_gpu_vendor)
+    info "Detected GPU vendor: $gpu_vendor"
+
+    if [[ "$gpu_vendor" == "nvidia" ]]; then
+        local driver_ver
+        driver_ver=$(detect_nvidia_driver_version)
+        [[ -n "$driver_ver" ]] && info "NVIDIA driver: $driver_ver"
+
+        if flatpak list --runtime --columns=application 2>/dev/null | grep -q "org.freedesktop.Platform.GL.nvidia"; then
+            ok "NVIDIA Flatpak GL runtime installed"
+        else
+            fail "NVIDIA Flatpak GL runtime MISSING"
+        fi
+        if flatpak list --runtime --columns=application 2>/dev/null | grep -q "org.freedesktop.Platform.GL32.nvidia"; then
+            ok "NVIDIA 32-bit GL runtime installed"
+        else
+            warn "NVIDIA 32-bit GL runtime missing"
+        fi
+    elif [[ "$gpu_vendor" == "amd" ]]; then
+        ok "AMD GPU — Mesa drivers (no extra Flatpak runtime needed)"
+    elif [[ "$gpu_vendor" == "intel" ]]; then
+        ok "Intel GPU — Mesa drivers (no extra Flatpak runtime needed)"
+    fi
+
+    # Outdated runtimes
+    print_section "Runtime Health"
+    local outdated
+    outdated=$(flatpak remote-ls --updates --columns=application 2>/dev/null | head -20 || true)
+    if [[ -n "$outdated" ]]; then
+        local runtime_updates
+        runtime_updates=$(echo "$outdated" | grep -c "org.freedesktop.Platform" || true)
+        if [[ "$runtime_updates" -gt 0 ]]; then
+            warn "$runtime_updates runtime update(s) available — run: flatpak update"
+        else
+            ok "All runtimes up to date"
+        fi
+    else
+        ok "All Flatpaks up to date"
+    fi
+}
+
+cmd_permissions() {
+    local target="${1:-}"
+    if [[ -z "$target" ]]; then
+        fail "Usage: $SCRIPT_NAME permissions <app>"
+        info "Example: $SCRIPT_NAME permissions steam"
+        return 1
+    fi
+
+    local app_id
+    if ! app_id=$(resolve_app_id "$target"); then
+        fail "Unknown app: $target"
+        return 1
+    fi
+
+    local name="${GAMING_APPS[$app_id]:-$app_id}"
+    print_header "Permissions: $name"
+
+    # Check installed
+    if ! flatpak list --app --columns=application 2>/dev/null | grep -qx "$app_id"; then
+        fail "$name is not installed"
+        return 1
+    fi
+
+    # Base permissions
+    print_section "Base Permissions (from manifest)"
+    local base_perms
+    base_perms=$(flatpak info --show-permissions "$app_id" 2>/dev/null || echo "(none)")
+    if [[ -n "$base_perms" && "$base_perms" != "(none)" ]]; then
+        echo "$base_perms" | while IFS= read -r line; do
+            dimtext "$line"
+        done
+    else
+        dimtext "No base permissions found"
+    fi
+
+    # User overrides
+    print_section "User Overrides"
+    local override_file="$OVERRIDES_DIR/$app_id"
+    if [[ -f "$override_file" ]]; then
+        cat "$override_file" | while IFS= read -r line; do
+            dimtext "$line"
+        done
+    else
+        dimtext "No user overrides applied"
+    fi
+
+    # Gaming feature analysis
+    print_section "Gaming Feature Checklist"
+
+    # Controllers
+    if has_device_access "$app_id"; then
+        ok "Controllers: device=all (gamepad, joystick, wheel)"
+    else
+        fail "Controllers: NO device access"
+        dimtext "Fix: device=all + /dev/uinput access"
+    fi
+
+    # External drives
+    if has_filesystem_access "$app_id" "host" || has_filesystem_access "$app_id" "/mnt"; then
+        ok "External drives: filesystem access to /mnt, /run/media"
+    else
+        fail "External drives: no access to /mnt or /run/media"
+        dimtext "Fix: filesystem=/mnt + filesystem=/run/media"
+    fi
+
+    # MangoHud
+    local perms_all
+    perms_all="$(get_app_permissions "$app_id")$(get_app_overrides "$app_id")"
+    if echo "$perms_all" | grep -q "MANGOHUD=1"; then
+        ok "MangoHud: enabled via environment"
+    else
+        warn "MangoHud: not configured"
+        dimtext "Fix: env=MANGOHUD=1"
+    fi
+
+    # GameMode
+    if has_dbus_access "$app_id" "com.feralinteractive.GameMode"; then
+        ok "GameMode: D-Bus access configured"
+    else
+        warn "GameMode: not configured"
+        dimtext "Fix: talk-name=com.feralinteractive.GameMode"
+    fi
+
+    # Discord Rich Presence (for game launchers)
+    case "$app_id" in
+        com.valvesoftware.Steam|net.lutris.Lutris|com.heroicgameslauncher.hgl)
+            if has_filesystem_access "$app_id" "xdg-run/app/com.discordapp.Discord"; then
+                ok "Discord Rich Presence: socket access configured"
+            else
+                warn "Discord Rich Presence: not configured"
+                dimtext "Fix: filesystem=xdg-run/app/com.discordapp.Discord:create"
+            fi
+            ;;
+    esac
+
+    # Audio
+    if has_socket "$app_id" "pulseaudio"; then
+        ok "Audio: PulseAudio/PipeWire socket"
+    else
+        fail "Audio: no audio socket"
+        dimtext "Fix: socket=pulseaudio"
+    fi
+
+    # Display
+    if has_socket "$app_id" "x11" && has_socket "$app_id" "wayland"; then
+        ok "Display: X11 + Wayland"
+    elif has_socket "$app_id" "x11"; then
+        warn "Display: X11 only (no native Wayland)"
+    elif has_socket "$app_id" "wayland"; then
+        warn "Display: Wayland only (no X11 fallback)"
+    else
+        fail "Display: no display socket!"
+    fi
+
+    # Network
+    if has_network "$app_id"; then
+        ok "Network: enabled"
+    else
+        fail "Network: disabled"
+    fi
+}
+
+cmd_reset() {
+    local target="${1:-}"
+    if [[ -z "$target" ]]; then
+        fail "Usage: $SCRIPT_NAME reset <app>"
+        info "Example: $SCRIPT_NAME reset steam"
+        return 1
+    fi
+
+    local app_id
+    if ! app_id=$(resolve_app_id "$target"); then
+        fail "Unknown app: $target"
+        return 1
+    fi
+
+    local name="${GAMING_APPS[$app_id]:-$app_id}"
+    print_header "Reset Permissions: $name"
+
+    local override_file="$OVERRIDES_DIR/$app_id"
+    if [[ ! -f "$override_file" ]]; then
+        info "No user overrides exist for $name — nothing to reset."
+        return 0
+    fi
+
+    # Show current overrides
+    print_section "Current overrides to be removed"
+    cat "$override_file" | while IFS= read -r line; do
+        dimtext "$line"
+    done
+    echo ""
+
+    if $DRY_RUN; then
+        dimtext "[dry-run] Would remove: $override_file"
+        return 0
+    fi
+
+    if ! gui_confirm "Remove all user overrides for $name?"; then
+        info "Cancelled."
+        return 0
+    fi
+
+    # Remove overrides
+    flatpak override --user --reset "$app_id" 2>/dev/null || rm -f "$override_file"
+    ok "All user overrides removed for $name"
+
+    echo ""
+    if gui_confirm "Re-apply gaming defaults for $name?"; then
+        fix_app "$app_id"
+        ok "Gaming defaults re-applied"
+    else
+        info "App reset to Flatpak defaults. Run '$SCRIPT_NAME fix $target' to re-apply gaming permissions."
+    fi
+}
+
+cmd_drives() {
+    print_header "Drive Access Fix"
+
+    detect_installed_apps
+
+    if [[ ${#INSTALLED_GAMING_APPS[@]} -eq 0 ]]; then
+        warn "No gaming Flatpaks detected."
+        return 0
+    fi
+
+    $DRY_RUN && info "DRY RUN — no changes will be made"
+
+    # Detect all drives
+    print_section "Detected Drives"
+    local drives
+    drives=$(get_mounted_drives)
+
+    if [[ -z "$drives" ]]; then
+        info "No additional drives detected (only root filesystem)."
+        info "If you have drives that aren't showing up, make sure they're mounted."
+        return 0
+    fi
+
+    # Also check common mount points even if not in lsblk
+    local extra_mounts=()
+    for dir in /mnt /run/media /media; do
+        if [[ -d "$dir" ]] && ! echo "$drives" | grep -q "^${dir}$"; then
+            local subdirs
+            subdirs=$(find "$dir" -maxdepth 2 -mindepth 1 -type d 2>/dev/null | head -10)
+            if [[ -n "$subdirs" ]]; then
+                while read -r subdir; do
+                    if mountpoint -q "$subdir" 2>/dev/null || [[ -n "$(ls -A "$subdir" 2>/dev/null)" ]]; then
+                        extra_mounts+=("$subdir")
+                    fi
+                done <<< "$subdirs"
+            fi
+        fi
+    done
+
+    # Combine
+    local all_drives=()
+    while read -r d; do
+        [[ -n "$d" ]] && all_drives+=("$d")
+    done <<< "$drives"
+    all_drives+=("${extra_mounts[@]}")
+
+    # Remove duplicates
+    local unique_drives=()
+    declare -A seen_drives=()
+    for d in "${all_drives[@]}"; do
+        if [[ -z "${seen_drives[$d]:-}" ]]; then
+            seen_drives[$d]=1
+            unique_drives+=("$d")
+        fi
+    done
+
+    if [[ ${#unique_drives[@]} -eq 0 ]]; then
+        info "No additional drives found."
+        return 0
+    fi
+
+    for drive in "${unique_drives[@]}"; do
+        local label=""
+        label=$(lsblk -nro LABEL "$(findmnt -nro SOURCE "$drive" 2>/dev/null || echo "")" 2>/dev/null || echo "")
+        local display="$drive"
+        [[ -n "$label" ]] && display="$drive ($label)"
+        info "Found: $display"
+    done
+
+    # Check and fix access per app
+    print_section "Fixing Drive Access"
+    local fixes_applied=0
+
+    for app_id in "${INSTALLED_GAMING_APPS[@]}"; do
+        local name="${GAMING_APPS[$app_id]}"
+        local app_needs_fix=false
+        local missing_drives=()
+
+        for drive in "${unique_drives[@]}"; do
+            if ! has_filesystem_access "$app_id" "$drive"; then
+                app_needs_fix=true
+                missing_drives+=("$drive")
+            fi
+        done
+
+        if $app_needs_fix; then
+            info "Fixing $name — adding access to: ${missing_drives[*]}"
+            for drive in "${missing_drives[@]}"; do
+                apply_override "$app_id" "--filesystem=$drive"
+            done
+            # Also ensure parent mount dirs are accessible
+            apply_override "$app_id" "--filesystem=/mnt"
+            apply_override "$app_id" "--filesystem=/run/media"
+            ok "$name: drive access fixed"
+            ((fixes_applied++))
+        else
+            ok "$name: all drives already accessible"
+        fi
+    done
+
+    print_section "Done"
+    if [[ $fixes_applied -gt 0 ]]; then
+        ok "Fixed drive access for $fixes_applied app(s)"
+        info "Restart affected apps to apply changes."
+    else
+        ok "All gaming apps already have drive access"
+    fi
+}
+
+# Silent version for use within fix command
+fix_drives_silent() {
+    local drives
+    drives=$(get_mounted_drives)
+    [[ -z "$drives" ]] && return 0
+
+    for app_id in "${INSTALLED_GAMING_APPS[@]}"; do
+        while read -r drive; do
+            [[ -z "$drive" ]] && continue
+            if ! has_filesystem_access "$app_id" "$drive"; then
+                apply_override "$app_id" "--filesystem=$drive"
+            fi
+        done <<< "$drives"
+    done
+}
+
+# ─── First boot integration ─────────────────────────────────────────────────
+
+cmd_first_boot() {
+    # Called during HubOS first-boot setup
+    # Silently pre-configures all installed gaming Flatpaks
+
+    detect_installed_apps
+
+    if [[ ${#INSTALLED_GAMING_APPS[@]} -eq 0 ]]; then
+        # Nothing to do yet — Flatpaks may not be installed during first boot
+        exit 0
+    fi
+
+    mkdir -p "$OVERRIDES_DIR"
+
+    # Apply all fixes silently
+    FIX_COUNT=0
+    for app_id in "${INSTALLED_GAMING_APPS[@]}"; do
+        fix_app "$app_id" >/dev/null 2>&1
+    done
+
+    # Fix NVIDIA if applicable
+    local gpu_vendor
+    gpu_vendor=$(detect_gpu_vendor)
+    if [[ "$gpu_vendor" == "nvidia" ]]; then
+        check_nvidia_runtime >/dev/null 2>&1 || true
+    fi
+
+    # Fix drives
+    fix_drives_silent >/dev/null 2>&1 || true
+
+    echo "hubos-flatpak-fix: configured $FIX_COUNT gaming app(s) on first boot"
+}
+
+# ─── Usage ───────────────────────────────────────────────────────────────────
+
+usage() {
+    echo -e "${BOLD}HubOS Flatpak Gaming Permission Fixer${RESET} v$VERSION"
+    echo "Auto-detect and fix Flatpak sandbox permission issues for gaming apps."
+    echo ""
+    echo -e "${BOLD}Usage:${RESET}"
+    echo "  $SCRIPT_NAME <command> [options]"
+    echo ""
+    echo -e "${BOLD}Commands:${RESET}"
+    echo "  scan                  Scan all gaming Flatpaks for permission issues"
+    echo "  fix [app]             Auto-fix all issues (or fix a specific app)"
+    echo "  status                Show Flatpak gaming health overview"
+    echo "  permissions <app>     Show detailed permissions for an app"
+    echo "  reset <app>           Reset an app's permissions to defaults"
+    echo "  drives                Detect and fix drive access issues"
+    echo ""
+    echo -e "${BOLD}Options:${RESET}"
+    echo "  --dry-run             Preview changes without applying them"
+    echo "  --gui                 Show zenity dialogs for desktop integration"
+    echo "  --first-boot          Run in first-boot mode (silent, auto-configure)"
+    echo "  -h, --help            Show this help"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  $SCRIPT_NAME scan                    # Find all issues"
+    echo "  $SCRIPT_NAME fix                     # Fix everything"
+    echo "  $SCRIPT_NAME fix steam               # Fix only Steam"
+    echo "  $SCRIPT_NAME fix --dry-run           # Preview fixes"
+    echo "  $SCRIPT_NAME permissions discord     # Check Discord permissions"
+    echo "  $SCRIPT_NAME drives                  # Fix drive access"
+    echo "  $SCRIPT_NAME reset steam             # Reset Steam to defaults"
+    echo ""
+    echo -e "${BOLD}Supported Apps:${RESET}"
+    echo "  steam, discord, lutris, heroic, bottles, obs, prismlauncher, nexusmods"
+}
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+main() {
+    # Parse global flags first (so --help works without flatpak)
+    local args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --dry-run)    DRY_RUN=true ;;
+            --gui)        GUI_MODE=true ;;
+            --first-boot) FIRST_BOOT=true ;;
+            *)            args+=("$arg") ;;
+        esac
+    done
+
+    local command="${args[0]:-}"
+    local subarg="${args[1]:-}"
+
+    # Show help without requiring flatpak
+    if [[ "$command" == "-h" || "$command" == "--help" || "$command" == "help" || -z "$command" ]]; then
+        usage
+        return 0
+    fi
+
+    # Check for flatpak
+    if ! command -v flatpak &>/dev/null; then
+        echo -e "${RED}Error:${RESET} flatpak is not installed."
+        echo "HubOS should have flatpak pre-installed. Something is wrong with your system."
+        exit 1
+    fi
+
+    # First boot mode
+    if $FIRST_BOOT; then
+        cmd_first_boot
+        exit 0
+    fi
+
+    case "$command" in
+        scan)
+            cmd_scan
+            ;;
+        fix)
+            cmd_fix "$subarg"
+            ;;
+        status)
+            cmd_status
+            ;;
+        permissions|perms)
+            cmd_permissions "$subarg"
+            ;;
+        reset)
+            cmd_reset "$subarg"
+            ;;
+        drives)
+            cmd_drives
+            ;;
+        *)
+            fail "Unknown command: $command"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

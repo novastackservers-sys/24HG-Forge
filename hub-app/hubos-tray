@@ -459,6 +459,41 @@ class HubOSTray:
         dl_item.set_submenu(dl_menu)
         tools_menu.append(dl_item)
 
+        # HDR
+        hdr_item = Gtk.MenuItem(label="HDR Gaming")
+        hdr_menu = Gtk.Menu()
+        for action, desc in [("status", "HDR Status"), ("toggle on", "Enable HDR"), ("toggle off", "Disable HDR"), ("setup", "HDR Setup Wizard")]:
+            hi = Gtk.MenuItem(label=desc)
+            hi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-hdr"] + a.split()))
+            hdr_menu.append(hi)
+        hdr_item.set_submenu(hdr_menu)
+        tools_menu.append(hdr_item)
+
+        # Mod Manager
+        mod_item = Gtk.MenuItem(label="Mod Manager")
+        mod_menu = Gtk.Menu()
+        for action, desc in [("status", "Modding Status"), ("install-vortex", "Install Vortex"), ("install-mo2", "Install Mod Organizer 2")]:
+            mi = Gtk.MenuItem(label=desc)
+            mi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-mod-manager", a]))
+            mod_menu.append(mi)
+        mod_item.set_submenu(mod_menu)
+        tools_menu.append(mod_item)
+
+        # NVIDIA Fix (only show if NVIDIA GPU)
+        try:
+            import subprocess as _sp
+            if _sp.run(["lsmod"], capture_output=True, text=True).stdout.find("nvidia") >= 0:
+                nv_item = Gtk.MenuItem(label="NVIDIA Wayland Fix")
+                nv_menu = Gtk.Menu()
+                for action, desc in [("status", "NVIDIA Status"), ("fix", "Auto-Fix All"), ("flicker-fix", "Fix Flickering")]:
+                    ni = Gtk.MenuItem(label=desc)
+                    ni.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-nvidia-wayland", a]))
+                    nv_menu.append(ni)
+                nv_item.set_submenu(nv_menu)
+                tools_menu.append(nv_item)
+        except Exception:
+            pass
+
         tools_item.set_submenu(tools_menu)
         menu.append(tools_item)
 
@@ -466,6 +501,21 @@ class HubOSTray:
         games_item = Gtk.MenuItem(label="My Games")
         games_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-games", "list"]))
         menu.append(games_item)
+
+        # ── Save Manager ──
+        saves_item = Gtk.MenuItem(label="Save Games")
+        saves_menu = Gtk.Menu()
+        for action, desc in [("list", "Find All Saves"), ("backup", "Backup All Saves"), ("restore", "Restore Saves")]:
+            si = Gtk.MenuItem(label=desc)
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-save-manager", a]))
+            saves_menu.append(si)
+        saves_item.set_submenu(saves_menu)
+        menu.append(saves_item)
+
+        # ── Anti-Cheat Tracker ──
+        ac_item = Gtk.MenuItem(label="Anti-Cheat Status")
+        ac_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-anticheat-tracker", "scan"]))
+        menu.append(ac_item)
 
         menu.append(Gtk.SeparatorMenuItem())
 

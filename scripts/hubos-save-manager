@@ -1,0 +1,2218 @@
+#!/usr/bin/env python3
+"""HubOS Save Game Manager — Find, backup, and restore saves across all launchers"""
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+VERSION = "1.0.0"
+HOME = Path.home()
+BACKUP_DIR = HOME / "HubOS-Backups" / "saves"
+STATE_FILE = HOME / ".config" / "hubos" / "save-manager-state.json"
+CONFIG_FILE = HOME / ".config" / "hubos" / "save-manager.json"
+MAX_BACKUPS = 5
+
+STEAM_ROOT = HOME / ".local" / "share" / "Steam"
+STEAM_FLATPAK = HOME / ".var" / "app" / "com.valvesoftware.Steam" / "data" / "Steam"
+LUTRIS_ROOT = HOME / ".local" / "share" / "lutris"
+HEROIC_ROOT = HOME / ".config" / "heroic"
+MINECRAFT_DIR = HOME / ".minecraft" / "saves"
+
+# ─── Colors ──────────────────────────────────────────────────────────────────
+
+class C:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+    BRED = "\033[91m"
+    BGREEN = "\033[92m"
+    BYELLOW = "\033[93m"
+    BBLUE = "\033[94m"
+    BMAGENTA = "\033[95m"
+    BCYAN = "\033[96m"
+
+NO_COLOR = os.environ.get("NO_COLOR")
+if NO_COLOR or not sys.stdout.isatty():
+    for attr in dir(C):
+        if not attr.startswith("_"):
+            setattr(C, attr, "")
+
+# ─── Save Path Database (80+ games) ─────────────────────────────────────────
+
+SAVE_PATHS = {
+    # ── RPGs ─────────────────────────────────────────────────────────────
+    1245620: {
+        "name": "Elden Ring",
+        "paths": [
+            "AppData/Roaming/EldenRing/{steamid}/",
+            "userdata/{steamid}/1245620/remote/"
+        ]
+    },
+    1086940: {
+        "name": "Baldur's Gate 3",
+        "paths": [
+            "AppData/Local/Larian Studios/Baldur's Gate 3/PlayerProfiles/",
+            "userdata/{steamid}/1086940/remote/"
+        ]
+    },
+    1091500: {
+        "name": "Cyberpunk 2077",
+        "paths": [
+            "Saved Games/CD Projekt Red/Cyberpunk 2077/",
+            "AppData/Local/CD Projekt Red/Cyberpunk 2077/"
+        ]
+    },
+    292030: {
+        "name": "The Witcher 3",
+        "paths": [
+            "Documents/My Games/The Witcher 3/gamesaves/",
+            "userdata/{steamid}/292030/remote/"
+        ]
+    },
+    72850: {
+        "name": "The Elder Scrolls V: Skyrim",
+        "paths": [
+            "Documents/My Games/Skyrim/Saves/",
+            "userdata/{steamid}/72850/remote/"
+        ]
+    },
+    489830: {
+        "name": "Skyrim Special Edition",
+        "paths": [
+            "Documents/My Games/Skyrim Special Edition/Saves/",
+            "userdata/{steamid}/489830/remote/"
+        ]
+    },
+    377160: {
+        "name": "Fallout 4",
+        "paths": [
+            "Documents/My Games/Fallout4/Saves/",
+            "userdata/{steamid}/377160/remote/"
+        ]
+    },
+    374320: {
+        "name": "Dark Souls III",
+        "paths": [
+            "AppData/Roaming/DarkSoulsIII/{steamid}/",
+            "userdata/{steamid}/374320/remote/"
+        ]
+    },
+    814380: {
+        "name": "Sekiro: Shadows Die Twice",
+        "paths": [
+            "AppData/Roaming/Sekiro/{steamid}/",
+            "userdata/{steamid}/814380/remote/"
+        ]
+    },
+    976730: {
+        "name": "Hades",
+        "paths": [
+            "AppData/Roaming/Supergiant Games/Hades/",
+            "userdata/{steamid}/976730/remote/"
+        ]
+    },
+    1145360: {
+        "name": "Hades II",
+        "paths": [
+            "AppData/Roaming/Supergiant Games/Hades II/",
+            "userdata/{steamid}/1145360/remote/"
+        ]
+    },
+    1817070: {
+        "name": "Hogwarts Legacy",
+        "paths": [
+            "AppData/Local/Hogwarts Legacy/Saved/SaveGames/",
+        ]
+    },
+    2358720: {
+        "name": "Black Myth: Wukong",
+        "paths": [
+            "AppData/Local/b1/Saved/SaveGames/",
+        ]
+    },
+    1817190: {
+        "name": "Lies of P",
+        "paths": [
+            "AppData/Local/LiesofP/Saved/SaveGames/",
+        ]
+    },
+    1888930: {
+        "name": "Armored Core VI",
+        "paths": [
+            "AppData/Roaming/ArmoredCore6/{steamid}/",
+        ]
+    },
+    1196590: {
+        "name": "Dragon's Dogma 2",
+        "paths": [
+            "AppData/Local/Dragon's Dogma 2/Saved/SaveGames/",
+        ]
+    },
+    2054970: {
+        "name": "Diablo IV",
+        "paths": [
+            "AppData/Local/Blizzard Entertainment/Diablo IV/",
+        ]
+    },
+    1332010: {
+        "name": "Starfield",
+        "paths": [
+            "Documents/My Games/Starfield/Saves/",
+        ]
+    },
+
+    # ── Multiplayer / Survival ───────────────────────────────────────────
+    252490: {
+        "name": "Rust",
+        "paths": [
+            "AppData/LocalLow/Facepunch Studios/Rust/",
+            "userdata/{steamid}/252490/remote/"
+        ]
+    },
+    892970: {
+        "name": "Valheim",
+        "paths": [
+            "AppData/LocalLow/IronGate/Valheim/",
+            "userdata/{steamid}/892970/remote/"
+        ]
+    },
+    1623730: {
+        "name": "Palworld",
+        "paths": [
+            "AppData/Local/Pal/Saved/SaveGames/",
+        ]
+    },
+    1966720: {
+        "name": "Lethal Company",
+        "paths": [
+            "AppData/LocalLow/ZeekerssRBLX/Lethal Company/",
+        ]
+    },
+    548430: {
+        "name": "Deep Rock Galactic",
+        "paths": [
+            "AppData/Local/DeepRockGalactic/Saved/SaveGames/",
+            "userdata/{steamid}/548430/remote/"
+        ]
+    },
+    108600: {
+        "name": "Project Zomboid",
+        "paths": [
+            "AppData/Roaming/ProjectZomboid/Saves/",
+        ],
+        "native": ["~/.local/share/ProjectZomboid/Saves/"]
+    },
+    322330: {
+        "name": "Don't Starve Together",
+        "paths": [
+            "Documents/Klei/DoNotStarveTogether/",
+        ]
+    },
+    313120: {
+        "name": "Stranded Deep",
+        "paths": [
+            "AppData/LocalLow/Beam Team Games/Stranded Deep/",
+            "userdata/{steamid}/313120/remote/"
+        ]
+    },
+
+    # ── Survival / Crafting ──────────────────────────────────────────────
+    264710: {
+        "name": "Subnautica",
+        "paths": [
+            "AppData/LocalLow/Unknown Worlds/Subnautica/",
+            "userdata/{steamid}/264710/remote/"
+        ]
+    },
+    848450: {
+        "name": "Subnautica: Below Zero",
+        "paths": [
+            "AppData/LocalLow/Unknown Worlds/SubnauticaZero/",
+        ]
+    },
+    275850: {
+        "name": "No Man's Sky",
+        "paths": [
+            "AppData/Roaming/HelloGames/NMS/",
+            "userdata/{steamid}/275850/remote/"
+        ]
+    },
+    242760: {
+        "name": "The Forest",
+        "paths": [
+            "AppData/LocalLow/SKS/TheForest/",
+            "userdata/{steamid}/242760/remote/"
+        ]
+    },
+    1369320: {
+        "name": "Sons of the Forest",
+        "paths": [
+            "AppData/LocalLow/Endnight/SonsOfTheForest/Saves/",
+        ]
+    },
+    526870: {
+        "name": "Satisfactory",
+        "paths": [
+            "AppData/Local/FactoryGame/Saved/SaveGames/",
+        ]
+    },
+    346110: {
+        "name": "ARK: Survival Evolved",
+        "paths": [
+            "AppData/Local/ARK/Saved/",
+            "userdata/{steamid}/346110/remote/"
+        ]
+    },
+    105600: {
+        "name": "Terraria",
+        "paths": [
+            "Documents/My Games/Terraria/",
+            "userdata/{steamid}/105600/remote/"
+        ],
+        "native": ["~/.local/share/Terraria/"]
+    },
+    367520: {
+        "name": "Hollow Knight",
+        "paths": [
+            "AppData/LocalLow/Team Cherry/Hollow Knight/",
+            "userdata/{steamid}/367520/remote/"
+        ],
+        "native": ["~/.config/unity3d/Team Cherry/Hollow Knight/"]
+    },
+
+    # ── Indie / Platformers ──────────────────────────────────────────────
+    413150: {
+        "name": "Stardew Valley",
+        "paths": [
+            "AppData/Roaming/StardewValley/Saves/",
+            "userdata/{steamid}/413150/remote/"
+        ],
+        "native": ["~/.config/StardewValley/Saves/"]
+    },
+    504230: {
+        "name": "Celeste",
+        "paths": [
+            "AppData/Local/Celeste/",
+            "userdata/{steamid}/504230/remote/"
+        ],
+        "native": ["~/.local/share/Celeste/"]
+    },
+    612880: {
+        "name": "Dead Cells",
+        "paths": [
+            "AppData/Roaming/Dead Cells/",
+            "userdata/{steamid}/612880/remote/"
+        ]
+    },
+    1145350: {
+        "name": "Cult of the Lamb",
+        "paths": [
+            "AppData/LocalLow/Massive Monster/Cult Of The Lamb/",
+            "userdata/{steamid}/1145350/remote/"
+        ]
+    },
+    814380: {
+        "name": "Sekiro",
+        "paths": [
+            "AppData/Roaming/Sekiro/{steamid}/",
+        ]
+    },
+    257850: {
+        "name": "Hyper Light Drifter",
+        "paths": [
+            "AppData/Local/HyperLightDrifter/",
+        ],
+        "native": ["~/.config/HyperLightDrifter/"]
+    },
+    261570: {
+        "name": "Ori and the Blind Forest",
+        "paths": [
+            "AppData/Local/Ori and the Blind Forest DE/",
+        ]
+    },
+    1057090: {
+        "name": "Ori and the Will of the Wisps",
+        "paths": [
+            "AppData/Local/Ori and the Will of the Wisps/",
+        ]
+    },
+    960090: {
+        "name": "Inscryption",
+        "paths": [
+            "AppData/LocalLow/Daniel Mullins Games/Inscryption/",
+            "userdata/{steamid}/960090/remote/"
+        ]
+    },
+    1113560: {
+        "name": "Raft",
+        "paths": [
+            "AppData/LocalLow/Redbeet Interactive/Raft/",
+        ]
+    },
+    1966900: {
+        "name": "Vampire Survivors",
+        "paths": [
+            "AppData/Roaming/Vampire_Survivors/",
+            "userdata/{steamid}/1966900/remote/"
+        ]
+    },
+    588650: {
+        "name": "Dead by Daylight",
+        "paths": [
+            "AppData/Local/DeadByDaylight/Saved/SaveGames/",
+        ]
+    },
+    291550: {
+        "name": "Brotato",
+        "paths": [
+            "AppData/Roaming/Brotato/",
+            "userdata/{steamid}/291550/remote/"
+        ]
+    },
+    1794680: {
+        "name": "Vampire Survivors",
+        "paths": [
+            "AppData/Roaming/Vampire_Survivors/",
+        ]
+    },
+    2379780: {
+        "name": "Balatro",
+        "paths": [
+            "AppData/Roaming/Balatro/",
+            "userdata/{steamid}/2379780/remote/"
+        ]
+    },
+
+    # ── Strategy ─────────────────────────────────────────────────────────
+    289070: {
+        "name": "Civilization VI",
+        "paths": [
+            "Documents/My Games/Sid Meier's Civilization VI/Saves/",
+            "userdata/{steamid}/289070/remote/"
+        ]
+    },
+    281990: {
+        "name": "Stellaris",
+        "paths": [
+            "Documents/Paradox Interactive/Stellaris/save games/",
+            "userdata/{steamid}/281990/remote/"
+        ]
+    },
+    255710: {
+        "name": "Cities: Skylines",
+        "paths": [
+            "AppData/Local/Colossal Order/Cities_Skylines/Saves/",
+            "userdata/{steamid}/255710/remote/"
+        ]
+    },
+    949230: {
+        "name": "Cities: Skylines II",
+        "paths": [
+            "AppData/LocalLow/Colossal Order/Cities Skylines II/Saves/",
+        ]
+    },
+    268500: {
+        "name": "XCOM 2",
+        "paths": [
+            "Documents/My Games/XCOM2/XComGame/SaveData/",
+            "userdata/{steamid}/268500/remote/"
+        ]
+    },
+    236390: {
+        "name": "War Thunder",
+        "paths": [
+            "Documents/My Games/WarThunder/Saves/",
+        ]
+    },
+    394360: {
+        "name": "Hearts of Iron IV",
+        "paths": [
+            "Documents/Paradox Interactive/Hearts of Iron IV/save games/",
+        ]
+    },
+    236850: {
+        "name": "Europa Universalis IV",
+        "paths": [
+            "Documents/Paradox Interactive/Europa Universalis IV/save games/",
+        ]
+    },
+    203770: {
+        "name": "Crusader Kings II",
+        "paths": [
+            "Documents/Paradox Interactive/Crusader Kings II/save games/",
+        ]
+    },
+    1158310: {
+        "name": "Crusader Kings III",
+        "paths": [
+            "Documents/Paradox Interactive/Crusader Kings III/save games/",
+        ]
+    },
+    294100: {
+        "name": "RimWorld",
+        "paths": [
+            "AppData/LocalLow/Ludeon Studios/RimWorld by Ludeon Studios/Saves/",
+            "userdata/{steamid}/294100/remote/"
+        ]
+    },
+    233450: {
+        "name": "Prison Architect",
+        "paths": [
+            "AppData/Local/Introversion/Prison Architect/saves/",
+        ],
+        "native": ["~/.local/share/Prison Architect/saves/"]
+    },
+    1181400: {
+        "name": "Against the Storm",
+        "paths": [
+            "AppData/LocalLow/Eremite Games/Against the Storm/",
+        ]
+    },
+    1259420: {
+        "name": "Slay the Spire 2",
+        "paths": [
+            "AppData/LocalLow/Mega Crit/Slay the Spire 2/",
+        ]
+    },
+    646570: {
+        "name": "Slay the Spire",
+        "paths": [
+            "AppData/LocalLow/MegaCrit/SlayTheSpire/",
+            "userdata/{steamid}/646570/remote/"
+        ]
+    },
+    1181400: {
+        "name": "Against the Storm",
+        "paths": [
+            "AppData/LocalLow/Eremite Games/Against the Storm/",
+        ]
+    },
+
+    # ── Shooters ─────────────────────────────────────────────────────────
+    782330: {
+        "name": "DOOM Eternal",
+        "paths": [
+            "Saved Games/id Software/DOOMEternal/",
+            "userdata/{steamid}/782330/remote/"
+        ]
+    },
+    1196590: {
+        "name": "Resident Evil Village",
+        "paths": [
+            "AppData/Local/CAPCOM/RESIDENT EVIL VILLAGE/",
+        ]
+    },
+    883710: {
+        "name": "Resident Evil 2 Remake",
+        "paths": [
+            "AppData/Local/CAPCOM/RESIDENT EVIL 2 BIOHAZARD RE2/",
+        ]
+    },
+    952060: {
+        "name": "Resident Evil 4 Remake",
+        "paths": [
+            "AppData/Local/CAPCOM/RESIDENT EVIL 4 BIOHAZARD RE4/",
+        ]
+    },
+    412020: {
+        "name": "Metro Exodus",
+        "paths": [
+            "Saved Games/metro exodus/",
+            "userdata/{steamid}/412020/remote/"
+        ]
+    },
+    209160: {
+        "name": "Call of Juarez: Gunslinger",
+        "paths": [
+            "AppData/Local/Techland/CoJGunslinger/",
+        ]
+    },
+    1238810: {
+        "name": "Atomic Heart",
+        "paths": [
+            "AppData/Local/AtomicHeart/Saved/SaveGames/",
+        ]
+    },
+    1238840: {
+        "name": "Battlefield 2042",
+        "paths": [
+            "Documents/Battlefield 2042/settings/",
+        ]
+    },
+    2357570: {
+        "name": "Overwatch 2",
+        "paths": [
+            "Documents/Overwatch/Settings/",
+        ]
+    },
+
+    # ── Horror / Action ──────────────────────────────────────────────────
+    739630: {
+        "name": "Phasmophobia",
+        "paths": [
+            "AppData/LocalLow/Kinetic Games/Phasmophobia/",
+            "userdata/{steamid}/739630/remote/"
+        ]
+    },
+    1172470: {
+        "name": "Apex Legends",
+        "paths": [
+            "Saved Games/Respawn/Apex/local/",
+        ]
+    },
+    1888160: {
+        "name": "The Last of Us Part I",
+        "paths": [
+            "Saved Games/The Last of Us Part I/",
+        ]
+    },
+    1593500: {
+        "name": "God of War",
+        "paths": [
+            "Saved Games/God of War/",
+            "userdata/{steamid}/1593500/remote/"
+        ]
+    },
+    2322010: {
+        "name": "God of War Ragnarok",
+        "paths": [
+            "Saved Games/God of War Ragnarok/",
+        ]
+    },
+    1328670: {
+        "name": "Mass Effect Legendary Edition",
+        "paths": [
+            "Documents/BioWare/Mass Effect Legendary Edition/Save/",
+        ]
+    },
+    1174180: {
+        "name": "Red Dead Redemption 2",
+        "paths": [
+            "Documents/Rockstar Games/Red Dead Redemption 2/Profiles/",
+        ]
+    },
+    271590: {
+        "name": "Grand Theft Auto V",
+        "paths": [
+            "Documents/Rockstar Games/GTA V/Profiles/",
+        ]
+    },
+    1938090: {
+        "name": "Call of Duty: MW2",
+        "paths": [
+            "Documents/Call of Duty/players/",
+        ]
+    },
+    1282100: {
+        "name": "Remnant II",
+        "paths": [
+            "AppData/Local/Remnant2/Saved/SaveGames/",
+        ]
+    },
+    1203220: {
+        "name": "Naraka: Bladepoint",
+        "paths": [
+            "AppData/Local/Naraka/Saved/SaveGames/",
+        ]
+    },
+    2420510: {
+        "name": "Wuthering Waves",
+        "paths": [
+            "AppData/Local/Wuthering Waves/Saved/",
+        ]
+    },
+
+    # ── Simulation / Building ────────────────────────────────────────────
+    753640: {
+        "name": "Outer Wilds",
+        "paths": [
+            "AppData/LocalLow/Mobius Digital/Outer Wilds/",
+            "userdata/{steamid}/753640/remote/"
+        ]
+    },
+    755790: {
+        "name": "Ring of Pain",
+        "paths": [
+            "AppData/LocalLow/Twice Different/Ring of Pain/",
+        ]
+    },
+    457140: {
+        "name": "Oxygen Not Included",
+        "paths": [
+            "Documents/Klei/OxygenNotIncluded/save_files/",
+        ]
+    },
+    322170: {
+        "name": "Geometry Dash",
+        "paths": [
+            "AppData/Local/GeometryDash/",
+        ]
+    },
+    427520: {
+        "name": "Factorio",
+        "paths": [
+            "AppData/Roaming/Factorio/saves/",
+        ],
+        "native": ["~/.factorio/saves/"]
+    },
+    387290: {
+        "name": "Ori and the Blind Forest: Definitive Edition",
+        "paths": [
+            "AppData/Local/Ori and the Blind Forest DE/",
+        ]
+    },
+    427520: {
+        "name": "Factorio",
+        "paths": [],
+        "native": ["~/.factorio/saves/"]
+    },
+
+    # ── More Indies ──────────────────────────────────────────────────────
+    632360: {
+        "name": "Risk of Rain 2",
+        "paths": [
+            "AppData/LocalLow/Hopoo Games, LLC/Risk of Rain 2/",
+            "userdata/{steamid}/632360/remote/"
+        ]
+    },
+    1150690: {
+        "name": "OMORI",
+        "paths": [
+            "AppData/Local/OMORI/",
+        ]
+    },
+    1164650: {
+        "name": "Nioh 2",
+        "paths": [
+            "AppData/Local/Koei Tecmo/Nioh2/",
+        ]
+    },
+    1057240: {
+        "name": "Tunic",
+        "paths": [
+            "AppData/LocalLow/Andrew Shouldice/Secret Legend/",
+            "userdata/{steamid}/1057240/remote/"
+        ]
+    },
+    774171: {
+        "name": "Monster Hunter: World",
+        "paths": [
+            "userdata/{steamid}/582010/remote/",
+        ]
+    },
+    1446780: {
+        "name": "Monster Hunter Rise",
+        "paths": [
+            "userdata/{steamid}/1446780/remote/",
+        ]
+    },
+    257510: {
+        "name": "The Talos Principle",
+        "paths": [
+            "Documents/My Games/Talos/",
+        ]
+    },
+    677120: {
+        "name": "Unravel Two",
+        "paths": [
+            "AppData/Local/UnravelTwo/Saved/SaveGames/",
+        ]
+    },
+    578080: {
+        "name": "PUBG: Battlegrounds",
+        "paths": [
+            "AppData/Local/TslGame/Saved/SaveGames/",
+        ]
+    },
+
+    # ── Racing / Sports ──────────────────────────────────────────────────
+    1293830: {
+        "name": "Forza Horizon 5",
+        "paths": [
+            "AppData/Local/ForzaHorizon5/User_SteamLocalStorageDirectory/",
+        ]
+    },
+    1551360: {
+        "name": "Forza Motorsport",
+        "paths": [
+            "AppData/Local/ForzaMotorsport/User_SteamLocalStorageDirectory/",
+        ]
+    },
+
+    # ── Native Linux ─────────────────────────────────────────────────────
+    0: {
+        "name": "Minecraft (Java)",
+        "paths": [],
+        "native": ["~/.minecraft/saves/"]
+    },
+}
+
+# ─── Utilities ───────────────────────────────────────────────────────────────
+
+def human_size(nbytes):
+    """Format byte count as human-readable string."""
+    if nbytes < 0:
+        return "0 B"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(nbytes) < 1024.0:
+            if unit == "B":
+                return f"{int(nbytes)} {unit}"
+            return f"{nbytes:.1f} {unit}"
+        nbytes /= 1024.0
+    return f"{nbytes:.1f} PB"
+
+
+def human_time(dt):
+    """Format datetime as relative time string."""
+    now = datetime.now()
+    diff = now - dt
+    if diff < timedelta(minutes=1):
+        return "just now"
+    if diff < timedelta(hours=1):
+        m = int(diff.total_seconds() / 60)
+        return f"{m}m ago"
+    if diff < timedelta(hours=24):
+        h = int(diff.total_seconds() / 3600)
+        return f"{h}h ago"
+    if diff < timedelta(days=2):
+        return "yesterday"
+    if diff < timedelta(days=7):
+        return f"{diff.days} days ago"
+    if diff < timedelta(days=30):
+        w = diff.days // 7
+        return f"{w} week{'s' if w > 1 else ''} ago"
+    if diff < timedelta(days=365):
+        m = diff.days // 30
+        return f"{m} month{'s' if m > 1 else ''} ago"
+    return dt.strftime("%Y-%m-%d")
+
+
+def time_color(dt):
+    """Return color based on save age."""
+    diff = datetime.now() - dt
+    if diff < timedelta(days=7):
+        return C.BGREEN
+    elif diff < timedelta(days=30):
+        return C.BYELLOW
+    else:
+        return C.RED
+
+
+def dir_size(path):
+    """Get total size of directory contents."""
+    total = 0
+    try:
+        for entry in path.rglob("*"):
+            if entry.is_file():
+                total += entry.stat().st_size
+    except (PermissionError, OSError):
+        pass
+    return total
+
+
+def dir_mtime(path):
+    """Get most recent modification time in directory."""
+    latest = 0
+    try:
+        for entry in path.rglob("*"):
+            if entry.is_file():
+                mt = entry.stat().st_mtime
+                if mt > latest:
+                    latest = mt
+    except (PermissionError, OSError):
+        pass
+    return datetime.fromtimestamp(latest) if latest > 0 else None
+
+
+def count_files(path):
+    """Count files in directory recursively."""
+    count = 0
+    try:
+        for entry in path.rglob("*"):
+            if entry.is_file():
+                count += 1
+    except (PermissionError, OSError):
+        pass
+    return count
+
+
+def notify(title, body):
+    """Send desktop notification if available."""
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "HubOS Save Manager", "-i", "document-save", title, body],
+            capture_output=True, timeout=5
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+
+def load_state():
+    """Load persistent state from disk."""
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"last_backup": None, "backups": [], "last_scan": None, "saves": {}}
+
+
+def save_state(state):
+    """Save persistent state to disk."""
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2, default=str))
+
+
+def load_config():
+    """Load user configuration."""
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"auto_backup": False, "sync_enabled": False, "hub_token": None, "passphrase": None}
+
+
+# ─── Steam Helpers ───────────────────────────────────────────────────────────
+
+def find_steam_roots():
+    """Find all Steam library folders."""
+    roots = []
+    for base in [STEAM_ROOT, STEAM_FLATPAK]:
+        if base.exists():
+            roots.append(base)
+            # Check libraryfolders.vdf for additional library paths
+            vdf = base / "steamapps" / "libraryfolders.vdf"
+            if vdf.exists():
+                try:
+                    text = vdf.read_text()
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if '"path"' in line:
+                            parts = line.split('"')
+                            if len(parts) >= 4:
+                                p = Path(parts[3])
+                                if p.exists() and p not in roots:
+                                    roots.append(p)
+                except OSError:
+                    pass
+    return roots
+
+
+def find_steam_ids(steam_root):
+    """Find all Steam user IDs in a Steam installation."""
+    ids = []
+    userdata = steam_root / "userdata"
+    if userdata.exists():
+        try:
+            for entry in userdata.iterdir():
+                if entry.is_dir() and entry.name.isdigit():
+                    ids.append(entry.name)
+        except OSError:
+            pass
+    return ids
+
+
+def get_game_name_from_manifest(steam_root, appid):
+    """Try to get game name from Steam appmanifest."""
+    for ext_dir in [steam_root / "steamapps", steam_root / "SteamApps"]:
+        manifest = ext_dir / f"appmanifest_{appid}.acf"
+        if manifest.exists():
+            try:
+                text = manifest.read_text()
+                for line in text.splitlines():
+                    if '"name"' in line:
+                        parts = line.split('"')
+                        if len(parts) >= 4:
+                            return parts[3]
+            except OSError:
+                pass
+    return None
+
+
+# ─── Save Discovery ─────────────────────────────────────────────────────────
+
+class SaveLocation:
+    """Represents a discovered save game location."""
+    def __init__(self, game_name, appid, path, source, size=0, mtime=None, file_count=0):
+        self.game_name = game_name
+        self.appid = appid
+        self.path = Path(path)
+        self.source = source  # "Proton Prefix", "Steam Cloud", "Native", etc.
+        self.size = size
+        self.mtime = mtime
+        self.file_count = file_count
+
+    def to_dict(self):
+        return {
+            "game_name": self.game_name,
+            "appid": self.appid,
+            "path": str(self.path),
+            "source": self.source,
+            "size": self.size,
+            "mtime": self.mtime.isoformat() if self.mtime else None,
+            "file_count": self.file_count,
+        }
+
+
+def scan_proton_saves(steam_root, steam_ids):
+    """Scan Proton prefix saves for known games."""
+    saves = []
+    compat_base = steam_root / "steamapps" / "compatdata"
+    if not compat_base.exists():
+        return saves
+
+    for appid, info in SAVE_PATHS.items():
+        if appid == 0:
+            continue
+        compat = compat_base / str(appid) / "pfx" / "drive_c" / "users" / "steamuser"
+        if not compat.exists():
+            continue
+
+        for rel_path in info.get("paths", []):
+            if rel_path.startswith("userdata/"):
+                continue  # handled by scan_steam_cloud
+            for sid in steam_ids:
+                expanded = rel_path.replace("{steamid}", sid)
+                full = compat / expanded
+                if full.exists() and any(full.rglob("*")):
+                    sz = dir_size(full)
+                    mt = dir_mtime(full)
+                    fc = count_files(full)
+                    if fc > 0:
+                        saves.append(SaveLocation(
+                            info["name"], appid, full, "Proton Prefix",
+                            sz, mt, fc
+                        ))
+                        break
+            else:
+                # Try without steamid substitution
+                if "{steamid}" not in rel_path:
+                    full = compat / rel_path
+                    if full.exists() and any(full.rglob("*")):
+                        sz = dir_size(full)
+                        mt = dir_mtime(full)
+                        fc = count_files(full)
+                        if fc > 0:
+                            saves.append(SaveLocation(
+                                info["name"], appid, full, "Proton Prefix",
+                                sz, mt, fc
+                            ))
+    return saves
+
+
+def scan_proton_unknown(steam_root):
+    """Scan Proton prefixes for unknown game saves (not in database)."""
+    saves = []
+    compat_base = steam_root / "steamapps" / "compatdata"
+    if not compat_base.exists():
+        return saves
+
+    known_ids = {str(k) for k in SAVE_PATHS.keys() if k != 0}
+    save_dirs = [
+        "AppData/Local", "AppData/LocalLow", "AppData/Roaming",
+        "Documents/My Games", "Saved Games"
+    ]
+
+    try:
+        for appdir in compat_base.iterdir():
+            if not appdir.is_dir() or appdir.name in known_ids:
+                continue
+            if not appdir.name.isdigit():
+                continue
+
+            appid = appdir.name
+            user_root = appdir / "pfx" / "drive_c" / "users" / "steamuser"
+            if not user_root.exists():
+                continue
+
+            for sd in save_dirs:
+                check = user_root / sd
+                if not check.exists():
+                    continue
+                try:
+                    for sub in check.iterdir():
+                        if sub.is_dir():
+                            fc = count_files(sub)
+                            if fc > 0:
+                                sz = dir_size(sub)
+                                mt = dir_mtime(sub)
+                                name = get_game_name_from_manifest(steam_root, appid)
+                                if not name:
+                                    name = f"Unknown ({appid})"
+                                saves.append(SaveLocation(
+                                    name, int(appid), sub, "Proton Prefix",
+                                    sz, mt, fc
+                                ))
+                except (PermissionError, OSError):
+                    pass
+    except (PermissionError, OSError):
+        pass
+    return saves
+
+
+def scan_steam_cloud(steam_root, steam_ids):
+    """Scan Steam Cloud save locations."""
+    saves = []
+    for sid in steam_ids:
+        user_dir = steam_root / "userdata" / sid
+        if not user_dir.exists():
+            continue
+        try:
+            for appdir in user_dir.iterdir():
+                if not appdir.is_dir() or not appdir.name.isdigit():
+                    continue
+                remote = appdir / "remote"
+                if not remote.exists():
+                    continue
+                fc = count_files(remote)
+                if fc == 0:
+                    continue
+                appid = int(appdir.name)
+                if appid in SAVE_PATHS:
+                    name = SAVE_PATHS[appid]["name"]
+                else:
+                    name = get_game_name_from_manifest(steam_root, appid)
+                    if not name:
+                        name = f"Unknown ({appid})"
+                sz = dir_size(remote)
+                mt = dir_mtime(remote)
+                saves.append(SaveLocation(
+                    name, appid, remote, "Steam Cloud",
+                    sz, mt, fc
+                ))
+        except (PermissionError, OSError):
+            pass
+    return saves
+
+
+def scan_native_saves():
+    """Scan native Linux save locations."""
+    saves = []
+
+    # Known native paths from database
+    for appid, info in SAVE_PATHS.items():
+        for np in info.get("native", []):
+            expanded = Path(np.replace("~", str(HOME)))
+            if expanded.exists():
+                fc = count_files(expanded)
+                if fc > 0:
+                    sz = dir_size(expanded)
+                    mt = dir_mtime(expanded)
+                    saves.append(SaveLocation(
+                        info["name"], appid, expanded, "Native",
+                        sz, mt, fc
+                    ))
+
+    # Generic native game save locations
+    xdg_data = HOME / ".local" / "share"
+    xdg_config = HOME / ".config"
+
+    # Well-known native game directories
+    native_known = {
+        "0ad": "0 A.D.",
+        "wesnoth": "Battle for Wesnoth",
+        "supertuxkart": "SuperTuxKart",
+        "openttd": "OpenTTD",
+        "vcmi": "VCMI (Heroes III)",
+        "warzone2100": "Warzone 2100",
+        "xonotic": "Xonotic",
+        "nethack": "NetHack",
+        "cataclysm-dda": "Cataclysm: DDA",
+        "FasterThanLight": "FTL: Faster Than Light",
+    }
+    for dirname, gamename in native_known.items():
+        for base in [xdg_data, xdg_config]:
+            p = base / dirname
+            if p.exists():
+                fc = count_files(p)
+                if fc > 0:
+                    saves.append(SaveLocation(
+                        gamename, 0, p, "Native",
+                        dir_size(p), dir_mtime(p), fc
+                    ))
+                break
+
+    return saves
+
+
+def scan_flatpak_saves():
+    """Scan Flatpak sandboxed save locations."""
+    saves = []
+    flatpak_root = HOME / ".var" / "app"
+    if not flatpak_root.exists():
+        return saves
+
+    try:
+        for appdir in flatpak_root.iterdir():
+            if not appdir.is_dir():
+                continue
+            # Skip Steam flatpak (handled separately)
+            if appdir.name == "com.valvesoftware.Steam":
+                continue
+            # Check common save locations within the sandbox
+            for sub in ["config", "data", "cache"]:
+                check = appdir / sub
+                if check.exists():
+                    fc = count_files(check)
+                    if fc > 0:
+                        saves.append(SaveLocation(
+                            appdir.name, 0, check, "Flatpak",
+                            dir_size(check), dir_mtime(check), fc
+                        ))
+    except (PermissionError, OSError):
+        pass
+    return saves
+
+
+def scan_lutris_saves():
+    """Scan Lutris Wine prefix saves."""
+    saves = []
+    prefix_base = HOME / ".local" / "share" / "lutris" / "runners" / "wine" / "prefixes"
+    if not prefix_base.exists():
+        # Also check Games directory
+        prefix_base = HOME / "Games"
+    if not prefix_base.exists():
+        return saves
+
+    save_dirs = [
+        "drive_c/users/{user}/AppData/Local",
+        "drive_c/users/{user}/AppData/Roaming",
+        "drive_c/users/{user}/Documents/My Games",
+        "drive_c/users/{user}/Saved Games",
+    ]
+    username = os.environ.get("USER", "user")
+
+    try:
+        for prefix in prefix_base.iterdir():
+            if not prefix.is_dir():
+                continue
+            for sd_template in save_dirs:
+                sd = prefix / sd_template.replace("{user}", username)
+                if not sd.exists():
+                    continue
+                try:
+                    for sub in sd.iterdir():
+                        if sub.is_dir():
+                            fc = count_files(sub)
+                            if fc > 0:
+                                saves.append(SaveLocation(
+                                    f"{prefix.name}/{sub.name}", 0, sub, "Lutris",
+                                    dir_size(sub), dir_mtime(sub), fc
+                                ))
+                except (PermissionError, OSError):
+                    pass
+    except (PermissionError, OSError):
+        pass
+    return saves
+
+
+def scan_heroic_saves():
+    """Scan Heroic Games Launcher prefix saves."""
+    saves = []
+    heroic_prefixes = HOME / ".config" / "heroic" / "tools" / "proton"
+    if not heroic_prefixes.exists():
+        heroic_prefixes = HOME / ".config" / "heroic"
+    if not heroic_prefixes.exists():
+        return saves
+
+    # Heroic stores prefixes in various locations
+    prefix_locations = [
+        HOME / "Games" / "Heroic",
+        HOME / ".config" / "heroic" / "Prefixes",
+    ]
+
+    save_dirs = [
+        "pfx/drive_c/users/steamuser/AppData/Local",
+        "pfx/drive_c/users/steamuser/AppData/Roaming",
+        "pfx/drive_c/users/steamuser/Documents/My Games",
+        "pfx/drive_c/users/steamuser/Saved Games",
+    ]
+
+    for prefix_base in prefix_locations:
+        if not prefix_base.exists():
+            continue
+        try:
+            for prefix in prefix_base.iterdir():
+                if not prefix.is_dir():
+                    continue
+                for sd in save_dirs:
+                    check = prefix / sd
+                    if not check.exists():
+                        continue
+                    try:
+                        for sub in check.iterdir():
+                            if sub.is_dir():
+                                fc = count_files(sub)
+                                if fc > 0:
+                                    saves.append(SaveLocation(
+                                        f"{prefix.name}/{sub.name}", 0, sub, "Heroic",
+                                        dir_size(sub), dir_mtime(sub), fc
+                                    ))
+                    except (PermissionError, OSError):
+                        pass
+        except (PermissionError, OSError):
+            pass
+    return saves
+
+
+def discover_all_saves(verbose=False):
+    """Run all scanners and return deduplicated save locations."""
+    all_saves = []
+    steam_roots = find_steam_roots()
+
+    if verbose:
+        print(f"  {C.DIM}Scanning Steam installations...{C.RESET}")
+    for sr in steam_roots:
+        sids = find_steam_ids(sr)
+        if verbose:
+            print(f"  {C.DIM}  {sr} ({len(sids)} user{'s' if len(sids) != 1 else ''}){C.RESET}")
+        all_saves.extend(scan_proton_saves(sr, sids))
+        all_saves.extend(scan_proton_unknown(sr))
+        all_saves.extend(scan_steam_cloud(sr, sids))
+
+    if verbose:
+        print(f"  {C.DIM}Scanning native saves...{C.RESET}")
+    all_saves.extend(scan_native_saves())
+
+    if verbose:
+        print(f"  {C.DIM}Scanning Flatpak saves...{C.RESET}")
+    all_saves.extend(scan_flatpak_saves())
+
+    if verbose:
+        print(f"  {C.DIM}Scanning Lutris prefixes...{C.RESET}")
+    all_saves.extend(scan_lutris_saves())
+
+    if verbose:
+        print(f"  {C.DIM}Scanning Heroic prefixes...{C.RESET}")
+    all_saves.extend(scan_heroic_saves())
+
+    # Deduplicate by path
+    seen = set()
+    unique = []
+    for s in all_saves:
+        key = str(s.path.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(s)
+
+    # Sort by most recently modified
+    unique.sort(key=lambda s: s.mtime or datetime.min, reverse=True)
+    return unique
+
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+def cmd_find(args):
+    """Find all save game locations across the system."""
+    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager{C.RESET}")
+    print(f"{C.DIM}  Scanning for save games across all launchers...{C.RESET}\n")
+
+    saves = discover_all_saves(verbose=True)
+
+    if not saves:
+        print(f"\n  {C.YELLOW}No save games found.{C.RESET}")
+        print(f"  {C.DIM}Install and play some games first!{C.RESET}\n")
+        return
+
+    print(f"\n  {C.BGREEN}Found {len(saves)} save location{'s' if len(saves) != 1 else ''}:{C.RESET}\n")
+
+    for s in saves:
+        tc = time_color(s.mtime) if s.mtime else C.DIM
+        age = human_time(s.mtime) if s.mtime else "unknown"
+        print(f"  {C.BOLD}{C.WHITE}{s.game_name}{C.RESET}")
+        print(f"    {C.DIM}Source:{C.RESET}   {s.source}")
+        print(f"    {C.DIM}Path:{C.RESET}     {s.path}")
+        print(f"    {C.DIM}Files:{C.RESET}    {s.file_count}  {C.DIM}|{C.RESET}  "
+              f"{C.DIM}Size:{C.RESET} {human_size(s.size)}  {C.DIM}|{C.RESET}  "
+              f"{C.DIM}Last save:{C.RESET} {tc}{age}{C.RESET}")
+        print()
+
+    total_size = sum(s.size for s in saves)
+    games = len(set(s.game_name for s in saves))
+    print(f"  {C.BOLD}Total: {len(saves)} save locations across {games} games "
+          f"({human_size(total_size)}){C.RESET}\n")
+
+    if args.json:
+        print(json.dumps([s.to_dict() for s in saves], indent=2, default=str))
+
+    # Save to state
+    state = load_state()
+    state["last_scan"] = datetime.now().isoformat()
+    state["saves"] = {s.game_name: s.to_dict() for s in saves}
+    save_state(state)
+
+
+def cmd_list(args):
+    """Show all discovered saves in a formatted table."""
+    saves = discover_all_saves()
+
+    if args.json:
+        print(json.dumps([s.to_dict() for s in saves], indent=2, default=str))
+        return
+
+    if not saves:
+        print(f"\n  {C.YELLOW}No save games found. Run 'hubos-save-manager find' first.{C.RESET}\n")
+        return
+
+    # Merge saves for same game
+    merged = {}
+    for s in saves:
+        if s.game_name in merged:
+            existing = merged[s.game_name]
+            existing["sources"].add(s.source)
+            existing["size"] += s.size
+            existing["file_count"] += s.file_count
+            if s.mtime and (not existing["mtime"] or s.mtime > existing["mtime"]):
+                existing["mtime"] = s.mtime
+        else:
+            merged[s.game_name] = {
+                "sources": {s.source},
+                "size": s.size,
+                "file_count": s.file_count,
+                "mtime": s.mtime,
+            }
+
+    sorted_games = sorted(merged.items(),
+                          key=lambda x: x[1]["mtime"] or datetime.min, reverse=True)
+
+    # Table header
+    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager{C.RESET}\n")
+    header = (f" {C.BOLD}{'Game':<28}{'Location':<22}{'Saves':>6}"
+              f"{'Size':>10}   {'Last Save':<16}{C.RESET}")
+    print(header)
+    print(f" {'━' * 84}")
+
+    total_size = 0
+    total_files = 0
+    for name, info in sorted_games:
+        sources = " + ".join(sorted(info["sources"]))
+        tc = time_color(info["mtime"]) if info["mtime"] else C.DIM
+        age = human_time(info["mtime"]) if info["mtime"] else "unknown"
+        total_size += info["size"]
+        total_files += info["file_count"]
+
+        # Truncate long names
+        dname = name[:26] + ".." if len(name) > 28 else name
+        dsrc = sources[:20] + ".." if len(sources) > 22 else sources
+
+        print(f" {C.WHITE}{dname:<28}{C.RESET}{dsrc:<22}"
+              f"{info['file_count']:>6}{human_size(info['size']):>10}   "
+              f"{tc}{age:<16}{C.RESET}")
+
+    print(f" {'━' * 84}")
+    print(f" {C.BOLD}Total: {total_files} saves across {len(merged)} games "
+          f"({human_size(total_size)}){C.RESET}\n")
+
+
+def cmd_backup(args):
+    """Backup save games."""
+    game_filter = args.game if hasattr(args, "game") and args.game else None
+    auto_mode = args.auto if hasattr(args, "auto") and args.auto else False
+
+    if not auto_mode:
+        print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager — Backup{C.RESET}\n")
+
+    saves = discover_all_saves()
+    if not saves:
+        print(f"  {C.YELLOW}No saves found to backup.{C.RESET}\n")
+        return
+
+    if game_filter:
+        saves = [s for s in saves if game_filter.lower() in s.game_name.lower()]
+        if not saves:
+            print(f"  {C.RED}No saves found matching '{game_filter}'.{C.RESET}\n")
+            return
+
+    # Check for incremental: skip unchanged saves
+    state = load_state()
+    last_hashes = state.get("file_hashes", {})
+
+    to_backup = []
+    for s in saves:
+        key = str(s.path)
+        current_hash = f"{s.size}:{s.mtime.isoformat() if s.mtime else 'none'}"
+        if not auto_mode or last_hashes.get(key) != current_hash:
+            to_backup.append(s)
+
+    if auto_mode and not to_backup:
+        return  # Nothing changed, silent exit
+
+    if not to_backup and auto_mode:
+        return
+
+    # Create backup directory
+    datestamp = datetime.now().strftime("%Y-%m-%d")
+    backup_name = f"saves-{datestamp}"
+    backup_path = BACKUP_DIR / backup_name
+    backup_path.mkdir(parents=True, exist_ok=True)
+
+    if not auto_mode:
+        print(f"  {C.DIM}Backing up {len(to_backup)} save location{'s' if len(to_backup) != 1 else ''}...{C.RESET}\n")
+
+    metadata = {"date": datestamp, "games": [], "total_size": 0, "compressed_size": 0}
+    total_original = 0
+    total_compressed = 0
+    backed_up = 0
+
+    for s in to_backup:
+        safe_name = s.game_name.replace(" ", "_").replace("/", "_").replace(":", "")
+        game_backup = backup_path / safe_name
+        archive_path = backup_path / f"{safe_name}.tar.zst"
+
+        if not auto_mode:
+            print(f"  {C.WHITE}{s.game_name}{C.RESET} ({human_size(s.size)})...", end="", flush=True)
+
+        try:
+            # Create tar.zst archive
+            result = subprocess.run(
+                ["tar", "--zstd", "-cf", str(archive_path), "-C", str(s.path.parent), s.path.name],
+                capture_output=True, timeout=300
+            )
+            if result.returncode != 0:
+                # Fallback: tar without zstd
+                archive_path = backup_path / f"{safe_name}.tar.gz"
+                result = subprocess.run(
+                    ["tar", "-czf", str(archive_path), "-C", str(s.path.parent), s.path.name],
+                    capture_output=True, timeout=300
+                )
+
+            if result.returncode == 0 and archive_path.exists():
+                comp_size = archive_path.stat().st_size
+                total_original += s.size
+                total_compressed += comp_size
+                backed_up += 1
+
+                metadata["games"].append({
+                    "name": s.game_name,
+                    "appid": s.appid,
+                    "source": s.source,
+                    "original_path": str(s.path),
+                    "archive": archive_path.name,
+                    "original_size": s.size,
+                    "compressed_size": comp_size,
+                    "file_count": s.file_count,
+                    "mtime": s.mtime.isoformat() if s.mtime else None,
+                })
+
+                # Update hash for incremental
+                key = str(s.path)
+                last_hashes[key] = f"{s.size}:{s.mtime.isoformat() if s.mtime else 'none'}"
+
+                if not auto_mode:
+                    ratio = (comp_size / s.size * 100) if s.size > 0 else 0
+                    print(f" {C.GREEN}OK{C.RESET} ({human_size(comp_size)}, {ratio:.0f}%)")
+            else:
+                if not auto_mode:
+                    print(f" {C.RED}FAILED{C.RESET}")
+        except (subprocess.TimeoutExpired, OSError) as e:
+            if not auto_mode:
+                print(f" {C.RED}ERROR: {e}{C.RESET}")
+
+    # Write metadata
+    metadata["total_size"] = total_original
+    metadata["compressed_size"] = total_compressed
+    (backup_path / "metadata.json").write_text(json.dumps(metadata, indent=2))
+
+    # Rotate old backups
+    _rotate_backups()
+
+    # Update state
+    state["file_hashes"] = last_hashes
+    state["last_backup"] = datetime.now().isoformat()
+    if backup_name not in state.get("backups", []):
+        state.setdefault("backups", []).append(backup_name)
+    save_state(state)
+
+    if not auto_mode:
+        print(f"\n  {C.BGREEN}Backed up {backed_up} game{'s' if backed_up != 1 else ''} "
+              f"({human_size(total_original)}) -> {human_size(total_compressed)} compressed{C.RESET}")
+        print(f"  {C.DIM}Location: {backup_path}{C.RESET}\n")
+
+    notify("Save Backup Complete",
+           f"Backed up {backed_up} games ({human_size(total_original)} -> {human_size(total_compressed)})")
+
+    if args.json:
+        print(json.dumps(metadata, indent=2))
+
+
+def _rotate_backups():
+    """Keep only the last MAX_BACKUPS backups, remove oldest."""
+    if not BACKUP_DIR.exists():
+        return
+    backups = sorted(
+        [d for d in BACKUP_DIR.iterdir() if d.is_dir() and d.name.startswith("saves-")],
+        key=lambda d: d.name
+    )
+    while len(backups) > MAX_BACKUPS:
+        oldest = backups.pop(0)
+        try:
+            shutil.rmtree(oldest)
+        except OSError:
+            pass
+
+
+def cmd_restore(args):
+    """Restore save games from backup."""
+    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager — Restore{C.RESET}\n")
+
+    if not BACKUP_DIR.exists():
+        print(f"  {C.YELLOW}No backups found at {BACKUP_DIR}{C.RESET}\n")
+        return
+
+    backups = sorted(
+        [d for d in BACKUP_DIR.iterdir() if d.is_dir() and d.name.startswith("saves-")],
+        key=lambda d: d.name, reverse=True
+    )
+
+    if not backups:
+        print(f"  {C.YELLOW}No backups found.{C.RESET}\n")
+        return
+
+    target_backup = args.backup if hasattr(args, "backup") and args.backup else None
+    game_filter = args.game if hasattr(args, "game") and args.game else None
+
+    # List available backups if no target specified
+    if not target_backup:
+        print(f"  {C.BOLD}Available backups:{C.RESET}\n")
+        for b in backups:
+            meta_path = b / "metadata.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text())
+                games = len(meta.get("games", []))
+                size = human_size(meta.get("compressed_size", 0))
+                print(f"    {C.WHITE}{b.name}{C.RESET}  "
+                      f"{C.DIM}({games} games, {size}){C.RESET}")
+            else:
+                print(f"    {C.WHITE}{b.name}{C.RESET}  {C.DIM}(no metadata){C.RESET}")
+        print(f"\n  {C.DIM}Usage: hubos-save-manager restore <backup-date|latest> [game name]{C.RESET}\n")
+
+        if args.json:
+            info = []
+            for b in backups:
+                meta_path = b / "metadata.json"
+                meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                info.append({"name": b.name, "metadata": meta})
+            print(json.dumps(info, indent=2))
+        return
+
+    # Resolve target backup
+    if target_backup == "latest":
+        backup_path = backups[0]
+    else:
+        # Match by date
+        matches = [b for b in backups if target_backup in b.name]
+        if not matches:
+            print(f"  {C.RED}No backup matching '{target_backup}'.{C.RESET}\n")
+            return
+        backup_path = matches[0]
+
+    meta_path = backup_path / "metadata.json"
+    if not meta_path.exists():
+        print(f"  {C.RED}Backup metadata missing: {meta_path}{C.RESET}\n")
+        return
+
+    metadata = json.loads(meta_path.read_text())
+    games = metadata.get("games", [])
+
+    if game_filter:
+        games = [g for g in games if game_filter.lower() in g["name"].lower()]
+        if not games:
+            print(f"  {C.RED}No saves matching '{game_filter}' in backup.{C.RESET}\n")
+            return
+
+    print(f"  {C.BOLD}Restoring from: {backup_path.name}{C.RESET}\n")
+
+    # Show what will be restored
+    print(f"  {C.BOLD}{'Game':<30} {'Size':>10}  {'Action'}{C.RESET}")
+    print(f"  {'─' * 60}")
+
+    for g in games:
+        dest = Path(g["original_path"])
+        action = f"{C.BYELLOW}overwrite{C.RESET}" if dest.exists() else f"{C.BGREEN}create{C.RESET}"
+        print(f"  {g['name']:<30} {human_size(g.get('original_size', 0)):>10}  {action}")
+
+    print()
+
+    # Confirm unless --yes flag
+    if not (hasattr(args, "yes") and args.yes):
+        try:
+            resp = input(f"  {C.BOLD}Proceed with restore? [y/N]{C.RESET} ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if resp.lower() not in ("y", "yes"):
+            print(f"  {C.DIM}Restore cancelled.{C.RESET}\n")
+            return
+
+    # Safety: backup current saves before overwriting
+    safety_dir = BACKUP_DIR / "pre-restore-safety"
+    safety_dir.mkdir(parents=True, exist_ok=True)
+
+    restored = 0
+    for g in games:
+        dest = Path(g["original_path"])
+        archive = backup_path / g["archive"]
+
+        print(f"  Restoring {C.WHITE}{g['name']}{C.RESET}...", end="", flush=True)
+
+        if not archive.exists():
+            print(f" {C.RED}archive missing{C.RESET}")
+            continue
+
+        # Safety backup of existing saves
+        if dest.exists():
+            safe_name = g["name"].replace(" ", "_").replace("/", "_").replace(":", "")
+            safety_archive = safety_dir / f"{safe_name}-safety.tar.gz"
+            try:
+                subprocess.run(
+                    ["tar", "-czf", str(safety_archive), "-C", str(dest.parent), dest.name],
+                    capture_output=True, timeout=120
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
+        # Restore
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            # Remove existing to avoid conflicts
+            if dest.exists():
+                shutil.rmtree(dest)
+
+            result = subprocess.run(
+                ["tar", "--zstd", "-xf", str(archive), "-C", str(dest.parent)],
+                capture_output=True, timeout=300
+            )
+            if result.returncode != 0:
+                # Try gzip fallback
+                result = subprocess.run(
+                    ["tar", "-xzf", str(archive), "-C", str(dest.parent)],
+                    capture_output=True, timeout=300
+                )
+
+            if result.returncode == 0:
+                print(f" {C.GREEN}OK{C.RESET}")
+                restored += 1
+            else:
+                print(f" {C.RED}FAILED{C.RESET}")
+        except (subprocess.TimeoutExpired, OSError) as e:
+            print(f" {C.RED}ERROR: {e}{C.RESET}")
+
+    print(f"\n  {C.BGREEN}Restored {restored}/{len(games)} game{'s' if len(games) != 1 else ''}.{C.RESET}")
+    print(f"  {C.DIM}Safety backup at: {safety_dir}{C.RESET}\n")
+
+    notify("Save Restore Complete", f"Restored {restored} game saves from {backup_path.name}")
+
+
+def cmd_sync(args):
+    """Sync saves to/from Hub cloud account."""
+    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager — Cloud Sync{C.RESET}\n")
+
+    config = load_config()
+
+    if not config.get("hub_token"):
+        print(f"  {C.YELLOW}Not logged in to HubOS account.{C.RESET}")
+        print(f"  {C.DIM}Run 'hubos-hub-bridge login' first, then enable sync:{C.RESET}")
+        print(f"  {C.DIM}  hubos-save-manager sync --setup{C.RESET}\n")
+        return
+
+    if hasattr(args, "setup") and args.setup:
+        _sync_setup(config)
+        return
+
+    direction = args.direction if hasattr(args, "direction") and args.direction else "status"
+
+    if direction == "status":
+        state = load_state()
+        last_sync = state.get("last_sync", "never")
+        last_backup = state.get("last_backup", "never")
+        print(f"  {C.BOLD}Sync Status{C.RESET}")
+        print(f"    Last backup:  {last_backup}")
+        print(f"    Last sync:    {last_sync}")
+        print(f"    Encryption:   {'enabled' if config.get('passphrase') else 'not set'}")
+        print()
+        return
+
+    if not config.get("passphrase"):
+        print(f"  {C.RED}Encryption passphrase not set. Run: hubos-save-manager sync --setup{C.RESET}\n")
+        return
+
+    if direction == "upload":
+        _sync_upload(config)
+    elif direction == "download":
+        _sync_download(config)
+
+
+def _sync_setup(config):
+    """Set up cloud sync configuration."""
+    print(f"  {C.BOLD}Cloud Sync Setup{C.RESET}\n")
+
+    try:
+        passphrase = input(f"  Enter encryption passphrase (for E2E encryption): ")
+        if len(passphrase) < 8:
+            print(f"  {C.RED}Passphrase must be at least 8 characters.{C.RESET}\n")
+            return
+        confirm = input(f"  Confirm passphrase: ")
+        if passphrase != confirm:
+            print(f"  {C.RED}Passphrases don't match.{C.RESET}\n")
+            return
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    config["passphrase"] = hashlib.sha256(passphrase.encode()).hexdigest()
+    config["sync_enabled"] = True
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(config, indent=2))
+    print(f"\n  {C.BGREEN}Cloud sync configured.{C.RESET}")
+    print(f"  {C.DIM}Your saves will be encrypted before upload.{C.RESET}\n")
+
+
+def _sync_upload(config):
+    """Upload encrypted backup to Hub."""
+    print(f"  {C.DIM}Preparing encrypted upload...{C.RESET}")
+
+    if not BACKUP_DIR.exists():
+        print(f"  {C.YELLOW}No backups found. Run backup first.{C.RESET}\n")
+        return
+
+    backups = sorted(
+        [d for d in BACKUP_DIR.iterdir() if d.is_dir() and d.name.startswith("saves-")],
+        key=lambda d: d.name, reverse=True
+    )
+    if not backups:
+        print(f"  {C.YELLOW}No backups to upload.{C.RESET}\n")
+        return
+
+    latest = backups[0]
+    archive_path = BACKUP_DIR / "sync-upload.tar.zst"
+
+    # Create single archive of latest backup
+    try:
+        result = subprocess.run(
+            ["tar", "--zstd", "-cf", str(archive_path), "-C", str(BACKUP_DIR), latest.name],
+            capture_output=True, timeout=600
+        )
+        if result.returncode != 0:
+            print(f"  {C.RED}Failed to create upload archive.{C.RESET}\n")
+            return
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"  {C.RED}Error: {e}{C.RESET}\n")
+        return
+
+    # Encrypt with openssl
+    enc_path = BACKUP_DIR / "sync-upload.tar.zst.enc"
+    key = config.get("passphrase", "")
+    try:
+        result = subprocess.run(
+            ["openssl", "enc", "-aes-256-cbc", "-salt", "-pbkdf2",
+             "-in", str(archive_path), "-out", str(enc_path), "-pass", f"pass:{key}"],
+            capture_output=True, timeout=600
+        )
+        if result.returncode != 0:
+            print(f"  {C.RED}Encryption failed.{C.RESET}\n")
+            return
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"  {C.RED}Encryption error: {e}{C.RESET}\n")
+        return
+    finally:
+        archive_path.unlink(missing_ok=True)
+
+    enc_size = enc_path.stat().st_size
+    print(f"  {C.DIM}Encrypted archive: {human_size(enc_size)}{C.RESET}")
+
+    # Upload to Hub API
+    hub_url = "https://hub.24hgaming.com/api/hubos/saves/upload"
+    token = config.get("hub_token", "")
+
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "-X", "POST", hub_url,
+             "-H", f"Authorization: Bearer {token}",
+             "-H", "Content-Type: application/octet-stream",
+             "--data-binary", f"@{enc_path}",
+             "-w", "%{http_code}", "-o", "/dev/null"],
+            capture_output=True, timeout=600, text=True
+        )
+        code = result.stdout.strip()
+        if code == "200":
+            print(f"\n  {C.BGREEN}Upload complete!{C.RESET}")
+            print(f"  {C.DIM}Your saves are safe in the cloud.{C.RESET}\n")
+            state = load_state()
+            state["last_sync"] = datetime.now().isoformat()
+            save_state(state)
+        else:
+            print(f"\n  {C.RED}Upload failed (HTTP {code}).{C.RESET}")
+            print(f"  {C.DIM}Check your Hub account connection.{C.RESET}\n")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"  {C.RED}Upload error: {e}{C.RESET}\n")
+    finally:
+        enc_path.unlink(missing_ok=True)
+
+
+def _sync_download(config):
+    """Download saves from Hub."""
+    print(f"  {C.DIM}Downloading saves from Hub...{C.RESET}")
+
+    hub_url = "https://hub.24hgaming.com/api/hubos/saves/download"
+    token = config.get("hub_token", "")
+    enc_path = BACKUP_DIR / "sync-download.tar.zst.enc"
+    dec_path = BACKUP_DIR / "sync-download.tar.zst"
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "-X", "GET", hub_url,
+             "-H", f"Authorization: Bearer {token}",
+             "-o", str(enc_path), "-w", "%{http_code}"],
+            capture_output=True, timeout=600, text=True
+        )
+        code = result.stdout.strip()
+        if code != "200":
+            print(f"  {C.RED}Download failed (HTTP {code}).{C.RESET}\n")
+            enc_path.unlink(missing_ok=True)
+            return
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"  {C.RED}Download error: {e}{C.RESET}\n")
+        return
+
+    # Decrypt
+    key = config.get("passphrase", "")
+    try:
+        result = subprocess.run(
+            ["openssl", "enc", "-d", "-aes-256-cbc", "-salt", "-pbkdf2",
+             "-in", str(enc_path), "-out", str(dec_path), "-pass", f"pass:{key}"],
+            capture_output=True, timeout=600
+        )
+        if result.returncode != 0:
+            print(f"  {C.RED}Decryption failed. Wrong passphrase?{C.RESET}\n")
+            return
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"  {C.RED}Decryption error: {e}{C.RESET}\n")
+        return
+    finally:
+        enc_path.unlink(missing_ok=True)
+
+    # Extract
+    try:
+        result = subprocess.run(
+            ["tar", "--zstd", "-xf", str(dec_path), "-C", str(BACKUP_DIR)],
+            capture_output=True, timeout=600
+        )
+        if result.returncode == 0:
+            print(f"\n  {C.BGREEN}Download complete!{C.RESET}")
+            print(f"  {C.DIM}Use 'hubos-save-manager restore latest' to restore saves.{C.RESET}\n")
+        else:
+            print(f"  {C.RED}Extraction failed.{C.RESET}\n")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"  {C.RED}Extraction error: {e}{C.RESET}\n")
+    finally:
+        dec_path.unlink(missing_ok=True)
+
+
+def cmd_watch(args):
+    """Watch for save changes in real-time using inotify."""
+    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager — Watch Mode{C.RESET}\n")
+
+    try:
+        import inotify.adapters
+    except ImportError:
+        # Fall back to polling if inotify not available
+        print(f"  {C.YELLOW}inotify module not found, using polling mode.{C.RESET}")
+        print(f"  {C.DIM}Install for better performance: pip install inotify{C.RESET}\n")
+        _watch_polling(args)
+        return
+
+    saves = discover_all_saves()
+    if not saves:
+        print(f"  {C.YELLOW}No save locations found to watch.{C.RESET}\n")
+        return
+
+    config = load_config()
+    auto_backup = config.get("auto_backup", False)
+
+    print(f"  {C.DIM}Monitoring {len(saves)} save locations...{C.RESET}")
+    if auto_backup:
+        print(f"  {C.DIM}Auto-backup: enabled{C.RESET}")
+    print(f"  {C.DIM}Press Ctrl+C to stop{C.RESET}\n")
+
+    i = inotify.adapters.Inotify()
+    path_to_game = {}
+
+    for s in saves:
+        try:
+            watch_path = str(s.path)
+            i.add_watch(watch_path)
+            path_to_game[watch_path] = s
+        except Exception:
+            pass
+
+    try:
+        for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            if "IN_CLOSE_WRITE" in type_names or "IN_MOVED_TO" in type_names:
+                game = path_to_game.get(path)
+                if game:
+                    sz = dir_size(game.path)
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    print(f"  {C.DIM}[{ts}]{C.RESET} {C.BGREEN}{game.game_name}{C.RESET} "
+                          f"saved ({human_size(sz)}, {filename})")
+                    notify(f"{game.game_name} Saved",
+                           f"Save detected: {filename} ({human_size(sz)})")
+
+                    if auto_backup:
+                        # Create a quick incremental backup
+                        class FakeArgs:
+                            json = False
+                            game = game.game_name
+                            auto = True
+                        cmd_backup(FakeArgs())
+    except KeyboardInterrupt:
+        print(f"\n  {C.DIM}Watch mode stopped.{C.RESET}\n")
+
+
+def _watch_polling(args):
+    """Fallback polling-based watch mode."""
+    saves = discover_all_saves()
+    if not saves:
+        print(f"  {C.YELLOW}No save locations found to watch.{C.RESET}\n")
+        return
+
+    config = load_config()
+    auto_backup = config.get("auto_backup", False)
+
+    print(f"  {C.DIM}Monitoring {len(saves)} save locations (polling every 10s)...{C.RESET}")
+    print(f"  {C.DIM}Press Ctrl+C to stop{C.RESET}\n")
+
+    # Record initial state
+    last_state = {}
+    for s in saves:
+        mt = dir_mtime(s.path)
+        last_state[str(s.path)] = mt
+
+    try:
+        while True:
+            time.sleep(10)
+            for s in saves:
+                mt = dir_mtime(s.path)
+                key = str(s.path)
+                if mt and last_state.get(key) and mt > last_state[key]:
+                    sz = dir_size(s.path)
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    print(f"  {C.DIM}[{ts}]{C.RESET} {C.BGREEN}{s.game_name}{C.RESET} "
+                          f"saved ({human_size(sz)})")
+                    notify(f"{s.game_name} Saved", f"Save change detected ({human_size(sz)})")
+
+                    if auto_backup:
+                        class FakeArgs:
+                            json = False
+                            game = s.game_name
+                            auto = True
+                        cmd_backup(FakeArgs())
+
+                last_state[key] = mt
+    except KeyboardInterrupt:
+        print(f"\n  {C.DIM}Watch mode stopped.{C.RESET}\n")
+
+
+def cmd_cleanup(args):
+    """Find and manage save storage."""
+    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager — Cleanup{C.RESET}\n")
+
+    saves = discover_all_saves()
+    if not saves:
+        print(f"  {C.YELLOW}No saves found.{C.RESET}\n")
+        return
+
+    total_size = sum(s.size for s in saves)
+    print(f"  {C.BOLD}Total save game disk usage: {human_size(total_size)}{C.RESET}\n")
+
+    # Find duplicate saves (same game, multiple locations)
+    by_game = {}
+    for s in saves:
+        by_game.setdefault(s.game_name, []).append(s)
+
+    duplicates = {k: v for k, v in by_game.items() if len(v) > 1}
+    if duplicates:
+        print(f"  {C.BYELLOW}Duplicate saves (same game, multiple locations):{C.RESET}\n")
+        for name, locs in duplicates.items():
+            print(f"    {C.WHITE}{name}{C.RESET}")
+            for loc in locs:
+                tc = time_color(loc.mtime) if loc.mtime else C.DIM
+                age = human_time(loc.mtime) if loc.mtime else "unknown"
+                print(f"      {loc.source:<18} {human_size(loc.size):>10}  "
+                      f"{tc}{age}{C.RESET}  {C.DIM}{loc.path}{C.RESET}")
+            dup_size = sum(l.size for l in locs[1:])  # All but newest
+            print(f"      {C.DIM}Potential savings: {human_size(dup_size)}{C.RESET}")
+            print()
+    else:
+        print(f"  {C.GREEN}No duplicate saves found.{C.RESET}\n")
+
+    # Find orphaned saves (game not installed)
+    orphaned = []
+    steam_roots = find_steam_roots()
+    installed_appids = set()
+    for sr in steam_roots:
+        apps_dir = sr / "steamapps"
+        if apps_dir.exists():
+            try:
+                for f in apps_dir.iterdir():
+                    if f.name.startswith("appmanifest_") and f.name.endswith(".acf"):
+                        aid = f.name.replace("appmanifest_", "").replace(".acf", "")
+                        installed_appids.add(int(aid))
+            except OSError:
+                pass
+
+    for s in saves:
+        if s.appid > 0 and s.appid not in installed_appids:
+            orphaned.append(s)
+
+    if orphaned:
+        orphan_size = sum(s.size for s in orphaned)
+        print(f"  {C.BYELLOW}Orphaned saves (game not installed):{C.RESET}\n")
+        for s in orphaned:
+            tc = time_color(s.mtime) if s.mtime else C.DIM
+            age = human_time(s.mtime) if s.mtime else "unknown"
+            print(f"    {C.WHITE}{s.game_name:<30}{C.RESET} {human_size(s.size):>10}  "
+                  f"{tc}{age}{C.RESET}")
+        print(f"\n    {C.DIM}Total orphaned: {human_size(orphan_size)}{C.RESET}")
+        print(f"    {C.DIM}Consider backing up then removing these saves.{C.RESET}\n")
+    else:
+        print(f"  {C.GREEN}No orphaned saves found.{C.RESET}\n")
+
+    # Find old saves
+    old_saves = [s for s in saves if s.mtime and (datetime.now() - s.mtime) > timedelta(days=90)]
+    if old_saves:
+        old_size = sum(s.size for s in old_saves)
+        print(f"  {C.DIM}Old saves (>90 days): {len(old_saves)} games, "
+              f"{human_size(old_size)}{C.RESET}")
+
+    # Backup size
+    if BACKUP_DIR.exists():
+        backup_size = dir_size(BACKUP_DIR)
+        backups = [d for d in BACKUP_DIR.iterdir() if d.is_dir() and d.name.startswith("saves-")]
+        print(f"  {C.DIM}Backup storage: {human_size(backup_size)} "
+              f"({len(backups)} backups){C.RESET}")
+
+    print()
+
+    if args.json:
+        result = {
+            "total_size": total_size,
+            "games": len(by_game),
+            "duplicates": len(duplicates),
+            "orphaned": len(orphaned),
+            "old_saves": len(old_saves),
+        }
+        print(json.dumps(result, indent=2))
+
+
+# ─── CLI ─────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="hubos-save-manager",
+        description="HubOS Save Game Manager — Find, backup, and restore saves across all launchers",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""commands:
+  find      Scan system for all save game locations
+  list      Show discovered saves in a table
+  backup    Backup save games (all or specific game)
+  restore   Restore saves from backup
+  sync      Sync saves to/from Hub cloud account
+  watch     Watch for save changes in real-time
+  cleanup   Find duplicates, orphans, and manage storage
+
+examples:
+  hubos-save-manager find
+  hubos-save-manager list
+  hubos-save-manager backup
+  hubos-save-manager backup "Elden Ring"
+  hubos-save-manager restore latest "Cyberpunk 2077"
+  hubos-save-manager watch
+  hubos-save-manager cleanup
+"""
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument("--json", action="store_true", help="Output in JSON format")
+
+    sub = parser.add_subparsers(dest="command")
+
+    # find
+    sub.add_parser("find", help="Scan for all save game locations")
+
+    # list
+    sub.add_parser("list", help="Show saves in a table")
+
+    # backup
+    p_backup = sub.add_parser("backup", help="Backup save games")
+    p_backup.add_argument("game", nargs="?", default=None, help="Specific game to backup")
+    p_backup.add_argument("--auto", action="store_true", help="Auto/scheduled backup mode")
+
+    # restore
+    p_restore = sub.add_parser("restore", help="Restore saves from backup")
+    p_restore.add_argument("backup", nargs="?", default=None, help="Backup date or 'latest'")
+    p_restore.add_argument("game", nargs="?", default=None, help="Specific game to restore")
+    p_restore.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+
+    # sync
+    p_sync = sub.add_parser("sync", help="Sync saves to/from Hub cloud")
+    p_sync.add_argument("direction", nargs="?", default="status",
+                        choices=["status", "upload", "download"],
+                        help="Sync direction")
+    p_sync.add_argument("--setup", action="store_true", help="Configure cloud sync")
+
+    # watch
+    sub.add_parser("watch", help="Watch for save changes in real-time")
+
+    # cleanup
+    sub.add_parser("cleanup", help="Manage save storage")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    commands = {
+        "find": cmd_find,
+        "list": cmd_list,
+        "backup": cmd_backup,
+        "restore": cmd_restore,
+        "sync": cmd_sync,
+        "watch": cmd_watch,
+        "cleanup": cmd_cleanup,
+    }
+
+    try:
+        commands[args.command](args)
+    except KeyboardInterrupt:
+        print(f"\n{C.DIM}  Interrupted.{C.RESET}\n")
+        sys.exit(130)
+    except Exception as e:
+        print(f"\n  {C.RED}Error: {e}{C.RESET}\n", file=sys.stderr)
+        if os.environ.get("DEBUG"):
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

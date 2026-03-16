@@ -78,6 +78,15 @@ COPY scripts/hubos-crash-recovery /tmp/hubos-build/bin/hubos-crash-recovery
 COPY scripts/hubos-download-mgr /tmp/hubos-build/bin/hubos-download-mgr
 COPY scripts/hubos-games /tmp/hubos-build/bin/hubos-games
 COPY scripts/hubos-thermal /tmp/hubos-build/bin/hubos-thermal
+COPY scripts/hubos-anticheat-tracker /tmp/hubos-build/bin/hubos-anticheat-tracker
+COPY scripts/hubos-mod-manager /tmp/hubos-build/bin/hubos-mod-manager
+COPY scripts/hubos-nxm-handler.desktop /tmp/hubos-build/desktop/hubos-nxm-handler.desktop
+COPY scripts/hubos-hdr /tmp/hubos-build/bin/hubos-hdr
+COPY scripts/hubos-flatpak-fix /tmp/hubos-build/bin/hubos-flatpak-fix
+COPY scripts/hubos-update-guard /tmp/hubos-build/bin/hubos-update-guard
+COPY scripts/hubos-update-guard-hook.sh /tmp/hubos-build/lib/hubos-update-guard-hook.sh
+COPY scripts/hubos-save-manager /tmp/hubos-build/bin/hubos-save-manager
+COPY scripts/hubos-nvidia-wayland /tmp/hubos-build/bin/hubos-nvidia-wayland
 COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
 COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
 COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
@@ -274,6 +283,14 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-download-mgr /usr/bin/hubos-download-mgr \
     && install -m 755 /tmp/hubos-build/bin/hubos-games /usr/bin/hubos-games \
     && install -m 755 /tmp/hubos-build/bin/hubos-thermal /usr/bin/hubos-thermal \
+    && install -m 755 /tmp/hubos-build/bin/hubos-anticheat-tracker /usr/bin/hubos-anticheat-tracker \
+    && install -m 755 /tmp/hubos-build/bin/hubos-mod-manager /usr/bin/hubos-mod-manager \
+    && cp /tmp/hubos-build/desktop/hubos-nxm-handler.desktop /usr/share/applications/ \
+    && install -m 755 /tmp/hubos-build/bin/hubos-hdr /usr/bin/hubos-hdr \
+    && install -m 755 /tmp/hubos-build/bin/hubos-flatpak-fix /usr/bin/hubos-flatpak-fix \
+    && install -m 755 /tmp/hubos-build/bin/hubos-update-guard /usr/bin/hubos-update-guard \
+    && install -m 755 /tmp/hubos-build/bin/hubos-save-manager /usr/bin/hubos-save-manager \
+    && install -m 755 /tmp/hubos-build/bin/hubos-nvidia-wayland /usr/bin/hubos-nvidia-wayland \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/hubos \
@@ -284,6 +301,7 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/lib/hubos-obs-setup.sh /usr/lib/hubos/ \
     && install -m 755 /tmp/hubos-build/lib/gamemode-start.sh /usr/lib/hubos/ \
     && install -m 755 /tmp/hubos-build/lib/gamemode-end.sh /usr/lib/hubos/ \
+    && install -m 755 /tmp/hubos-build/lib/hubos-update-guard-hook.sh /usr/lib/hubos/ \
     \
     # ── User systemd services ── \
     && mkdir -p /etc/skel/.config/systemd/user/default.target.wants \
@@ -310,6 +328,9 @@ RUN rpm-ostree install \
     && ln -sf ../hubos-perks-claim.service /etc/skel/.config/systemd/user/default.target.wants/hubos-perks-claim.service \
     && cp /tmp/hubos-build/systemd-user/hubos-smart-launch.service /etc/skel/.config/systemd/user/ \
     && ln -sf ../hubos-smart-launch.service /etc/skel/.config/systemd/user/default.target.wants/hubos-smart-launch.service \
+    && cp /tmp/hubos-build/systemd-user/hubos-anticheat-tracker.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-anticheat-tracker.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-anticheat-tracker.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-anticheat-tracker.timer \
     && cp /tmp/hubos-build/systemd-user/hubos-wallpaper.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/hubos-build/systemd-user/hubos-wallpaper.timer /etc/skel/.config/systemd/user/ \
     && ln -sf ../hubos-wallpaper.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-wallpaper.timer \
