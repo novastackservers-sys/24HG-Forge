@@ -1,0 +1,1131 @@
+#!/usr/bin/env python3
+"""
+HubOS Session Summary — Post-game stats, restoration, and session tracking.
+
+Shows a beautiful session summary notification when you close a game. Parses
+MangoHud CSV logs for FPS/frametime/temperature stats, restores desktop state,
+saves session history as JSON, and optionally syncs to the 24HG Hub.
+
+Commands:
+  show [appid]       Show session summary (called by smart-launch on game exit)
+  last               Show the last session summary in the terminal
+  history            Show all sessions in a table (--game, --week, --month, --sort)
+  stats              Aggregate statistics (playtime, trends, best sessions)
+  help               Show this help text
+
+Data: ~/.local/share/hubos/sessions/<timestamp>_<appid>.json
+"""
+
+import csv
+import io
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+import urllib.error
+from datetime import datetime, date, timedelta
+from pathlib import Path
+
+# ── Configuration ──
+
+DATA_DIR = os.path.expanduser("~/.local/share/hubos")
+SESSION_DIR = os.path.join(DATA_DIR, "sessions")
+STATE_DIR = os.path.join(DATA_DIR, "session-state")
+GAME_TIMER_FILE = os.path.join(DATA_DIR, "game-timer.json")
+HUB_TOKEN_FILE = os.path.expanduser("~/.config/hubos/hub-token")
+HUB_API_URL = "https://api.24hgaming.com/api/hubos/session"
+STEAM_APPS_COMMON = os.path.expanduser("~/.local/share/Steam/steamapps/common")
+STEAM_APP_INFO = os.path.expanduser("~/.local/share/Steam/appcache/appinfo.vdf")
+
+# MangoHud log location (set by smart-launch before game starts)
+MANGOHUD_LOG_DIR = os.path.expanduser("~/.local/share/MangoHud")
+
+# ── Colors ──
+
+class C:
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    RESET   = "\033[0m"
+    RED     = "\033[31m"
+    GREEN   = "\033[32m"
+    YELLOW  = "\033[33m"
+    BLUE    = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN    = "\033[36m"
+    WHITE   = "\033[37m"
+    BG_RED  = "\033[41m"
+
+def strip_ansi(text: str) -> str:
+    return re.sub(r'\033\[[0-9;]*m', '', text)
+
+def visible_len(text: str) -> int:
+    return len(strip_ansi(text))
+
+# ── Helpers ──
+
+def ensure_dirs():
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    os.makedirs(STATE_DIR, exist_ok=True)
+
+def format_duration(seconds: int) -> str:
+    """Format seconds into human-readable duration."""
+    if seconds < 60:
+        return f"{seconds}s"
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    if hours > 0:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m"
+
+def format_duration_short(seconds: int) -> str:
+    """Compact duration for table display."""
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m"
+
+def percentile(data: list, pct: float) -> float:
+    """Calculate percentile without numpy. Uses linear interpolation."""
+    if not data:
+        return 0.0
+    sorted_data = sorted(data)
+    n = len(sorted_data)
+    if n == 1:
+        return sorted_data[0]
+    k = (n - 1) * (pct / 100.0)
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return sorted_data[int(k)]
+    return sorted_data[f] * (c - k) + sorted_data[c] * (k - f)
+
+def get_game_name(appid: str) -> str:
+    """Resolve Steam appid to game name. Falls back to appid."""
+    well_known = {
+        "252490": "Rust", "730": "CS2", "440": "TF2", "570": "Dota 2",
+        "578080": "PUBG", "1172470": "Apex Legends", "1085660": "Destiny 2",
+        "892970": "Valheim", "1174180": "Red Dead Redemption 2",
+        "413150": "Stardew Valley", "322170": "Geometry Dash",
+        "1245620": "Elden Ring", "1091500": "Cyberpunk 2077",
+        "275850": "No Man's Sky", "346110": "ARK: Survival Evolved",
+        "381210": "Dead by Daylight", "271590": "GTA V",
+        "230410": "Warframe", "105600": "Terraria", "238960": "Path of Exile",
+        "221100": "DayZ", "4000": "Garry's Mod", "236390": "War Thunder",
+        "359550": "Rainbow Six Siege", "1938090": "Call of Duty",
+        "553850": "Helldivers 2", "2358720": "Black Myth: Wukong",
+        "1086940": "Baldur's Gate 3", "814380": "Sekiro",
+    }
+    if appid in well_known:
+        return well_known[appid]
+    # Try reading from game-timer data
+    try:
+        with open(GAME_TIMER_FILE) as f:
+            data = json.load(f)
+        for game in data.get("games", {}).values():
+            if str(game.get("appid")) == appid:
+                return game.get("name", appid)
+    except (OSError, json.JSONDecodeError, KeyError):
+        pass
+    # Try finding Steam library folder name
+    try:
+        manifest = os.path.expanduser(
+            f"~/.local/share/Steam/steamapps/appmanifest_{appid}.acf"
+        )
+        if os.path.exists(manifest):
+            with open(manifest) as f:
+                for line in f:
+                    if '"name"' in line:
+                        return line.split('"')[3]
+    except (OSError, IndexError):
+        pass
+    return f"App {appid}"
+
+def load_hub_token() -> str:
+    """Load hub API token if available."""
+    try:
+        return Path(HUB_TOKEN_FILE).read_text().strip()
+    except OSError:
+        return ""
+
+def hub_sync(session_data: dict):
+    """Sync session to 24HG Hub. Graceful failure."""
+    token = load_hub_token()
+    if not token:
+        return
+    try:
+        payload = json.dumps(session_data).encode()
+        req = urllib.request.Request(
+            HUB_API_URL,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except (urllib.error.URLError, OSError):
+        pass  # Offline or hub unreachable — that's fine
+
+def send_notification(summary: str, body: str = "", actions: list = None,
+                      icon: str = "input-gaming", urgency: str = "normal"):
+    """Send desktop notification via notify-send."""
+    cmd = ["notify-send", "--app-name=HubOS", f"--icon={icon}",
+           f"--urgency={urgency}"]
+    if actions:
+        for action in actions:
+            cmd.extend(["--action", action])
+    cmd.extend([summary, body])
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=5)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+# ── MangoHud CSV Parsing ──
+
+def find_mangohud_log(appid: str) -> str:
+    """Find the most recent MangoHud log for this appid."""
+    # Check environment variable first
+    env_log = os.environ.get("MANGOHUD_LOG_FILE")
+    if env_log and os.path.exists(env_log):
+        return env_log
+    # Search MangoHud log directory
+    if not os.path.isdir(MANGOHUD_LOG_DIR):
+        return ""
+    candidates = []
+    for name in os.listdir(MANGOHUD_LOG_DIR):
+        if not name.endswith(".csv"):
+            continue
+        fpath = os.path.join(MANGOHUD_LOG_DIR, name)
+        candidates.append((os.path.getmtime(fpath), fpath))
+    if not candidates:
+        return ""
+    # Return most recent CSV modified in the last hour
+    candidates.sort(reverse=True)
+    cutoff = time.time() - 3600
+    for mtime, fpath in candidates:
+        if mtime > cutoff:
+            return fpath
+    return ""
+
+def parse_mangohud_csv(filepath: str) -> dict:
+    """Parse MangoHud CSV log and extract performance statistics.
+
+    MangoHud CSV columns typically include:
+    fps, frametime, cpu_load, gpu_load, cpu_temp, gpu_temp, ram_vram,
+    gpu_core_clock, gpu_mem_clock, gpu_power, ...
+
+    Returns dict with fps, frametime, temp, utilization, and ram stats.
+    """
+    result = {
+        "fps": [], "frametime": [], "cpu_load": [], "gpu_load": [],
+        "cpu_temp": [], "gpu_temp": [], "ram_usage": [],
+    }
+    try:
+        with open(filepath, newline="") as f:
+            content = f.read()
+    except OSError:
+        return result
+
+    # MangoHud sometimes has comment lines or metadata before the CSV header
+    lines = content.strip().splitlines()
+    csv_start = 0
+    for i, line in enumerate(lines):
+        if "fps" in line.lower() and "," in line:
+            csv_start = i
+            break
+
+    csv_text = "\n".join(lines[csv_start:])
+    reader = csv.DictReader(io.StringIO(csv_text))
+
+    # Normalize column names (MangoHud uses varying cases/formats)
+    col_map = {}
+
+    for row in reader:
+        # Build column map on first row
+        if not col_map:
+            lower_keys = {k.strip().lower(): k for k in row.keys()}
+            col_map = {
+                "fps": lower_keys.get("fps", ""),
+                "frametime": lower_keys.get("frametime", lower_keys.get("frametime_ms", "")),
+                "cpu_load": lower_keys.get("cpu_load", lower_keys.get("cpu_usage", "")),
+                "gpu_load": lower_keys.get("gpu_load", lower_keys.get("gpu_usage", "")),
+                "cpu_temp": lower_keys.get("cpu_temp", lower_keys.get("cpu_temperature", "")),
+                "gpu_temp": lower_keys.get("gpu_temp", lower_keys.get("gpu_temperature", "")),
+                "ram_usage": lower_keys.get("ram_vram", lower_keys.get("ram_usage",
+                             lower_keys.get("ram", ""))),
+            }
+
+        for key, col in col_map.items():
+            if not col:
+                continue
+            try:
+                val = float(row.get(col, "").strip())
+                if val > 0:  # Skip zero/negative readings
+                    result[key].append(val)
+            except (ValueError, AttributeError):
+                continue
+
+    return result
+
+def compute_stats(raw: dict) -> dict:
+    """Compute summary statistics from raw MangoHud data."""
+    stats = {}
+
+    fps = raw.get("fps", [])
+    if fps:
+        stats["fps"] = {
+            "avg": round(sum(fps) / len(fps)),
+            "min": round(min(fps)),
+            "max": round(max(fps)),
+            "p1": round(percentile(fps, 1)),
+            "p01": round(percentile(fps, 0.1)),
+        }
+
+    ft = raw.get("frametime", [])
+    if ft:
+        stats["frametime_99th_ms"] = round(percentile(ft, 99), 1)
+
+    gpu_temp = raw.get("gpu_temp", [])
+    cpu_temp = raw.get("cpu_temp", [])
+    stats["temp"] = {}
+    if gpu_temp:
+        stats["temp"]["gpu_peak"] = round(max(gpu_temp))
+    if cpu_temp:
+        stats["temp"]["cpu_peak"] = round(max(cpu_temp))
+
+    gpu_load = raw.get("gpu_load", [])
+    cpu_load = raw.get("cpu_load", [])
+    stats["utilization"] = {}
+    if gpu_load:
+        stats["utilization"]["gpu_avg"] = round(sum(gpu_load) / len(gpu_load))
+    if cpu_load:
+        stats["utilization"]["cpu_avg"] = round(sum(cpu_load) / len(cpu_load))
+
+    ram = raw.get("ram_usage", [])
+    if ram:
+        # MangoHud reports RAM in MB
+        stats["ram_peak_gb"] = round(max(ram) / 1024, 1)
+
+    return stats
+
+def get_temps_from_sensors() -> dict:
+    """Fallback: read peak temps from lm-sensors."""
+    temps = {}
+    try:
+        out = subprocess.run(["sensors", "-j"], capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            data = json.loads(out.stdout)
+            gpu_temps = []
+            cpu_temps = []
+            for chip, readings in data.items():
+                chip_lower = chip.lower()
+                for label, values in readings.items():
+                    if not isinstance(values, dict):
+                        continue
+                    for k, v in values.items():
+                        if "input" in k and isinstance(v, (int, float)):
+                            if "gpu" in chip_lower or "amd" in chip_lower.split("-")[0]:
+                                gpu_temps.append(v)
+                            elif "cpu" in label.lower() or "core" in label.lower() or "tctl" in label.lower():
+                                cpu_temps.append(v)
+            if gpu_temps:
+                temps["gpu_peak"] = round(max(gpu_temps))
+            if cpu_temps:
+                temps["cpu_peak"] = round(max(cpu_temps))
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+        pass
+    return temps
+
+# ── Desktop Restoration ──
+
+def load_pre_game_state() -> dict:
+    """Load desktop state saved by smart-launch before game started."""
+    state_file = os.path.join(STATE_DIR, "pre-game.json")
+    try:
+        with open(state_file) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+def restore_desktop(state: dict) -> list:
+    """Restore desktop environment after game exit. Returns list of actions taken."""
+    actions = []
+
+    # Restore KWin compositor
+    if state.get("compositor_suspended"):
+        try:
+            subprocess.run(
+                ["dbus-send", "--session", "--dest=org.kde.KWin",
+                 "--type=method_call", "/Compositor",
+                 "org.kde.kwin.Compositing.resume"],
+                capture_output=True, timeout=5
+            )
+            actions.append("compositor_resumed")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Restore screen resolution
+    saved_res = state.get("resolution")
+    if saved_res:
+        try:
+            out = subprocess.run(["xrandr", "--current"], capture_output=True,
+                                 text=True, timeout=5)
+            current = ""
+            for line in out.stdout.splitlines():
+                if " connected" in line and "*" in line:
+                    m = re.search(r'(\d+x\d+)', line)
+                    if m:
+                        current = m.group(1)
+            if current and current != saved_res:
+                subprocess.run(
+                    ["xrandr", "--output", state.get("display", "eDP-1"),
+                     "--mode", saved_res],
+                    capture_output=True, timeout=5
+                )
+                actions.append(f"resolution_restored:{saved_res}")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Restore audio default sink
+    saved_sink = state.get("audio_sink")
+    if saved_sink:
+        try:
+            out = subprocess.run(["pactl", "get-default-sink"],
+                                 capture_output=True, text=True, timeout=5)
+            if out.stdout.strip() != saved_sink:
+                subprocess.run(["pactl", "set-default-sink", saved_sink],
+                               capture_output=True, timeout=5)
+                actions.append("audio_sink_restored")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Resume paused downloads (Steam)
+    if state.get("downloads_paused"):
+        # Steam doesn't have a great CLI for this, but we can try
+        try:
+            subprocess.run(
+                ["dbus-send", "--session", "--dest=com.steampowered.App",
+                 "--type=method_call", "/App",
+                 "com.steampowered.App.ResumeDownloads"],
+                capture_output=True, timeout=5
+            )
+            actions.append("downloads_resumed")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Restore performance profile to balanced
+    if state.get("gaming_profile"):
+        try:
+            # Try powerprofilesctl (GNOME/KDE)
+            subprocess.run(
+                ["powerprofilesctl", "set", "balanced"],
+                capture_output=True, timeout=5
+            )
+            actions.append("profile_balanced")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Clean up state file
+    state_file = os.path.join(STATE_DIR, "pre-game.json")
+    try:
+        os.remove(state_file)
+    except OSError:
+        pass
+
+    return actions
+
+# ── Session Detection ──
+
+def detect_session_info(appid: str) -> dict:
+    """Detect session timing and exit status from process/timer data."""
+    info = {
+        "start": None,
+        "end": None,
+        "duration_seconds": 0,
+        "clean_exit": True,
+        "exit_code": 0,
+    }
+
+    # Try game-timer data first
+    try:
+        with open(GAME_TIMER_FILE) as f:
+            timer_data = json.load(f)
+        active = timer_data.get("active_session")
+        if active and str(active.get("appid")) == appid:
+            info["start"] = active.get("start")
+            info["end"] = datetime.now().isoformat(timespec="seconds")
+            start_dt = datetime.fromisoformat(info["start"])
+            end_dt = datetime.fromisoformat(info["end"])
+            info["duration_seconds"] = int((end_dt - start_dt).total_seconds())
+    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+        pass
+
+    # Try state file for start time
+    if not info["start"]:
+        state_file = os.path.join(STATE_DIR, "pre-game.json")
+        try:
+            with open(state_file) as f:
+                state = json.load(f)
+            info["start"] = state.get("start_time")
+            if info["start"]:
+                start_dt = datetime.fromisoformat(info["start"])
+                info["end"] = datetime.now().isoformat(timespec="seconds")
+                info["duration_seconds"] = int(
+                    (datetime.now() - start_dt).total_seconds()
+                )
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+
+    # Try /proc for game process timing (look for recently exited processes)
+    if not info["start"]:
+        info["end"] = datetime.now().isoformat(timespec="seconds")
+        # Check environment for timing hints
+        env_start = os.environ.get("HUBOS_GAME_START")
+        if env_start:
+            try:
+                start_ts = float(env_start)
+                info["start"] = datetime.fromtimestamp(start_ts).isoformat(timespec="seconds")
+                info["duration_seconds"] = int(time.time() - start_ts)
+            except (ValueError, OSError):
+                pass
+
+    # If we still have no start time, use a minimal default
+    if not info["start"]:
+        info["start"] = datetime.now().isoformat(timespec="seconds")
+        info["end"] = info["start"]
+        info["duration_seconds"] = 0
+
+    # Check exit status from environment (set by smart-launch wrapper)
+    exit_env = os.environ.get("HUBOS_GAME_EXIT_CODE")
+    if exit_env:
+        try:
+            code = int(exit_env)
+            info["exit_code"] = code
+            if code != 0:
+                info["clean_exit"] = False
+        except ValueError:
+            pass
+
+    # Check for segfault in dmesg (last 60 seconds)
+    try:
+        out = subprocess.run(
+            ["journalctl", "--no-pager", "-k", "--since", "1 min ago",
+             "--grep", "segfault"],
+            capture_output=True, text=True, timeout=5
+        )
+        if out.stdout.strip():
+            info["clean_exit"] = False
+            info["crash_type"] = "segfault"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return info
+
+# ── Session Summary Display ──
+
+def render_terminal_summary(session: dict) -> str:
+    """Render a beautiful terminal summary with box-drawing characters."""
+    game = session.get("game", "Unknown")
+    duration = format_duration(session.get("duration_seconds", 0))
+    clean = session.get("clean_exit", True)
+    fps = session.get("fps", {})
+    temp = session.get("temp", {})
+    util = session.get("utilization", {})
+    ram = session.get("ram_peak_gb")
+    ft99 = session.get("frametime_99th_ms")
+    optimizations = session.get("optimizations", [])
+
+    lines = []
+
+    # Header
+    if clean:
+        header = f"  Session Complete -- {game}"
+        icon = ">>>"
+    else:
+        crash_type = session.get("crash_type", "crash")
+        header = f"  Session Ended (CRASHED) -- {game}"
+        icon = "!!!"
+
+    # Build content lines
+    content = []
+    content.append(f"  {C.CYAN}>>>{C.RESET}  {C.BOLD}{duration}{C.RESET} played")
+
+    if fps:
+        fps_line = f"  {C.GREEN}>>>{C.RESET}  "
+        fps_line += f"Avg {C.BOLD}{fps.get('avg', '?')}{C.RESET} FPS"
+        if fps.get("p1"):
+            fps_line += f" | 1% low: {C.YELLOW}{fps['p1']}{C.RESET}"
+        if fps.get("p01"):
+            fps_line += f" | 0.1% low: {fps['p01']}"
+        if fps.get("max"):
+            fps_line += f" | Max: {C.GREEN}{fps['max']}{C.RESET}"
+        content.append(fps_line)
+
+    if ft99:
+        content.append(f"  {C.MAGENTA}>>>{C.RESET}  99th %ile frame time: {C.BOLD}{ft99}ms{C.RESET}")
+
+    if temp:
+        temp_line = f"  {C.RED}>>>{C.RESET}  "
+        parts = []
+        if temp.get("gpu_peak"):
+            t = temp["gpu_peak"]
+            color = C.RED if t >= 85 else C.YELLOW if t >= 75 else C.GREEN
+            parts.append(f"Peak GPU: {color}{t} C{C.RESET}")
+        if temp.get("cpu_peak"):
+            t = temp["cpu_peak"]
+            color = C.RED if t >= 90 else C.YELLOW if t >= 80 else C.GREEN
+            parts.append(f"Peak CPU: {color}{t} C{C.RESET}")
+        if parts:
+            content.append(temp_line + " | ".join(parts))
+
+    if util:
+        util_line = f"  {C.BLUE}>>>{C.RESET}  "
+        parts = []
+        if util.get("gpu_avg"):
+            parts.append(f"GPU avg: {util['gpu_avg']}%")
+        if util.get("cpu_avg"):
+            parts.append(f"CPU avg: {util['cpu_avg']}%")
+        if parts:
+            content.append(util_line + " | ".join(parts))
+
+    if ram:
+        content.append(f"  {C.MAGENTA}>>>{C.RESET}  Peak RAM: {C.BOLD}{ram} GB{C.RESET}")
+
+    if not clean:
+        appid = session.get("appid", "")
+        content.append("")
+        content.append(f"  {C.RED}{C.BOLD}Game exited abnormally.{C.RESET}")
+        if appid:
+            content.append(
+                f"  Run: {C.CYAN}hubos-crash-fix diagnose {appid}{C.RESET}"
+            )
+
+    if optimizations:
+        opt_labels = {
+            "gaming_profile": "gaming profile",
+            "compositor_suspended": "compositor off",
+            "downloads_paused": "downloads paused",
+        }
+        opt_str = ", ".join(opt_labels.get(o, o) for o in optimizations)
+        content.append(f"  {C.DIM}Optimizations: {opt_str}{C.RESET}")
+
+    # Calculate box width
+    max_visible = 0
+    for line in content:
+        vl = visible_len(line)
+        if vl > max_visible:
+            max_visible = vl
+    # Header width
+    header_vl = visible_len(header)
+    if header_vl > max_visible:
+        max_visible = header_vl
+
+    box_width = max(max_visible + 4, 40)
+
+    # Render box
+    top_bar = "+" + "-" * (box_width - 2) + "+"
+    sep_bar = "|" + "-" * (box_width - 2) + "|"
+    bot_bar = "+" + "-" * (box_width - 2) + "+"
+
+    lines.append("")
+    if clean:
+        lines.append(f"  {C.GREEN}{top_bar}{C.RESET}")
+    else:
+        lines.append(f"  {C.RED}{top_bar}{C.RESET}")
+
+    # Header line
+    pad = box_width - 4 - visible_len(header)
+    color = C.GREEN if clean else C.RED
+    lines.append(f"  {color}|{C.RESET} {C.BOLD}{header}{C.RESET}{' ' * max(pad, 0)} {color}|{C.RESET}")
+    lines.append(f"  {color}{sep_bar}{C.RESET}")
+
+    # Content lines
+    for cline in content:
+        pad = box_width - 4 - visible_len(cline)
+        lines.append(f"  {color}|{C.RESET} {cline}{' ' * max(pad, 0)} {color}|{C.RESET}")
+
+    lines.append(f"  {color}{bot_bar}{C.RESET}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+def render_notification_line(session: dict) -> tuple:
+    """Return (summary, body) for desktop notification."""
+    game = session.get("game", "Unknown")
+    duration = format_duration(session.get("duration_seconds", 0))
+    fps = session.get("fps", {})
+    temp = session.get("temp", {})
+    clean = session.get("clean_exit", True)
+
+    if not clean:
+        summary = f"{game} crashed after {duration}"
+        appid = session.get("appid", "")
+        body = f"Run: hubos-crash-fix diagnose {appid}" if appid else "Check logs for details"
+        return summary, body
+
+    parts = [duration]
+    if fps.get("avg"):
+        parts.append(f"Avg {fps['avg']} FPS")
+    if temp.get("gpu_peak"):
+        parts.append(f"Peak {temp['gpu_peak']}C")
+
+    summary = f"{game} -- " + " | ".join(parts)
+    body = ""
+    if fps.get("p1"):
+        body = f"1% low: {fps['p1']} FPS"
+    return summary, body
+
+# ── Session Storage ──
+
+def save_session(session: dict) -> str:
+    """Save session data to JSON file. Returns the file path."""
+    ensure_dirs()
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    appid = session.get("appid", "unknown")
+    filename = f"{ts}_{appid}.json"
+    filepath = os.path.join(SESSION_DIR, filename)
+    with open(filepath, "w") as f:
+        json.dump(session, f, indent=2)
+    return filepath
+
+def load_all_sessions() -> list:
+    """Load all session JSON files, sorted by start time descending."""
+    sessions = []
+    if not os.path.isdir(SESSION_DIR):
+        return sessions
+    for name in os.listdir(SESSION_DIR):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(SESSION_DIR, name)) as f:
+                data = json.load(f)
+            data["_file"] = name
+            sessions.append(data)
+        except (OSError, json.JSONDecodeError):
+            continue
+    sessions.sort(key=lambda s: s.get("start", ""), reverse=True)
+    return sessions
+
+def load_last_session() -> dict:
+    """Load the most recent session."""
+    sessions = load_all_sessions()
+    return sessions[0] if sessions else {}
+
+# ── Commands ──
+
+def cmd_show(args: list):
+    """Show session summary for a just-ended game."""
+    appid = args[0] if args else os.environ.get("SteamAppId", "")
+    if not appid:
+        print(f"{C.RED}Error:{C.RESET} No appid provided. Usage: hubos-session-summary show <appid>")
+        sys.exit(1)
+
+    game_name = get_game_name(appid)
+
+    # Detect session timing and exit status
+    session_info = detect_session_info(appid)
+
+    # Parse MangoHud log
+    mangohud_log = find_mangohud_log(appid)
+    perf_stats = {}
+    if mangohud_log:
+        raw = parse_mangohud_csv(mangohud_log)
+        perf_stats = compute_stats(raw)
+
+    # Fallback temperatures from sensors
+    if not perf_stats.get("temp"):
+        perf_stats["temp"] = get_temps_from_sensors()
+
+    # Restore desktop state
+    pre_state = load_pre_game_state()
+    restorations = restore_desktop(pre_state)
+    optimizations = pre_state.get("optimizations", [])
+
+    # Build session record
+    session = {
+        "game": game_name,
+        "appid": appid,
+        "start": session_info["start"],
+        "end": session_info["end"],
+        "duration_seconds": session_info["duration_seconds"],
+        "clean_exit": session_info["clean_exit"],
+    }
+    if session_info.get("crash_type"):
+        session["crash_type"] = session_info["crash_type"]
+    if perf_stats.get("fps"):
+        session["fps"] = perf_stats["fps"]
+    if perf_stats.get("frametime_99th_ms"):
+        session["frametime_99th_ms"] = perf_stats["frametime_99th_ms"]
+    if perf_stats.get("temp"):
+        session["temp"] = perf_stats["temp"]
+    if perf_stats.get("utilization"):
+        session["utilization"] = perf_stats["utilization"]
+    if perf_stats.get("ram_peak_gb"):
+        session["ram_peak_gb"] = perf_stats["ram_peak_gb"]
+    if optimizations:
+        session["optimizations"] = optimizations
+    if restorations:
+        session["restorations"] = restorations
+
+    # Save session
+    filepath = save_session(session)
+
+    # Terminal output
+    print(render_terminal_summary(session))
+
+    # Desktop notification
+    summary, body = render_notification_line(session)
+    if session["clean_exit"]:
+        send_notification(summary, body, icon="input-gaming")
+    else:
+        send_notification(
+            summary, body,
+            icon="dialog-error",
+            urgency="critical",
+            actions=[f"diagnose=Run hubos-crash-fix diagnose {appid}"],
+        )
+
+    # Sync to hub
+    hub_sync(session)
+
+    # Print restoration actions
+    if restorations:
+        restore_labels = {
+            "compositor_resumed": "Compositor resumed",
+            "audio_sink_restored": "Audio output restored",
+            "downloads_resumed": "Downloads resumed",
+            "profile_balanced": "Performance profile set to balanced",
+        }
+        print(f"  {C.DIM}Desktop restored:{C.RESET}")
+        for r in restorations:
+            label = restore_labels.get(r, r)
+            if r.startswith("resolution_restored:"):
+                label = f"Resolution restored to {r.split(':')[1]}"
+            print(f"    {C.GREEN}>{C.RESET} {label}")
+        print()
+
+    print(f"  {C.DIM}Session saved: {filepath}{C.RESET}")
+
+def cmd_last(_args: list):
+    """Show the last session summary."""
+    session = load_last_session()
+    if not session:
+        print(f"{C.YELLOW}No sessions recorded yet.{C.RESET}")
+        print(f"Sessions are created when you close a game.")
+        return
+    print(render_terminal_summary(session))
+
+def cmd_history(args: list):
+    """Show session history in a table."""
+    sessions = load_all_sessions()
+    if not sessions:
+        print(f"{C.YELLOW}No sessions recorded yet.{C.RESET}")
+        return
+
+    # Parse filters
+    game_filter = ""
+    date_filter = None
+    sort_col = "date"
+    i = 0
+    while i < len(args):
+        if args[i] == "--game" and i + 1 < len(args):
+            game_filter = args[i + 1].lower()
+            i += 2
+        elif args[i] == "--week":
+            date_filter = datetime.now() - timedelta(days=7)
+            i += 1
+        elif args[i] == "--month":
+            date_filter = datetime.now() - timedelta(days=30)
+            i += 1
+        elif args[i] == "--sort" and i + 1 < len(args):
+            sort_col = args[i + 1].lower()
+            i += 2
+        else:
+            i += 1
+
+    # Apply filters
+    filtered = []
+    for s in sessions:
+        if game_filter and game_filter not in s.get("game", "").lower():
+            continue
+        if date_filter:
+            try:
+                sdt = datetime.fromisoformat(s.get("start", ""))
+                if sdt < date_filter:
+                    continue
+            except ValueError:
+                continue
+        filtered.append(s)
+
+    if not filtered:
+        print(f"{C.YELLOW}No matching sessions found.{C.RESET}")
+        return
+
+    # Sort
+    sort_keys = {
+        "date": lambda s: s.get("start", ""),
+        "game": lambda s: s.get("game", "").lower(),
+        "duration": lambda s: s.get("duration_seconds", 0),
+        "fps": lambda s: s.get("fps", {}).get("avg", 0),
+        "temp": lambda s: max(
+            s.get("temp", {}).get("gpu_peak", 0),
+            s.get("temp", {}).get("cpu_peak", 0)
+        ),
+    }
+    key_fn = sort_keys.get(sort_col, sort_keys["date"])
+    reverse = sort_col != "game"
+    filtered.sort(key=key_fn, reverse=reverse)
+
+    # Render table
+    cols = [
+        ("Date", 12), ("Game", 24), ("Duration", 10),
+        ("Avg FPS", 9), ("Peak Temp", 10), ("Status", 8),
+    ]
+
+    # Header
+    header = ""
+    sep = ""
+    for name, width in cols:
+        header += f" {C.BOLD}{name:<{width}}{C.RESET}"
+        sep += " " + "-" * width
+
+    print()
+    print(f"  {C.CYAN}Session History{C.RESET}" +
+          (f" (game: {game_filter})" if game_filter else "") +
+          f"  [{len(filtered)} sessions]")
+    print()
+    print(f" {header}")
+    print(f" {sep}")
+
+    for s in filtered:
+        try:
+            dt = datetime.fromisoformat(s.get("start", ""))
+            date_str = dt.strftime("%Y-%m-%d")
+        except ValueError:
+            date_str = "?"
+        game = s.get("game", "?")
+        if len(game) > 22:
+            game = game[:21] + "."
+        dur = format_duration_short(s.get("duration_seconds", 0))
+        fps_avg = s.get("fps", {}).get("avg", "")
+        fps_str = str(fps_avg) if fps_avg else "-"
+        temp_gpu = s.get("temp", {}).get("gpu_peak", 0)
+        temp_cpu = s.get("temp", {}).get("cpu_peak", 0)
+        peak = max(temp_gpu, temp_cpu)
+        temp_str = f"{peak}C" if peak else "-"
+        clean = s.get("clean_exit", True)
+        status = f"{C.GREEN}OK{C.RESET}" if clean else f"{C.RED}CRASH{C.RESET}"
+
+        print(f"  {date_str:<12} {game:<24} {dur:<10} {fps_str:<9} {temp_str:<10} {status}")
+
+    # Summary
+    total_time = sum(s.get("duration_seconds", 0) for s in filtered)
+    print()
+    print(f"  {C.DIM}Total playtime: {format_duration(total_time)}{C.RESET}")
+    print()
+
+def cmd_stats(_args: list):
+    """Show aggregate statistics."""
+    sessions = load_all_sessions()
+    if not sessions:
+        print(f"{C.YELLOW}No sessions recorded yet.{C.RESET}")
+        return
+
+    now = datetime.now()
+    week_ago = now - timedelta(days=7)
+    month_ago = now - timedelta(days=30)
+
+    # Categorize sessions
+    all_time = sessions
+    this_week = []
+    this_month = []
+    for s in sessions:
+        try:
+            sdt = datetime.fromisoformat(s.get("start", ""))
+            if sdt >= week_ago:
+                this_week.append(s)
+            if sdt >= month_ago:
+                this_month.append(s)
+        except ValueError:
+            pass
+
+    def total_playtime(sess_list):
+        return sum(s.get("duration_seconds", 0) for s in sess_list)
+
+    def game_playtimes(sess_list):
+        games = {}
+        for s in sess_list:
+            g = s.get("game", "Unknown")
+            games[g] = games.get(g, 0) + s.get("duration_seconds", 0)
+        return sorted(games.items(), key=lambda x: x[1], reverse=True)
+
+    print()
+    print(f"  {C.CYAN}{C.BOLD}Session Statistics{C.RESET}")
+    print(f"  {'=' * 40}")
+    print()
+
+    # Playtime summary
+    print(f"  {C.BOLD}Playtime{C.RESET}")
+    print(f"    This week:   {C.GREEN}{format_duration(total_playtime(this_week))}{C.RESET}"
+          f"  ({len(this_week)} sessions)")
+    print(f"    This month:  {C.GREEN}{format_duration(total_playtime(this_month))}{C.RESET}"
+          f"  ({len(this_month)} sessions)")
+    print(f"    All time:    {C.GREEN}{format_duration(total_playtime(all_time))}{C.RESET}"
+          f"  ({len(all_time)} sessions)")
+    print()
+
+    # Most played games
+    print(f"  {C.BOLD}Most Played (all time){C.RESET}")
+    for game, secs in game_playtimes(all_time)[:8]:
+        bar_width = min(int(secs / max(total_playtime(all_time), 1) * 30), 30)
+        bar = "#" * bar_width
+        print(f"    {game:<24} {format_duration(secs):>8}  {C.GREEN}{bar}{C.RESET}")
+    print()
+
+    # FPS trends
+    sessions_with_fps = [s for s in sessions if s.get("fps", {}).get("avg")]
+    if sessions_with_fps:
+        print(f"  {C.BOLD}FPS Trends{C.RESET}")
+        # Group by game
+        game_fps = {}
+        for s in sessions_with_fps:
+            g = s.get("game", "Unknown")
+            if g not in game_fps:
+                game_fps[g] = []
+            game_fps[g].append({
+                "date": s.get("start", "")[:10],
+                "avg": s["fps"]["avg"],
+            })
+
+        for game, entries in sorted(game_fps.items()):
+            if len(entries) < 2:
+                continue
+            entries.sort(key=lambda e: e["date"])
+            first = entries[0]["avg"]
+            last = entries[-1]["avg"]
+            diff = last - first
+            arrow = f"{C.GREEN}+{diff}{C.RESET}" if diff > 0 else (
+                f"{C.RED}{diff}{C.RESET}" if diff < 0 else "=")
+            print(f"    {game:<20} {first} -> {last} FPS ({arrow})")
+        print()
+
+    # Temperature trends
+    sessions_with_temp = [s for s in sessions if s.get("temp", {}).get("gpu_peak")]
+    if sessions_with_temp:
+        print(f"  {C.BOLD}Temperature Trends{C.RESET}")
+        recent_temps = [s["temp"]["gpu_peak"] for s in sessions_with_temp[:10]]
+        avg_temp = round(sum(recent_temps) / len(recent_temps))
+        max_temp = max(recent_temps)
+        print(f"    Recent avg GPU peak: {avg_temp}C")
+        print(f"    Highest GPU peak:    {max_temp}C")
+        if max_temp >= 90:
+            print(f"    {C.RED}Warning: GPU temps are high! Check cooling.{C.RESET}")
+        print()
+
+    # Best sessions
+    if sessions_with_fps:
+        best = max(sessions_with_fps, key=lambda s: s["fps"]["avg"])
+        try:
+            dt = datetime.fromisoformat(best["start"])
+            date_str = dt.strftime("%B %d")
+        except ValueError:
+            date_str = "unknown date"
+        print(f"  {C.BOLD}Best Session{C.RESET}")
+        print(f"    {C.GREEN}{best.get('game', '?')}{C.RESET} on {date_str}"
+              f" -- {best['fps']['avg']} avg FPS")
+        print()
+
+    # Crash rate
+    total = len(all_time)
+    crashes = sum(1 for s in all_time if not s.get("clean_exit", True))
+    if crashes:
+        rate = round(crashes / total * 100, 1)
+        print(f"  {C.BOLD}Stability{C.RESET}")
+        print(f"    {crashes} crashes in {total} sessions ({rate}%)")
+        crash_games = {}
+        for s in all_time:
+            if not s.get("clean_exit", True):
+                g = s.get("game", "Unknown")
+                crash_games[g] = crash_games.get(g, 0) + 1
+        for g, c in sorted(crash_games.items(), key=lambda x: x[1], reverse=True):
+            print(f"      {g}: {c} crashes")
+        print()
+    else:
+        print(f"  {C.BOLD}Stability{C.RESET}")
+        print(f"    {C.GREEN}No crashes in {total} sessions!{C.RESET}")
+        print()
+
+def cmd_help(_args: list):
+    """Show help text."""
+    print(f"""
+  {C.CYAN}{C.BOLD}hubos-session-summary{C.RESET} -- Post-game stats, restoration, and session tracking
+
+  {C.BOLD}Usage:{C.RESET}
+    hubos-session-summary show <appid>       Show session summary (called on game exit)
+    hubos-session-summary last               Show the last session summary
+    hubos-session-summary history [options]   Show session history table
+    hubos-session-summary stats              Show aggregate statistics
+
+  {C.BOLD}History options:{C.RESET}
+    --game <name>     Filter by game name (case-insensitive partial match)
+    --week            Show only sessions from the last 7 days
+    --month           Show only sessions from the last 30 days
+    --sort <col>      Sort by: date, game, duration, fps, temp (default: date)
+
+  {C.BOLD}Environment variables:{C.RESET}
+    MANGOHUD_LOG_FILE      Path to MangoHud CSV log for current session
+    HUBOS_GAME_START       Unix timestamp when game was launched
+    HUBOS_GAME_EXIT_CODE   Exit code of the game process
+    SteamAppId             Steam application ID (fallback for appid)
+
+  {C.BOLD}Data:{C.RESET}
+    Sessions:   ~/.local/share/hubos/sessions/
+    State:      ~/.local/share/hubos/session-state/
+    Hub token:  ~/.config/hubos/hub-token
+
+  {C.BOLD}Integration:{C.RESET}
+    This tool is called automatically by the smart-launch daemon when a game
+    exits. It can also be run manually to review past sessions.
+
+    Sessions are optionally synced to your 24HG Hub profile if a hub token
+    is configured. Your hub profile shows: "This week: 15h played across 4 games"
+""")
+
+# ── Main ──
+
+def main():
+    if len(sys.argv) < 2:
+        cmd_help([])
+        sys.exit(0)
+
+    command = sys.argv[1].lower()
+    args = sys.argv[2:]
+
+    commands = {
+        "show": cmd_show,
+        "last": cmd_last,
+        "history": cmd_history,
+        "stats": cmd_stats,
+        "help": cmd_help,
+        "--help": cmd_help,
+        "-h": cmd_help,
+    }
+
+    fn = commands.get(command)
+    if not fn:
+        print(f"{C.RED}Unknown command:{C.RESET} {command}")
+        print(f"Run {C.CYAN}hubos-session-summary help{C.RESET} for usage.")
+        sys.exit(1)
+
+    ensure_dirs()
+    fn(args)
+
+if __name__ == "__main__":
+    main()

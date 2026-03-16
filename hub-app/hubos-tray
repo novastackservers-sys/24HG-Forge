@@ -439,8 +439,33 @@ class HubOSTray:
         dboot_item.set_submenu(dboot_menu)
         tools_menu.append(dboot_item)
 
+        # Thermal Guard
+        therm_item = Gtk.MenuItem(label="Thermal Guard")
+        therm_menu = Gtk.Menu()
+        for action, desc in [("status", "Temperature Status"), ("monitor", "Live Monitor"), ("fan status", "Fan Status")]:
+            ti = Gtk.MenuItem(label=desc)
+            ti.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-thermal"] + a.split()))
+            therm_menu.append(ti)
+        therm_item.set_submenu(therm_menu)
+        tools_menu.append(therm_item)
+
+        # Download Manager
+        dl_item = Gtk.MenuItem(label="Downloads")
+        dl_menu = Gtk.Menu()
+        for action, desc in [("status", "Download Status"), ("pause", "Pause All"), ("resume", "Resume All"), ("gaming-mode on", "Gaming Mode")]:
+            di = Gtk.MenuItem(label=desc)
+            di.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-download-mgr"] + a.split()))
+            dl_menu.append(di)
+        dl_item.set_submenu(dl_menu)
+        tools_menu.append(dl_item)
+
         tools_item.set_submenu(tools_menu)
         menu.append(tools_item)
+
+        # ── Game Library ──
+        games_item = Gtk.MenuItem(label="My Games")
+        games_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-games", "list"]))
+        menu.append(games_item)
 
         menu.append(Gtk.SeparatorMenuItem())
 

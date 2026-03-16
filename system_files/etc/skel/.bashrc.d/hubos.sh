@@ -128,3 +128,10 @@ alias bench-compare='hubos-benchmark-compare'
 alias perks='hubos-perks'
 alias creator='hubos-creator-kit'
 alias demo='hubos-demo'
+
+# Wave 10 smart gaming aliases
+alias games='hubos-games list'
+alias game-search='hubos-games search'
+alias thermal='hubos-thermal status'
+alias downloads='hubos-download-mgr status'
+alias session='hubos-session-summary last'

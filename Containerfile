@@ -72,6 +72,12 @@ COPY scripts/hubos-perks /tmp/hubos-build/bin/hubos-perks
 COPY scripts/hubos-creator-kit /tmp/hubos-build/bin/hubos-creator-kit
 COPY scripts/hubos-demo /tmp/hubos-build/bin/hubos-demo
 COPY scripts/hubos-demo.desktop /tmp/hubos-build/desktop/hubos-demo.desktop
+COPY scripts/hubos-smart-launch /tmp/hubos-build/bin/hubos-smart-launch
+COPY scripts/hubos-session-summary /tmp/hubos-build/bin/hubos-session-summary
+COPY scripts/hubos-crash-recovery /tmp/hubos-build/bin/hubos-crash-recovery
+COPY scripts/hubos-download-mgr /tmp/hubos-build/bin/hubos-download-mgr
+COPY scripts/hubos-games /tmp/hubos-build/bin/hubos-games
+COPY scripts/hubos-thermal /tmp/hubos-build/bin/hubos-thermal
 COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
 COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
 COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
@@ -262,6 +268,12 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-creator-kit /usr/bin/hubos-creator-kit \
     && install -m 755 /tmp/hubos-build/bin/hubos-demo /usr/bin/hubos-demo \
     && cp /tmp/hubos-build/desktop/hubos-demo.desktop /usr/share/applications/ \
+    && install -m 755 /tmp/hubos-build/bin/hubos-smart-launch /usr/bin/hubos-smart-launch \
+    && install -m 755 /tmp/hubos-build/bin/hubos-session-summary /usr/bin/hubos-session-summary \
+    && install -m 755 /tmp/hubos-build/bin/hubos-crash-recovery /usr/bin/hubos-crash-recovery \
+    && install -m 755 /tmp/hubos-build/bin/hubos-download-mgr /usr/bin/hubos-download-mgr \
+    && install -m 755 /tmp/hubos-build/bin/hubos-games /usr/bin/hubos-games \
+    && install -m 755 /tmp/hubos-build/bin/hubos-thermal /usr/bin/hubos-thermal \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/hubos \
@@ -296,6 +308,8 @@ RUN rpm-ostree install \
     && ln -sf ../hubos-achievements.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-achievements.timer \
     && cp /tmp/hubos-build/systemd-user/hubos-perks-claim.service /etc/skel/.config/systemd/user/ \
     && ln -sf ../hubos-perks-claim.service /etc/skel/.config/systemd/user/default.target.wants/hubos-perks-claim.service \
+    && cp /tmp/hubos-build/systemd-user/hubos-smart-launch.service /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-smart-launch.service /etc/skel/.config/systemd/user/default.target.wants/hubos-smart-launch.service \
     && cp /tmp/hubos-build/systemd-user/hubos-wallpaper.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/hubos-build/systemd-user/hubos-wallpaper.timer /etc/skel/.config/systemd/user/ \
     && ln -sf ../hubos-wallpaper.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-wallpaper.timer \
