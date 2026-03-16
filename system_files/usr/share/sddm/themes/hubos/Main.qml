@@ -1,17 +1,30 @@
-import QtQuick 2.15
-import QtQuick.Controls 2.15
-import QtQuick.Layouts 1.15
+import QtQuick
 import SddmComponents 2.0
 
 Rectangle {
     id: root
-    width: Screen.width
-    height: Screen.height
+    width: 1920
+    height: 1080
     color: "#0a0a14"
+
+    property int sessionIndex: session.index
+
+    TextConstants { id: textConstants }
+
+    Connections {
+        target: sddm
+        function onLoginFailed() {
+            errorLabel.text = textConstants.loginFailed
+            password.text = ""
+            password.focus = true
+        }
+        function onLoginSucceeded() {
+            errorLabel.text = ""
+        }
+    }
 
     // Background image
     Image {
-        id: background
         anchors.fill: parent
         source: config.background || ""
         fillMode: Image.PreserveAspectCrop
@@ -28,28 +41,40 @@ Rectangle {
         }
     }
 
+    // Clock top-right
+    Clock {
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: 30
+        color: "#ffffff"
+        timeFont.pixelSize: 42
+        timeFont.bold: true
+        dateFont.pixelSize: 16
+        dateColor: "#8080b0"
+    }
+
     // Center login card
     Rectangle {
         id: loginCard
         anchors.centerIn: parent
         width: 420
-        height: 480
+        height: 460
         radius: 16
         color: "#dd0e0e1c"
         border.color: "#2058a6ff"
         border.width: 1
 
-        ColumnLayout {
+        Column {
             anchors.fill: parent
             anchors.margins: 40
-            spacing: 20
+            spacing: 18
 
             // Logo
             Image {
                 source: "logo.png"
-                Layout.preferredWidth: 80
-                Layout.preferredHeight: 80
-                Layout.alignment: Qt.AlignHCenter
+                width: 80
+                height: 80
+                anchors.horizontalCenter: parent.horizontalCenter
                 fillMode: Image.PreserveAspectFit
             }
 
@@ -59,143 +84,115 @@ Rectangle {
                 font.pixelSize: 28
                 font.bold: true
                 color: "#ffffff"
-                Layout.alignment: Qt.AlignHCenter
+                anchors.horizontalCenter: parent.horizontalCenter
             }
 
             Text {
                 text: "24 Hour Gaming"
                 font.pixelSize: 13
                 color: "#8080b0"
-                Layout.alignment: Qt.AlignHCenter
+                anchors.horizontalCenter: parent.horizontalCenter
             }
 
-            Item { Layout.fillHeight: true; Layout.maximumHeight: 10 }
+            // Spacer
+            Item { width: 1; height: 5 }
 
             // Username
-            TextField {
-                id: userField
-                Layout.fillWidth: true
-                Layout.preferredHeight: 44
-                placeholderText: "Username"
+            TextBox {
+                id: username
+                width: parent.width
+                height: 44
                 font.pixelSize: 14
-                color: "#e0e0f0"
-                placeholderTextColor: "#606080"
-                background: Rectangle {
-                    radius: 8
-                    color: "#1a1a2e"
-                    border.color: userField.activeFocus ? "#58a6ff" : "#2a2a3e"
-                    border.width: 1
-                }
-                Keys.onReturnPressed: passwordField.forceActiveFocus()
+                color: "#1a1a2e"
+                borderColor: focus ? "#58a6ff" : "#2a2a3e"
+                textColor: "#e0e0f0"
                 text: userModel.lastUser
+                KeyNavigation.tab: password
+                Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        password.focus = true
+                        event.accepted = true
+                    }
+                }
             }
 
             // Password
-            TextField {
-                id: passwordField
-                Layout.fillWidth: true
-                Layout.preferredHeight: 44
-                placeholderText: "Password"
-                echoMode: TextInput.Password
+            PasswordBox {
+                id: password
+                width: parent.width
+                height: 44
                 font.pixelSize: 14
-                color: "#e0e0f0"
-                placeholderTextColor: "#606080"
-                background: Rectangle {
-                    radius: 8
-                    color: "#1a1a2e"
-                    border.color: passwordField.activeFocus ? "#58a6ff" : "#2a2a3e"
-                    border.width: 1
+                color: "#1a1a2e"
+                borderColor: focus ? "#58a6ff" : "#2a2a3e"
+                textColor: "#e0e0f0"
+                tooltipBG: "#1a1a2e"
+                KeyNavigation.tab: loginButton
+                Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        sddm.login(username.text, password.text, sessionIndex)
+                        event.accepted = true
+                    }
                 }
-                Keys.onReturnPressed: loginButton.clicked()
             }
 
             // Session selector
             ComboBox {
-                id: sessionSelector
-                Layout.fillWidth: true
-                Layout.preferredHeight: 40
-                model: sessionModel
-                textRole: "name"
-                currentIndex: sessionModel.lastIndex
+                id: session
+                width: parent.width
+                height: 36
                 font.pixelSize: 13
-                background: Rectangle {
-                    radius: 8
-                    color: "#1a1a2e"
-                    border.color: "#2a2a3e"
-                    border.width: 1
-                }
-                contentItem: Text {
-                    text: sessionSelector.displayText
-                    color: "#c0c0d0"
-                    font.pixelSize: 13
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 12
-                }
+                color: "#1a1a2e"
+                borderColor: "#2a2a3e"
+                textColor: "#c0c0d0"
+                arrowColor: "#606080"
+                model: sessionModel
+                index: sessionModel.lastIndex
+                KeyNavigation.tab: username
             }
 
             // Login button
-            Button {
+            Rectangle {
                 id: loginButton
-                Layout.fillWidth: true
-                Layout.preferredHeight: 48
-                text: "Login"
-                font.pixelSize: 15
-                font.bold: true
-                onClicked: sddm.login(userField.text, passwordField.text, sessionSelector.currentIndex)
-                background: Rectangle {
-                    radius: 8
-                    color: loginButton.pressed ? "#3b82f6" : (loginButton.hovered ? "#4a94ff" : "#58a6ff")
-                }
-                contentItem: Text {
-                    text: loginButton.text
+                width: parent.width
+                height: 48
+                radius: 8
+                color: loginArea.pressed ? "#3b82f6" : (loginArea.containsMouse ? "#4a94ff" : "#58a6ff")
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "Login"
                     color: "#ffffff"
-                    font: loginButton.font
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
+                    font.pixelSize: 15
+                    font.bold: true
+                }
+
+                MouseArea {
+                    id: loginArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: sddm.login(username.text, password.text, sessionIndex)
+                }
+
+                focus: true
+                Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        sddm.login(username.text, password.text, sessionIndex)
+                        event.accepted = true
+                    }
                 }
             }
 
             // Error message
             Text {
-                id: errorMessage
-                Layout.fillWidth: true
-                Layout.alignment: Qt.AlignHCenter
+                id: errorLabel
+                width: parent.width
                 font.pixelSize: 12
                 color: "#ff5555"
                 horizontalAlignment: Text.AlignHCenter
                 visible: text !== ""
+                text: ""
             }
         }
-    }
-
-    // Clock in top-right
-    Text {
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.margins: 30
-        font.pixelSize: 42
-        font.bold: true
-        color: "#ffffff"
-        opacity: 0.7
-        text: Qt.formatTime(new Date(), "HH:mm")
-
-        Timer {
-            interval: 30000
-            running: true
-            repeat: true
-            onTriggered: parent.text = Qt.formatTime(new Date(), "HH:mm")
-        }
-    }
-
-    // Date below clock
-    Text {
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.topMargin: 80
-        anchors.rightMargin: 30
-        font.pixelSize: 16
-        color: "#8080b0"
-        text: Qt.formatDate(new Date(), "dddd, MMMM d")
     }
 
     // Power buttons bottom-right
@@ -229,24 +226,11 @@ Rectangle {
         text: "HubOS — 24hgaming.com"
     }
 
-    // Handle login failure
-    Connections {
-        target: sddm
-        function onLoginFailed() {
-            errorMessage.text = "Invalid username or password"
-            passwordField.text = ""
-            passwordField.forceActiveFocus()
-        }
-        function onLoginSucceeded() {
-            errorMessage.text = ""
-        }
-    }
-
     Component.onCompleted: {
-        if (userField.text !== "") {
-            passwordField.forceActiveFocus()
+        if (username.text !== "") {
+            password.focus = true
         } else {
-            userField.forceActiveFocus()
+            username.focus = true
         }
     }
 }
