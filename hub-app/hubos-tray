@@ -34,6 +34,7 @@ except (ImportError, ValueError):
 
 SERVERS_JSON = "/usr/share/hubos/servers.json"
 STATUS_CACHE = os.path.expanduser("~/.cache/hubos/server-status.json")
+HUB_STATE = os.path.expanduser("~/.cache/hubos/hub-state.json")
 HUB_URL = "https://hub.24hgaming.com"
 ICON_NAME = "hubos-logo"
 REFRESH_INTERVAL = 30_000  # ms — refresh menu labels every 30s
@@ -55,6 +56,20 @@ def load_status():
             return json.load(f)
     except Exception:
         return None
+
+
+def load_hub_state():
+    """Load hub bridge state (notifications, DMs, friends)."""
+    try:
+        with open(HUB_STATE) as f:
+            data = json.load(f)
+            # Only trust state if updated within last 2 minutes
+            import time
+            if data.get("updated_at", 0) > time.time() - 120:
+                return data
+    except Exception:
+        pass
+    return None
 
 
 def get_server_status(ip, port, status_data):
@@ -147,6 +162,33 @@ class HubOSTray:
             header = Gtk.MenuItem(label="24HG — Loading server status...")
         header.set_sensitive(False)
         menu.append(header)
+
+        # ── Hub connection status ──
+        hub_state = load_hub_state()
+        if hub_state and hub_state.get("connected"):
+            username = hub_state.get("username", "?")
+            unread = hub_state.get("unread_notifications", 0)
+            unread_dms = hub_state.get("unread_dms", 0)
+            online_friends = hub_state.get("online_friends", 0)
+
+            hub_label = f"Hub: {username}"
+            badges = []
+            if unread > 0:
+                badges.append(f"{unread} notif")
+            if unread_dms > 0:
+                badges.append(f"{unread_dms} DMs")
+            if online_friends > 0:
+                badges.append(f"{online_friends} friends online")
+            if badges:
+                hub_label += f" — {', '.join(badges)}"
+
+            hub_info = Gtk.MenuItem(label=hub_label)
+            hub_info.set_sensitive(False)
+            menu.append(hub_info)
+        else:
+            hub_info = Gtk.MenuItem(label="Hub: Not connected")
+            hub_info.set_sensitive(False)
+            menu.append(hub_info)
 
         menu.append(Gtk.SeparatorMenuItem())
 
@@ -314,6 +356,23 @@ class HubOSTray:
         backup = Gtk.MenuItem(label="Backup Game Saves")
         backup.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-backup", "create"]))
         menu.append(backup)
+
+        # ── Hub Account ──
+        hub_acct = Gtk.MenuItem(label="Hub Account")
+        hub_acct_menu = Gtk.Menu()
+        if hub_state and hub_state.get("connected"):
+            hub_status = Gtk.MenuItem(label=f"Logged in as {hub_state.get('username', '?')}")
+            hub_status.set_sensitive(False)
+            hub_acct_menu.append(hub_status)
+            hub_logout = Gtk.MenuItem(label="Logout")
+            hub_logout.connect("activate", lambda w: subprocess.Popen(["/usr/bin/hubos-hub-bridge", "logout"]))
+            hub_acct_menu.append(hub_logout)
+        else:
+            hub_login = Gtk.MenuItem(label="Login to 24HG Hub")
+            hub_login.connect("activate", lambda w: subprocess.Popen(["/usr/bin/hubos-hub-bridge", "login"]))
+            hub_acct_menu.append(hub_login)
+        hub_acct.set_submenu(hub_acct_menu)
+        menu.append(hub_acct)
 
         discord = Gtk.MenuItem(label="Discord")
         discord.connect("activate", open_discord)

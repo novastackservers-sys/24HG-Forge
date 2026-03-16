@@ -89,6 +89,23 @@ echo "User services will auto-start on first login:"
 echo "  - hubos-server-status (live server monitoring)"
 echo "  - hubos-discord-fix (Rich Presence bridge)"
 echo "  - hubos-backup.timer (weekly game save backup)"
+echo "  - hubos-hub-bridge (Hub notifications, DMs, friend status)"
+
+# Enable Chromium desktop notifications for the Hub
+mkdir -p /etc/skel/.config/chromium/Default
+cat > /etc/skel/.config/chromium/Default/Preferences.hubos 2>/dev/null <<'CHROMEOF'
+{
+  "profile": {
+    "content_settings": {
+      "exceptions": {
+        "notifications": {
+          "https://hub.24hgaming.com,*": {"setting": 1}
+        }
+      }
+    }
+  }
+}
+CHROMEOF
 
 # Mark completion
 mkdir -p /var/lib/hubos

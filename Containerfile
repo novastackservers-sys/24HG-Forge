@@ -46,6 +46,7 @@ COPY scripts/hubos-screenshot /tmp/hubos-build/bin/hubos-screenshot
 COPY scripts/hubos-backup /tmp/hubos-build/bin/hubos-backup
 COPY scripts/hubos-nightlight /tmp/hubos-build/bin/hubos-nightlight
 COPY scripts/hubos-benchmark /tmp/hubos-build/bin/hubos-benchmark
+COPY scripts/hubos-hub-bridge /tmp/hubos-build/bin/hubos-hub-bridge
 COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
 COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
 COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
@@ -168,6 +169,7 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-backup /usr/bin/hubos-backup \
     && install -m 755 /tmp/hubos-build/bin/hubos-nightlight /usr/bin/hubos-nightlight \
     && install -m 755 /tmp/hubos-build/bin/hubos-benchmark /usr/bin/hubos-benchmark \
+    && install -m 755 /tmp/hubos-build/bin/hubos-hub-bridge /usr/bin/hubos-hub-bridge \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/hubos \
@@ -186,8 +188,10 @@ RUN rpm-ostree install \
     && cp /tmp/hubos-build/systemd-user/hubos-discord-fix.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/hubos-build/systemd-user/hubos-backup.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/hubos-build/systemd-user/hubos-backup.timer /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-hub-bridge.service /etc/skel/.config/systemd/user/ \
     && ln -sf ../hubos-server-status.service /etc/skel/.config/systemd/user/default.target.wants/hubos-server-status.service \
     && ln -sf ../hubos-discord-fix.service /etc/skel/.config/systemd/user/default.target.wants/hubos-discord-fix.service \
+    && ln -sf ../hubos-hub-bridge.service /etc/skel/.config/systemd/user/default.target.wants/hubos-hub-bridge.service \
     && mkdir -p /etc/skel/.config/systemd/user/timers.target.wants \
     && ln -sf ../hubos-backup.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-backup.timer \
     \

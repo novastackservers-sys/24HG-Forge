@@ -93,3 +93,8 @@ alias benchmark='hubos-benchmark'
 
 # Server status shortcut
 alias status='hubos-server-status --once'
+
+# Hub bridge aliases
+alias hub-login='hubos-hub-bridge login'
+alias hub-logout='hubos-hub-bridge logout'
+alias hub-status='hubos-hub-bridge status'

@@ -140,8 +140,8 @@ def step_gpu():
 def step_account():
     rc, _ = zenity([
         "--question", "--title=24HG Account",
-        "--width=500", "--height=320",
-        "--ok-label=Open Hub", "--cancel-label=Skip for Now",
+        "--width=500", "--height=380",
+        "--ok-label=Login to Hub", "--cancel-label=Skip for Now",
         "--text="
         "<big><b>Join the Community</b></big>\n\n"
         "The 24HG Hub gives you access to:\n\n"
@@ -150,9 +150,14 @@ def step_account():
         "  <b>Tournaments</b> and leaderboards\n"
         "  <b>Voice chat</b> (LiveKit)\n"
         "  <b>Economy</b>, clans, and factions\n\n"
+        "Login to get desktop notifications for messages,\n"
+        "friend activity, and tournament alerts.\n\n"
         "Create an account or log in to get the full experience."
     ])
     if rc == 0:
+        # Launch hub bridge login (zenity dialog for credentials)
+        subprocess.run(["/usr/bin/hubos-hub-bridge", "login"], timeout=120)
+        # Also open the hub in browser
         subprocess.Popen(["/usr/bin/hubos-hub"])
         return True
     return False
