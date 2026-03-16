@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=HubOS Tools
+Comment=Gaming tools and diagnostics
+Exec=konsole -e bash -c 'echo "=== HubOS Gaming Tools ==="; echo ""; echo "  hubos-performance  - Switch performance profile"; echo "  hubos-server-status - Live server status"; echo "  hubos-proton-fix   - Fix game launch issues"; echo "  hubos-benchmark    - System benchmark"; echo "  hubos-diag         - Full diagnostics"; echo "  hubos-achievements - Your achievements"; echo "  hubos-game-timer   - Playtime stats"; echo "  hubos-tips         - Gaming tips"; echo ""; echo "Type any command to get started."; echo ""; exec bash'
+Icon=utilities-terminal
+Terminal=false
+Categories=System;

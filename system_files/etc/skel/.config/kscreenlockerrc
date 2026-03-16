@@ -1,0 +1,13 @@
+[Greeter]
+Theme=com.hubos.splash
+WallpaperPlugin=org.kde.image
+
+[Greeter][Wallpaper][org.kde.image][General]
+Image=/usr/share/hubos/wallpapers/hubos-dark.png
+PreviewImage=/usr/share/hubos/wallpapers/hubos-dark.png
+
+[Daemon]
+Autolock=true
+LockGrace=30
+LockOnResume=true
+Timeout=10

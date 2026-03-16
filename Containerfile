@@ -58,6 +58,8 @@ COPY scripts/hubos-tips /tmp/hubos-build/bin/hubos-tips
 COPY scripts/hubos-achievements /tmp/hubos-build/bin/hubos-achievements
 COPY scripts/hubos-wallpaper /tmp/hubos-build/bin/hubos-wallpaper
 COPY scripts/hubos-notify-style /tmp/hubos-build/bin/hubos-notify-style
+COPY scripts/hubos-desktop-setup /tmp/hubos-build/bin/hubos-desktop-setup
+COPY scripts/hubos-lock-info /tmp/hubos-build/bin/hubos-lock-info
 COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
 COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
 COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
@@ -67,6 +69,13 @@ COPY system_files/usr/share/sounds/hubos/ /tmp/hubos-build/sounds/hubos/
 COPY system_files/usr/share/plasma/look-and-feel/com.hubos.splash/ /tmp/hubos-build/plasma-splash/
 COPY system_files/etc/skel/.config/conky/ /tmp/hubos-build/conky/
 COPY system_files/etc/skel/.config/plasmanotifyrc /tmp/hubos-build/plasmanotifyrc
+COPY system_files/etc/skel/.config/dolphinrc /tmp/hubos-build/skel-dolphinrc
+COPY system_files/etc/skel/.config/kwinrulesrc /tmp/hubos-build/skel-kwinrulesrc
+COPY system_files/etc/skel/.config/kscreenlockerrc /tmp/hubos-build/skel-kscreenlockerrc
+COPY system_files/etc/skel/.config/kwinrc.d/ /tmp/hubos-build/skel-kwinrc.d/
+COPY system_files/etc/skel/.local/share/user-places.xbel /tmp/hubos-build/skel-user-places.xbel
+COPY system_files/etc/skel/.local/share/kservices5/ /tmp/hubos-build/skel-kservices5/
+COPY system_files/etc/skel/Desktop/ /tmp/hubos-build/skel-desktop/
 COPY installer/ /tmp/hubos-build/installer/
 
 # ── Single RUN: install packages, deploy files, configure, cleanup ──
@@ -143,6 +152,19 @@ RUN rpm-ostree install \
     # ── Notification config ── \
     && cp /tmp/hubos-build/plasmanotifyrc /etc/skel/.config/plasmanotifyrc \
     \
+    # ── Dolphin + KWin + Lock screen + Desktop shortcuts ── \
+    && cp /tmp/hubos-build/skel-dolphinrc /etc/skel/.config/dolphinrc \
+    && cp /tmp/hubos-build/skel-kwinrulesrc /etc/skel/.config/kwinrulesrc \
+    && cp /tmp/hubos-build/skel-kscreenlockerrc /etc/skel/.config/kscreenlockerrc \
+    && mkdir -p /etc/skel/.config/kwinrc.d \
+    && cp /tmp/hubos-build/skel-kwinrc.d/* /etc/skel/.config/kwinrc.d/ \
+    && mkdir -p /etc/skel/.local/share \
+    && cp /tmp/hubos-build/skel-user-places.xbel /etc/skel/.local/share/user-places.xbel \
+    && mkdir -p /etc/skel/.local/share/kservices5/ServiceMenus \
+    && cp -r /tmp/hubos-build/skel-kservices5/* /etc/skel/.local/share/kservices5/ \
+    && mkdir -p /etc/skel/Desktop \
+    && cp /tmp/hubos-build/skel-desktop/*.desktop /etc/skel/Desktop/ \
+    \
     # ── Sound theme ── \
     && mkdir -p /usr/share/sounds/hubos/stereo \
     && cp -r /tmp/hubos-build/sounds/hubos/* /usr/share/sounds/hubos/ \
@@ -214,6 +236,8 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-achievements /usr/bin/hubos-achievements \
     && install -m 755 /tmp/hubos-build/bin/hubos-wallpaper /usr/bin/hubos-wallpaper \
     && install -m 755 /tmp/hubos-build/bin/hubos-notify-style /usr/bin/hubos-notify-style \
+    && install -m 755 /tmp/hubos-build/bin/hubos-desktop-setup /usr/bin/hubos-desktop-setup \
+    && install -m 755 /tmp/hubos-build/bin/hubos-lock-info /usr/bin/hubos-lock-info \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/hubos \

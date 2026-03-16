@@ -1,0 +1,30 @@
+[General]
+ShowFullPath=true
+FilterBar=true
+GlobalViewProps=false
+HomeUrl=file:///home
+RememberOpenedTabs=true
+ShowFullPathInTitlebar=true
+SortingChoice=1
+ViewPropsTimestamp=2025,1,1,0,0,0
+
+[DetailsMode]
+PreviewSize=22
+IconSize=22
+
+[IconsMode]
+IconSize=48
+PreviewSize=48
+
+[PlacesPanel]
+IconSize=22
+
+[PreviewSettings]
+Plugins=appimagethumbnail,audiothumbnail,comicbookthumbnail,cursorthumbnail,djvuthumbnail,ebookthumbnail,exrthumbnail,directorythumbnail,fontthumbnail,imagethumbnail,jaborathumbnail,kraborathumbnail,opaborathumbnail,svgthumbnail,windowsexethumbnail,windowsimagethumbnail
+
+[Search]
+Location=Everywhere
+
+[KFileDialog Settings]
+Places Icons Auto-resize=false
+Places Icons Static Size=22

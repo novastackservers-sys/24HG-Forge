@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Discord
+Comment=Launch Discord
+Exec=flatpak run com.discordapp.Discord
+Icon=com.discordapp.Discord
+Terminal=false
+Categories=Network;Chat;

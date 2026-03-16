@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Steam
+Comment=Launch Steam
+Exec=flatpak run com.valvesoftware.Steam
+Icon=com.valvesoftware.Steam
+Terminal=false
+Categories=Game;

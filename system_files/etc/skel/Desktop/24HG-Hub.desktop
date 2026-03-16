@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=24HG Hub
+Comment=Open the 24 Hour Gaming Hub
+Exec=/usr/bin/hubos-hub
+Icon=hubos-logo
+Terminal=false
+Categories=Game;Network;
