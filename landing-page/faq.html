@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HubOS FAQ — Frequently Asked Questions</title>
+    <meta name="description" content="Common questions about HubOS, the custom Linux gaming distribution from 24 Hour Gaming.">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav">
+    <a href="index.html" class="nav-logo">HubOS</a>
+    <div class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="install.html">Install Guide</a>
+        <a href="faq.html" class="active">FAQ</a>
+        <a href="https://hub.24hgaming.com">Hub</a>
+        <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+    </div>
+</nav>
+
+<main class="page">
+    <h1>Frequently Asked Questions</h1>
+
+    <div class="faq-section">
+        <h2>General</h2>
+
+        <details class="faq-item" open>
+            <summary>What is HubOS?</summary>
+            <p>HubOS is a custom Linux distribution built for gamers. It's based on Bazzite (Fedora Atomic) and comes pre-configured with everything you need to game on Linux — GPU drivers, Steam, Proton, performance tools — plus the 24HG community hub with 88+ game servers, voice chat, tournaments, and more.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>Is HubOS free?</summary>
+            <p>Yes, completely free and open source (MIT license). The 24HG Hub is also free to use. Some premium features on the Hub (like VIP server perks) are optional paid upgrades.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>How is HubOS different from Bazzite, Nobara, or SteamOS?</summary>
+            <p>Those are great gaming distros, but they're generic — they give you tools and leave you to figure it out. HubOS integrates the 24HG gaming community directly into the OS. You boot up and you're already connected to 88+ servers, voice chat, tournaments, and a full community platform. No other distro does this.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>Can I dual-boot with Windows?</summary>
+            <p>Yes. The installer supports "Install alongside" which shrinks your Windows partition and installs HubOS next to it. You'll get a boot menu to choose which OS to start.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>Do I need to be part of 24HG to use HubOS?</summary>
+            <p>No. HubOS works as a standalone gaming Linux distro even without a 24HG account. But creating a free account unlocks the full experience — server browser, chat, tournaments, economy, etc.</p>
+        </details>
+    </div>
+
+    <div class="faq-section">
+        <h2>Hardware & Compatibility</h2>
+
+        <details class="faq-item">
+            <summary>Does my NVIDIA GPU work?</summary>
+            <p>Yes. The NVIDIA variant includes proprietary NVIDIA drivers pre-configured. GTX 900 series and newer are fully supported. Download the "NVIDIA" ISO variant.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>Does my AMD GPU work?</summary>
+            <p>Yes. AMD GPUs have the best Linux support via the open-source Mesa drivers, which are included in the base image. Download the "Desktop" ISO variant.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>Can I run HubOS on a Steam Deck?</summary>
+            <p>A Steam Deck variant is in development. The Desktop variant may work but isn't optimized for the Deck's handheld controls.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>What about laptops with hybrid graphics (NVIDIA + Intel)?</summary>
+            <p>Supported. Use the NVIDIA variant. Bazzite (our base) handles NVIDIA Optimus/PRIME switching automatically.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>Will my Wi-Fi / Bluetooth / peripherals work?</summary>
+            <p>HubOS inherits Fedora's hardware support, which is extensive. Most Wi-Fi chips, Bluetooth adapters, controllers, headsets, and peripherals work out of the box. If you have issues, run <code>hubos-diag --paste</code> and share the URL in our Discord #support channel.</p>
+        </details>
+    </div>
+
+    <div class="faq-section">
+        <h2>Gaming</h2>
+
+        <details class="faq-item">
+            <summary>Can I play Windows games?</summary>
+            <p>Yes. Steam's Proton compatibility layer runs most Windows games. Check <a href="https://protondb.com">ProtonDB</a> to see if your specific game works. Non-Steam Windows games can run via Lutris or Heroic (both pre-installed).</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>Does anti-cheat work? (EAC, BattlEye)</summary>
+            <p>Many games with EasyAntiCheat and BattlEye now support Linux/Proton. Games like Rust, Apex Legends, and Elden Ring work. Some games (like Valorant, FACEIT CS2) still require Windows. Check ProtonDB for specific games.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>How do I connect to 24HG servers?</summary>
+            <p>Multiple ways:</p>
+            <ul>
+                <li><strong>Hub app:</strong> Click any server in the server browser</li>
+                <li><strong>System tray:</strong> Right-click the 24HG icon → Quick Connect</li>
+                <li><strong>Terminal:</strong> Type <code>connect-rust</code>, <code>connect-cs2</code>, etc.</li>
+                <li><strong>Links:</strong> Click any <code>24hg://connect/...</code> link (Discord, browser, anywhere)</li>
+                <li><strong>Steam:</strong> 24HG servers are pre-added to your favorites</li>
+            </ul>
+        </details>
+
+        <details class="faq-item">
+            <summary>What's MangoHud? How do I use it?</summary>
+            <p>MangoHud is a performance overlay that shows FPS, GPU/CPU usage, temperatures, and frame timing while gaming. Press <kbd>F12</kbd> to toggle it on/off in any game. It's pre-configured with 24HG-themed colors.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>What's GameMode?</summary>
+            <p>GameMode (by Feral Interactive) automatically optimizes your CPU and GPU when a game is running — sets the CPU governor to performance, adjusts GPU clocks, and more. It's enabled by default and works with Steam games automatically.</p>
+        </details>
+    </div>
+
+    <div class="faq-section">
+        <h2>System & Updates</h2>
+
+        <details class="faq-item">
+            <summary>How do updates work?</summary>
+            <p>HubOS uses atomic updates (via rpm-ostree). The system checks for updates daily at 4 AM and downloads them in the background. You'll get a desktop notification when an update is ready. Just reboot to apply. If anything goes wrong, you can instantly roll back: <code>rpm-ostree rollback</code>.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>Can updates break my system?</summary>
+            <p>Extremely unlikely. Atomic updates are all-or-nothing — if the update fails to download or apply, your current system is untouched. And you always have the previous version available to roll back to. This is fundamentally safer than traditional Linux distros.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>Can I install regular Linux packages?</summary>
+            <p>Yes, but the recommended way is via Flatpak (for GUI apps) or <code>rpm-ostree install</code> (for system packages). The base system is immutable, which keeps it stable, but you can layer packages on top.</p>
+        </details>
+
+        <details class="faq-item">
+            <summary>How do I get help?</summary>
+            <p>Join our <a href="https://discord.gg/ymfEjH6EJN">Discord</a> and post in #support. Run <code>hubos-diag --paste</code> to generate a diagnostics report and share the URL — it includes your hardware info, driver status, and recent errors.</p>
+        </details>
+    </div>
+</main>
+
+<footer>
+    <p>
+        <a href="https://24hgaming.com">24 Hour Gaming</a> &middot;
+        <a href="https://discord.gg/ymfEjH6EJN">Discord</a> &middot;
+        <a href="https://github.com/24hg/hubos">GitHub</a>
+    </p>
+</footer>
+
+</body>
+</html>

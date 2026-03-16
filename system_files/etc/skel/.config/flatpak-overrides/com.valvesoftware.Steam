@@ -1,0 +1,12 @@
+[Context]
+filesystems=xdg-config/MangoHud:ro;/usr/lib/hubos:ro;xdg-run/gamescope-0:rw
+shared=network;ipc
+
+[Environment]
+MANGOHUD=1
+MANGOHUD_CONFIG=position=top-left,fps,gpu_stats,cpu_stats,ram,vram,frame_timing,toggle_hud=F12
+DXVK_LOG_LEVEL=none
+PROTON_ENABLE_NVAPI=1
+PROTON_HIDE_NVIDIA_GPU=0
+PROTON_NO_FSYNC=0
+ENABLE_GAMESCOPE_WSI=1

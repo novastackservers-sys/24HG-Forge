@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=24HG Hub
+Comment=Launch 24HG Hub on login
+Exec=/usr/bin/hubos-hub
+Icon=hubos-logo
+Type=Application
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5

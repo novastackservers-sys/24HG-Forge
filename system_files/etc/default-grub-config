@@ -1,0 +1,3 @@
+# HubOS GRUB configuration
+GRUB_DISTRIBUTOR="HubOS"
+GRUB_THEME="/usr/share/hubos/grub/theme.txt"

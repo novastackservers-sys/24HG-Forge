@@ -1,0 +1,30 @@
+---
+componentName: hubos
+welcomeStyleCalamares: true
+welcomeExpandingLogo: true
+
+strings:
+    productName: HubOS
+    shortProductName: HubOS
+    version: "1.0"
+    shortVersion: "1.0"
+    versionedName: HubOS 1.0
+    shortVersionedName: HubOS 1.0
+    bootloaderEntryName: HubOS
+    productUrl: https://24hgaming.com/os
+    supportUrl: https://discord.gg/ymfEjH6EJN
+    knownIssuesUrl: https://github.com/24hg/hubos/issues
+    releaseNotesUrl: https://24hgaming.com/os/release-notes
+
+images:
+    productLogo: "logo.png"
+    productIcon: "logo.png"
+    productWelcome: "welcome.png"
+
+slideshow: "show.qml"
+
+style:
+    SidebarBackground: "#0a0a14"
+    SidebarText: "#ffffff"
+    SidebarTextSelect: "#58a6ff"
+    SidebarTextHighlight: "#ffffff"

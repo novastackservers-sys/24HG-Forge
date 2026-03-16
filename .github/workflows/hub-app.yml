@@ -1,0 +1,79 @@
+name: Build Hub App (Electron)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hub-app/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "hub-app/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: hub-app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: hub-app
+        run: npm ci || npm install
+
+      - name: Copy logo assets
+        working-directory: hub-app
+        run: |
+          mkdir -p assets/icons
+          for size in 16 32 48 64 128 256 512; do
+            # Generate PNGs from SVG (or copy placeholder)
+            if command -v rsvg-convert &>/dev/null; then
+              rsvg-convert -w $size -h $size ../branding/icons/hubos-logo.svg \
+                -o assets/icons/${size}x${size}.png
+            else
+              # Fallback: create colored placeholder
+              convert -size ${size}x${size} xc:"#0a0a14" \
+                -fill "#58a6ff" -gravity center -pointsize $((size/3)) \
+                -annotate 0 "24" assets/icons/${size}x${size}.png 2>/dev/null || \
+              touch assets/icons/${size}x${size}.png
+            fi
+          done
+
+      - name: Build Electron app
+        working-directory: hub-app
+        run: npm run build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: hubos-hub-appimage
+          path: hub-app/dist/*.AppImage
+          retention-days: 30
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@v4
+        with:
+          name: hubos-hub-rpm
+          path: hub-app/dist/*.rpm
+          retention-days: 30
+
+      - name: Upload to release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            hub-app/dist/*.AppImage
+            hub-app/dist/*.rpm

@@ -1,0 +1,7 @@
+[Context]
+filesystems=xdg-config/MangoHud:ro;~/.local/share/lutris:create
+shared=network;ipc
+
+[Environment]
+MANGOHUD=1
+DXVK_LOG_LEVEL=none

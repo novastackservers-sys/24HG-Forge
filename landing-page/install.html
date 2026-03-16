@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Install HubOS — Step-by-Step Guide</title>
+    <meta name="description" content="How to install HubOS on your PC, laptop, or Steam Deck. Detailed guide with screenshots.">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav">
+    <a href="index.html" class="nav-logo">HubOS</a>
+    <div class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="install.html" class="active">Install Guide</a>
+        <a href="faq.html">FAQ</a>
+        <a href="https://hub.24hgaming.com">Hub</a>
+        <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+    </div>
+</nav>
+
+<main class="page">
+    <h1>Install Guide</h1>
+    <p class="subtitle">Get HubOS running in 15 minutes.</p>
+
+    <div class="steps">
+        <div class="step">
+            <div class="step-number">1</div>
+            <div class="step-content">
+                <h2>Download the ISO</h2>
+                <p>Choose the right variant for your hardware:</p>
+                <table class="variant-table">
+                    <tr>
+                        <td><strong>Desktop</strong></td>
+                        <td>AMD or Intel GPU (integrated or dedicated)</td>
+                        <td><a href="download.html" class="btn btn-small btn-primary">Download (~4 GB)</a></td>
+                    </tr>
+                    <tr>
+                        <td><strong>NVIDIA</strong></td>
+                        <td>NVIDIA GPU (GTX 900 series or newer)</td>
+                        <td><a href="download.html" class="btn btn-small btn-primary">Download (~4.5 GB)</a></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Deck</strong></td>
+                        <td>Steam Deck and handheld PCs</td>
+                        <td><a href="#" class="btn btn-small btn-secondary">Coming Soon</a></td>
+                    </tr>
+                </table>
+                <div class="info-box">
+                    <strong>Not sure which GPU you have?</strong><br>
+                    Windows: Right-click desktop → Display settings → Advanced display → GPU<br>
+                    Linux: Run <code>lspci | grep VGA</code> in terminal
+                </div>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">2</div>
+            <div class="step-content">
+                <h2>Create a bootable USB</h2>
+                <p>Write the ISO to a USB drive (8 GB minimum). Pick your tool:</p>
+
+                <div class="tool-cards">
+                    <div class="tool-card">
+                        <h3>Ventoy (Recommended)</h3>
+                        <p>Install Ventoy on USB once, then just copy ISO files onto it. Supports multiple ISOs.</p>
+                        <a href="https://ventoy.net" class="btn btn-small btn-secondary">ventoy.net</a>
+                    </div>
+                    <div class="tool-card">
+                        <h3>Rufus (Windows)</h3>
+                        <p>Simple USB writer for Windows. Select the ISO, pick your USB, click Start.</p>
+                        <a href="https://rufus.ie" class="btn btn-small btn-secondary">rufus.ie</a>
+                    </div>
+                    <div class="tool-card">
+                        <h3>dd (Linux/Mac)</h3>
+                        <p>Command line. Replace <code>/dev/sdX</code> with your USB device:</p>
+                        <code class="code-block">sudo dd if=hubos-desktop.iso of=/dev/sdX bs=4M status=progress oflag=sync</code>
+                    </div>
+                </div>
+
+                <div class="warning-box">
+                    <strong>Warning:</strong> This will erase everything on the USB drive. Make sure you select the correct device.
+                </div>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">3</div>
+            <div class="step-content">
+                <h2>Boot from USB</h2>
+                <ol>
+                    <li>Plug in the USB drive</li>
+                    <li>Restart your PC</li>
+                    <li>Press the boot menu key during startup:
+                        <ul>
+                            <li><strong>Most PCs:</strong> F12, F8, or Esc</li>
+                            <li><strong>ASUS:</strong> F8</li>
+                            <li><strong>MSI/Gigabyte:</strong> F12</li>
+                            <li><strong>Dell:</strong> F12</li>
+                            <li><strong>HP:</strong> F9</li>
+                            <li><strong>Lenovo:</strong> F12</li>
+                        </ul>
+                    </li>
+                    <li>Select your USB drive from the boot menu</li>
+                </ol>
+
+                <div class="info-box">
+                    <strong>Secure Boot:</strong> HubOS supports Secure Boot (inherited from Fedora). You do not need to disable it. If you have issues, try disabling it in BIOS as a troubleshooting step.
+                </div>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">4</div>
+            <div class="step-content">
+                <h2>Install with Calamares</h2>
+                <p>The HubOS installer will launch automatically. Follow the steps:</p>
+                <ol>
+                    <li><strong>Welcome:</strong> Select your language</li>
+                    <li><strong>Location:</strong> Pick your timezone</li>
+                    <li><strong>Keyboard:</strong> Choose your layout</li>
+                    <li><strong>Partitioning:</strong>
+                        <ul>
+                            <li><em>Erase disk</em> — Simplest option, uses the whole drive</li>
+                            <li><em>Install alongside</em> — Dual-boot with Windows/other OS</li>
+                            <li><em>Manual</em> — Advanced partitioning</li>
+                        </ul>
+                    </li>
+                    <li><strong>Users:</strong> Create your username and password</li>
+                    <li><strong>Summary:</strong> Review and click Install</li>
+                </ol>
+
+                <div class="info-box">
+                    <strong>Recommended disk space:</strong> 50 GB minimum, 100 GB+ recommended (games need space)
+                </div>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">5</div>
+            <div class="step-content">
+                <h2>First boot — you're in!</h2>
+                <p>After installation and reboot:</p>
+                <ol>
+                    <li>HubOS login screen appears — log in with your credentials</li>
+                    <li>The <strong>First-Boot Wizard</strong> launches automatically:
+                        <ul>
+                            <li>Detects your GPU and confirms drivers are working</li>
+                            <li>Opens the 24HG Hub to create/link your account</li>
+                            <li>Lets you pick gaming preferences (MangoHud, GameMode, etc.)</li>
+                            <li>Deploys optimized game configs</li>
+                        </ul>
+                    </li>
+                    <li>In the background, Steam, Lutris, Heroic, and Discord are being installed via Flatpak</li>
+                    <li>The 24HG Hub opens — browse servers, join chat, start gaming!</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+
+    <section class="post-install">
+        <h2>After installation</h2>
+
+        <h3>Useful commands</h3>
+        <table class="command-table">
+            <tr><td><code>hubos-performance gaming</code></td><td>Switch to max performance mode</td></tr>
+            <tr><td><code>hubos-performance balanced</code></td><td>Back to balanced mode</td></tr>
+            <tr><td><code>hubos-diag</code></td><td>System diagnostics (share in Discord for support)</td></tr>
+            <tr><td><code>hubos-diag --paste</code></td><td>Upload diagnostics and get a shareable URL</td></tr>
+            <tr><td><code>connect-rust</code></td><td>Quick-connect to 24HG Rust server</td></tr>
+            <tr><td><code>connect-cs2</code></td><td>Quick-connect to 24HG CS2 server</td></tr>
+            <tr><td><code>hubos-update</code></td><td>Check for and apply OS updates</td></tr>
+            <tr><td><code>hubos-rollback</code></td><td>Roll back to previous OS version</td></tr>
+        </table>
+
+        <h3>Keyboard shortcuts</h3>
+        <table class="command-table">
+            <tr><td><kbd>F12</kbd></td><td>Toggle MangoHud performance overlay (in games)</td></tr>
+            <tr><td><kbd>Super</kbd></td><td>Open app launcher</td></tr>
+            <tr><td><kbd>Super + L</kbd></td><td>Lock screen</td></tr>
+        </table>
+
+        <h3>System updates</h3>
+        <p>HubOS updates automatically every night. Updates are staged and apply on reboot. You'll get a notification when an update is ready. To update manually:</p>
+        <code class="code-block">rpm-ostree upgrade && systemctl reboot</code>
+        <p>If something breaks, roll back instantly:</p>
+        <code class="code-block">rpm-ostree rollback && systemctl reboot</code>
+    </section>
+
+    <section class="requirements">
+        <h2>System Requirements</h2>
+        <table class="command-table">
+            <tr><td><strong>CPU</strong></td><td>64-bit (x86_64) — Intel or AMD</td></tr>
+            <tr><td><strong>RAM</strong></td><td>4 GB minimum, 8 GB+ recommended</td></tr>
+            <tr><td><strong>Storage</strong></td><td>50 GB minimum, 100 GB+ recommended</td></tr>
+            <tr><td><strong>GPU</strong></td><td>AMD, NVIDIA (GTX 900+), or Intel (UHD 600+)</td></tr>
+            <tr><td><strong>USB</strong></td><td>8 GB+ for installer</td></tr>
+            <tr><td><strong>Internet</strong></td><td>Required for first-boot setup and Hub access</td></tr>
+        </table>
+    </section>
+</main>
+
+<footer>
+    <p>
+        <a href="https://24hgaming.com">24 Hour Gaming</a> &middot;
+        <a href="https://discord.gg/ymfEjH6EJN">Discord</a> &middot;
+        <a href="https://github.com/24hg/hubos">GitHub</a>
+    </p>
+</footer>
+
+</body>
+</html>

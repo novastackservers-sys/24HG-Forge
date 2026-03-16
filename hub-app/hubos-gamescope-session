@@ -1,0 +1,31 @@
+#!/bin/bash
+# HubOS Gamescope Session — Console-like experience
+# Launches Gamescope compositor with the 24HG Hub app
+
+# Detect display resolution
+RESOLUTION=$(xdpyinfo 2>/dev/null | grep dimensions | awk '{print $2}')
+WIDTH="${RESOLUTION%x*}"
+HEIGHT="${RESOLUTION#*x}"
+
+# Fallback to 1920x1080
+WIDTH="${WIDTH:-1920}"
+HEIGHT="${HEIGHT:-1080}"
+
+# Gamescope flags
+GAMESCOPE_FLAGS=(
+    -W "${WIDTH}"
+    -H "${HEIGHT}"
+    -w "${WIDTH}"
+    -h "${HEIGHT}"
+    --adaptive-sync
+    --force-grab-cursor
+    --expose-wayland
+    --steam
+)
+
+# MangoHud config for performance overlay (toggle with F12)
+export MANGOHUD=1
+export MANGOHUD_CONFIG="position=top-left,fps,gpu_stats,cpu_stats,ram,vram,frame_timing,toggle_hud=F12"
+
+# Launch Gamescope with Hub app
+exec gamescope "${GAMESCOPE_FLAGS[@]}" -- /usr/bin/hubos-hub

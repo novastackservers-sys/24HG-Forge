@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Download HubOS — 24 Hour Gaming</title>
+    <meta name="description" content="Download HubOS or rebase from an existing Fedora Atomic installation.">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav">
+    <a href="index.html" class="nav-logo">HubOS</a>
+    <div class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="install.html">Install Guide</a>
+        <a href="faq.html">FAQ</a>
+        <a href="https://hub.24hgaming.com">Hub</a>
+        <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+    </div>
+</nav>
+
+<main class="page">
+    <h1>Download HubOS</h1>
+    <p class="subtitle">Two ways to get HubOS — pick what fits your situation.</p>
+
+    <!-- Option 1: Rebase (available now) -->
+    <div class="download-option">
+        <div class="option-badge available">Available Now</div>
+        <h2>Option 1: Rebase from Fedora Atomic</h2>
+        <p>Already running <strong>Fedora Atomic</strong>, <strong>Bazzite</strong>, <strong>Silverblue</strong>, or <strong>Kinoite</strong>? Rebase to HubOS in one command. No reinstall needed — keeps your home directory and user data intact.</p>
+
+        <h3>Desktop (AMD / Intel GPU)</h3>
+        <div class="code-wrapper">
+            <code class="code-block" id="cmd-desktop">rpm-ostree rebase ostree-unverified-registry:ghcr.io/24hg/hubos-desktop:latest</code>
+            <button class="copy-btn" onclick="copyCode('cmd-desktop')">Copy</button>
+        </div>
+
+        <h3>NVIDIA</h3>
+        <div class="code-wrapper">
+            <code class="code-block" id="cmd-nvidia">rpm-ostree rebase ostree-unverified-registry:ghcr.io/24hg/hubos-nvidia:latest</code>
+            <button class="copy-btn" onclick="copyCode('cmd-nvidia')">Copy</button>
+        </div>
+
+        <h3>Steam Deck / Handheld</h3>
+        <div class="code-wrapper">
+            <code class="code-block" id="cmd-deck">rpm-ostree rebase ostree-unverified-registry:ghcr.io/24hg/hubos-deck:latest</code>
+            <button class="copy-btn" onclick="copyCode('cmd-deck')">Copy</button>
+        </div>
+
+        <p style="margin-top: 1rem;">Then reboot:</p>
+        <div class="code-wrapper">
+            <code class="code-block" id="cmd-reboot">systemctl reboot</code>
+            <button class="copy-btn" onclick="copyCode('cmd-reboot')">Copy</button>
+        </div>
+
+        <div class="info-box">
+            <strong>What is rebasing?</strong> It replaces your OS image with HubOS while keeping your user data. It's atomic — if anything fails, your current system is untouched. You can always roll back with <code>rpm-ostree rollback</code>.
+        </div>
+
+        <div class="info-box">
+            <strong>Don't have Fedora Atomic yet?</strong> Install <a href="https://bazzite.gg">Bazzite</a> first (it's the easiest Fedora Atomic gaming distro to install), then rebase to HubOS. Or use the ISO below for a fresh install.
+        </div>
+    </div>
+
+    <!-- Option 2: ISO -->
+    <div class="download-option">
+        <div class="option-badge coming-soon">Coming Soon</div>
+        <h2>Option 2: Fresh Install (ISO)</h2>
+        <p>For new installations on bare metal. Download the ISO, flash it to a USB drive, and boot from it.</p>
+
+        <div class="iso-grid">
+            <div class="iso-card">
+                <h3>Desktop</h3>
+                <p>AMD / Intel GPU</p>
+                <span class="iso-size">~4 GB</span>
+                <button class="btn btn-secondary" disabled>ISO Coming Soon</button>
+            </div>
+            <div class="iso-card">
+                <h3>NVIDIA</h3>
+                <p>NVIDIA GPU (GTX 900+)</p>
+                <span class="iso-size">~4.5 GB</span>
+                <button class="btn btn-secondary" disabled>ISO Coming Soon</button>
+            </div>
+            <div class="iso-card">
+                <h3>Steam Deck</h3>
+                <p>Handhelds / HTPC</p>
+                <span class="iso-size">~4 GB</span>
+                <button class="btn btn-secondary" disabled>ISO Coming Soon</button>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <strong>ISOs are built automatically</strong> from the OCI image via GitHub Actions. Once the first CI build completes, ISOs will be available here. In the meantime, use the rebase method above, or <a href="https://discord.gg/ymfEjH6EJN">join our Discord</a> to get notified when ISOs drop.
+        </div>
+
+        <p>Once you have an ISO, follow the <a href="install.html">Install Guide</a> for step-by-step instructions.</p>
+    </div>
+
+    <!-- System Requirements -->
+    <div class="download-option">
+        <h2>System Requirements</h2>
+        <table class="command-table">
+            <tr><td><strong>CPU</strong></td><td>64-bit x86_64 (Intel or AMD)</td></tr>
+            <tr><td><strong>RAM</strong></td><td>4 GB minimum, 8 GB+ recommended</td></tr>
+            <tr><td><strong>Storage</strong></td><td>50 GB minimum, 100 GB+ recommended (games need space)</td></tr>
+            <tr><td><strong>GPU</strong></td><td>AMD (any), NVIDIA (GTX 900+), Intel (UHD 600+)</td></tr>
+            <tr><td><strong>Internet</strong></td><td>Required for first-boot setup</td></tr>
+        </table>
+    </div>
+
+    <!-- Verify -->
+    <div class="download-option">
+        <h2>After Install / Rebase</h2>
+        <p>Verify you're running HubOS:</p>
+        <div class="code-wrapper">
+            <code class="code-block" id="cmd-verify">cat /etc/os-release | grep PRETTY_NAME</code>
+            <button class="copy-btn" onclick="copyCode('cmd-verify')">Copy</button>
+        </div>
+        <p>Should output: <code>PRETTY_NAME="HubOS (24 Hour Gaming)"</code></p>
+
+        <p style="margin-top: 1rem;">Check your status:</p>
+        <div class="code-wrapper">
+            <code class="code-block" id="cmd-status">rpm-ostree status</code>
+            <button class="copy-btn" onclick="copyCode('cmd-status')">Copy</button>
+        </div>
+
+        <p style="margin-top: 1rem;">Run diagnostics:</p>
+        <div class="code-wrapper">
+            <code class="code-block" id="cmd-diag">hubos-diag</code>
+            <button class="copy-btn" onclick="copyCode('cmd-diag')">Copy</button>
+        </div>
+    </div>
+</main>
+
+<footer>
+    <p>
+        <a href="https://24hgaming.com">24 Hour Gaming</a> &middot;
+        <a href="https://discord.gg/ymfEjH6EJN">Discord</a> &middot;
+        <a href="https://github.com/24hg/hubos">GitHub</a>
+    </p>
+</footer>
+
+<script>
+function copyCode(id) {
+    const el = document.getElementById(id);
+    const text = el.textContent.trim();
+    navigator.clipboard.writeText(text).then(() => {
+        const btn = el.parentElement.querySelector('.copy-btn');
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+            btn.textContent = 'Copy';
+            btn.classList.remove('copied');
+        }, 2000);
+    });
+}
+</script>
+
+</body>
+</html>

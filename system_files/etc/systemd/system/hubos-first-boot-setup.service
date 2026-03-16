@@ -1,0 +1,15 @@
+[Unit]
+Description=HubOS First Boot Setup
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/hubos/.first-boot-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/hubos/first-boot-setup.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

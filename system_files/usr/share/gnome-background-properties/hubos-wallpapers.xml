@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE wallpapers SYSTEM "gnome-wp-list.dtd">
+<wallpapers>
+  <wallpaper deleted="false">
+    <name>HubOS Dark</name>
+    <filename>/usr/share/hubos/wallpapers/hubos-dark.png</filename>
+    <options>zoom</options>
+    <shade_type>solid</shade_type>
+    <pcolor>#0a0a14</pcolor>
+  </wallpaper>
+  <wallpaper deleted="false">
+    <name>HubOS Neon</name>
+    <filename>/usr/share/hubos/wallpapers/hubos-neon.png</filename>
+    <options>zoom</options>
+    <shade_type>solid</shade_type>
+    <pcolor>#0a0a14</pcolor>
+  </wallpaper>
+  <wallpaper deleted="false">
+    <name>HubOS Minimal</name>
+    <filename>/usr/share/hubos/wallpapers/hubos-minimal.png</filename>
+    <options>zoom</options>
+    <shade_type>solid</shade_type>
+    <pcolor>#0a0a14</pcolor>
+  </wallpaper>
+  <wallpaper deleted="false">
+    <name>HubOS Circuit</name>
+    <filename>/usr/share/hubos/wallpapers/hubos-circuit.png</filename>
+    <options>zoom</options>
+    <shade_type>solid</shade_type>
+    <pcolor>#0a0a14</pcolor>
+  </wallpaper>
+</wallpapers>

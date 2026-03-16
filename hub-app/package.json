@@ -1,0 +1,48 @@
+{
+  "name": "hubos-hub",
+  "version": "1.0.0",
+  "description": "24HG Hub — Desktop app for 24 Hour Gaming",
+  "main": "main.js",
+  "author": "24 Hour Gaming",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --linux",
+    "build:rpm": "electron-builder --linux rpm",
+    "build:flatpak": "electron-builder --linux flatpak"
+  },
+  "dependencies": {
+    "electron-updater": "^6.1.0"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.0"
+  },
+  "build": {
+    "appId": "com.24hgaming.hub",
+    "productName": "24HG Hub",
+    "linux": {
+      "target": ["rpm", "flatpak", "AppImage"],
+      "icon": "assets/icons",
+      "category": "Game",
+      "desktop": {
+        "StartupWMClass": "hubos-hub",
+        "MimeType": "x-scheme-handler/24hg"
+      }
+    },
+    "flatpak": {
+      "runtimeVersion": "23.08",
+      "baseVersion": "23.08",
+      "finishArgs": [
+        "--share=ipc",
+        "--share=network",
+        "--socket=x11",
+        "--socket=wayland",
+        "--socket=pulseaudio",
+        "--device=dri",
+        "--talk-name=org.freedesktop.Notifications",
+        "--talk-name=org.kde.StatusNotifierWatcher"
+      ]
+    }
+  }
+}

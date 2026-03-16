@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""
+HubOS First-Boot Wizard — Full GTK4 setup experience
+Steps:
+  1. Welcome + language
+  2. GPU detection & driver status
+  3. 24HG account (open hub or skip)
+  4. Gaming preferences (MangoHud, GameMode, default mode)
+  5. Performance profile selection
+  6. Game config deployment
+  7. Summary & launch
+"""
+
+import subprocess
+import os
+import sys
+import json
+import shutil
+
+MARKER = os.path.expanduser("~/.config/hubos/.wizard-done")
+CONFIG_DIR = os.path.expanduser("~/.config/hubos")
+HUB_URL = "https://hub.24hgaming.com"
+
+
+def check_already_done():
+    if os.path.exists(MARKER):
+        sys.exit(0)
+
+
+def run_cmd(cmd, timeout=10):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def detect_gpu():
+    gpus = []
+    output = run_cmd(["lspci", "-nn"])
+    for line in output.split("\n"):
+        if any(x in line for x in ["VGA", "3D", "Display"]):
+            vendor = "Unknown"
+            if "NVIDIA" in line.upper():
+                vendor = "NVIDIA"
+            elif "AMD" in line.upper() or "ATI" in line.upper():
+                vendor = "AMD"
+            elif "INTEL" in line.upper():
+                vendor = "Intel"
+            gpus.append({"vendor": vendor, "info": line.strip()})
+    return gpus or [{"vendor": "Unknown", "info": "Could not detect GPU"}]
+
+
+def detect_vulkan():
+    output = run_cmd(["vulkaninfo", "--summary"], timeout=5)
+    if "deviceName" in output:
+        for line in output.split("\n"):
+            if "deviceName" in line:
+                return line.split("=")[-1].strip()
+    return "Not detected"
+
+
+def check_steam_installed():
+    return os.path.exists(os.path.expanduser(
+        "~/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+    ))
+
+
+def zenity(args):
+    """Run zenity with given args, return (returncode, stdout)."""
+    try:
+        r = subprocess.run(
+            ["zenity"] + args,
+            capture_output=True, text=True, timeout=300
+        )
+        return r.returncode, r.stdout.strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+def step_welcome():
+    zenity([
+        "--info", "--title=Welcome to HubOS",
+        "--width=550", "--height=350",
+        "--ok-label=Let's Go!",
+        "--text="
+        "<big><b>Welcome to HubOS</b></big>\n\n"
+        "24 Hour Gaming's custom Linux distribution.\n\n"
+        "This wizard will:\n\n"
+        "  <b>1.</b>  Detect your hardware\n"
+        "  <b>2.</b>  Connect you to the 24HG community\n"
+        "  <b>3.</b>  Configure your gaming experience\n"
+        "  <b>4.</b>  Optimize performance settings\n"
+        "  <b>5.</b>  Deploy game configs\n\n"
+        "<i>Takes about 2 minutes.</i>"
+    ])
+
+
+def step_gpu():
+    gpus = detect_gpu()
+    vulkan = detect_vulkan()
+
+    gpu_lines = []
+    drivers_ok = True
+    for g in gpus:
+        status = "Ready"
+        if g["vendor"] == "NVIDIA":
+            # Check if nvidia-smi works
+            nv = run_cmd(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"])
+            if nv:
+                status = f"Driver {nv}"
+            else:
+                status = "Driver not detected — may need reboot"
+                drivers_ok = False
+        elif g["vendor"] == "AMD":
+            status = "Mesa (open-source) — Best Linux support"
+        elif g["vendor"] == "Intel":
+            status = "Mesa (open-source) — Supported"
+
+        gpu_lines.append(f"  <b>{g['vendor']}</b>: {status}")
+
+    gpu_text = "\n".join(gpu_lines)
+    icon = "dialog-information" if drivers_ok else "dialog-warning"
+
+    zenity([
+        "--info", "--title=Hardware Detection",
+        "--width=600", "--height=300",
+        "--icon-name=" + icon,
+        "--text="
+        "<big><b>GPU Detection</b></big>\n\n"
+        f"{gpu_text}\n\n"
+        f"Vulkan: <b>{vulkan}</b>\n\n"
+        + ("<span foreground='#50c878'>All drivers are ready!</span>" if drivers_ok else
+           "<span foreground='#ffcc50'>A reboot may be needed for full driver support.</span>")
+    ])
+
+    return gpus
+
+
+def step_account():
+    rc, _ = zenity([
+        "--question", "--title=24HG Account",
+        "--width=500", "--height=320",
+        "--ok-label=Open Hub", "--cancel-label=Skip for Now",
+        "--text="
+        "<big><b>Join the Community</b></big>\n\n"
+        "The 24HG Hub gives you access to:\n\n"
+        "  <b>88+</b> game servers across 30+ titles\n"
+        "  <b>Chat</b> and forums\n"
+        "  <b>Tournaments</b> and leaderboards\n"
+        "  <b>Voice chat</b> (LiveKit)\n"
+        "  <b>Economy</b>, clans, and factions\n\n"
+        "Create an account or log in to get the full experience."
+    ])
+    if rc == 0:
+        subprocess.Popen(["/usr/bin/hubos-hub"])
+        return True
+    return False
+
+
+def step_gaming_prefs():
+    """Let user pick gaming preferences."""
+    rc, output = zenity([
+        "--list", "--title=Gaming Preferences",
+        "--width=550", "--height=400",
+        "--checklist",
+        "--text=<big><b>Choose your defaults</b></big>\n\nYou can change these anytime.",
+        "--column=Enable", "--column=Setting", "--column=Description",
+        "TRUE", "mangohud", "Performance overlay (F12 to toggle)",
+        "TRUE", "gamemode", "Auto-optimize CPU/GPU when gaming",
+        "TRUE", "steam-servers", "Add 24HG servers to Steam favorites",
+        "TRUE", "game-configs", "Deploy optimized game configs (CS, TF2, Rust)",
+        "FALSE", "compositor-off", "Disable desktop compositor during games",
+    ])
+
+    prefs = output.split("|") if output else []
+    return {
+        "mangohud": "mangohud" in prefs,
+        "gamemode": "gamemode" in prefs,
+        "steam_servers": "steam-servers" in prefs,
+        "game_configs": "game-configs" in prefs,
+        "compositor_off": "compositor-off" in prefs,
+    }
+
+
+def step_performance():
+    """Choose default performance profile."""
+    rc, output = zenity([
+        "--list", "--title=Performance Profile",
+        "--width=500", "--height=300",
+        "--radiolist",
+        "--text=<big><b>Default Performance Profile</b></big>\n\n"
+               "Switch anytime with: <tt>hubos-performance [mode]</tt>",
+        "--column=Select", "--column=Profile", "--column=Description",
+        "FALSE", "gaming", "Maximum performance (higher power, fan noise)",
+        "TRUE", "balanced", "Smart auto-switching (recommended)",
+        "FALSE", "powersave", "Battery life priority (laptops)",
+    ])
+    return output or "balanced"
+
+
+def step_deploy(prefs):
+    """Deploy configurations based on preferences."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+
+    # MangoHud
+    if prefs.get("mangohud"):
+        env_dir = os.path.expanduser("~/.config/environment.d")
+        os.makedirs(env_dir, exist_ok=True)
+        with open(os.path.join(env_dir, "hubos-mangohud.conf"), "w") as f:
+            f.write("MANGOHUD=1\n")
+
+    # Compositor preference
+    if prefs.get("compositor_off"):
+        env_dir = os.path.expanduser("~/.config/environment.d")
+        os.makedirs(env_dir, exist_ok=True)
+        with open(os.path.join(env_dir, "hubos-compositor.conf"), "w") as f:
+            f.write("# KWin will suspend compositing for fullscreen games\n")
+            f.write("KWIN_EXPLICIT_SYNC=0\n")
+
+    # Steam servers
+    if prefs.get("steam_servers"):
+        subprocess.run(["/usr/lib/hubos/configure-steam-servers.sh"],
+                       capture_output=True, timeout=30)
+
+    # Game configs
+    if prefs.get("game_configs") and shutil.which("bash"):
+        subprocess.run(["/usr/lib/hubos/hubos-game-configs.sh"],
+                       capture_output=True, timeout=30)
+
+
+def step_summary(gpus, prefs, profile):
+    gpu_names = ", ".join(g["vendor"] for g in gpus)
+    pref_list = [k for k, v in prefs.items() if v]
+    pref_text = ", ".join(p.replace("_", " ").title() for p in pref_list) or "None"
+
+    steam_status = "Installed" if check_steam_installed() else "Installing in background..."
+
+    zenity([
+        "--info", "--title=Setup Complete!",
+        "--width=550", "--height=380",
+        "--ok-label=Start Gaming!",
+        "--text="
+        "<big><b>You're all set!</b></big>\n\n"
+        f"<b>GPU:</b> {gpu_names}\n"
+        f"<b>Profile:</b> {profile.title()}\n"
+        f"<b>Enabled:</b> {pref_text}\n"
+        f"<b>Steam:</b> {steam_status}\n\n"
+        "<b>Quick Reference:</b>\n"
+        "  <tt>F12</tt> — Toggle performance overlay\n"
+        "  <tt>Super</tt> — App launcher\n"
+        "  <tt>hubos-performance</tt> — Switch power profile\n"
+        "  <tt>hubos-diag</tt> — System diagnostics\n"
+        "  System tray — Quick connect to servers\n\n"
+        "<i>Welcome to 24 Hour Gaming!</i>"
+    ])
+
+
+def main():
+    check_already_done()
+
+    # Check zenity
+    if not shutil.which("zenity"):
+        os.makedirs(os.path.dirname(MARKER), exist_ok=True)
+        with open(MARKER, "w") as f:
+            f.write("done\n")
+        sys.exit(0)
+
+    # Run wizard steps
+    step_welcome()
+    gpus = step_gpu()
+    step_account()
+    prefs = step_gaming_prefs()
+    profile = step_performance()
+    step_deploy(prefs)
+
+    # Apply performance profile
+    subprocess.run(["/usr/bin/hubos-performance", profile],
+                   capture_output=True, timeout=10)
+
+    # Save config
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    config = {
+        "wizard_completed": True,
+        "gpus": gpus,
+        "preferences": prefs,
+        "performance_profile": profile,
+    }
+    with open(os.path.join(CONFIG_DIR, "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+
+    step_summary(gpus, prefs, profile)
+
+    # Mark done
+    os.makedirs(os.path.dirname(MARKER), exist_ok=True)
+    with open(MARKER, "w") as f:
+        f.write("done\n")
+
+
+if __name__ == "__main__":
+    main()

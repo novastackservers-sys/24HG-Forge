@@ -1,0 +1,56 @@
+# HubOS GRUB Theme
+# 24 Hour Gaming
+
+title-text: ""
+desktop-color: "#0a0a14"
+desktop-image: "background.png"
+terminal-font: "DejaVu Sans Mono Regular 14"
+terminal-left: "10%"
+terminal-top: "20%"
+terminal-width: "80%"
+terminal-height: "60%"
+
++ boot_menu {
+    left = 25%
+    top = 30%
+    width = 50%
+    height = 50%
+    item_font = "DejaVu Sans Regular 16"
+    item_color = "#a0a0c0"
+    selected_item_font = "DejaVu Sans Bold 16"
+    selected_item_color = "#ffffff"
+    item_height = 32
+    item_padding = 8
+    item_spacing = 4
+    selected_item_pixmap_style = "select_*.png"
+    scrollbar = true
+    scrollbar_width = 6
+    scrollbar_thumb = "scrollbar_thumb_*.png"
+}
+
++ label {
+    left = 50%-150
+    top = 90%
+    width = 300
+    align = "center"
+    id = "__timeout__"
+    text = "Booting in %d seconds..."
+    color = "#606080"
+    font = "DejaVu Sans Regular 12"
+}
+
++ image {
+    left = 50%-64
+    top = 10%
+    file = "logo.png"
+}
+
++ label {
+    left = 50%-100
+    top = 22%
+    width = 200
+    align = "center"
+    text = "24 HOUR GAMING"
+    color = "#8080b0"
+    font = "DejaVu Sans Bold 14"
+}
