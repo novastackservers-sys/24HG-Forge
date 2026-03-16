@@ -1,0 +1,247 @@
+#!/bin/bash
+# HubOS Gaming Tips — Rotating tips for gamers, power users, and 24HG community.
+#
+# Usage: hubos-tips [show|daily|all|notify|motd]
+#   show   (default)  Display a random tip with nice formatting
+#   daily             Show the deterministic tip of the day
+#   all               List all tips numbered
+#   notify            Send a random tip as a desktop notification
+#   motd              Output formatted for /etc/motd or terminal login
+
+set -euo pipefail
+
+ACTION="${1:-show}"
+
+# ── Colors ──
+
+BOLD='\033[1m'
+DIM='\033[2m'
+GREEN='\033[32m'
+CYAN='\033[36m'
+YELLOW='\033[33m'
+MAGENTA='\033[35m'
+BLUE='\033[34m'
+RESET='\033[0m'
+
+# ── Tips Database ──
+
+TIPS=(
+  # HubOS specific
+  "Press F12 to toggle MangoHud — see FPS, GPU temp, and frame timing at a glance."
+  "Use 'hubos-performance gaming' to switch to max FPS mode. Your GPU will thank you later."
+  "hubos-performance balanced is great for everyday use — saves power and keeps fans quiet."
+  "hubos-replay auto-saves the last 30 seconds of gameplay. Press F9 to save a clip."
+  "Run 'hubos-diag' to get a full system health check — catches driver issues before they bite."
+  "hubos-proton-fix --check can diagnose why a game won't launch. Try it before googling."
+  "hubos-benchmark quick gives you a gaming readiness score in under a minute."
+  "Use hubos-shader-cache to pre-compile shaders — no more stuttering in the first 5 minutes."
+  "hubos-backup saves your game saves and configs. Set it and forget it."
+  "hubos-controller auto-detects gamepads. Plug in and play — no config needed."
+  "hubos-game-profiles let you save per-game settings. Different games, different configs."
+  "hubos-audio game switches to the low-latency audio profile for gaming."
+  "hubos-stream can set up OBS with one command. Start streaming in seconds."
+  "hubos-screenshot saves to ~/Pictures/Screenshots with a timestamp. Clean and organized."
+  "hubos-proton-updater keeps Proton-GE up to date automatically. Set it once."
+  "The Hub Bridge syncs your activity and achievements to hub.24hgaming.com."
+
+  # Linux gaming fundamentals
+  "Use gamemode to auto-optimize CPU governor and GPU clocks while gaming. It's free performance."
+  "Proton-GE often fixes games that regular Proton can't. Install it with hubos-proton-updater."
+  "Steam's Shader Pre-Caching (Settings > Shader Pre-Caching) reduces in-game stutters."
+  "AMD users: Mesa's ACO shader compiler is faster than LLVM. It's the default on HubOS."
+  "NVIDIA users: Make sure you're on the latest proprietary drivers. 'nvidia-smi' shows your version."
+  "Vulkan games generally run better than OpenGL under Proton. Check ProtonDB for tips."
+  "Enable Feral GameMode in Steam launch options: 'gamemoderun %command%' for auto-optimization."
+  "Lutris is great for non-Steam games. It handles Wine prefixes so you don't have to."
+  "Check ProtonDB.com before buying a game — community reports show how well it runs on Linux."
+  "Flatpak Steam can have permission issues. HubOS uses the native package for best compatibility."
+  "The 'mangohud' overlay works with any Vulkan or OpenGL game, not just Steam."
+
+  # Performance tips
+  "Close browsers before gaming — Chrome alone can eat 2GB+ of VRAM on integrated GPUs."
+  "Enable FSR in Proton for free FPS: Set WINE_FULLSCREEN_FSR=1 in game launch options."
+  "Reduce desktop compositor overhead: HubOS auto-disables compositing in fullscreen games."
+  "Use 'htop' or 'btop' to find background processes hogging CPU. Kill what you don't need."
+  "Swap can cause stutter. HubOS uses zram for faster swap that doesn't touch your disk."
+  "If a game stutters, check if shader compilation is running. First launch is always the worst."
+  "Lower shadow quality first — it's usually the biggest FPS drain with the least visual difference."
+  "DXVK async can eliminate shader compilation stutter: DXVK_ASYNC=1 in launch options."
+  "Wayland gives better input latency than X11 for most setups. HubOS defaults to Wayland."
+  "V-Sync adds input lag. Use frame limiters (MangoHud or in-game) instead for smoother play."
+
+  # 24HG community
+  "Join voice chat on the Hub — no Discord needed. Open-source, low-latency, and community-run."
+  "Check the tournament schedule at hub.24hgaming.com — prizes every month."
+  "24HG runs 85+ game servers across Rust, CS2, TF2, CS 1.6, and more. All community-funded."
+  "Your Hub profile tracks playtime, achievements, and server stats across all 24HG services."
+  "Found a bug? Report it on the Hub. Community feedback shapes every HubOS update."
+  "The 24HG Discord at discord.gg/ymfEjH6EJN has channels for every game we host."
+  "Clip something cool? Share it on the Hub — best clips get featured weekly."
+  "HubOS is built by gamers, for gamers. No telemetry, no ads, no nonsense."
+
+  # Keyboard shortcuts
+  "F9 saves a replay clip of the last 30 seconds. Works globally."
+  "Meta+N toggles night light — easy on the eyes for late-night sessions."
+  "Meta+G opens the game launcher overlay."
+  "Meta+Shift+S takes a region screenshot."
+  "Ctrl+Alt+F2 drops to a TTY if your desktop freezes. Ctrl+Alt+F1 goes back."
+  "Meta+L locks the screen. Good habit when you step away."
+
+  # Tool tips
+  "Run 'hubos-server-status' to see which 24HG game servers are online and player counts."
+  "hubos-netguard monitors your network for packet loss and latency spikes during gaming."
+  "hubos-discord-fix patches Discord screen sharing on Wayland. No more black screens."
+  "Use 'hubos-input calibrate' to test input latency — helps dial in your mouse settings."
+  "hubos-nightlight adjusts color temperature on a schedule. Your eyes will thank you at 2 AM."
+  "hubos-neofetch shows your system specs in style. Great for screenshots."
+  "'flatpak update' keeps your games and apps current. HubOS runs it weekly automatically."
+  "Need help? 'hubos-tips all' lists every tip. There's always something new to learn."
+)
+
+TIP_COUNT=${#TIPS[@]}
+
+# ── Functions ──
+
+random_index() {
+    echo $(( RANDOM % TIP_COUNT ))
+}
+
+daily_index() {
+    local day_of_year
+    day_of_year=$(date +%j | sed 's/^0*//')
+    echo $(( day_of_year % TIP_COUNT ))
+}
+
+wrap_text() {
+    local text="$1"
+    local width="$2"
+    echo "$text" | fold -s -w "$width"
+}
+
+draw_box() {
+    local title="$1"
+    local text="$2"
+    local width=68
+    local inner=$(( width - 4 ))
+
+    # Top border
+    local title_len=${#title}
+    local dash_after=$(( width - title_len - 5 ))
+    printf "${CYAN}┌─ ${BOLD}${YELLOW}%s${RESET}${CYAN} " "$title"
+    printf '%0.s─' $(seq 1 "$dash_after")
+    printf "┐${RESET}\n"
+
+    # Wrap and print text
+    while IFS= read -r line; do
+        local line_len=${#line}
+        local padding=$(( inner - line_len ))
+        if [ "$padding" -lt 0 ]; then padding=0; fi
+        printf "${CYAN}│${RESET}  %s%*s ${CYAN}│${RESET}\n" "$line" "$padding" ""
+    done <<< "$(wrap_text "$text" "$inner")"
+
+    # Bottom border
+    printf "${CYAN}└"
+    printf '%0.s─' $(seq 1 "$width")
+    printf "┘${RESET}\n"
+}
+
+show_tip() {
+    local idx
+    idx=$(random_index)
+    local tip="${TIPS[$idx]}"
+    echo ""
+    draw_box "Gaming Tip" "$tip"
+    echo -e "  ${DIM}Tip $((idx + 1))/${TIP_COUNT} — Run 'hubos-tips' again for another${RESET}"
+    echo ""
+}
+
+show_daily() {
+    local idx
+    idx=$(daily_index)
+    local tip="${TIPS[$idx]}"
+    local today
+    today=$(date +"%A, %B %d")
+    echo ""
+    draw_box "Tip of the Day" "$tip"
+    echo -e "  ${DIM}${today}${RESET}"
+    echo -e "  ${DIM}Tip $((idx + 1))/${TIP_COUNT} — New tip every day${RESET}"
+    echo ""
+}
+
+show_all() {
+    echo ""
+    echo -e "${BOLD}${CYAN}  All HubOS Tips (${TIP_COUNT} total)${RESET}"
+    echo -e "${CYAN}  $(printf '%0.s─' $(seq 1 40))${RESET}"
+    echo ""
+    for i in "${!TIPS[@]}"; do
+        local num=$((i + 1))
+        printf "  ${GREEN}%3d.${RESET} %s\n\n" "$num" "${TIPS[$i]}"
+    done
+}
+
+send_notify() {
+    local idx
+    idx=$(random_index)
+    local tip="${TIPS[$idx]}"
+
+    if command -v notify-send &>/dev/null; then
+        notify-send \
+            --icon=input-gaming \
+            --app-name="HubOS Tips" \
+            --urgency=low \
+            "Gaming Tip" \
+            "$tip"
+        echo "Notification sent."
+    else
+        echo "notify-send not found. Here's the tip instead:"
+        echo ""
+        draw_box "Gaming Tip" "$tip"
+    fi
+}
+
+show_motd() {
+    local idx
+    idx=$(daily_index)
+    local tip="${TIPS[$idx]}"
+
+    # Plain text output suitable for /etc/motd or login shell
+    echo ""
+    echo "  ┌─ HubOS Tip of the Day ─────────────────────────────────────────┐"
+
+    local inner=62
+    while IFS= read -r line; do
+        local line_len=${#line}
+        local padding=$(( inner - line_len ))
+        if [ "$padding" -lt 0 ]; then padding=0; fi
+        printf "  │  %s%*s │\n" "$line" "$padding" ""
+    done <<< "$(wrap_text "$tip" "$inner")"
+
+    echo "  └──────────────────────────────────────────────────────────────────┘"
+    echo "  Tip $((idx + 1))/${TIP_COUNT} — hubos-tips all to see more"
+    echo ""
+}
+
+# ── Main ──
+
+case "$ACTION" in
+    show)    show_tip    ;;
+    daily)   show_daily  ;;
+    all)     show_all    ;;
+    notify)  send_notify ;;
+    motd)    show_motd   ;;
+    -h|--help|help)
+        echo "Usage: hubos-tips [show|daily|all|notify|motd]"
+        echo ""
+        echo "Commands:"
+        echo "  show    (default) Display a random gaming tip"
+        echo "  daily   Show the deterministic tip of the day"
+        echo "  all     List all tips numbered"
+        echo "  notify  Send a random tip as a desktop notification"
+        echo "  motd    Output formatted for /etc/motd or login"
+        ;;
+    *)
+        echo "Unknown command: $ACTION"
+        echo "Run 'hubos-tips help' for usage."
+        exit 1
+        ;;
+esac

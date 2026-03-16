@@ -1,0 +1,837 @@
+#!/usr/bin/env python3
+"""
+HubOS Achievements — OS-level gamification that rewards exploration and engagement.
+
+Tracks milestones, unlocks achievements, awards points, and syncs with the 24HG Hub.
+Designed to run periodically via systemd timer and on-demand by the user.
+
+Commands:
+  check              Scan system state and unlock earned achievements
+  list               Show all achievements with locked/unlocked status
+  status             Summary: unlocked count, points, streaks
+  unlock <id>        Manually unlock an achievement (for Hub-triggered unlocks)
+  reset              Reset all achievement progress (with confirmation)
+  help               Show this help text
+
+Data: ~/.local/share/hubos/achievements.json
+"""
+
+import json
+import os
+import sys
+import time
+import glob
+import subprocess
+import urllib.request
+import urllib.error
+from datetime import datetime, date, timedelta
+from pathlib import Path
+
+# ── Configuration ──
+
+DATA_DIR = os.path.expanduser("~/.local/share/hubos")
+DATA_FILE = os.path.join(DATA_DIR, "achievements.json")
+GAME_TIMER_FILE = os.path.join(DATA_DIR, "game-timer.json")
+BENCHMARK_FILE = os.path.join(DATA_DIR, "benchmark.json")
+HUB_TOKEN_FILE = os.path.expanduser("~/.config/hubos/hub-token")
+HUB_API_URL = "https://api.24hgaming.com/activity/achievements"
+
+# ── Colors ──
+
+class C:
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    RED    = "\033[31m"
+    GREEN  = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE   = "\033[34m"
+    MAGENTA= "\033[35m"
+    CYAN   = "\033[36m"
+    WHITE  = "\033[37m"
+    GOLD   = "\033[38;5;220m"
+    ORANGE = "\033[38;5;208m"
+    RESET  = "\033[0m"
+
+    @staticmethod
+    def strip():
+        """Disable colors when not a TTY."""
+        if not sys.stdout.isatty():
+            for attr in ("BOLD", "DIM", "RED", "GREEN", "YELLOW", "BLUE",
+                         "MAGENTA", "CYAN", "WHITE", "GOLD", "ORANGE", "RESET"):
+                setattr(C, attr, "")
+
+
+# ── Achievement Definitions ──
+
+# Categories with display colors
+CATEGORIES = {
+    "getting_started": ("Getting Started", C.GREEN),
+    "playtime":        ("Playtime",        C.BLUE),
+    "community":       ("Community",       C.MAGENTA),
+    "tools":           ("Tools & Mastery", C.CYAN),
+    "streaks":         ("Streaks",         C.ORANGE),
+    "special":         ("Special",         C.GOLD),
+}
+
+# Each: (id, name, description, points, category, icon)
+ACHIEVEMENTS = [
+    # Getting Started
+    ("first_boot",     "First Boot",       "Complete the first-boot wizard",                    5,  "getting_started", "🚀"),
+    ("identity",       "Identity",         "Set a custom wallpaper",                            5,  "getting_started", "🎨"),
+    ("connected",      "Connected",        "Login to the 24HG Hub",                            10,  "getting_started", "🔗"),
+    ("first_blood",    "First Blood",      "Launch your first game via Steam",                 10,  "getting_started", "⚔️"),
+    ("controller_kid", "Controller Kid",   "Connect a gamepad",                                 5,  "getting_started", "🎮"),
+    ("configurator",   "Configurator",     "Create a game profile",                            10,  "getting_started", "⚙️"),
+
+    # Playtime
+    ("marathon",       "Marathon",         "Play for 4+ hours in a single session",            15,  "playtime", "🏃"),
+    ("centurion",      "Centurion",        "Reach 100 total hours played",                     20,  "playtime", "💯"),
+    ("night_owl",      "Night Owl",        "Game after midnight",                               5,  "playtime", "🦉"),
+    ("early_bird",     "Early Bird",       "Game before 7 AM",                                  5,  "playtime", "🐦"),
+    ("five_hundred",   "Dedicated",        "Reach 500 total hours played",                     30,  "playtime", "⭐"),
+    ("thousand",       "Legendary Gamer",  "Reach 1,000 total hours played",                   50,  "playtime", "👑"),
+
+    # Community
+    ("social_butterfly","Social Butterfly","Have 5+ friends online at once",                   10,  "community", "🦋"),
+    ("server_hopper",  "Server Hopper",    "Connect to 5 different 24HG servers",              10,  "community", "🌐"),
+    ("clip_artist",    "Clip Artist",      "Save 10 replay clips",                             10,  "community", "🎬"),
+    ("streamer",       "Streamer",         "Start a stream with hubos-stream",                 15,  "community", "📡"),
+    ("sharer",         "Sharer",           "Share a clip or screenshot to the Hub",            10,  "community", "📤"),
+    ("team_player",    "Team Player",      "Join a Hub group or clan",                         10,  "community", "🤝"),
+
+    # Tools & Mastery
+    ("benchmarker",    "Benchmarker",      "Run hubos-benchmark",                               5,  "tools", "📊"),
+    ("diagnosed",      "Diagnosed",        "Run hubos-diag",                                    5,  "tools", "🔍"),
+    ("proton_master",  "Proton Master",    "Have 3+ Proton-GE versions installed",             10,  "tools", "🧪"),
+    ("shader_chef",    "Shader Chef",      "Optimize shader cache with hubos-shader-cache",    10,  "tools", "🍳"),
+    ("backup_hero",    "Backup Hero",      "Create a game save backup",                        10,  "tools", "💾"),
+    ("speed_demon",    "Speed Demon",      "Reach FPS > 144 (MangoHud logs)",                  15,  "tools", "⚡"),
+    ("customizer",     "Customizer",       "Change performance profile",                       10,  "tools", "🎛️"),
+    ("explorer",       "Explorer",         "Use 10 different hubos tools",                      5,  "tools", "🧭"),
+    ("net_watcher",    "Net Watcher",      "Run hubos-netguard to check connection quality",    5,  "tools", "📶"),
+    ("audio_tweaker",  "Audio Tweaker",    "Switch audio profiles with hubos-audio",            5,  "tools", "🔊"),
+
+    # Streaks
+    ("week_streak",    "Week Warrior",     "Game every day for 7 days",                        20,  "streaks", "🔥"),
+    ("month_streak",   "Monthly Monster",  "Game every day for 30 days",                       30,  "streaks", "🌟"),
+    ("quarter_streak", "Unstoppable",      "Game every day for 90 days",                       50,  "streaks", "💎"),
+
+    # Special
+    ("veteran",        "Veteran",          "Use HubOS for 30+ days",                           25,  "special", "🎖️"),
+    ("old_guard",      "Old Guard",        "Use HubOS for 365+ days",                          50,  "special", "🏛️"),
+    ("completionist",  "Completionist",    "Unlock all other achievements",                    50,  "special", "🏆"),
+]
+
+ACHIEVEMENT_MAP = {a[0]: a for a in ACHIEVEMENTS}
+TOTAL_POINTS = sum(a[3] for a in ACHIEVEMENTS)
+
+# ── Data Management ──
+
+def load_data():
+    """Load achievement data, creating defaults if needed."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r") as f:
+                data = json.load(f)
+            # Ensure structure
+            data.setdefault("unlocked", {})
+            data.setdefault("first_seen", data.get("first_seen", datetime.now().isoformat()))
+            data.setdefault("tools_used", [])
+            data.setdefault("gaming_days", [])
+            data.setdefault("version", 1)
+            return data
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return {
+        "unlocked": {},
+        "first_seen": datetime.now().isoformat(),
+        "tools_used": [],
+        "gaming_days": [],
+        "version": 1,
+    }
+
+
+def save_data(data):
+    """Write achievement data to disk."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = DATA_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, DATA_FILE)
+
+
+def load_game_timer():
+    """Load game timer data if available."""
+    if os.path.exists(GAME_TIMER_FILE):
+        try:
+            with open(GAME_TIMER_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return {}
+
+
+# ── Achievement Unlock ──
+
+def unlock(data, achievement_id, quiet=False):
+    """Unlock an achievement. Returns True if newly unlocked."""
+    if achievement_id in data["unlocked"]:
+        return False
+    if achievement_id not in ACHIEVEMENT_MAP:
+        return False
+
+    now = datetime.now().isoformat()
+    data["unlocked"][achievement_id] = {"date": now}
+
+    a = ACHIEVEMENT_MAP[achievement_id]
+    name, desc, pts, icon = a[1], a[2], a[3], a[5]
+
+    if not quiet:
+        # Terminal celebration
+        print()
+        print(f"  {C.GOLD}{C.BOLD}{'=' * 52}{C.RESET}")
+        print(f"  {C.GOLD}{C.BOLD}  {icon}  ACHIEVEMENT UNLOCKED!  {icon}{C.RESET}")
+        print(f"  {C.GOLD}{C.BOLD}{'=' * 52}{C.RESET}")
+        print(f"  {C.WHITE}{C.BOLD}  {name}{C.RESET}  {C.DIM}({pts} pts){C.RESET}")
+        print(f"  {C.CYAN}  {desc}{C.RESET}")
+        print(f"  {C.GOLD}{C.BOLD}{'=' * 52}{C.RESET}")
+        print()
+
+    # Desktop notification
+    try:
+        subprocess.run(
+            [
+                "notify-send",
+                "--icon=trophy-gold",
+                "--app-name=HubOS Achievements",
+                "--urgency=normal",
+                f"{icon} Achievement Unlocked!",
+                f"{name} — {desc} (+{pts} pts)",
+            ],
+            capture_output=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Sync to Hub
+    sync_to_hub(achievement_id, pts, now)
+
+    return True
+
+
+def sync_to_hub(achievement_id, points, timestamp):
+    """POST achievement unlock to the 24HG Hub API."""
+    if not os.path.exists(HUB_TOKEN_FILE):
+        return
+    try:
+        token = Path(HUB_TOKEN_FILE).read_text().strip()
+        payload = json.dumps({
+            "achievement": achievement_id,
+            "points": points,
+            "unlocked_at": timestamp,
+            "client": "hubos",
+        }).encode()
+        req = urllib.request.Request(
+            HUB_API_URL,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except (urllib.error.URLError, OSError, ValueError):
+        pass
+
+
+# ── Achievement Checkers ──
+
+def check_all(data):
+    """Scan system state and unlock any earned achievements."""
+    newly_unlocked = 0
+    timer_data = load_game_timer()
+    now = datetime.now()
+    today_str = date.today().isoformat()
+
+    # -- First Boot: check if first-boot wizard stamp exists --
+    if os.path.exists(os.path.expanduser("~/.config/hubos/first-boot-done")):
+        if unlock(data, "first_boot"):
+            newly_unlocked += 1
+
+    # -- Identity: custom wallpaper (not the default) --
+    wallpaper_paths = [
+        os.path.expanduser("~/.config/hubos/wallpaper-changed"),
+        os.path.expanduser("~/.config/plasma-org.kde.plasma.desktop-appletsrc"),
+    ]
+    for wp in wallpaper_paths:
+        if os.path.exists(wp):
+            if wp.endswith("wallpaper-changed"):
+                if unlock(data, "identity"):
+                    newly_unlocked += 1
+                break
+            else:
+                # KDE: check if wallpaper was modified from default
+                try:
+                    stat = os.stat(wp)
+                    first_seen = datetime.fromisoformat(data["first_seen"])
+                    file_mtime = datetime.fromtimestamp(stat.st_mtime)
+                    if file_mtime > first_seen + timedelta(minutes=30):
+                        if unlock(data, "identity"):
+                            newly_unlocked += 1
+                        break
+                except (OSError, ValueError):
+                    pass
+
+    # -- Connected: Hub token exists --
+    if os.path.exists(HUB_TOKEN_FILE):
+        if unlock(data, "connected"):
+            newly_unlocked += 1
+
+    # -- First Blood: any game in timer data --
+    sessions = timer_data.get("sessions", [])
+    completed = timer_data.get("completed", [])
+    all_sessions = sessions + completed
+    if all_sessions:
+        if unlock(data, "first_blood"):
+            newly_unlocked += 1
+
+    # -- Marathon: 4+ hour session --
+    for s in all_sessions:
+        duration = s.get("duration", s.get("elapsed", 0))
+        if duration >= 4 * 3600:
+            if unlock(data, "marathon"):
+                newly_unlocked += 1
+            break
+
+    # -- Centurion / Dedicated / Legendary: total hours --
+    total_seconds = sum(s.get("duration", s.get("elapsed", 0)) for s in all_sessions)
+    total_hours = total_seconds / 3600
+    if total_hours >= 100:
+        if unlock(data, "centurion"):
+            newly_unlocked += 1
+    if total_hours >= 500:
+        if unlock(data, "five_hundred"):
+            newly_unlocked += 1
+    if total_hours >= 1000:
+        if unlock(data, "thousand"):
+            newly_unlocked += 1
+
+    # -- Night Owl / Early Bird: check session start times --
+    for s in all_sessions:
+        start_str = s.get("started", s.get("start", ""))
+        if not start_str:
+            continue
+        try:
+            start_dt = datetime.fromisoformat(start_str)
+            hour = start_dt.hour
+            if hour >= 0 and hour < 5:
+                if unlock(data, "night_owl"):
+                    newly_unlocked += 1
+            if hour >= 4 and hour < 7:
+                if unlock(data, "early_bird"):
+                    newly_unlocked += 1
+        except ValueError:
+            continue
+
+    # -- Controller Kid: check for gamepad devices --
+    try:
+        js_devices = glob.glob("/dev/input/js*")
+        gamepad_marker = os.path.expanduser("~/.local/share/hubos/gamepad-seen")
+        if js_devices or os.path.exists(gamepad_marker):
+            if unlock(data, "controller_kid"):
+                newly_unlocked += 1
+    except OSError:
+        pass
+
+    # -- Configurator: game profile exists --
+    profiles_dir = os.path.expanduser("~/.config/hubos/game-profiles")
+    if os.path.isdir(profiles_dir):
+        profiles = [f for f in os.listdir(profiles_dir) if f.endswith(".json")]
+        if profiles:
+            if unlock(data, "configurator"):
+                newly_unlocked += 1
+
+    # -- Benchmarker --
+    if os.path.exists(BENCHMARK_FILE):
+        if unlock(data, "benchmarker"):
+            newly_unlocked += 1
+
+    # -- Diagnosed --
+    diag_file = os.path.join(DATA_DIR, "diag-report.json")
+    diag_marker = os.path.expanduser("~/.local/share/hubos/diag-ran")
+    if os.path.exists(diag_file) or os.path.exists(diag_marker):
+        if unlock(data, "diagnosed"):
+            newly_unlocked += 1
+
+    # -- Proton Master: 3+ Proton-GE versions --
+    proton_dirs = [
+        os.path.expanduser("~/.steam/root/compatibilitytools.d"),
+        os.path.expanduser("~/.local/share/Steam/compatibilitytools.d"),
+    ]
+    proton_versions = set()
+    for pd in proton_dirs:
+        if os.path.isdir(pd):
+            for entry in os.listdir(pd):
+                if "proton" in entry.lower() or "ge" in entry.lower():
+                    proton_versions.add(entry)
+    if len(proton_versions) >= 3:
+        if unlock(data, "proton_master"):
+            newly_unlocked += 1
+
+    # -- Shader Chef --
+    shader_marker = os.path.expanduser("~/.local/share/hubos/shader-optimized")
+    if os.path.exists(shader_marker):
+        if unlock(data, "shader_chef"):
+            newly_unlocked += 1
+
+    # -- Backup Hero --
+    backup_dir = os.path.expanduser("~/.local/share/hubos/backups")
+    backup_marker = os.path.expanduser("~/.local/share/hubos/backup-created")
+    if os.path.exists(backup_marker) or (os.path.isdir(backup_dir) and os.listdir(backup_dir)):
+        if unlock(data, "backup_hero"):
+            newly_unlocked += 1
+
+    # -- Speed Demon: FPS > 144 in MangoHud logs --
+    mangohud_logs = glob.glob(os.path.expanduser("~/.local/share/MangoHud/*.csv"))
+    mangohud_logs += glob.glob("/tmp/mangohud/*.csv")
+    for log_path in mangohud_logs[-5:]:  # Check last 5 logs
+        try:
+            with open(log_path, "r") as f:
+                header = f.readline().strip().split(",")
+                if "fps" in header:
+                    fps_idx = header.index("fps")
+                    for line in f:
+                        parts = line.strip().split(",")
+                        if len(parts) > fps_idx:
+                            try:
+                                fps = float(parts[fps_idx])
+                                if fps > 144:
+                                    if unlock(data, "speed_demon"):
+                                        newly_unlocked += 1
+                                    raise StopIteration
+                            except ValueError:
+                                continue
+        except (OSError, StopIteration):
+            break
+
+    # -- Customizer: performance profile changed from default --
+    perf_file = os.path.expanduser("~/.config/hubos/performance-profile")
+    if os.path.exists(perf_file):
+        try:
+            profile = Path(perf_file).read_text().strip()
+            if profile and profile != "balanced":
+                if unlock(data, "customizer"):
+                    newly_unlocked += 1
+        except OSError:
+            pass
+
+    # -- Explorer: 10 different hubos tools used --
+    tools_marker_dir = os.path.expanduser("~/.local/share/hubos/tools-used")
+    if os.path.isdir(tools_marker_dir):
+        tools_seen = set(os.listdir(tools_marker_dir))
+        data["tools_used"] = list(set(data.get("tools_used", [])) | tools_seen)
+    # Also check for tool-specific markers
+    tool_markers = {
+        "benchmark": BENCHMARK_FILE,
+        "diag": os.path.join(DATA_DIR, "diag-ran"),
+        "replay": os.path.expanduser("~/.local/share/hubos/replay-used"),
+        "stream": os.path.expanduser("~/.local/share/hubos/stream-used"),
+        "backup": os.path.expanduser("~/.local/share/hubos/backup-created"),
+        "shader-cache": os.path.expanduser("~/.local/share/hubos/shader-optimized"),
+        "performance": perf_file,
+        "game-timer": GAME_TIMER_FILE,
+        "netguard": os.path.expanduser("~/.local/share/hubos/netguard-ran"),
+        "audio": os.path.expanduser("~/.local/share/hubos/audio-switched"),
+        "controller": os.path.expanduser("~/.local/share/hubos/gamepad-seen"),
+        "screenshot": os.path.expanduser("~/.local/share/hubos/screenshot-taken"),
+        "proton-fix": os.path.expanduser("~/.local/share/hubos/proton-fix-ran"),
+        "proton-updater": os.path.expanduser("~/.local/share/hubos/proton-updated"),
+    }
+    tools_found = set(data.get("tools_used", []))
+    for tool_name, marker in tool_markers.items():
+        if os.path.exists(marker):
+            tools_found.add(tool_name)
+    data["tools_used"] = list(tools_found)
+    if len(tools_found) >= 10:
+        if unlock(data, "explorer"):
+            newly_unlocked += 1
+
+    # -- Net Watcher --
+    netguard_marker = os.path.expanduser("~/.local/share/hubos/netguard-ran")
+    if os.path.exists(netguard_marker):
+        if unlock(data, "net_watcher"):
+            newly_unlocked += 1
+
+    # -- Audio Tweaker --
+    audio_marker = os.path.expanduser("~/.local/share/hubos/audio-switched")
+    if os.path.exists(audio_marker):
+        if unlock(data, "audio_tweaker"):
+            newly_unlocked += 1
+
+    # -- Clip Artist: 10+ replay clips --
+    clips_dir = os.path.expanduser("~/Videos/Clips")
+    if os.path.isdir(clips_dir):
+        clips = [f for f in os.listdir(clips_dir) if not f.startswith(".")]
+        if len(clips) >= 10:
+            if unlock(data, "clip_artist"):
+                newly_unlocked += 1
+
+    # -- Streamer --
+    stream_marker = os.path.expanduser("~/.local/share/hubos/stream-used")
+    if os.path.exists(stream_marker):
+        if unlock(data, "streamer"):
+            newly_unlocked += 1
+
+    # -- Sharer --
+    share_marker = os.path.expanduser("~/.local/share/hubos/hub-shared")
+    if os.path.exists(share_marker):
+        if unlock(data, "sharer"):
+            newly_unlocked += 1
+
+    # -- Team Player --
+    team_marker = os.path.expanduser("~/.local/share/hubos/hub-group-joined")
+    if os.path.exists(team_marker):
+        if unlock(data, "team_player"):
+            newly_unlocked += 1
+
+    # -- Social Butterfly --
+    social_marker = os.path.expanduser("~/.local/share/hubos/social-butterfly")
+    if os.path.exists(social_marker):
+        if unlock(data, "social_butterfly"):
+            newly_unlocked += 1
+
+    # -- Server Hopper --
+    servers_file = os.path.expanduser("~/.local/share/hubos/servers-visited.json")
+    if os.path.exists(servers_file):
+        try:
+            with open(servers_file, "r") as f:
+                servers = json.load(f)
+            if isinstance(servers, list) and len(servers) >= 5:
+                if unlock(data, "server_hopper"):
+                    newly_unlocked += 1
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # -- Gaming day streaks --
+    # Track today if any gaming happened
+    if all_sessions:
+        gaming_dates = set(data.get("gaming_days", []))
+        for s in all_sessions:
+            start_str = s.get("started", s.get("start", ""))
+            if start_str:
+                try:
+                    d = datetime.fromisoformat(start_str).date().isoformat()
+                    gaming_dates.add(d)
+                except ValueError:
+                    pass
+        data["gaming_days"] = sorted(gaming_dates)
+
+        # Calculate current streak
+        streak = calculate_streak(data["gaming_days"])
+        if streak >= 7:
+            if unlock(data, "week_streak"):
+                newly_unlocked += 1
+        if streak >= 30:
+            if unlock(data, "month_streak"):
+                newly_unlocked += 1
+        if streak >= 90:
+            if unlock(data, "quarter_streak"):
+                newly_unlocked += 1
+
+    # -- Veteran / Old Guard: days since first seen --
+    try:
+        first_seen = datetime.fromisoformat(data["first_seen"]).date()
+        days_used = (date.today() - first_seen).days
+        if days_used >= 30:
+            if unlock(data, "veteran"):
+                newly_unlocked += 1
+        if days_used >= 365:
+            if unlock(data, "old_guard"):
+                newly_unlocked += 1
+    except (ValueError, KeyError):
+        pass
+
+    # -- Completionist: all others unlocked --
+    other_ids = {a[0] for a in ACHIEVEMENTS if a[0] != "completionist"}
+    if other_ids.issubset(set(data["unlocked"].keys())):
+        if unlock(data, "completionist"):
+            newly_unlocked += 1
+
+    return newly_unlocked
+
+
+def calculate_streak(gaming_days):
+    """Calculate the current consecutive gaming day streak."""
+    if not gaming_days:
+        return 0
+    try:
+        dates = sorted(date.fromisoformat(d) for d in gaming_days)
+    except ValueError:
+        return 0
+
+    today = date.today()
+    # Allow today or yesterday as the streak end
+    if dates[-1] < today - timedelta(days=1):
+        return 0
+
+    streak = 1
+    for i in range(len(dates) - 1, 0, -1):
+        diff = (dates[i] - dates[i - 1]).days
+        if diff == 1:
+            streak += 1
+        elif diff == 0:
+            continue  # same day, skip
+        else:
+            break
+
+    return streak
+
+
+# ── Display Functions ──
+
+def progress_bar(current, total, width=30):
+    """Render a colored progress bar."""
+    if total == 0:
+        ratio = 0
+    else:
+        ratio = current / total
+    filled = int(width * ratio)
+    empty = width - filled
+
+    if ratio >= 1.0:
+        color = C.GOLD
+    elif ratio >= 0.7:
+        color = C.GREEN
+    elif ratio >= 0.4:
+        color = C.YELLOW
+    else:
+        color = C.CYAN
+
+    bar = f"{color}{'█' * filled}{C.DIM}{'░' * empty}{C.RESET}"
+    pct = f"{ratio * 100:.0f}%"
+    return f"{bar} {pct}"
+
+
+def cmd_list(data):
+    """Show all achievements grouped by category."""
+    print()
+    print(f"  {C.BOLD}{C.GOLD}╔══════════════════════════════════════════════════════╗{C.RESET}")
+    print(f"  {C.BOLD}{C.GOLD}║          H u b O S   A c h i e v e m e n t s       ║{C.RESET}")
+    print(f"  {C.BOLD}{C.GOLD}╚══════════════════════════════════════════════════════╝{C.RESET}")
+    print()
+
+    unlocked = data.get("unlocked", {})
+
+    for cat_id, (cat_name, cat_color) in CATEGORIES.items():
+        cat_achievements = [a for a in ACHIEVEMENTS if a[4] == cat_id]
+        if not cat_achievements:
+            continue
+
+        cat_unlocked = sum(1 for a in cat_achievements if a[0] in unlocked)
+        cat_total = len(cat_achievements)
+
+        print(f"  {cat_color}{C.BOLD}── {cat_name} ({cat_unlocked}/{cat_total}) ──{C.RESET}")
+        print()
+
+        for aid, name, desc, pts, _, icon in cat_achievements:
+            if aid in unlocked:
+                unlock_date = unlocked[aid].get("date", "")
+                try:
+                    dt = datetime.fromisoformat(unlock_date)
+                    date_str = dt.strftime("%b %d, %Y")
+                except ValueError:
+                    date_str = "Unknown"
+                print(f"    {C.GREEN}✓{C.RESET} {icon}  {C.BOLD}{name}{C.RESET}  "
+                      f"{C.DIM}({pts} pts){C.RESET}")
+                print(f"       {C.CYAN}{desc}{C.RESET}")
+                print(f"       {C.DIM}Unlocked {date_str}{C.RESET}")
+            else:
+                print(f"    {C.DIM}○{C.RESET} {C.DIM}🔒{C.RESET}  {C.DIM}{name}  ({pts} pts){C.RESET}")
+                print(f"       {C.DIM}{desc}{C.RESET}")
+            print()
+
+    # Summary line
+    total_unlocked = len(unlocked)
+    total_count = len(ACHIEVEMENTS)
+    points_earned = sum(ACHIEVEMENT_MAP[a][3] for a in unlocked if a in ACHIEVEMENT_MAP)
+    print(f"  {C.BOLD}{total_unlocked}/{total_count} unlocked  ·  "
+          f"{points_earned}/{TOTAL_POINTS} points{C.RESET}")
+    print()
+
+
+def cmd_status(data):
+    """Show achievement summary with progress bars."""
+    unlocked = data.get("unlocked", {})
+    total_unlocked = len(unlocked)
+    total_count = len(ACHIEVEMENTS)
+    points_earned = sum(ACHIEVEMENT_MAP[a][3] for a in unlocked if a in ACHIEVEMENT_MAP)
+    streak = calculate_streak(data.get("gaming_days", []))
+
+    print()
+    print(f"  {C.BOLD}{C.GOLD}╔══════════════════════════════════════════════════════╗{C.RESET}")
+    print(f"  {C.BOLD}{C.GOLD}║            Achievement Status                       ║{C.RESET}")
+    print(f"  {C.BOLD}{C.GOLD}╚══════════════════════════════════════════════════════╝{C.RESET}")
+    print()
+
+    # Overall progress
+    print(f"  {C.BOLD}Achievements:{C.RESET}  {total_unlocked}/{total_count}")
+    print(f"  {progress_bar(total_unlocked, total_count)}")
+    print()
+
+    print(f"  {C.BOLD}Points:{C.RESET}         {points_earned}/{TOTAL_POINTS}")
+    print(f"  {progress_bar(points_earned, TOTAL_POINTS)}")
+    print()
+
+    # Streak
+    if streak > 0:
+        streak_icon = "🔥" if streak >= 7 else "📅"
+        print(f"  {C.BOLD}Gaming Streak:{C.RESET}  {streak_icon} {streak} day{'s' if streak != 1 else ''}")
+    else:
+        print(f"  {C.BOLD}Gaming Streak:{C.RESET}  {C.DIM}No active streak — play today to start one!{C.RESET}")
+    print()
+
+    # Days since first use
+    try:
+        first_seen = datetime.fromisoformat(data["first_seen"]).date()
+        days = (date.today() - first_seen).days
+        print(f"  {C.BOLD}HubOS User:{C.RESET}    {days} day{'s' if days != 1 else ''}")
+    except (ValueError, KeyError):
+        pass
+    print()
+
+    # Per-category breakdown
+    print(f"  {C.BOLD}By Category:{C.RESET}")
+    for cat_id, (cat_name, cat_color) in CATEGORIES.items():
+        cat_achievements = [a for a in ACHIEVEMENTS if a[4] == cat_id]
+        cat_unlocked = sum(1 for a in cat_achievements if a[0] in unlocked)
+        cat_total = len(cat_achievements)
+        bar = progress_bar(cat_unlocked, cat_total, width=20)
+        print(f"    {cat_color}{cat_name:18s}{C.RESET} {cat_unlocked}/{cat_total}  {bar}")
+    print()
+
+    # Next to unlock hint
+    locked = [a for a in ACHIEVEMENTS if a[0] not in unlocked and a[0] != "completionist"]
+    if locked:
+        # Sort by points (easiest first)
+        locked.sort(key=lambda a: a[3])
+        hint = locked[0]
+        print(f"  {C.YELLOW}{C.BOLD}Next up:{C.RESET} {hint[5]} {hint[1]} — {hint[2]} "
+              f"{C.DIM}({hint[3]} pts){C.RESET}")
+    elif "completionist" not in unlocked:
+        print(f"  {C.GOLD}{C.BOLD}Almost there! Just the Completionist trophy left!{C.RESET}")
+    else:
+        print(f"  {C.GOLD}{C.BOLD}🏆 ALL ACHIEVEMENTS UNLOCKED! You are a HubOS legend! 🏆{C.RESET}")
+    print()
+
+
+def cmd_check(data):
+    """Run all achievement checks and report results."""
+    print(f"  {C.CYAN}Scanning system for achievements...{C.RESET}")
+    count = check_all(data)
+    save_data(data)
+
+    if count == 0:
+        unlocked_count = len(data.get("unlocked", {}))
+        print(f"  {C.DIM}No new achievements. ({unlocked_count}/{len(ACHIEVEMENTS)} unlocked){C.RESET}")
+    else:
+        print(f"  {C.GREEN}{C.BOLD}Unlocked {count} new achievement{'s' if count != 1 else ''}!{C.RESET}")
+
+
+def cmd_unlock(data, achievement_id):
+    """Manually unlock a specific achievement."""
+    if achievement_id not in ACHIEVEMENT_MAP:
+        print(f"  {C.RED}Unknown achievement: {achievement_id}{C.RESET}")
+        print(f"  {C.DIM}Use 'hubos-achievements list' to see all IDs.{C.RESET}")
+        return
+
+    if achievement_id in data.get("unlocked", {}):
+        name = ACHIEVEMENT_MAP[achievement_id][1]
+        print(f"  {C.YELLOW}Already unlocked: {name}{C.RESET}")
+        return
+
+    unlock(data, achievement_id)
+    save_data(data)
+
+
+def cmd_reset(data):
+    """Reset all achievements after confirmation."""
+    print(f"  {C.RED}{C.BOLD}WARNING: This will erase ALL achievement progress!{C.RESET}")
+    print(f"  {C.RED}This cannot be undone.{C.RESET}")
+    print()
+
+    try:
+        confirm = input(f"  Type 'RESET' to confirm: ")
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n  {C.DIM}Cancelled.{C.RESET}")
+        return
+
+    if confirm.strip() == "RESET":
+        new_data = {
+            "unlocked": {},
+            "first_seen": data.get("first_seen", datetime.now().isoformat()),
+            "tools_used": [],
+            "gaming_days": [],
+            "version": 1,
+        }
+        save_data(new_data)
+        print(f"  {C.GREEN}All achievements have been reset.{C.RESET}")
+    else:
+        print(f"  {C.DIM}Cancelled.{C.RESET}")
+
+
+def cmd_help():
+    """Show help text."""
+    print()
+    print(f"  {C.BOLD}HubOS Achievements{C.RESET} — Unlock rewards as you explore HubOS")
+    print()
+    print(f"  {C.BOLD}Commands:{C.RESET}")
+    print(f"    {C.CYAN}check{C.RESET}            Scan system and unlock earned achievements")
+    print(f"    {C.CYAN}list{C.RESET}             Show all achievements with status")
+    print(f"    {C.CYAN}status{C.RESET}           Progress summary with points and streaks")
+    print(f"    {C.CYAN}unlock <id>{C.RESET}      Manually unlock an achievement by ID")
+    print(f"    {C.CYAN}reset{C.RESET}            Reset all progress (requires confirmation)")
+    print(f"    {C.CYAN}help{C.RESET}             Show this help text")
+    print()
+    print(f"  {C.DIM}Achievements are checked automatically every hour via systemd timer.{C.RESET}")
+    print(f"  {C.DIM}Data: {DATA_FILE}{C.RESET}")
+    print()
+
+
+# ── Main ──
+
+def main():
+    C.strip()
+
+    if len(sys.argv) < 2:
+        cmd = "help"
+    else:
+        cmd = sys.argv[1].lower()
+
+    data = load_data()
+
+    if cmd == "check":
+        cmd_check(data)
+    elif cmd == "list":
+        cmd_list(data)
+    elif cmd == "status":
+        cmd_status(data)
+    elif cmd == "unlock":
+        if len(sys.argv) < 3:
+            print(f"  {C.RED}Usage: hubos-achievements unlock <achievement_id>{C.RESET}")
+            sys.exit(1)
+        cmd_unlock(data, sys.argv[2])
+    elif cmd == "reset":
+        cmd_reset(data)
+    elif cmd in ("help", "-h", "--help"):
+        cmd_help()
+    else:
+        print(f"  {C.RED}Unknown command: {cmd}{C.RESET}")
+        cmd_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

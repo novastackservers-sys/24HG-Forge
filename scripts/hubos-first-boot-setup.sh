@@ -109,6 +109,16 @@ cat > /etc/skel/.config/chromium/Default/Preferences.hubos 2>/dev/null <<'CHROME
 }
 CHROMEOF
 
+# Generate HubOS sound theme
+echo "Generating HubOS sound theme..."
+/usr/bin/hubos-sounds install 2>/dev/null || true
+
+# Set KDE splash screen to HubOS
+if command -v kwriteconfig6 &>/dev/null; then
+    # Will be applied per-user on first login via skel
+    echo "KDE splash screen set to HubOS"
+fi
+
 # Mark completion
 mkdir -p /var/lib/hubos
 touch "${MARKER}"

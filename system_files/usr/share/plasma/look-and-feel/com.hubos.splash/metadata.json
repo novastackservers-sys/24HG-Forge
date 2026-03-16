@@ -1,0 +1,12 @@
+{
+    "KPlugin": {
+        "Id": "com.hubos.splash",
+        "Name": "HubOS",
+        "Description": "24 Hour Gaming boot splash",
+        "Authors": [{"Name": "24 Hour Gaming"}],
+        "Category": "Plasma Look And Feel",
+        "License": "MIT",
+        "Version": "1.0"
+    },
+    "X-Plasma-MainScript": "contents/splash/Splash.qml"
+}

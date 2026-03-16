@@ -1,0 +1,11 @@
+[Notifications]
+PopupPosition=TopRight
+PopupTimeout=4000
+LowPriorityPopups=false
+
+[DoNotDisturb]
+WhenScreensMirrored=false
+Turns=false
+
+[Badges]
+InTaskManager=true

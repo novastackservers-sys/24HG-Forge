@@ -1,0 +1,8 @@
+[Unit]
+Description=HubOS Wallpaper Rotation
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hubos-wallpaper rotate
+Environment=DISPLAY=:0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus

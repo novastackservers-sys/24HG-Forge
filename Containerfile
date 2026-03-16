@@ -53,11 +53,20 @@ COPY scripts/hubos-proton-updater /tmp/hubos-build/bin/hubos-proton-updater
 COPY scripts/hubos-game-timer /tmp/hubos-build/bin/hubos-game-timer
 COPY scripts/hubos-stream /tmp/hubos-build/bin/hubos-stream
 COPY scripts/hubos-shader-cache /tmp/hubos-build/bin/hubos-shader-cache
+COPY scripts/hubos-sounds /tmp/hubos-build/bin/hubos-sounds
+COPY scripts/hubos-tips /tmp/hubos-build/bin/hubos-tips
+COPY scripts/hubos-achievements /tmp/hubos-build/bin/hubos-achievements
+COPY scripts/hubos-wallpaper /tmp/hubos-build/bin/hubos-wallpaper
+COPY scripts/hubos-notify-style /tmp/hubos-build/bin/hubos-notify-style
 COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
 COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
 COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
 COPY system_files/usr/share/hubos/servers.json /tmp/hubos-build/data/servers.json
 COPY system_files/usr/share/hubos/offline.html /tmp/hubos-build/data/offline.html
+COPY system_files/usr/share/sounds/hubos/ /tmp/hubos-build/sounds/hubos/
+COPY system_files/usr/share/plasma/look-and-feel/com.hubos.splash/ /tmp/hubos-build/plasma-splash/
+COPY system_files/etc/skel/.config/conky/ /tmp/hubos-build/conky/
+COPY system_files/etc/skel/.config/plasmanotifyrc /tmp/hubos-build/plasmanotifyrc
 COPY installer/ /tmp/hubos-build/installer/
 
 # ── Single RUN: install packages, deploy files, configure, cleanup ──
@@ -76,6 +85,7 @@ RUN rpm-ostree install \
     pciutils \
     vulkan-tools \
     libappindicator-gtk3 \
+    conky \
     && rpm-ostree cleanup -m \
     \
     # ── Sysctl gaming tweaks ── \
@@ -123,6 +133,23 @@ RUN rpm-ostree install \
     && cp /tmp/hubos-build/etc/skel/.config/flatpak-overrides/* /etc/skel/.config/flatpak-overrides/ \
     && mkdir -p /etc/skel/.config/kglobalshortcutsrc.d \
     && cp /tmp/hubos-build/etc/skel/.config/kglobalshortcutsrc.d/hubos.conf /etc/skel/.config/kglobalshortcutsrc.d/ \
+    \
+    # ── Conky desktop widget ── \
+    && mkdir -p /etc/skel/.config/conky \
+    && cp /tmp/hubos-build/conky/hubos.conf /etc/skel/.config/conky/ \
+    && cp /tmp/hubos-build/conky/hubos-json.lua /etc/skel/.config/conky/ \
+    && cp /tmp/hubos-build/etc/skel/.config/autostart/hubos-conky.desktop /etc/skel/.config/autostart/ \
+    \
+    # ── Notification config ── \
+    && cp /tmp/hubos-build/plasmanotifyrc /etc/skel/.config/plasmanotifyrc \
+    \
+    # ── Sound theme ── \
+    && mkdir -p /usr/share/sounds/hubos/stereo \
+    && cp -r /tmp/hubos-build/sounds/hubos/* /usr/share/sounds/hubos/ \
+    \
+    # ── KDE Plasma splash screen ── \
+    && mkdir -p /usr/share/plasma/look-and-feel/com.hubos.splash/contents/splash \
+    && cp -r /tmp/hubos-build/plasma-splash/* /usr/share/plasma/look-and-feel/com.hubos.splash/ \
     \
     # ── SDDM login theme ── \
     && mkdir -p /usr/share/sddm/themes/hubos/icons /etc/sddm.conf.d \
@@ -182,6 +209,11 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-game-timer /usr/bin/hubos-game-timer \
     && install -m 755 /tmp/hubos-build/bin/hubos-stream /usr/bin/hubos-stream \
     && install -m 755 /tmp/hubos-build/bin/hubos-shader-cache /usr/bin/hubos-shader-cache \
+    && install -m 755 /tmp/hubos-build/bin/hubos-sounds /usr/bin/hubos-sounds \
+    && install -m 755 /tmp/hubos-build/bin/hubos-tips /usr/bin/hubos-tips \
+    && install -m 755 /tmp/hubos-build/bin/hubos-achievements /usr/bin/hubos-achievements \
+    && install -m 755 /tmp/hubos-build/bin/hubos-wallpaper /usr/bin/hubos-wallpaper \
+    && install -m 755 /tmp/hubos-build/bin/hubos-notify-style /usr/bin/hubos-notify-style \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/hubos \
@@ -211,6 +243,12 @@ RUN rpm-ostree install \
     && mkdir -p /etc/skel/.config/systemd/user/timers.target.wants \
     && ln -sf ../hubos-backup.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-backup.timer \
     && ln -sf ../hubos-proton-updater.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-proton-updater.timer \
+    && cp /tmp/hubos-build/systemd-user/hubos-achievements.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-achievements.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-achievements.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-achievements.timer \
+    && cp /tmp/hubos-build/systemd-user/hubos-wallpaper.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-wallpaper.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-wallpaper.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-wallpaper.timer \
     \
     # ── PipeWire gaming config ── \
     && mkdir -p /etc/pipewire/pipewire.conf.d \

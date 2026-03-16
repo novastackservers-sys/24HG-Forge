@@ -422,6 +422,44 @@ class HubOSTray:
         hub_acct.set_submenu(hub_acct_menu)
         menu.append(hub_acct)
 
+        # ── Personalization ──
+        personal_item = Gtk.MenuItem(label="Personalize")
+        personal_menu = Gtk.Menu()
+
+        ach_item = Gtk.MenuItem(label="Achievements")
+        ach_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-achievements", "list"]))
+        personal_menu.append(ach_item)
+
+        wp_item = Gtk.MenuItem(label="Wallpaper")
+        wp_menu = Gtk.Menu()
+        for action, desc in [("random", "Random Wallpaper"), ("rotate", "Time-Based Rotation"), ("list", "Browse Wallpapers")]:
+            wi = Gtk.MenuItem(label=desc)
+            wi.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-wallpaper", a]))
+            wp_menu.append(wi)
+        wp_item.set_submenu(wp_menu)
+        personal_menu.append(wp_item)
+
+        snd_item = Gtk.MenuItem(label="Sounds")
+        snd_menu = Gtk.Menu()
+        for action, desc in [("enable", "Enable HubOS Sounds"), ("disable", "Use Default Sounds"), ("test", "Test All Sounds")]:
+            si = Gtk.MenuItem(label=desc)
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-sounds", a]))
+            snd_menu.append(si)
+        snd_item.set_submenu(snd_menu)
+        personal_menu.append(snd_item)
+
+        notif_item = Gtk.MenuItem(label="Notification Style")
+        notif_menu = Gtk.Menu()
+        for action, desc in [("gaming", "Gaming (Compact, Top-Right)"), ("desktop", "Desktop (Default)"), ("minimal", "Minimal (Quiet)")]:
+            ni = Gtk.MenuItem(label=desc)
+            ni.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-notify-style", a]))
+            notif_menu.append(ni)
+        notif_item.set_submenu(notif_menu)
+        personal_menu.append(notif_item)
+
+        personal_item.set_submenu(personal_menu)
+        menu.append(personal_item)
+
         discord = Gtk.MenuItem(label="Discord")
         discord.connect("activate", open_discord)
         menu.append(discord)

@@ -1,9 +1,10 @@
 # HubOS shell customizations
 # Sourced by .bashrc on Fedora (via /etc/skel/.bashrc.d/ pattern)
 
-# Show HubOS system info on first terminal open (once per session)
+# Show HubOS system info + tip of the day on first terminal open (once per session)
 if [ -z "$HUBOS_GREETED" ] && [ -x /usr/bin/hubos-neofetch ]; then
     /usr/bin/hubos-neofetch
+    [ -x /usr/bin/hubos-tips ] && /usr/bin/hubos-tips daily 2>/dev/null
     export HUBOS_GREETED=1
 fi
 
@@ -106,3 +107,9 @@ alias proton-update='hubos-proton-updater update'
 alias playtime='hubos-game-timer stats'
 alias stream='hubos-stream'
 alias shaders='hubos-shader-cache'
+
+# Wave 6 feel aliases
+alias tips='hubos-tips'
+alias achievements='hubos-achievements list'
+alias wallpaper='hubos-wallpaper'
+alias sounds='hubos-sounds'
