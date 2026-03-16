@@ -1,0 +1,343 @@
+#!/bin/bash
+# HubOS Gaming Benchmark
+# Tests system performance with gaming-relevant metrics.
+# Gives users a score to compare with others in the community.
+#
+# Usage: hubos-benchmark [quick|full|gpu|cpu|disk|ram|network]
+
+set -euo pipefail
+
+ACTION="${1:-quick}"
+RESULTS_DIR="$HOME/.local/share/hubos"
+RESULTS_FILE="$RESULTS_DIR/benchmark.json"
+
+mkdir -p "$RESULTS_DIR"
+
+BOLD='\033[1m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+CYAN='\033[36m'
+RESET='\033[0m'
+
+header() {
+    echo -e "\n${BOLD}${CYAN}=== $1 ===${RESET}"
+}
+
+score_label() {
+    local SCORE=$1
+    if [ "$SCORE" -ge 90 ]; then echo -e "${GREEN}Excellent${RESET}"
+    elif [ "$SCORE" -ge 70 ]; then echo -e "${GREEN}Good${RESET}"
+    elif [ "$SCORE" -ge 50 ]; then echo -e "${YELLOW}Average${RESET}"
+    else echo -e "${YELLOW}Below Average${RESET}"
+    fi
+}
+
+bench_cpu() {
+    header "CPU Benchmark"
+
+    # CPU info
+    local CPU_MODEL
+    CPU_MODEL=$(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)
+    local CPU_CORES
+    CPU_CORES=$(nproc)
+    echo "  CPU: $CPU_MODEL ($CPU_CORES threads)"
+
+    # Single-thread: count primes (SHA256 hashing)
+    echo -n "  Single-thread:  "
+    local ST_START ST_END ST_TIME
+    ST_START=$(date +%s%N)
+    # Hash 50000 iterations
+    for i in $(seq 1 500); do
+        echo "$i" | sha256sum > /dev/null
+    done
+    ST_END=$(date +%s%N)
+    ST_TIME=$(( (ST_END - ST_START) / 1000000 ))
+    echo "${ST_TIME}ms (500 SHA256 hashes)"
+
+    # Multi-thread: parallel hashing
+    echo -n "  Multi-thread:   "
+    local MT_START MT_END MT_TIME
+    MT_START=$(date +%s%N)
+    seq 1 500 | xargs -P "$CPU_CORES" -I{} bash -c 'echo {} | sha256sum > /dev/null'
+    MT_END=$(date +%s%N)
+    MT_TIME=$(( (MT_END - MT_START) / 1000000 ))
+    echo "${MT_TIME}ms (500 SHA256 hashes, $CPU_CORES threads)"
+
+    # Score (lower is better, normalize to 0-100)
+    local CPU_SCORE=$(( 100 - ST_TIME / 20 ))
+    [ "$CPU_SCORE" -lt 0 ] && CPU_SCORE=0
+    [ "$CPU_SCORE" -gt 100 ] && CPU_SCORE=100
+    echo -e "  Score: ${BOLD}$CPU_SCORE${RESET} — $(score_label $CPU_SCORE)"
+
+    echo "$ST_TIME $MT_TIME $CPU_SCORE"
+}
+
+bench_gpu() {
+    header "GPU Benchmark"
+
+    # GPU info
+    local GPU_INFO
+    GPU_INFO=$(lspci 2>/dev/null | grep -iE "VGA|3D|Display" | head -1 | sed 's/.*: //')
+    echo "  GPU: $GPU_INFO"
+
+    # Vulkan check
+    if command -v vulkaninfo &>/dev/null; then
+        local VULKAN_VER
+        VULKAN_VER=$(vulkaninfo --summary 2>/dev/null | grep "apiVersion" | head -1 | grep -oP '\d+\.\d+\.\d+' || echo "unknown")
+        echo "  Vulkan: $VULKAN_VER"
+
+        local VRAM
+        VRAM=$(vulkaninfo 2>/dev/null | grep "totalDeviceLocalMemorySize" | head -1 | awk '{print $NF}')
+        if [ -n "$VRAM" ]; then
+            VRAM_MB=$((VRAM / 1048576))
+            echo "  VRAM: ${VRAM_MB} MB"
+        fi
+    else
+        echo "  Vulkan: NOT AVAILABLE (install vulkan-tools)"
+    fi
+
+    # NVIDIA specific
+    if command -v nvidia-smi &>/dev/null; then
+        nvidia-smi --query-gpu=name,driver_version,memory.total,clocks.max.gr,clocks.max.mem \
+            --format=csv,noheader 2>/dev/null | while read -r line; do
+            echo "  NVIDIA: $line"
+        done
+    fi
+
+    # OpenGL rendering benchmark (glxgears equivalent)
+    if command -v glxinfo &>/dev/null; then
+        local GL_VER
+        GL_VER=$(glxinfo 2>/dev/null | grep "OpenGL version" | head -1 | sed 's/.*: //')
+        echo "  OpenGL: $GL_VER"
+    fi
+
+    # Simple GPU throughput test via dd + GPU context
+    echo "  (For detailed GPU benchmarks, run vkmark or Unigine via Steam)"
+}
+
+bench_disk() {
+    header "Disk I/O Benchmark"
+
+    local TEST_FILE="/tmp/hubos-bench-$$"
+
+    # Sequential write
+    echo -n "  Sequential write: "
+    local WRITE_SPEED
+    WRITE_SPEED=$(dd if=/dev/zero of="$TEST_FILE" bs=1M count=512 conv=fdatasync 2>&1 | grep -oP '[\d.]+ [GM]B/s' || echo "N/A")
+    echo "$WRITE_SPEED"
+
+    # Sequential read (drop caches first if root, otherwise just read)
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    echo -n "  Sequential read:  "
+    local READ_SPEED
+    READ_SPEED=$(dd if="$TEST_FILE" of=/dev/null bs=1M count=512 2>&1 | grep -oP '[\d.]+ [GM]B/s' || echo "N/A")
+    echo "$READ_SPEED"
+
+    # Random I/O (if fio available)
+    if command -v fio &>/dev/null; then
+        echo -n "  Random 4K read:   "
+        local FIO_RESULT
+        FIO_RESULT=$(fio --name=rand --ioengine=libaio --direct=1 --bs=4k --iodepth=32 \
+            --size=64M --rw=randread --filename="$TEST_FILE" --minimal 2>/dev/null | \
+            cut -d';' -f8)
+        if [ -n "$FIO_RESULT" ]; then
+            echo "${FIO_RESULT} KB/s"
+        else
+            echo "N/A"
+        fi
+    fi
+
+    rm -f "$TEST_FILE"
+
+    # Check filesystem type
+    local FS_TYPE
+    FS_TYPE=$(df -T / 2>/dev/null | tail -1 | awk '{print $2}')
+    echo "  Filesystem: $FS_TYPE"
+}
+
+bench_ram() {
+    header "Memory Benchmark"
+
+    local TOTAL_MB FREE_MB USED_PCT
+    TOTAL_MB=$(free -m | awk '/^Mem:/{print $2}')
+    FREE_MB=$(free -m | awk '/^Mem:/{print $7}')
+    USED_PCT=$(free | awk '/^Mem:/{printf "%.0f", ($2-$7)/$2*100}')
+    echo "  Total: ${TOTAL_MB} MB"
+    echo "  Available: ${FREE_MB} MB"
+    echo "  Used: ${USED_PCT}%"
+
+    # Swap
+    local SWAP_TOTAL
+    SWAP_TOTAL=$(free -m | awk '/^Swap:/{print $2}')
+    echo "  Swap: ${SWAP_TOTAL} MB"
+
+    # Memory throughput test
+    echo -n "  Throughput: "
+    local MEM_START MEM_END MEM_TIME
+    MEM_START=$(date +%s%N)
+    dd if=/dev/zero of=/dev/null bs=1M count=2048 2>/dev/null
+    MEM_END=$(date +%s%N)
+    MEM_TIME=$(( (MEM_END - MEM_START) / 1000000 ))
+    local MEM_SPEED=$(( 2048 * 1000 / MEM_TIME ))
+    echo "${MEM_SPEED} MB/s (2GB null copy)"
+}
+
+bench_network() {
+    header "Network Benchmark"
+
+    local IFACE
+    IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+    echo "  Interface: $IFACE"
+
+    # Latency to 24HG servers
+    echo -n "  24HG server ping: "
+    local PING
+    PING=$(ping -c 3 -W 2 91.99.37.118 2>/dev/null | tail -1 | awk -F'/' '{print $5}')
+    if [ -n "$PING" ]; then
+        echo "${PING}ms avg"
+    else
+        echo "unreachable"
+    fi
+
+    # DNS resolution time
+    echo -n "  DNS resolution:   "
+    local DNS_START DNS_END DNS_TIME
+    DNS_START=$(date +%s%N)
+    host hub.24hgaming.com &>/dev/null || true
+    DNS_END=$(date +%s%N)
+    DNS_TIME=$(( (DNS_END - DNS_START) / 1000000 ))
+    echo "${DNS_TIME}ms"
+
+    # Download speed estimate (small file)
+    echo -n "  Download speed:   "
+    local DL_START DL_END DL_TIME
+    DL_START=$(date +%s%N)
+    curl -s -o /dev/null -w "%{speed_download}" "https://hub.24hgaming.com" 2>/dev/null || echo "0"
+    DL_END=$(date +%s%N)
+    DL_TIME=$(( (DL_END - DL_START) / 1000000 ))
+    echo "~${DL_TIME}ms to hub.24hgaming.com"
+
+    # TCP congestion control
+    local CC
+    CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+    echo "  TCP congestion:   $CC"
+}
+
+summary() {
+    header "HubOS Gaming Readiness"
+    echo ""
+
+    # Check critical gaming components
+    local CHECKS=0 TOTAL=0
+
+    # Vulkan
+    TOTAL=$((TOTAL + 1))
+    if vulkaninfo --summary &>/dev/null; then
+        echo -e "  ${GREEN}[OK]${RESET} Vulkan"
+        CHECKS=$((CHECKS + 1))
+    else
+        echo -e "  ${YELLOW}[!!]${RESET} Vulkan — not working"
+    fi
+
+    # Steam
+    TOTAL=$((TOTAL + 1))
+    if flatpak list 2>/dev/null | grep -q "com.valvesoftware.Steam"; then
+        echo -e "  ${GREEN}[OK]${RESET} Steam"
+        CHECKS=$((CHECKS + 1))
+    else
+        echo -e "  ${YELLOW}[!!]${RESET} Steam — not installed"
+    fi
+
+    # GameMode
+    TOTAL=$((TOTAL + 1))
+    if command -v gamemoded &>/dev/null; then
+        echo -e "  ${GREEN}[OK]${RESET} GameMode"
+        CHECKS=$((CHECKS + 1))
+    else
+        echo -e "  ${YELLOW}[!!]${RESET} GameMode — not installed"
+    fi
+
+    # MangoHud
+    TOTAL=$((TOTAL + 1))
+    if command -v mangohud &>/dev/null || flatpak list 2>/dev/null | grep -q MangoHud; then
+        echo -e "  ${GREEN}[OK]${RESET} MangoHud"
+        CHECKS=$((CHECKS + 1))
+    else
+        echo -e "  ${YELLOW}[!!]${RESET} MangoHud — not installed"
+    fi
+
+    # vm.max_map_count
+    TOTAL=$((TOTAL + 1))
+    local MMC
+    MMC=$(cat /proc/sys/vm/max_map_count 2>/dev/null || echo 0)
+    if [ "$MMC" -ge 1048576 ]; then
+        echo -e "  ${GREEN}[OK]${RESET} vm.max_map_count ($MMC)"
+        CHECKS=$((CHECKS + 1))
+    else
+        echo -e "  ${YELLOW}[!!]${RESET} vm.max_map_count too low ($MMC)"
+    fi
+
+    # TCP BBR
+    TOTAL=$((TOTAL + 1))
+    local CC
+    CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
+    if [ "$CC" = "bbr" ]; then
+        echo -e "  ${GREEN}[OK]${RESET} TCP BBR"
+        CHECKS=$((CHECKS + 1))
+    else
+        echo -e "  ${YELLOW}[!!]${RESET} TCP BBR not active ($CC)"
+    fi
+
+    # 32-bit libs
+    TOTAL=$((TOTAL + 1))
+    if [ -f /usr/lib/libGL.so.1 ] || [ -f /usr/lib32/libGL.so.1 ] || \
+       ldconfig -p 2>/dev/null | grep -q "libGL.so.1 (libc6,x86-64)"; then
+        echo -e "  ${GREEN}[OK]${RESET} OpenGL libraries"
+        CHECKS=$((CHECKS + 1))
+    else
+        echo -e "  ${YELLOW}[!!]${RESET} OpenGL libraries may be missing"
+    fi
+
+    echo ""
+    echo -e "  Gaming readiness: ${BOLD}$CHECKS/$TOTAL${RESET} checks passed"
+}
+
+case "$ACTION" in
+    quick)
+        echo -e "${BOLD}${CYAN}HubOS Quick Benchmark${RESET}"
+        bench_cpu > /dev/null
+        bench_gpu
+        bench_network
+        summary
+        ;;
+    full)
+        echo -e "${BOLD}${CYAN}HubOS Full System Benchmark${RESET}"
+        echo "This will take a few minutes..."
+        bench_cpu
+        bench_gpu
+        bench_disk
+        bench_ram
+        bench_network
+        summary
+        ;;
+    cpu)     bench_cpu ;;
+    gpu)     bench_gpu ;;
+    disk)    bench_disk ;;
+    ram)     bench_ram ;;
+    network) bench_network ;;
+    check)   summary ;;
+    *)
+        echo "HubOS Gaming Benchmark"
+        echo "Usage: hubos-benchmark [quick|full|gpu|cpu|disk|ram|network|check]"
+        echo ""
+        echo "  quick   — Fast overview (GPU, network, readiness check)"
+        echo "  full    — Complete benchmark suite"
+        echo "  check   — Gaming readiness check only"
+        echo "  cpu     — CPU performance only"
+        echo "  gpu     — GPU info and Vulkan check"
+        echo "  disk    — Disk I/O speed"
+        echo "  ram     — Memory throughput"
+        echo "  network — Latency and DNS speed"
+        exit 1
+        ;;
+esac

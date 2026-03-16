@@ -41,6 +41,11 @@ COPY scripts/hubos-input /tmp/hubos-build/bin/hubos-input
 COPY scripts/hubos-audio /tmp/hubos-build/bin/hubos-audio
 COPY scripts/gamemode-start.sh /tmp/hubos-build/lib/gamemode-start.sh
 COPY scripts/gamemode-end.sh /tmp/hubos-build/lib/gamemode-end.sh
+COPY scripts/hubos-discord-fix /tmp/hubos-build/bin/hubos-discord-fix
+COPY scripts/hubos-screenshot /tmp/hubos-build/bin/hubos-screenshot
+COPY scripts/hubos-backup /tmp/hubos-build/bin/hubos-backup
+COPY scripts/hubos-nightlight /tmp/hubos-build/bin/hubos-nightlight
+COPY scripts/hubos-benchmark /tmp/hubos-build/bin/hubos-benchmark
 COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
 COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
 COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
@@ -109,6 +114,8 @@ RUN rpm-ostree install \
     && cp /tmp/hubos-build/etc/skel/.bashrc.d/hubos.sh /etc/skel/.bashrc.d/ \
     && cp /tmp/hubos-build/etc/skel/.config/MangoHud/MangoHud.conf /etc/skel/.config/MangoHud/ \
     && cp /tmp/hubos-build/etc/skel/.config/flatpak-overrides/* /etc/skel/.config/flatpak-overrides/ \
+    && mkdir -p /etc/skel/.config/kglobalshortcutsrc.d \
+    && cp /tmp/hubos-build/etc/skel/.config/kglobalshortcutsrc.d/hubos.conf /etc/skel/.config/kglobalshortcutsrc.d/ \
     \
     # ── SDDM login theme ── \
     && mkdir -p /usr/share/sddm/themes/hubos/icons /etc/sddm.conf.d \
@@ -156,6 +163,11 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-replay /usr/bin/hubos-replay \
     && install -m 755 /tmp/hubos-build/bin/hubos-input /usr/bin/hubos-input \
     && install -m 755 /tmp/hubos-build/bin/hubos-audio /usr/bin/hubos-audio \
+    && install -m 755 /tmp/hubos-build/bin/hubos-discord-fix /usr/bin/hubos-discord-fix \
+    && install -m 755 /tmp/hubos-build/bin/hubos-screenshot /usr/bin/hubos-screenshot \
+    && install -m 755 /tmp/hubos-build/bin/hubos-backup /usr/bin/hubos-backup \
+    && install -m 755 /tmp/hubos-build/bin/hubos-nightlight /usr/bin/hubos-nightlight \
+    && install -m 755 /tmp/hubos-build/bin/hubos-benchmark /usr/bin/hubos-benchmark \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/hubos \
@@ -171,7 +183,13 @@ RUN rpm-ostree install \
     && mkdir -p /etc/skel/.config/systemd/user/default.target.wants \
     && cp /tmp/hubos-build/systemd-user/hubos-server-status.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/hubos-build/systemd-user/hubos-replay.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-discord-fix.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-backup.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-backup.timer /etc/skel/.config/systemd/user/ \
     && ln -sf ../hubos-server-status.service /etc/skel/.config/systemd/user/default.target.wants/hubos-server-status.service \
+    && ln -sf ../hubos-discord-fix.service /etc/skel/.config/systemd/user/default.target.wants/hubos-discord-fix.service \
+    && mkdir -p /etc/skel/.config/systemd/user/timers.target.wants \
+    && ln -sf ../hubos-backup.timer /etc/skel/.config/systemd/user/timers.target.wants/hubos-backup.timer \
     \
     # ── PipeWire gaming config ── \
     && mkdir -p /etc/pipewire/pipewire.conf.d \

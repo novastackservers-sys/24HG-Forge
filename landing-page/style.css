@@ -587,6 +587,112 @@ footer {
 footer a { color: var(--accent); }
 
 /* ── Responsive ── */
+/* ── Roadmap ── */
+
+.roadmap-section {
+    margin-bottom: 2.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.roadmap-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem;
+    background: var(--bg-card);
+    flex-wrap: wrap;
+}
+
+.roadmap-header h2 {
+    font-size: 1.3rem;
+    color: var(--text-bright);
+    margin: 0;
+}
+
+.roadmap-date {
+    margin-left: auto;
+    color: var(--text-dim);
+    font-size: 0.9rem;
+}
+
+.roadmap-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.roadmap-badge.done {
+    background: var(--success);
+    color: #0a0a14;
+}
+
+.roadmap-badge.planned {
+    background: var(--accent);
+    color: #0a0a14;
+}
+
+.roadmap-badge.vision {
+    background: #a855f7;
+    color: #fff;
+}
+
+.roadmap-items {
+    padding: 1rem 1.5rem;
+}
+
+.roadmap-item {
+    padding: 0.5rem 0;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    color: var(--text);
+    font-size: 0.95rem;
+}
+
+.roadmap-item .check {
+    color: var(--success);
+    font-weight: bold;
+    font-size: 1.1rem;
+    min-width: 1.2rem;
+}
+
+.roadmap-item .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    min-width: 8px;
+    margin: 0 5px;
+}
+
+.roadmap-item.done {
+    color: var(--text);
+}
+
+.roadmap-cta {
+    text-align: center;
+    padding: 3rem 1rem;
+    margin-top: 2rem;
+    border-top: 1px solid var(--border);
+}
+
+.roadmap-cta h2 {
+    color: var(--text-bright);
+    margin-bottom: 0.5rem;
+}
+
+.roadmap-cta p {
+    color: var(--text-dim);
+    margin-bottom: 1.5rem;
+}
+
 @media (max-width: 768px) {
     .nav { flex-direction: column; gap: 0.75rem; }
     .nav-links { flex-wrap: wrap; justify-content: center; gap: 1rem; }
@@ -596,4 +702,6 @@ footer a { color: var(--accent); }
     .compare-table { font-size: 0.85rem; }
     .compare-table th, .compare-table td { padding: 0.6rem; }
     .tool-cards { grid-template-columns: 1fr; }
+    .roadmap-header { flex-direction: column; align-items: flex-start; }
+    .roadmap-date { margin-left: 0; }
 }

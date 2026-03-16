@@ -1,0 +1,10 @@
+[Unit]
+Description=HubOS Weekly Game Save Backup
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=3600
+
+[Install]
+WantedBy=timers.target

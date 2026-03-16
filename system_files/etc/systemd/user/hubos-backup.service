@@ -1,0 +1,6 @@
+[Unit]
+Description=HubOS Game Save Auto-Backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hubos-backup auto

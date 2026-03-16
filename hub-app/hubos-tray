@@ -277,6 +277,26 @@ class HubOSTray:
         proton_item.connect("activate", open_proton_fix)
         tools_menu.append(proton_item)
 
+        # Night Light
+        night_item = Gtk.MenuItem(label="Night Light")
+        night_menu = Gtk.Menu()
+        for action, desc in [("on", "Enable (Warm)"), ("off", "Disable"), ("on 3000", "Very Warm (Late Night)")]:
+            ni = Gtk.MenuItem(label=desc)
+            ni.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-nightlight"] + a.split()))
+            night_menu.append(ni)
+        night_item.set_submenu(night_menu)
+        tools_menu.append(night_item)
+
+        # Screenshot
+        ss_item = Gtk.MenuItem(label="Screenshot")
+        ss_menu = Gtk.Menu()
+        for action, desc in [("full", "Full Screen (Print)"), ("area", "Select Area (Shift+Print)"), ("window", "Active Window")]:
+            si = Gtk.MenuItem(label=desc)
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-screenshot", a]))
+            ss_menu.append(si)
+        ss_item.set_submenu(ss_menu)
+        tools_menu.append(ss_item)
+
         tools_item.set_submenu(tools_menu)
         menu.append(tools_item)
 
@@ -286,6 +306,14 @@ class HubOSTray:
         diag = Gtk.MenuItem(label="Diagnostics")
         diag.connect("activate", open_diag)
         menu.append(diag)
+
+        bench = Gtk.MenuItem(label="Benchmark")
+        bench.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-benchmark", "full"]))
+        menu.append(bench)
+
+        backup = Gtk.MenuItem(label="Backup Game Saves")
+        backup.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-backup", "create"]))
+        menu.append(backup)
 
         discord = Gtk.MenuItem(label="Discord")
         discord.connect("activate", open_discord)

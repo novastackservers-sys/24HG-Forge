@@ -86,6 +86,10 @@ alias replay-start='hubos-replay start'
 alias netguard='hubos-netguard'
 alias proton-fix='hubos-proton-fix'
 alias audio='hubos-audio'
+alias screenshot='hubos-screenshot'
+alias backup='hubos-backup'
+alias nightlight='hubos-nightlight'
+alias benchmark='hubos-benchmark'
 
 # Server status shortcut
 alias status='hubos-server-status --once'

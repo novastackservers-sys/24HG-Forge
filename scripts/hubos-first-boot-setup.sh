@@ -52,11 +52,43 @@ if [ -d /usr/share/hubos/grub ]; then
     fi
 fi
 
-# Install latest ProtonGE for the first user who logs in
-# ProtonUp-Qt handles this, but we can pre-seed the download
-PROTON_DIR="/var/lib/hubos/proton-ge"
-mkdir -p "$PROTON_DIR"
-echo "ProtonGE will be available via ProtonUp-Qt on first login."
+# Install Protontricks (for hubos-proton-fix auto-repair)
+echo "Installing Protontricks..."
+flatpak install -y --noninteractive flathub com.github.Matoking.protontricks || true
+
+# Install latest Proton-GE automatically
+echo "Installing latest Proton-GE..."
+PROTON_GE_DIR="/var/lib/hubos/proton-ge"
+mkdir -p "$PROTON_GE_DIR"
+# Download latest GE-Proton release
+GE_LATEST=$(curl -s https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest 2>/dev/null | \
+    grep "browser_download_url.*tar.gz" | head -1 | cut -d'"' -f4) || true
+if [ -n "$GE_LATEST" ]; then
+    GE_FILENAME=$(basename "$GE_LATEST")
+    echo "Downloading $GE_FILENAME..."
+    curl -sL "$GE_LATEST" -o "/tmp/$GE_FILENAME" 2>/dev/null || true
+    if [ -f "/tmp/$GE_FILENAME" ]; then
+        # Install for all users via Steam's compatibilitytools.d
+        # Will be copied to user dir on first login
+        mkdir -p "$PROTON_GE_DIR"
+        tar -xzf "/tmp/$GE_FILENAME" -C "$PROTON_GE_DIR" 2>/dev/null || true
+        rm -f "/tmp/$GE_FILENAME"
+        echo "Proton-GE installed to $PROTON_GE_DIR"
+    fi
+else
+    echo "Could not fetch Proton-GE (no internet?). Install later via ProtonUp-Qt."
+fi
+
+# Allow Discord to talk to other Flatpak sandboxes (Rich Presence)
+flatpak override --user com.discordapp.Discord --filesystem=xdg-run/discord-ipc-0 2>/dev/null || true
+flatpak override --user com.valvesoftware.Steam --filesystem=xdg-run/discord-ipc-0:ro 2>/dev/null || true
+
+# Enable user services for first user
+# (these are in /etc/skel/.config/systemd/user/ so they'll be active for new users)
+echo "User services will auto-start on first login:"
+echo "  - hubos-server-status (live server monitoring)"
+echo "  - hubos-discord-fix (Rich Presence bridge)"
+echo "  - hubos-backup.timer (weekly game save backup)"
 
 # Mark completion
 mkdir -p /var/lib/hubos
