@@ -113,3 +113,11 @@ alias tips='hubos-tips'
 alias achievements='hubos-achievements list'
 alias wallpaper='hubos-wallpaper'
 alias sounds='hubos-sounds'
+
+# Wave 8 troubleshooting aliases
+alias compat='hubos-compat'
+alias crash-fix='hubos-crash-fix'
+alias display='hubos-display'
+alias discord-share='hubos-discord-screen'
+alias prefix='hubos-prefix'
+alias dualboot='hubos-dualboot'

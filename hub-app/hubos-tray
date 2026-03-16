@@ -379,6 +379,66 @@ class HubOSTray:
         shader_item.set_submenu(shader_menu)
         tools_menu.append(shader_item)
 
+        # Game Compatibility
+        compat_item = Gtk.MenuItem(label="Game Compatibility")
+        compat_menu = Gtk.Menu()
+        for action, desc in [("scan", "Scan Library"), ("check", "Check a Game"), ("report", "Full Report")]:
+            ci = Gtk.MenuItem(label=desc)
+            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-compat", a]))
+            compat_menu.append(ci)
+        compat_item.set_submenu(compat_menu)
+        tools_menu.append(compat_item)
+
+        # Crash Diagnosis
+        crash_item = Gtk.MenuItem(label="Crash Diagnosis")
+        crash_menu = Gtk.Menu()
+        for action, desc in [("diagnose", "Diagnose Last Crash"), ("report", "Generate Report"), ("watch", "Watch for Crashes")]:
+            cri = Gtk.MenuItem(label=desc)
+            cri.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-crash-fix", a]))
+            crash_menu.append(cri)
+        crash_item.set_submenu(crash_menu)
+        tools_menu.append(crash_item)
+
+        # Display Manager
+        disp_item = Gtk.MenuItem(label="Display Manager")
+        disp_menu = Gtk.Menu()
+        for action, desc in [("status", "Display Status"), ("profiles", "Manage Profiles"), ("--gui", "Display Settings")]:
+            di = Gtk.MenuItem(label=desc)
+            di.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-display", a]))
+            disp_menu.append(di)
+        disp_item.set_submenu(disp_menu)
+        tools_menu.append(disp_item)
+
+        # Discord Screen Share
+        dscr_item = Gtk.MenuItem(label="Discord Screen Share")
+        dscr_menu = Gtk.Menu()
+        for action, desc in [("setup", "Setup (One-Time)"), ("start", "Start Sharing"), ("stop", "Stop Sharing"), ("fix", "Fix Issues")]:
+            dsi = Gtk.MenuItem(label=desc)
+            dsi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-discord-screen", a]))
+            dscr_menu.append(dsi)
+        dscr_item.set_submenu(dscr_menu)
+        tools_menu.append(dscr_item)
+
+        # Prefix Manager
+        pfx_item = Gtk.MenuItem(label="Proton Prefixes")
+        pfx_menu = Gtk.Menu()
+        for action, desc in [("list", "List All Prefixes"), ("cleanup", "Cleanup Orphans"), ("health", "Health Check")]:
+            pi = Gtk.MenuItem(label=desc)
+            pi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-prefix", a]))
+            pfx_menu.append(pi)
+        pfx_item.set_submenu(pfx_menu)
+        tools_menu.append(pfx_item)
+
+        # Dual Boot
+        dboot_item = Gtk.MenuItem(label="Dual Boot")
+        dboot_menu = Gtk.Menu()
+        for action, desc in [("status", "Boot Status"), ("quick-reboot windows", "Reboot to Windows"), ("time-fix", "Fix Clock Sync")]:
+            dbi = Gtk.MenuItem(label=desc)
+            dbi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-dualboot"] + a.split()))
+            dboot_menu.append(dbi)
+        dboot_item.set_submenu(dboot_menu)
+        tools_menu.append(dboot_item)
+
         tools_item.set_submenu(tools_menu)
         menu.append(tools_item)
 

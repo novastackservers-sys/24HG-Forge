@@ -60,6 +60,12 @@ COPY scripts/hubos-wallpaper /tmp/hubos-build/bin/hubos-wallpaper
 COPY scripts/hubos-notify-style /tmp/hubos-build/bin/hubos-notify-style
 COPY scripts/hubos-desktop-setup /tmp/hubos-build/bin/hubos-desktop-setup
 COPY scripts/hubos-lock-info /tmp/hubos-build/bin/hubos-lock-info
+COPY scripts/hubos-compat /tmp/hubos-build/bin/hubos-compat
+COPY scripts/hubos-crash-fix /tmp/hubos-build/bin/hubos-crash-fix
+COPY scripts/hubos-display /tmp/hubos-build/bin/hubos-display
+COPY scripts/hubos-discord-screen /tmp/hubos-build/bin/hubos-discord-screen
+COPY scripts/hubos-prefix /tmp/hubos-build/bin/hubos-prefix
+COPY scripts/hubos-dualboot /tmp/hubos-build/bin/hubos-dualboot
 COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
 COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
 COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
@@ -238,6 +244,12 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-notify-style /usr/bin/hubos-notify-style \
     && install -m 755 /tmp/hubos-build/bin/hubos-desktop-setup /usr/bin/hubos-desktop-setup \
     && install -m 755 /tmp/hubos-build/bin/hubos-lock-info /usr/bin/hubos-lock-info \
+    && install -m 755 /tmp/hubos-build/bin/hubos-compat /usr/bin/hubos-compat \
+    && install -m 755 /tmp/hubos-build/bin/hubos-crash-fix /usr/bin/hubos-crash-fix \
+    && install -m 755 /tmp/hubos-build/bin/hubos-display /usr/bin/hubos-display \
+    && install -m 755 /tmp/hubos-build/bin/hubos-discord-screen /usr/bin/hubos-discord-screen \
+    && install -m 755 /tmp/hubos-build/bin/hubos-prefix /usr/bin/hubos-prefix \
+    && install -m 755 /tmp/hubos-build/bin/hubos-dualboot /usr/bin/hubos-dualboot \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/hubos \

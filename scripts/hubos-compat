@@ -1,0 +1,1003 @@
+#!/usr/bin/env python3
+"""HubOS Game Compatibility Checker — Will my game work on Linux?
+
+Commands:
+    check <appid|name>   Check a specific game's Linux compatibility
+    search <name>        Search Steam store for a game by name
+    scan                 Scan all installed Steam games
+    report               Generate full compatibility report
+    status               Show system readiness for gaming
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+# ─── Color Helpers ───────────────────────────────────────────────────────────
+
+class C:
+    """ANSI color codes."""
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    RED     = "\033[91m"
+    GREEN   = "\033[92m"
+    YELLOW  = "\033[93m"
+    BLUE    = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN    = "\033[96m"
+    WHITE   = "\033[97m"
+    GRAY    = "\033[90m"
+    BG_RED    = "\033[41m"
+    BG_GREEN  = "\033[42m"
+    BG_YELLOW = "\033[43m"
+    BG_BLUE   = "\033[44m"
+
+    @staticmethod
+    def enabled():
+        return sys.stdout.isatty()
+
+def c(text, *codes):
+    """Colorize text if stdout is a tty."""
+    if not C.enabled():
+        return text
+    return "".join(codes) + str(text) + C.RESET
+
+def verdict_color(verdict):
+    """Return colored verdict string."""
+    v = verdict.upper()
+    if v == "WORKS":
+        return c(f" {v} ", C.BOLD, C.BG_GREEN, C.WHITE)
+    elif v == "WORKS WITH TWEAKS":
+        return c(f" {v} ", C.BOLD, C.BG_YELLOW, C.WHITE)
+    elif v == "PROBLEMATIC":
+        return c(f" {v} ", C.BOLD, C.BG_YELLOW, C.RED)
+    elif v == "BLOCKED":
+        return c(f" {v} ", C.BOLD, C.BG_RED, C.WHITE)
+    else:
+        return c(f" {v} ", C.BOLD, C.DIM)
+
+def rating_color(rating):
+    """Color a ProtonDB rating."""
+    r = (rating or "unknown").lower()
+    colors = {
+        "platinum": C.CYAN,
+        "gold": C.YELLOW,
+        "silver": C.WHITE,
+        "bronze": C.RED,
+        "borked": C.RED,
+        "native": C.GREEN,
+    }
+    return c(rating or "Unknown", C.BOLD, colors.get(r, C.DIM))
+
+# ─── Built-in Anti-Cheat Database ───────────────────────────────────────────
+# Format: appid -> { name, anticheat, ac_status, notes }
+# ac_status: "works", "partial", "blocked"
+
+ANTICHEAT_DB = {
+    # ── EAC — mostly works ──
+    252490:  {"name": "Rust",                   "anticheat": "EAC",       "ac_status": "works",   "notes": "Fully supported with Proton EAC runtime"},
+    1172470: {"name": "Apex Legends",           "anticheat": "EAC",       "ac_status": "works",   "notes": "Works well via Proton"},
+    1245620: {"name": "Elden Ring",             "anticheat": "EAC",       "ac_status": "works",   "notes": "EAC works, minor stutters on shader compile"},
+    1097150: {"name": "Fall Guys",              "anticheat": "EAC",       "ac_status": "works",   "notes": "EAC fully enabled for Linux"},
+    1599340: {"name": "Lost Ark",               "anticheat": "EAC",       "ac_status": "works",   "notes": "Works with Proton"},
+    381210:  {"name": "Dead by Daylight",       "anticheat": "EAC",       "ac_status": "works",   "notes": "EAC Linux support enabled"},
+    594650:  {"name": "Hunt: Showdown 1896",    "anticheat": "EAC",       "ac_status": "works",   "notes": "Works with Proton"},
+    1240440: {"name": "Halo Infinite",          "anticheat": "EAC",       "ac_status": "works",   "notes": "Multiplayer works via Proton"},
+    1063730: {"name": "New World",              "anticheat": "EAC",       "ac_status": "works",   "notes": "EAC works on Linux"},
+    578080:  {"name": "PUBG: Battlegrounds",    "anticheat": "EAC",       "ac_status": "works",   "notes": "Supported via Proton"},
+    1517290: {"name": "Battlefield 2042",       "anticheat": "EAC",       "ac_status": "works",   "notes": "EA enabled EAC for Proton"},
+    236390:  {"name": "War Thunder",            "anticheat": "EAC",       "ac_status": "works",   "notes": "Native Linux + EAC support"},
+    230410:  {"name": "Warframe",               "anticheat": "EAC",       "ac_status": "works",   "notes": "Native Linux + EAC"},
+    892970:  {"name": "Valheim",                "anticheat": "EAC",       "ac_status": "works",   "notes": "Works great on Linux"},
+    1938090: {"name": "Call of Duty: MW3",      "anticheat": "Ricochet",  "ac_status": "works",   "notes": "Works with Proton"},
+    1962663: {"name": "Call of Duty: Warzone",  "anticheat": "Ricochet",  "ac_status": "works",   "notes": "Works with Proton"},
+    1085660: {"name": "Destiny 2",              "anticheat": "BattlEye",  "ac_status": "blocked", "notes": "Bungie explicitly blocks Linux/Steam Deck"},
+
+    # ── BattlEye — partial ──
+    221100:  {"name": "DayZ",                   "anticheat": "BattlEye",  "ac_status": "works",   "notes": "BattlEye Proton support enabled"},
+    107410:  {"name": "ARMA 3",                 "anticheat": "BattlEye",  "ac_status": "works",   "notes": "BattlEye works via Proton"},
+    359550:  {"name": "Rainbow Six Siege",      "anticheat": "BattlEye",  "ac_status": "works",   "notes": "Ubisoft enabled BattlEye for Proton"},
+    1422450: {"name": "Escape from Tarkov",     "anticheat": "BattlEye",  "ac_status": "partial", "notes": "Works but occasional disconnects reported"},
+    218230:  {"name": "PlanetSide 2",           "anticheat": "BattlEye",  "ac_status": "works",   "notes": "BattlEye Proton enabled"},
+    440900:  {"name": "Conan Exiles",           "anticheat": "BattlEye",  "ac_status": "works",   "notes": "BattlEye works on Linux"},
+    346110:  {"name": "ARK: Survival Evolved",  "anticheat": "BattlEye",  "ac_status": "works",   "notes": "Native Linux available"},
+    2344520: {"name": "ARK: Survival Ascended", "anticheat": "BattlEye",  "ac_status": "works",   "notes": "BattlEye Proton support"},
+    304930:  {"name": "Unturned",               "anticheat": "BattlEye",  "ac_status": "works",   "notes": "Native Linux with BattlEye"},
+    393380:  {"name": "Squad",                  "anticheat": "EAC",       "ac_status": "works",   "notes": "EAC works on Proton"},
+    1604030: {"name": "V Rising",               "anticheat": "EAC",       "ac_status": "works",   "notes": "Works well on Linux"},
+
+    # ── BLOCKED ──
+    1203220: {"name": "Naraka: Bladepoint",     "anticheat": "EAC (kernel)","ac_status": "blocked","notes": "Kernel-level EAC, not Proton-compatible"},
+    438100:  {"name": "VRChat",                 "anticheat": "EAC",       "ac_status": "works",   "notes": "Native Linux available, EAC works"},
+    # Valorant
+    0:       {"name": "Valorant",               "anticheat": "Vanguard",  "ac_status": "blocked", "notes": "Riot Vanguard kernel AC is incompatible with Linux"},
+    # FACEIT (not a Steam game, but important for CS2 players)
+    1:       {"name": "FACEIT (CS2)",           "anticheat": "FACEIT AC", "ac_status": "blocked", "notes": "FACEIT anti-cheat does not support Linux"},
+    2:       {"name": "Roblox",                 "anticheat": "Hyperion",  "ac_status": "blocked", "notes": "Roblox Hyperion blocks Linux/Wine entirely"},
+    3:       {"name": "Genshin Impact",         "anticheat": "mhyprot",   "ac_status": "blocked", "notes": "HoYoverse kernel AC blocks Linux (recent versions)"},
+
+    # ── More popular games (no anti-cheat or non-invasive) ──
+    730:     {"name": "Counter-Strike 2",       "anticheat": "VAC",       "ac_status": "works",   "notes": "Native Linux build available"},
+    570:     {"name": "Dota 2",                 "anticheat": "VAC",       "ac_status": "works",   "notes": "Native Linux build"},
+    440:     {"name": "Team Fortress 2",        "anticheat": "VAC",       "ac_status": "works",   "notes": "Native Linux build"},
+    1091500: {"name": "Cyberpunk 2077",         "anticheat": "None",      "ac_status": "works",   "notes": "Excellent Proton support"},
+    1174180: {"name": "Red Dead Redemption 2",  "anticheat": "None",      "ac_status": "works",   "notes": "Works well with Proton-GE"},
+    292030:  {"name": "The Witcher 3",          "anticheat": "None",      "ac_status": "works",   "notes": "Native Linux build available"},
+    1086940: {"name": "Baldur's Gate 3",        "anticheat": "None",      "ac_status": "works",   "notes": "Native Linux build"},
+    1593500: {"name": "God of War",             "anticheat": "None",      "ac_status": "works",   "notes": "Runs great on Proton"},
+    1888160: {"name": "The Last of Us Part I",  "anticheat": "None",      "ac_status": "works",   "notes": "Works with Proton, shader compile stutter"},
+    892970:  {"name": "Valheim",                "anticheat": "None",      "ac_status": "works",   "notes": "Native Linux build"},
+    413150:  {"name": "Stardew Valley",         "anticheat": "None",      "ac_status": "works",   "notes": "Native Linux build"},
+    367520:  {"name": "Hollow Knight",          "anticheat": "None",      "ac_status": "works",   "notes": "Native Linux build"},
+    1145360: {"name": "Hades",                  "anticheat": "None",      "ac_status": "works",   "notes": "Native Linux build"},
+    814380:  {"name": "Sekiro",                 "anticheat": "None",      "ac_status": "works",   "notes": "Works on Proton"},
+    374320:  {"name": "Dark Souls III",         "anticheat": "None",      "ac_status": "works",   "notes": "Works on Proton"},
+    105600:  {"name": "Terraria",               "anticheat": "None",      "ac_status": "works",   "notes": "Native Linux build"},
+    322330:  {"name": "Don't Starve Together",  "anticheat": "None",      "ac_status": "works",   "notes": "Native Linux build"},
+    242760:  {"name": "The Forest",             "anticheat": "None",      "ac_status": "works",   "notes": "Native Linux build"},
+    1326470: {"name": "Sons of the Forest",     "anticheat": "None",      "ac_status": "works",   "notes": "Works with Proton"},
+    1229490: {"name": "Lethal Company",         "anticheat": "None",      "ac_status": "works",   "notes": "Works with Proton"},
+    552500:  {"name": "Warhammer: Vermintide 2","anticheat": "EAC",       "ac_status": "works",   "notes": "EAC works on Proton"},
+    548430:  {"name": "Deep Rock Galactic",     "anticheat": "None",      "ac_status": "works",   "notes": "Native Linux build"},
+    945360:  {"name": "Among Us",               "anticheat": "None",      "ac_status": "works",   "notes": "Works on Proton"},
+    739630:  {"name": "Phasmophobia",           "anticheat": "None",      "ac_status": "works",   "notes": "Works with Proton"},
+    1966720: {"name": "Palworld",               "anticheat": "EAC",       "ac_status": "works",   "notes": "EAC Proton support enabled"},
+}
+
+# ── Name lookup (lowercase name -> appid) for quick matching ──
+ANTICHEAT_NAME_MAP = {v["name"].lower(): k for k, v in ANTICHEAT_DB.items()}
+
+# ─── Recommended Proton Versions ────────────────────────────────────────────
+
+RECOMMENDED_PROTON = {
+    730:     {"proton": "Proton Experimental",  "notes": "Native Linux preferred; Proton for Windows-only features"},
+    1091500: {"proton": "Proton-GE (latest)",   "notes": "Better performance with GE patches, FSR support"},
+    1245620: {"proton": "Proton-GE (latest)",   "notes": "Fixes EAC + shader stutter, use DXVK async"},
+    1174180: {"proton": "Proton-GE (latest)",   "notes": "Required for Rockstar launcher fixes"},
+    1086940: {"proton": "Proton Experimental",  "notes": "Native Linux recommended; Proton fallback"},
+    1593500: {"proton": "Proton-GE (latest)",   "notes": "Better FSR + shader cache handling"},
+    1888160: {"proton": "Proton-GE (latest)",   "notes": "Shader compile stutter fix in GE builds"},
+    814380:  {"proton": "Proton-GE (latest)",   "notes": "Unlock framerate with GE patches"},
+    374320:  {"proton": "Proton-GE (latest)",   "notes": "Better controller support in GE builds"},
+    252490:  {"proton": "Proton Experimental",  "notes": "EAC runtime requires Experimental or newer"},
+    1172470: {"proton": "Proton Experimental",  "notes": "EAC requires latest Experimental"},
+    578080:  {"proton": "Proton Experimental",  "notes": "EAC requires Experimental"},
+    107410:  {"proton": "Proton Experimental",  "notes": "BattlEye support in Experimental"},
+    221100:  {"proton": "Proton Experimental",  "notes": "BattlEye support in Experimental"},
+    359550:  {"proton": "Proton Experimental",  "notes": "BattlEye + Ubisoft Connect needs Experimental"},
+    1422450: {"proton": "Proton Experimental",  "notes": "BattlEye, use latest Experimental only"},
+    381210:  {"proton": "Proton Experimental",  "notes": "EAC runtime in Experimental"},
+    594650:  {"proton": "Proton-GE (latest)",   "notes": "Better performance with GE + EAC works"},
+    1938090: {"proton": "Proton Experimental",  "notes": "Ricochet AC requires latest Experimental"},
+    1962663: {"proton": "Proton Experimental",  "notes": "Ricochet AC requires latest Experimental"},
+    292030:  {"proton": "Proton-GE (latest)",   "notes": "Native Linux available, Proton for DX12 mode"},
+    739630:  {"proton": "Proton Experimental",  "notes": "VR support needs Experimental"},
+    236390:  {"proton": "Native",               "notes": "Use native Linux build for best performance"},
+    440:     {"proton": "Native",               "notes": "Native Linux build, no Proton needed"},
+    570:     {"proton": "Native",               "notes": "Native Linux build, no Proton needed"},
+    413150:  {"proton": "Native",               "notes": "Native Linux build"},
+    105600:  {"proton": "Native",               "notes": "Native Linux build"},
+    322330:  {"proton": "Native",               "notes": "Native Linux build"},
+    548430:  {"proton": "Native",               "notes": "Native Linux build"},
+    367520:  {"proton": "Native",               "notes": "Native Linux build"},
+    1145360: {"proton": "Native",               "notes": "Native Linux build"},
+    1966720: {"proton": "Proton Experimental",  "notes": "EAC requires Experimental"},
+}
+
+# ─── Known Issues Database ──────────────────────────────────────────────────
+
+KNOWN_ISSUES = {
+    1091500: [
+        "Shader compilation stutter on first play — use DXVK async",
+        "AMD FSR may need manual enable via launch options",
+        "Ray tracing works but may reduce FPS significantly on older GPUs",
+    ],
+    1245620: [
+        "First launch compiles shaders — may stutter for ~30min",
+        "Multiplayer EAC works with Proton Experimental/GE",
+        "Some reports of white screen: try PROTON_USE_WINED3D=1 as workaround",
+    ],
+    1174180: [
+        "Rockstar Launcher may hang — kill and relaunch usually fixes",
+        "Online mode has intermittent disconnects",
+        "Set WINE_FULLSCREEN_FSR=1 for FSR upscaling",
+    ],
+    1888160: [
+        "Heavy shader compilation on first run (5-15 min)",
+        "Memory usage is high — 16GB+ RAM recommended",
+    ],
+    252490:  [
+        "First launch may take a while for EAC to initialize",
+        "Voice chat may not work on some setups — check PipeWire",
+    ],
+    1422450: [
+        "Occasional BattlEye disconnects — rejoin usually works",
+        "May need to disable IPv6 in some network configs",
+    ],
+}
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+API_TIMEOUT = 10  # seconds
+STEAM_LIBRARY_PATHS = [
+    os.path.expanduser("~/.local/share/Steam"),
+    os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam"),
+    os.path.expanduser("~/.steam/steam"),
+]
+
+VERSION = "1.0.0"
+PROG = "hubos-compat"
+
+# ─── Utility Functions ───────────────────────────────────────────────────────
+
+def api_get(url, timeout=API_TIMEOUT):
+    """Fetch URL and return parsed JSON, or None on failure."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "HubOS-Compat/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
+            OSError, ValueError, TimeoutError):
+        return None
+
+def api_get_raw(url, timeout=API_TIMEOUT):
+    """Fetch URL and return raw text, or None on failure."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "HubOS-Compat/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            ValueError, TimeoutError):
+        return None
+
+def parse_vdf_simple(text):
+    """Minimal VDF/ACF parser — handles Valve's KeyValues format."""
+    result = {}
+    stack = [result]
+    key = None
+    for token in re.findall(r'"([^"]*)"|\{|\}', text):
+        if token == "{":
+            new = {}
+            if key is not None:
+                stack[-1][key] = new
+                key = None
+            stack.append(new)
+        elif token == "}":
+            if len(stack) > 1:
+                stack.pop()
+        else:
+            if key is None:
+                key = token
+            else:
+                stack[-1][key] = token
+                key = None
+    return result
+
+def find_steam_libraries():
+    """Find all Steam library folders."""
+    libraries = []
+    for base in STEAM_LIBRARY_PATHS:
+        if os.path.isdir(base):
+            libraries.append(base)
+            # Parse libraryfolders.vdf for additional paths
+            vdf_path = os.path.join(base, "steamapps", "libraryfolders.vdf")
+            if os.path.isfile(vdf_path):
+                try:
+                    with open(vdf_path, "r") as f:
+                        data = parse_vdf_simple(f.read())
+                    # Navigate the structure
+                    folders = data.get("libraryfolders", data.get("LibraryFolders", {}))
+                    for _key, val in folders.items():
+                        if isinstance(val, dict) and "path" in val:
+                            p = val["path"]
+                            if os.path.isdir(p) and p not in libraries:
+                                libraries.append(p)
+                        elif isinstance(val, str) and os.path.isdir(val):
+                            if val not in libraries:
+                                libraries.append(val)
+                except (OSError, ValueError):
+                    pass
+    return libraries
+
+def find_installed_games():
+    """Return list of (appid, name, install_dir) from installed Steam games."""
+    games = []
+    seen = set()
+    for lib in find_steam_libraries():
+        steamapps = os.path.join(lib, "steamapps")
+        if not os.path.isdir(steamapps):
+            continue
+        for manifest in glob.glob(os.path.join(steamapps, "appmanifest_*.acf")):
+            try:
+                with open(manifest, "r") as f:
+                    data = parse_vdf_simple(f.read())
+                state = data.get("AppState", {})
+                appid = int(state.get("appid", 0))
+                name = state.get("name", "Unknown")
+                installdir = state.get("installdir", "")
+                if appid and appid not in seen:
+                    seen.add(appid)
+                    games.append((appid, name, installdir))
+            except (OSError, ValueError, KeyError):
+                continue
+    games.sort(key=lambda x: x[1].lower())
+    return games
+
+def find_proton_versions():
+    """Find installed Proton versions."""
+    versions = []
+    for lib in find_steam_libraries():
+        steamapps = os.path.join(lib, "steamapps")
+        common = os.path.join(steamapps, "common")
+        if not os.path.isdir(common):
+            continue
+        for entry in os.listdir(common):
+            if entry.lower().startswith("proton"):
+                full = os.path.join(common, entry)
+                if os.path.isdir(full):
+                    versions.append(entry)
+    # Also check GE-Proton in compatibilitytools.d
+    compat_dirs = [
+        os.path.expanduser("~/.local/share/Steam/compatibilitytools.d"),
+        os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d"),
+    ]
+    for d in compat_dirs:
+        if os.path.isdir(d):
+            for entry in os.listdir(d):
+                if "proton" in entry.lower() or "ge-" in entry.lower():
+                    versions.append(entry)
+    return sorted(set(versions))
+
+def run_cmd(cmd, timeout=5):
+    """Run a command and return stdout, or None."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+# ─── ProtonDB + Steam API Queries ───────────────────────────────────────────
+
+def get_protondb_rating(appid):
+    """Query ProtonDB for a game's compatibility rating."""
+    url = f"https://www.protondb.com/api/v1/reports/summaries/{appid}.json"
+    data = api_get(url)
+    if data and "tier" in data:
+        return data["tier"].capitalize()
+    return None
+
+def get_steam_app_details(appid):
+    """Query Steam store API for app details."""
+    url = f"https://store.steampowered.com/api/appdetails?appids={appid}"
+    data = api_get(url)
+    if data and str(appid) in data:
+        entry = data[str(appid)]
+        if entry.get("success"):
+            return entry.get("data", {})
+    return None
+
+def has_native_linux(details):
+    """Check if game has native Linux support from Steam details."""
+    if not details:
+        return False
+    platforms = details.get("platforms", {})
+    return platforms.get("linux", False)
+
+def search_steam(query):
+    """Search Steam store for games matching a query. Returns list of (appid, name)."""
+    encoded = urllib.parse.quote(query)
+    # Use Steam's search suggest endpoint
+    url = f"https://store.steampowered.com/api/storesearch/?term={encoded}&l=english&cc=US"
+    data = api_get(url)
+    results = []
+    if data and "items" in data:
+        for item in data["items"]:
+            appid = item.get("id", 0)
+            name = item.get("name", "Unknown")
+            results.append((appid, name))
+    return results
+
+def resolve_appid(query):
+    """Given an appid (int) or game name (str), return (appid, name) or None."""
+    # Try as numeric AppID
+    try:
+        appid = int(query)
+        # Check local DB first
+        if appid in ANTICHEAT_DB:
+            return appid, ANTICHEAT_DB[appid]["name"]
+        # Try Steam API
+        details = get_steam_app_details(appid)
+        if details:
+            return appid, details.get("name", f"App {appid}")
+        return appid, f"App {appid}"
+    except ValueError:
+        pass
+
+    # Try local DB by name
+    ql = query.lower()
+    for name_lower, appid in ANTICHEAT_NAME_MAP.items():
+        if ql in name_lower or name_lower in ql:
+            return appid, ANTICHEAT_DB[appid]["name"]
+
+    # Search Steam
+    results = search_steam(query)
+    if results:
+        return results[0]
+    return None
+
+# ─── Compatibility Determination ─────────────────────────────────────────────
+
+def determine_verdict(appid, protondb_rating, native_linux, ac_info):
+    """Determine the final verdict for a game.
+
+    Returns: (verdict, reasons)
+    verdict: WORKS, WORKS WITH TWEAKS, PROBLEMATIC, BLOCKED
+    """
+    reasons = []
+
+    # Check anti-cheat blocking
+    if ac_info and ac_info["ac_status"] == "blocked":
+        return "BLOCKED", [f"{ac_info['anticheat']} anti-cheat blocks Linux: {ac_info['notes']}"]
+
+    # Native Linux is best case
+    if native_linux:
+        reasons.append("Native Linux build available")
+        if ac_info and ac_info["ac_status"] == "partial":
+            return "WORKS WITH TWEAKS", reasons + [ac_info["notes"]]
+        return "WORKS", reasons
+
+    # Rate based on ProtonDB
+    rating = (protondb_rating or "").lower()
+    if rating == "platinum":
+        reasons.append("ProtonDB: Platinum — runs perfectly via Proton")
+        if ac_info and ac_info["ac_status"] == "partial":
+            return "WORKS WITH TWEAKS", reasons + [ac_info["notes"]]
+        return "WORKS", reasons
+    elif rating == "gold":
+        reasons.append("ProtonDB: Gold — runs well, minor tweaks may help")
+        return "WORKS WITH TWEAKS" if ac_info and ac_info["ac_status"] == "partial" else "WORKS", reasons
+    elif rating == "silver":
+        reasons.append("ProtonDB: Silver — playable with some issues")
+        return "WORKS WITH TWEAKS", reasons
+    elif rating == "bronze":
+        reasons.append("ProtonDB: Bronze — significant issues, may require workarounds")
+        return "PROBLEMATIC", reasons
+    elif rating == "borked":
+        reasons.append("ProtonDB: Borked — does not work or major issues")
+        return "PROBLEMATIC", reasons
+    elif rating == "native":
+        reasons.append("ProtonDB reports native Linux support")
+        return "WORKS", reasons
+
+    # No data
+    if ac_info and ac_info["ac_status"] == "works":
+        reasons.append(f"Anti-cheat ({ac_info['anticheat']}) is Linux-compatible")
+        return "WORKS WITH TWEAKS", reasons + ["No ProtonDB data — compatibility unconfirmed"]
+
+    reasons.append("No compatibility data available — status unknown")
+    return "WORKS WITH TWEAKS", reasons
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+def cmd_check(query):
+    """Check a specific game's compatibility."""
+    resolved = resolve_appid(query)
+    if not resolved:
+        print(c("  Could not find game: ", C.RED) + c(query, C.BOLD))
+        print(c("  Try: ", C.DIM) + f"{PROG} search {query}")
+        return 1
+
+    appid, name = resolved
+    print()
+    print(c("  Game Compatibility Check", C.BOLD, C.CYAN))
+    print(c("  " + "─" * 50, C.DIM))
+    print(f"  {c('Game:', C.BOLD)}    {c(name, C.WHITE)}")
+    print(f"  {c('AppID:', C.BOLD)}   {c(appid, C.CYAN)}")
+    print()
+
+    # Gather data
+    print(c("  Checking ProtonDB...", C.DIM), end="", flush=True)
+    protondb_rating = get_protondb_rating(appid)
+    print(c(" done", C.DIM))
+
+    print(c("  Checking Steam store...", C.DIM), end="", flush=True)
+    details = get_steam_app_details(appid)
+    native = has_native_linux(details)
+    print(c(" done", C.DIM))
+
+    ac_info = ANTICHEAT_DB.get(appid)
+
+    # Determine verdict
+    verdict, reasons = determine_verdict(appid, protondb_rating, native, ac_info)
+
+    print()
+    print(c("  " + "─" * 50, C.DIM))
+
+    # ProtonDB Rating
+    print(f"  {c('ProtonDB:', C.BOLD)}       {rating_color(protondb_rating)}")
+
+    # Native Linux
+    native_str = c("Yes", C.GREEN, C.BOLD) if native else c("No", C.YELLOW)
+    print(f"  {c('Native Linux:', C.BOLD)}   {native_str}")
+
+    # Anti-cheat
+    if ac_info:
+        ac_name = ac_info["anticheat"]
+        ac_stat = ac_info["ac_status"]
+        if ac_stat == "works":
+            ac_display = c(f"{ac_name} — Works on Linux", C.GREEN)
+        elif ac_stat == "partial":
+            ac_display = c(f"{ac_name} — Partial support", C.YELLOW)
+        else:
+            ac_display = c(f"{ac_name} — BLOCKED on Linux", C.RED, C.BOLD)
+        print(f"  {c('Anti-Cheat:', C.BOLD)}     {ac_display}")
+    else:
+        print(f"  {c('Anti-Cheat:', C.BOLD)}     {c('None detected / not in database', C.DIM)}")
+
+    # Recommended Proton
+    proton_rec = RECOMMENDED_PROTON.get(appid)
+    if proton_rec:
+        print(f"  {c('Proton:', C.BOLD)}         {c(proton_rec['proton'], C.MAGENTA)} — {proton_rec['notes']}")
+    elif native:
+        print(f"  {c('Proton:', C.BOLD)}         {c('Not needed (native Linux)', C.GREEN)}")
+    else:
+        print(f"  {c('Proton:', C.BOLD)}         {c('Proton Experimental (default)', C.DIM)}")
+
+    # Verdict
+    print()
+    print(f"  {c('VERDICT:', C.BOLD)}      {verdict_color(verdict)}")
+    print()
+
+    # Reasons
+    for r in reasons:
+        print(f"    {c('•', C.CYAN)} {r}")
+
+    # Known issues
+    issues = KNOWN_ISSUES.get(appid, [])
+    if issues:
+        print()
+        print(f"  {c('Known Issues:', C.BOLD, C.YELLOW)}")
+        for issue in issues:
+            print(f"    {c('⚠', C.YELLOW)} {issue}")
+
+    # Links
+    print()
+    print(c("  " + "─" * 50, C.DIM))
+    print(f"  {c('ProtonDB:', C.DIM)}  https://www.protondb.com/app/{appid}")
+    print(f"  {c('Steam:', C.DIM)}     https://store.steampowered.com/app/{appid}")
+    print()
+    return 0
+
+def cmd_search(query):
+    """Search Steam for a game by name."""
+    print()
+    print(c(f"  Searching Steam for: ", C.BOLD) + c(query, C.CYAN))
+    print()
+
+    results = search_steam(query)
+    if not results:
+        print(c("  No results found.", C.YELLOW))
+        print(c("  Try a different search term.", C.DIM))
+        return 1
+
+    # Also check local DB
+    ql = query.lower()
+    local_matches = []
+    for name_lower, appid in ANTICHEAT_NAME_MAP.items():
+        if ql in name_lower:
+            info = ANTICHEAT_DB[appid]
+            local_matches.append((appid, info["name"]))
+
+    print(f"  {c('Steam Store Results:', C.BOLD)}")
+    print(f"  {'AppID':<12} {'Name'}")
+    print(f"  {'-' * 10}   {'-' * 35}")
+    for appid, name in results[:15]:
+        # Check if in local DB
+        marker = ""
+        if appid in ANTICHEAT_DB:
+            ac = ANTICHEAT_DB[appid]
+            if ac["ac_status"] == "blocked":
+                marker = c(" [BLOCKED]", C.RED, C.BOLD)
+            elif ac["ac_status"] == "works":
+                marker = c(" [WORKS]", C.GREEN)
+            elif ac["ac_status"] == "partial":
+                marker = c(" [PARTIAL]", C.YELLOW)
+        print(f"  {c(str(appid), C.CYAN):<22} {name}{marker}")
+
+    if local_matches:
+        extra = [(a, n) for a, n in local_matches if a not in [r[0] for r in results]]
+        if extra:
+            print()
+            print(f"  {c('Also in local database:', C.BOLD)}")
+            for appid, name in extra[:5]:
+                print(f"  {c(str(appid), C.CYAN):<22} {name}")
+
+    print()
+    print(c(f"  Use '{PROG} check <appid>' for full compatibility details.", C.DIM))
+    print()
+    return 0
+
+def cmd_scan():
+    """Scan installed Steam games and show compatibility."""
+    print()
+    print(c("  Scanning Installed Steam Games", C.BOLD, C.CYAN))
+    print(c("  " + "─" * 60, C.DIM))
+
+    games = find_installed_games()
+    if not games:
+        print()
+        print(c("  No installed Steam games found.", C.YELLOW))
+        print()
+        print(c("  Checked paths:", C.DIM))
+        for p in STEAM_LIBRARY_PATHS:
+            exists = c("exists", C.GREEN) if os.path.isdir(p) else c("not found", C.RED)
+            print(f"    {p}  [{exists}]")
+        print()
+        return 1
+
+    print(f"  Found {c(str(len(games)), C.BOLD, C.GREEN)} installed games. Checking compatibility...")
+    print()
+
+    # Table header
+    hdr = f"  {'Game':<35} {'AppID':<10} {'ProtonDB':<12} {'Anti-Cheat':<15} {'Verdict'}"
+    print(c(hdr, C.BOLD))
+    print(f"  {'─' * 35} {'─' * 10} {'─' * 12} {'─' * 15} {'─' * 18}")
+
+    results = []
+    for appid, name, _installdir in games:
+        # Skip Proton, Steamworks, redistributables
+        if any(kw in name.lower() for kw in ["proton", "steamworks", "redistribut", "steam linux"]):
+            continue
+
+        # Check local DB first (fast)
+        ac_info = ANTICHEAT_DB.get(appid)
+        protondb_rating = get_protondb_rating(appid)
+
+        # Quick native check from local DB
+        proton_rec = RECOMMENDED_PROTON.get(appid)
+        native = proton_rec["proton"] == "Native" if proton_rec else False
+
+        verdict, _ = determine_verdict(appid, protondb_rating, native, ac_info)
+
+        # Format columns
+        short_name = (name[:32] + "...") if len(name) > 35 else name
+        ac_str = ac_info["anticheat"] if ac_info else "—"
+        rating_str = protondb_rating or "?"
+
+        results.append((short_name, appid, rating_str, ac_str, verdict))
+        print(f"  {short_name:<35} {c(str(appid), C.CYAN):<20} {rating_color(rating_str):<22} {ac_str:<15} {verdict_color(verdict)}")
+
+    print()
+    # Summary
+    v_counts = {}
+    for _, _, _, _, v in results:
+        v_counts[v] = v_counts.get(v, 0) + 1
+    print(c("  Summary:", C.BOLD))
+    for v in ["WORKS", "WORKS WITH TWEAKS", "PROBLEMATIC", "BLOCKED"]:
+        if v in v_counts:
+            print(f"    {verdict_color(v)}  {v_counts[v]} game(s)")
+    print()
+    return 0
+
+def cmd_report(output_format="text"):
+    """Generate a full compatibility report."""
+    games = find_installed_games()
+    if not games:
+        print(c("  No installed games found.", C.YELLOW))
+        return 1
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+    if output_format == "html":
+        return _generate_html_report(games, timestamp)
+    else:
+        return _generate_text_report(games, timestamp)
+
+def _generate_text_report(games, timestamp):
+    """Generate a text compatibility report."""
+    filename = f"hubos-compat-report_{timestamp}.txt"
+    filepath = os.path.join(os.getcwd(), filename)
+
+    lines = []
+    lines.append("=" * 70)
+    lines.append("HubOS Game Compatibility Report")
+    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"Total installed games: {len(games)}")
+    lines.append("=" * 70)
+    lines.append("")
+
+    for appid, name, _installdir in games:
+        if any(kw in name.lower() for kw in ["proton", "steamworks", "redistribut", "steam linux"]):
+            continue
+
+        ac_info = ANTICHEAT_DB.get(appid)
+        protondb_rating = get_protondb_rating(appid)
+        proton_rec = RECOMMENDED_PROTON.get(appid)
+        native = proton_rec["proton"] == "Native" if proton_rec else False
+        verdict, reasons = determine_verdict(appid, protondb_rating, native, ac_info)
+
+        lines.append(f"--- {name} (AppID: {appid}) ---")
+        lines.append(f"  Verdict:    {verdict}")
+        lines.append(f"  ProtonDB:   {protondb_rating or 'Unknown'}")
+        lines.append(f"  Native:     {'Yes' if native else 'No'}")
+        if ac_info:
+            lines.append(f"  Anti-Cheat: {ac_info['anticheat']} ({ac_info['ac_status']})")
+        if proton_rec:
+            lines.append(f"  Proton:     {proton_rec['proton']}")
+        for r in reasons:
+            lines.append(f"  - {r}")
+        issues = KNOWN_ISSUES.get(appid, [])
+        for issue in issues:
+            lines.append(f"  ! {issue}")
+        lines.append("")
+
+    try:
+        with open(filepath, "w") as f:
+            f.write("\n".join(lines))
+        print()
+        print(c(f"  Report saved to: ", C.GREEN) + c(filepath, C.BOLD))
+        print()
+    except OSError as e:
+        print(c(f"  Failed to save report: {e}", C.RED))
+        return 1
+    return 0
+
+def _generate_html_report(games, timestamp):
+    """Generate an HTML compatibility report."""
+    filename = f"hubos-compat-report_{timestamp}.html"
+    filepath = os.path.join(os.getcwd(), filename)
+
+    verdict_css = {
+        "WORKS": "background:#22c55e;color:#fff;",
+        "WORKS WITH TWEAKS": "background:#eab308;color:#fff;",
+        "PROBLEMATIC": "background:#f97316;color:#fff;",
+        "BLOCKED": "background:#ef4444;color:#fff;",
+    }
+
+    rows = []
+    for appid, name, _installdir in games:
+        if any(kw in name.lower() for kw in ["proton", "steamworks", "redistribut", "steam linux"]):
+            continue
+
+        ac_info = ANTICHEAT_DB.get(appid)
+        protondb_rating = get_protondb_rating(appid)
+        proton_rec = RECOMMENDED_PROTON.get(appid)
+        native = proton_rec["proton"] == "Native" if proton_rec else False
+        verdict, reasons = determine_verdict(appid, protondb_rating, native, ac_info)
+
+        ac_str = f"{ac_info['anticheat']} ({ac_info['ac_status']})" if ac_info else "—"
+        style = verdict_css.get(verdict, "")
+        notes = "; ".join(reasons)
+
+        rows.append(f"""<tr>
+<td><a href="https://store.steampowered.com/app/{appid}">{name}</a></td>
+<td>{appid}</td>
+<td>{protondb_rating or '?'}</td>
+<td>{'Yes' if native else 'No'}</td>
+<td>{ac_str}</td>
+<td><span style="{style}padding:2px 8px;border-radius:4px;font-weight:bold;">{verdict}</span></td>
+<td>{notes}</td>
+</tr>""")
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>HubOS Compatibility Report — {timestamp}</title>
+<style>
+body {{ font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; padding: 2rem; }}
+h1 {{ color: #38bdf8; }}
+table {{ border-collapse: collapse; width: 100%; margin-top: 1rem; }}
+th, td {{ padding: 8px 12px; border: 1px solid #334155; text-align: left; }}
+th {{ background: #1e293b; color: #94a3b8; }}
+tr:hover {{ background: #1e293b; }}
+a {{ color: #38bdf8; text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+</style></head><body>
+<h1>HubOS Game Compatibility Report</h1>
+<p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Games: {len(rows)}</p>
+<table>
+<tr><th>Game</th><th>AppID</th><th>ProtonDB</th><th>Native</th><th>Anti-Cheat</th><th>Verdict</th><th>Notes</th></tr>
+{"".join(rows)}
+</table>
+</body></html>"""
+
+    try:
+        with open(filepath, "w") as f:
+            f.write(html)
+        print()
+        print(c(f"  HTML report saved to: ", C.GREEN) + c(filepath, C.BOLD))
+        print()
+    except OSError as e:
+        print(c(f"  Failed to save report: {e}", C.RED))
+        return 1
+    return 0
+
+def cmd_status():
+    """Show system readiness for Linux gaming."""
+    print()
+    print(c("  HubOS System Readiness Check", C.BOLD, C.CYAN))
+    print(c("  " + "─" * 50, C.DIM))
+    print()
+
+    # Kernel
+    kernel = run_cmd(["uname", "-r"]) or "unknown"
+    print(f"  {c('Kernel:', C.BOLD)}          {c(kernel, C.GREEN)}")
+
+    # GPU Driver
+    gpu_info = "not detected"
+    # Try nvidia-smi
+    nv = run_cmd(["nvidia-smi", "--query-gpu=driver_version,name", "--format=csv,noheader"])
+    if nv:
+        gpu_info = f"NVIDIA {nv}"
+    else:
+        # Try AMD/Intel via glxinfo
+        glx = run_cmd(["glxinfo", "-B"])
+        if glx:
+            for line in glx.splitlines():
+                if "OpenGL renderer" in line:
+                    gpu_info = line.split(":", 1)[-1].strip()
+                    break
+                elif "Device" in line:
+                    gpu_info = line.split(":", 1)[-1].strip()
+                    break
+    print(f"  {c('GPU:', C.BOLD)}             {gpu_info}")
+
+    # Vulkan
+    vulkan_ok = False
+    vulkaninfo = run_cmd(["vulkaninfo", "--summary"])
+    if vulkaninfo:
+        vulkan_ok = True
+        # Extract Vulkan version
+        for line in vulkaninfo.splitlines():
+            if "apiVersion" in line or "Vulkan Instance Version" in line:
+                ver = line.split("=")[-1].strip().split("(")[0].strip() if "=" in line else line.split(":")[-1].strip()
+                print(f"  {c('Vulkan:', C.BOLD)}          {c('Available', C.GREEN)} ({ver})")
+                break
+        else:
+            print(f"  {c('Vulkan:', C.BOLD)}          {c('Available', C.GREEN)}")
+    else:
+        # Check if vulkan libs exist
+        has_vulkan = any(
+            os.path.exists(p)
+            for p in ["/usr/lib/libvulkan.so.1", "/usr/lib64/libvulkan.so.1",
+                      "/usr/lib/x86_64-linux-gnu/libvulkan.so.1"]
+        )
+        if has_vulkan:
+            print(f"  {c('Vulkan:', C.BOLD)}          {c('Libraries found (vulkaninfo not available)', C.YELLOW)}")
+        else:
+            print(f"  {c('Vulkan:', C.BOLD)}          {c('NOT FOUND — required for most games!', C.RED, C.BOLD)}")
+
+    # Proton versions
+    proton_versions = find_proton_versions()
+    if proton_versions:
+        print(f"  {c('Proton:', C.BOLD)}          {c(str(len(proton_versions)), C.GREEN)} version(s) installed")
+        for pv in proton_versions[:8]:
+            print(f"                     {c('•', C.CYAN)} {pv}")
+        if len(proton_versions) > 8:
+            print(f"                     {c(f'... and {len(proton_versions) - 8} more', C.DIM)}")
+    else:
+        print(f"  {c('Proton:', C.BOLD)}          {c('None found', C.YELLOW)}")
+
+    # Steam
+    steam_libs = find_steam_libraries()
+    if steam_libs:
+        print(f"  {c('Steam:', C.BOLD)}           {c('Found', C.GREEN)}")
+        for sl in steam_libs:
+            print(f"                     {c('•', C.CYAN)} {sl}")
+    else:
+        print(f"  {c('Steam:', C.BOLD)}           {c('Not found', C.RED)}")
+
+    # Installed games count
+    games = find_installed_games()
+    if games:
+        print(f"  {c('Games:', C.BOLD)}           {c(str(len(games)), C.GREEN)} installed")
+
+    # Check for common blockers
+    print()
+    print(c("  Compatibility Blockers:", C.BOLD))
+    blockers = []
+
+    if not vulkan_ok and not any(
+        os.path.exists(p) for p in ["/usr/lib/libvulkan.so.1", "/usr/lib64/libvulkan.so.1",
+                                     "/usr/lib/x86_64-linux-gnu/libvulkan.so.1"]
+    ):
+        blockers.append(("Vulkan not available", "Install vulkan drivers for your GPU"))
+
+    # Check 32-bit libs
+    has_32bit = any(
+        os.path.exists(p) for p in [
+            "/usr/lib32/", "/usr/lib/i386-linux-gnu/",
+            "/usr/lib/i686-linux-gnu/",
+        ]
+    )
+    if not has_32bit:
+        blockers.append(("32-bit libraries missing", "Install lib32 packages for Proton compatibility"))
+
+    # Check wine/proton deps
+    for dep, pkg in [("wine", "wine"), ("winetricks", "winetricks"), ("gamemode", "gamemode")]:
+        if not shutil.which(dep):
+            blockers.append((f"{dep} not installed", f"Install {pkg} for better compatibility"))
+
+    if not blockers:
+        print(c("    None detected — system looks ready for gaming!", C.GREEN, C.BOLD))
+    else:
+        for issue, fix in blockers:
+            print(f"    {c('!', C.RED)} {c(issue, C.YELLOW)} — {fix}")
+
+    print()
+    return 0
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description="HubOS Game Compatibility Checker — Will my game work on Linux?",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent(f"""\
+            examples:
+              {PROG} check 1091500          Check Cyberpunk 2077 by AppID
+              {PROG} check "Elden Ring"     Check by game name
+              {PROG} search "dark souls"    Search Steam for a game
+              {PROG} scan                   Check all installed games
+              {PROG} report --html          Generate HTML report
+              {PROG} status                 Check system readiness
+        """),
+    )
+    parser.add_argument("--version", action="version", version=f"{PROG} {VERSION}")
+
+    sub = parser.add_subparsers(dest="command", help="Available commands")
+
+    # check
+    p_check = sub.add_parser("check", help="Check a game's Linux compatibility")
+    p_check.add_argument("game", nargs="+", help="Steam AppID or game name")
+
+    # search
+    p_search = sub.add_parser("search", help="Search Steam for a game by name")
+    p_search.add_argument("query", nargs="+", help="Game name to search for")
+
+    # scan
+    sub.add_parser("scan", help="Scan all installed Steam games")
+
+    # report
+    p_report = sub.add_parser("report", help="Generate full compatibility report")
+    p_report.add_argument("--html", action="store_true", help="Generate HTML report instead of text")
+
+    # status
+    sub.add_parser("status", help="Show system readiness for Linux gaming")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 0
+
+    if args.command == "check":
+        query = " ".join(args.game)
+        return cmd_check(query)
+    elif args.command == "search":
+        query = " ".join(args.query)
+        return cmd_search(query)
+    elif args.command == "scan":
+        return cmd_scan()
+    elif args.command == "report":
+        fmt = "html" if args.html else "text"
+        return cmd_report(fmt)
+    elif args.command == "status":
+        return cmd_status()
+
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
