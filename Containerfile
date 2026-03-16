@@ -11,7 +11,7 @@ LABEL org.opencontainers.image.title="HubOS"
 LABEL org.opencontainers.image.description="24HG Gaming Distribution — Boot into the 24 Hour Gaming ecosystem"
 LABEL org.opencontainers.image.vendor="24 Hour Gaming"
 LABEL org.opencontainers.image.url="https://24hgaming.com/os"
-LABEL org.opencontainers.image.source="https://git.raggi.is/admin/hubos"
+LABEL org.opencontainers.image.source="https://os.24hgaming.com"
 
 # ── Copy ALL files first (single context layer) ──
 COPY system_files/etc/ /tmp/hubos-build/etc/
@@ -20,6 +20,8 @@ COPY branding/ /tmp/hubos-build/branding/
 COPY hub-app/hubos-hub /tmp/hubos-build/bin/hubos-hub
 COPY hub-app/hubos-hub.desktop /tmp/hubos-build/desktop/hubos-hub.desktop
 COPY hub-app/hubos-session.desktop /tmp/hubos-build/desktop/hubos-session.desktop
+COPY hub-app/hubos-tray /tmp/hubos-build/bin/hubos-tray
+COPY hub-app/hubos-tray.desktop /tmp/hubos-build/desktop/hubos-tray.desktop
 COPY hub-app/hubos-gamescope-session /tmp/hubos-build/bin/hubos-gamescope-session
 COPY scripts/hubos-first-boot /tmp/hubos-build/bin/hubos-first-boot
 COPY scripts/hubos-first-boot.desktop /tmp/hubos-build/desktop/hubos-first-boot.desktop
@@ -31,6 +33,8 @@ COPY scripts/hubos-obs-setup.sh /tmp/hubos-build/lib/hubos-obs-setup.sh
 COPY scripts/hubos-neofetch /tmp/hubos-build/bin/hubos-neofetch
 COPY scripts/hubos-diag /tmp/hubos-build/bin/hubos-diag
 COPY scripts/hubos-performance /tmp/hubos-build/bin/hubos-performance
+COPY system_files/usr/share/hubos/servers.json /tmp/hubos-build/data/servers.json
+COPY system_files/usr/share/hubos/offline.html /tmp/hubos-build/data/offline.html
 COPY installer/ /tmp/hubos-build/installer/
 
 # ── Single RUN: install packages, deploy files, configure, cleanup ──
@@ -48,6 +52,7 @@ RUN rpm-ostree install \
     lm_sensors \
     pciutils \
     vulkan-tools \
+    libappindicator-gtk3 \
     && rpm-ostree cleanup -m \
     \
     # ── Sysctl gaming tweaks ── \
@@ -102,12 +107,15 @@ RUN rpm-ostree install \
     # ── GameMode config ── \
     && cp /tmp/hubos-build/etc/gamemode.ini /etc/gamemode.ini \
     \
-    # ── Firewall ── \
+    # ── Firewall (install service + activate in default zone) ── \
     && mkdir -p /etc/firewalld/services \
     && cp /tmp/hubos-build/etc/firewalld/services/hubos-gaming.xml /etc/firewalld/services/ \
+    && mkdir -p /etc/firewalld/zones \
+    && (firewall-offline-cmd --zone=FedoraWorkstation --add-service=hubos-gaming 2>/dev/null || true) \
     \
     # ── Hub app + session ── \
     && install -m 755 /tmp/hubos-build/bin/hubos-hub /usr/bin/hubos-hub \
+    && install -m 755 /tmp/hubos-build/bin/hubos-tray /usr/bin/hubos-tray \
     && install -m 755 /tmp/hubos-build/bin/hubos-gamescope-session /usr/bin/hubos-gamescope-session \
     && cp /tmp/hubos-build/desktop/hubos-hub.desktop /usr/share/applications/ \
     && mkdir -p /usr/share/wayland-sessions \
@@ -115,10 +123,16 @@ RUN rpm-ostree install \
     && printf '[Desktop Entry]\nName=24HG Protocol Handler\nExec=/usr/bin/hubos-hub %%u\nType=Application\nNoDisplay=true\nMimeType=x-scheme-handler/24hg;\n' \
        > /usr/share/applications/hubos-protocol.desktop \
     \
+    # ── HubOS data (server list, offline page) ── \
+    && mkdir -p /usr/share/hubos \
+    && cp /tmp/hubos-build/data/servers.json /usr/share/hubos/servers.json \
+    && cp /tmp/hubos-build/data/offline.html /usr/share/hubos/offline.html \
+    \
     # ── First-boot wizard + autostart ── \
     && install -m 755 /tmp/hubos-build/bin/hubos-first-boot /usr/bin/hubos-first-boot \
     && cp /tmp/hubos-build/desktop/hubos-first-boot.desktop /usr/share/applications/ \
     && cp /tmp/hubos-build/desktop/hubos-hub.desktop /etc/skel/.config/autostart/ \
+    && cp /tmp/hubos-build/desktop/hubos-tray.desktop /etc/skel/.config/autostart/ \
     && cp /tmp/hubos-build/desktop/hubos-first-boot.desktop /etc/skel/.config/autostart/ \
     \
     # ── CLI tools ── \
@@ -147,7 +161,7 @@ RUN rpm-ostree install \
     && sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="HubOS (24 Hour Gaming)"/' /usr/lib/os-release \
     && sed -i 's|^HOME_URL=.*|HOME_URL="https://24hgaming.com/os"|' /usr/lib/os-release \
     && sed -i 's|^SUPPORT_URL=.*|SUPPORT_URL="https://discord.gg/ymfEjH6EJN"|' /usr/lib/os-release \
-    && sed -i 's|^BUG_REPORT_URL=.*|BUG_REPORT_URL="https://git.raggi.is/admin/hubos/issues"|' /usr/lib/os-release \
+    && sed -i 's|^BUG_REPORT_URL=.*|BUG_REPORT_URL="https://discord.gg/ymfEjH6EJN"|' /usr/lib/os-release \
     && echo 'VARIANT="24HG Gaming"' >> /usr/lib/os-release \
     && echo 'VARIANT_ID=hubos' >> /usr/lib/os-release \
     \

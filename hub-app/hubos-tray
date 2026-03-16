@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""
+HubOS System Tray — Quick-connect to 24HG servers, status indicator
+Lightweight alternative to the full Electron app.
+Uses libappindicator3 (KDE/GNOME compatible via StatusNotifierItem)
+"""
+
+import json
+import os
+import signal
+import subprocess
+import sys
+from collections import defaultdict
+
+# Graceful shutdown
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+try:
+    import gi
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('AppIndicator3', '0.1')
+    from gi.repository import Gtk, AppIndicator3, GLib
+except (ImportError, ValueError):
+    # Fallback: try without AppIndicator (use GtkStatusIcon)
+    try:
+        import gi
+        gi.require_version('Gtk', '3.0')
+        from gi.repository import Gtk, GLib
+        AppIndicator3 = None
+    except ImportError:
+        print("GTK3 not available, tray disabled", file=sys.stderr)
+        sys.exit(0)
+
+
+SERVERS_JSON = "/usr/share/hubos/servers.json"
+HUB_URL = "https://hub.24hgaming.com"
+ICON_NAME = "hubos-logo"
+
+
+def load_servers():
+    """Load server list from centralized JSON."""
+    try:
+        with open(SERVERS_JSON) as f:
+            return json.load(f)
+    except Exception:
+        return {"servers": [], "game_labels": {}}
+
+
+def connect_server(widget, ip, port):
+    """Launch Steam connect to a server."""
+    subprocess.Popen(["xdg-open", f"steam://connect/{ip}:{port}"])
+
+
+def open_hub(widget=None):
+    """Open the 24HG Hub."""
+    subprocess.Popen(["/usr/bin/hubos-hub"])
+
+
+def open_discord(widget=None):
+    """Open Discord."""
+    subprocess.Popen(["xdg-open", "https://discord.gg/ymfEjH6EJN"])
+
+
+def open_diag(widget=None):
+    """Open terminal with diagnostics."""
+    subprocess.Popen(["konsole", "-e", "hubos-diag"])
+
+
+def switch_profile(widget, profile):
+    """Switch performance profile."""
+    subprocess.Popen(["/usr/bin/hubos-performance", profile])
+
+
+def build_menu():
+    """Build the system tray context menu."""
+    menu = Gtk.Menu()
+    data = load_servers()
+    labels = data.get("game_labels", {})
+    servers = data.get("servers", [])
+
+    # ── Open Hub ──
+    item = Gtk.MenuItem(label="Open 24HG Hub")
+    item.connect("activate", open_hub)
+    menu.append(item)
+
+    menu.append(Gtk.SeparatorMenuItem())
+
+    # ── Quick Connect submenu by game ──
+    by_game = defaultdict(list)
+    for s in servers:
+        by_game[s["game"]].append(s)
+
+    connect_item = Gtk.MenuItem(label="Quick Connect")
+    connect_menu = Gtk.Menu()
+
+    for game in sorted(by_game.keys()):
+        game_label = labels.get(game, game.upper())
+        game_item = Gtk.MenuItem(label=f"{game_label} ({len(by_game[game])})")
+        game_submenu = Gtk.Menu()
+
+        for s in by_game[game]:
+            tags = ", ".join(s.get("tags", []))
+            srv_label = f"{s['name']}"
+            if tags:
+                srv_label += f"  [{tags}]"
+            srv_item = Gtk.MenuItem(label=srv_label)
+            srv_item.connect("activate", connect_server, s["ip"], s["port"])
+            game_submenu.append(srv_item)
+
+        game_item.set_submenu(game_submenu)
+        connect_menu.append(game_item)
+
+    connect_item.set_submenu(connect_menu)
+    menu.append(connect_item)
+
+    menu.append(Gtk.SeparatorMenuItem())
+
+    # ── Performance profiles ──
+    perf_item = Gtk.MenuItem(label="Performance")
+    perf_menu = Gtk.Menu()
+    for profile, desc in [("gaming", "Gaming (Max Performance)"),
+                          ("balanced", "Balanced (Recommended)"),
+                          ("powersave", "Power Save (Battery)")]:
+        p_item = Gtk.MenuItem(label=desc)
+        p_item.connect("activate", switch_profile, profile)
+        perf_menu.append(p_item)
+    perf_item.set_submenu(perf_menu)
+    menu.append(perf_item)
+
+    menu.append(Gtk.SeparatorMenuItem())
+
+    # ── Utilities ──
+    diag = Gtk.MenuItem(label="Diagnostics")
+    diag.connect("activate", open_diag)
+    menu.append(diag)
+
+    discord = Gtk.MenuItem(label="Discord")
+    discord.connect("activate", open_discord)
+    menu.append(discord)
+
+    menu.append(Gtk.SeparatorMenuItem())
+
+    quit_item = Gtk.MenuItem(label="Quit")
+    quit_item.connect("activate", Gtk.main_quit)
+    menu.append(quit_item)
+
+    menu.show_all()
+    return menu
+
+
+def main():
+    menu = build_menu()
+
+    if AppIndicator3:
+        indicator = AppIndicator3.Indicator.new(
+            "hubos-tray",
+            ICON_NAME,
+            AppIndicator3.IndicatorCategory.APPLICATION_STATUS
+        )
+        indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+        indicator.set_title("24HG Hub")
+        indicator.set_menu(menu)
+    else:
+        # Fallback for systems without AppIndicator
+        icon = Gtk.StatusIcon.new_from_icon_name(ICON_NAME)
+        icon.set_title("24HG Hub")
+        icon.set_tooltip_text("24 Hour Gaming — Right-click for servers")
+        icon.connect("popup-menu", lambda i, b, t: menu.popup(None, None, None, None, b, t))
+        icon.connect("activate", open_hub)
+
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

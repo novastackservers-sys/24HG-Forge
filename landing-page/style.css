@@ -542,6 +542,38 @@ kbd {
 .iso-size { display: block; font-size: 0.8rem; color: var(--text-dim); margin-bottom: 1rem; }
 .iso-card .btn { width: 100%; justify-content: center; }
 .iso-card .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.checksum-link { display: block; margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-dim); text-decoration: none; }
+.checksum-link:hover { color: var(--accent); }
+
+/* ── Games Grid ── */
+.games-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: center;
+    max-width: 900px;
+    margin: 2rem auto 0;
+}
+.game-badge {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 1.2rem;
+    font-size: 0.95rem;
+    color: var(--text-bright);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: border-color 0.2s;
+}
+.game-badge:hover { border-color: var(--accent); }
+.game-badge span {
+    font-size: 0.75rem;
+    color: var(--accent);
+    background: var(--accent-dim);
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+}
 
 /* ── Footer ── */
 footer {
