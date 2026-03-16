@@ -50,7 +50,7 @@ ISOs are built automatically by GitHub Actions on push to `main`. You can also b
 
 ## Installation
 
-1. Download the ISO from the [Releases](https://github.com/24hg/hubos/releases) page
+1. Download the ISO from the [Releases](https://git.raggi.is/admin/hubos/releases) page
 2. Flash to USB with [Ventoy](https://ventoy.net/), [Rufus](https://rufus.ie/), or `dd`
 3. Boot from USB
 4. Follow the Calamares installer
@@ -100,7 +100,7 @@ Fedora Atomic (base OS, security, kernel)
 - **Website:** https://24hgaming.com/os
 - **Hub:** https://hub.24hgaming.com
 - **Discord:** https://discord.gg/ymfEjH6EJN
-- **Issues:** https://github.com/24hg/hubos/issues
+- **Issues:** https://git.raggi.is/admin/hubos/issues
 
 ## License
 
