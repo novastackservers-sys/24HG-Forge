@@ -78,3 +78,14 @@ export DXVK_LOG_LEVEL=none
 export PROTON_ENABLE_NVAPI=1
 export PROTON_HIDE_NVIDIA_GPU=0
 export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0
+
+# HubOS tool aliases
+alias gamemode='hubos-performance gaming'
+alias replay-save='hubos-replay save'
+alias replay-start='hubos-replay start'
+alias netguard='hubos-netguard'
+alias proton-fix='hubos-proton-fix'
+alias audio='hubos-audio'
+
+# Server status shortcut
+alias status='hubos-server-status --once'

@@ -1,0 +1,175 @@
+#!/bin/bash
+# HubOS Input Latency Optimizer
+# Configures mouse, keyboard, and controller input for minimal latency.
+# Critical for competitive FPS players.
+#
+# Usage: hubos-input [gaming|desktop|status]
+
+set -euo pipefail
+
+ACTION="${1:-status}"
+
+# Find pointer devices for libinput configuration
+get_pointer_ids() {
+    xinput list 2>/dev/null | grep -i "pointer\|mouse\|gaming" | grep -oP 'id=\K\d+' || true
+}
+
+set_flat_accel() {
+    # Set flat (no acceleration) profile — essential for FPS gaming
+    # Works for both X11 and Wayland (via libinput)
+    local PROFILE="$1"  # "flat" or "adaptive"
+
+    # Method 1: xinput (X11 / XWayland)
+    for id in $(get_pointer_ids); do
+        xinput set-prop "$id" "libinput Accel Profile Enabled" \
+            $([ "$PROFILE" = "flat" ] && echo "0 1" || echo "1 0") 2>/dev/null || true
+        if [ "$PROFILE" = "flat" ]; then
+            # Set acceleration speed to 0 (no acceleration at all)
+            xinput set-prop "$id" "libinput Accel Speed" 0 2>/dev/null || true
+        fi
+    done
+
+    # Method 2: KDE settings (persistent, works on Wayland)
+    if [ -f "$HOME/.config/kcminputrc" ] || command -v kwriteconfig6 &>/dev/null; then
+        if [ "$PROFILE" = "flat" ]; then
+            kwriteconfig6 --file kcminputrc --group Mouse --key XLbInptAccelProfileFlat true 2>/dev/null || true
+            kwriteconfig6 --file kcminputrc --group Mouse --key XLbInptPointerAcceleration "0.0" 2>/dev/null || true
+        else
+            kwriteconfig6 --file kcminputrc --group Mouse --key XLbInptAccelProfileFlat false 2>/dev/null || true
+        fi
+    fi
+}
+
+set_keyboard_rate() {
+    local DELAY="$1"  # ms before repeat starts
+    local RATE="$2"   # repeats per second
+
+    # X11
+    xset r rate "$DELAY" "$RATE" 2>/dev/null || true
+
+    # KDE Wayland
+    if command -v kwriteconfig6 &>/dev/null; then
+        kwriteconfig6 --file kcminputrc --group Keyboard --key RepeatDelay "$DELAY" 2>/dev/null || true
+        kwriteconfig6 --file kcminputrc --group Keyboard --key RepeatRate "$RATE" 2>/dev/null || true
+    fi
+}
+
+optimize_usb_polling() {
+    # Check current USB mouse polling rate
+    echo "USB polling rates:"
+    for mouse_dev in /sys/bus/usb/devices/*/bInterval; do
+        [ -f "$mouse_dev" ] || continue
+        local INTERVAL DIR PRODUCT
+        INTERVAL=$(cat "$mouse_dev")
+        DIR=$(dirname "$mouse_dev")
+        PRODUCT=$(cat "$DIR/product" 2>/dev/null || echo "Unknown")
+        # bInterval is in 125µs units for USB2 (1=8ms=125Hz, 2=4ms=250Hz, etc.)
+        # But for HID devices bInterval=1 means 1ms=1000Hz
+        echo "  $PRODUCT: interval=$INTERVAL"
+    done 2>/dev/null || echo "  Cannot read USB device info"
+}
+
+case "$ACTION" in
+    gaming)
+        echo "Switching to Gaming input mode..."
+
+        # 1. Flat mouse acceleration (NO acceleration — raw input)
+        set_flat_accel "flat"
+        echo "  Mouse: flat acceleration (raw input)"
+
+        # 2. Fast keyboard repeat (200ms delay, 40 repeats/sec)
+        set_keyboard_rate 200 40
+        echo "  Keyboard: 200ms delay, 40 reps/sec"
+
+        # 3. Disable touchpad while gaming (if laptop)
+        for id in $(xinput list 2>/dev/null | grep -i touchpad | grep -oP 'id=\K\d+'); do
+            xinput disable "$id" 2>/dev/null || true
+            echo "  Touchpad: disabled"
+        done
+
+        # 4. Set compositor to not interfere with mouse (KDE)
+        if command -v kwriteconfig6 &>/dev/null; then
+            # Disable animated cursor
+            kwriteconfig6 --file kwinrc --group Plugins --key kwin4_effect_startupfeedbackEnabled false 2>/dev/null || true
+            # Disable cursor trail effects
+            kwriteconfig6 --file kwinrc --group Effect-overview --key BorderActivate 9 2>/dev/null || true
+        fi
+
+        echo ""
+        echo "Gaming input mode active."
+        echo "  - Mouse acceleration: OFF (raw/flat)"
+        echo "  - Keyboard: fast repeat"
+        echo "  - Touchpad: disabled"
+        ;;
+
+    desktop)
+        echo "Switching to Desktop input mode..."
+
+        # Restore adaptive mouse acceleration
+        set_flat_accel "adaptive"
+        echo "  Mouse: adaptive acceleration"
+
+        # Normal keyboard repeat
+        set_keyboard_rate 400 25
+        echo "  Keyboard: 400ms delay, 25 reps/sec"
+
+        # Re-enable touchpad
+        for id in $(xinput list 2>/dev/null | grep -i touchpad | grep -oP 'id=\K\d+'); do
+            xinput enable "$id" 2>/dev/null || true
+            echo "  Touchpad: enabled"
+        done
+
+        echo "Desktop input mode active."
+        ;;
+
+    status)
+        echo "=== HubOS Input Status ==="
+
+        # Mouse acceleration
+        echo ""
+        echo "Mouse devices:"
+        for id in $(get_pointer_ids); do
+            NAME=$(xinput list-props "$id" 2>/dev/null | head -1 | sed 's/Device.*://' | xargs)
+            ACCEL=$(xinput list-props "$id" 2>/dev/null | grep "Accel Profile Enabled" | grep -oP '\d+,\s*\K\d+' || echo "?")
+            SPEED=$(xinput list-props "$id" 2>/dev/null | grep "Accel Speed (" | grep -oP ':\s*\K[-0-9.]+' || echo "?")
+            if [ "$ACCEL" = "1" ]; then
+                PROFILE="FLAT (gaming)"
+            else
+                PROFILE="adaptive (desktop)"
+            fi
+            echo "  [$id] $NAME — $PROFILE, speed=$SPEED"
+        done 2>/dev/null || echo "  Cannot enumerate devices (Wayland?)"
+
+        # Keyboard
+        echo ""
+        echo "Keyboard repeat:"
+        xset q 2>/dev/null | grep -A1 "auto repeat" | tail -1 | sed 's/^/  /' || echo "  Unknown"
+
+        # USB polling
+        echo ""
+        optimize_usb_polling
+
+        # Touchpad
+        echo ""
+        echo "Touchpad:"
+        TP=$(xinput list 2>/dev/null | grep -i touchpad | head -1)
+        if [ -n "$TP" ]; then
+            local TP_ID
+            TP_ID=$(echo "$TP" | grep -oP 'id=\K\d+')
+            ENABLED=$(xinput list-props "$TP_ID" 2>/dev/null | grep "Device Enabled" | grep -oP ':\s*\K\d+')
+            echo "  ${TP}  — $([ "$ENABLED" = "1" ] && echo "enabled" || echo "DISABLED")"
+        else
+            echo "  No touchpad detected"
+        fi
+        ;;
+
+    *)
+        echo "HubOS Input Latency Optimizer"
+        echo "Usage: hubos-input [gaming|desktop|status]"
+        echo ""
+        echo "  gaming   — Zero mouse accel, fast keyboard, disable touchpad"
+        echo "  desktop  — Normal mouse accel, standard keyboard"
+        echo "  status   — Show current input configuration"
+        exit 1
+        ;;
+esac

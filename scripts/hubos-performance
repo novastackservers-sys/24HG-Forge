@@ -38,7 +38,19 @@ case "$ACTION" in
         # Start GameMode daemon
         gamemoded -r 2>/dev/null || true
 
+        # Optimize input (flat mouse accel, fast keyboard)
+        /usr/bin/hubos-input gaming 2>/dev/null || true
+
+        # Activate network guard
+        /usr/bin/hubos-netguard start 2>/dev/null || true
+
+        # Switch to low-latency audio
+        /usr/bin/hubos-audio gaming 2>/dev/null || true
+
         echo "Gaming mode active. CPU: performance, GPU: max, compositor: suspended"
+        echo "  + Input: raw/flat mouse, fast keyboard"
+        echo "  + Network: low-latency mode, gaming DNS"
+        echo "  + Audio: 5ms buffer"
         echo "Run 'hubos-performance balanced' when done gaming."
         ;;
 
@@ -61,6 +73,15 @@ case "$ACTION" in
         if command -v qdbus &>/dev/null; then
             qdbus org.kde.KWin /Compositor resume 2>/dev/null || true
         fi
+
+        # Restore desktop input
+        /usr/bin/hubos-input desktop 2>/dev/null || true
+
+        # Restore network
+        /usr/bin/hubos-netguard stop 2>/dev/null || true
+
+        # Restore balanced audio
+        /usr/bin/hubos-audio desktop 2>/dev/null || true
 
         echo "Balanced mode active."
         ;;

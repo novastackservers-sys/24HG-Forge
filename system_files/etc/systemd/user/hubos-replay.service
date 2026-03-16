@@ -1,0 +1,13 @@
+[Unit]
+Description=HubOS Instant Replay Buffer
+Documentation=https://os.24hgaming.com
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hubos-replay start
+ExecStop=/usr/bin/hubos-replay stop
+Restart=no
+
+[Install]
+WantedBy=default.target

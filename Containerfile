@@ -33,6 +33,17 @@ COPY scripts/hubos-obs-setup.sh /tmp/hubos-build/lib/hubos-obs-setup.sh
 COPY scripts/hubos-neofetch /tmp/hubos-build/bin/hubos-neofetch
 COPY scripts/hubos-diag /tmp/hubos-build/bin/hubos-diag
 COPY scripts/hubos-performance /tmp/hubos-build/bin/hubos-performance
+COPY scripts/hubos-server-status /tmp/hubos-build/bin/hubos-server-status
+COPY scripts/hubos-netguard /tmp/hubos-build/bin/hubos-netguard
+COPY scripts/hubos-proton-fix /tmp/hubos-build/bin/hubos-proton-fix
+COPY scripts/hubos-replay /tmp/hubos-build/bin/hubos-replay
+COPY scripts/hubos-input /tmp/hubos-build/bin/hubos-input
+COPY scripts/hubos-audio /tmp/hubos-build/bin/hubos-audio
+COPY scripts/gamemode-start.sh /tmp/hubos-build/lib/gamemode-start.sh
+COPY scripts/gamemode-end.sh /tmp/hubos-build/lib/gamemode-end.sh
+COPY system_files/etc/systemd/user/ /tmp/hubos-build/systemd-user/
+COPY system_files/etc/pipewire/ /tmp/hubos-build/pipewire/
+COPY system_files/etc/libinput/ /tmp/hubos-build/libinput/
 COPY system_files/usr/share/hubos/servers.json /tmp/hubos-build/data/servers.json
 COPY system_files/usr/share/hubos/offline.html /tmp/hubos-build/data/offline.html
 COPY installer/ /tmp/hubos-build/installer/
@@ -139,6 +150,12 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/bin/hubos-neofetch /usr/bin/hubos-neofetch \
     && install -m 755 /tmp/hubos-build/bin/hubos-diag /usr/bin/hubos-diag \
     && install -m 755 /tmp/hubos-build/bin/hubos-performance /usr/bin/hubos-performance \
+    && install -m 755 /tmp/hubos-build/bin/hubos-server-status /usr/bin/hubos-server-status \
+    && install -m 755 /tmp/hubos-build/bin/hubos-netguard /usr/bin/hubos-netguard \
+    && install -m 755 /tmp/hubos-build/bin/hubos-proton-fix /usr/bin/hubos-proton-fix \
+    && install -m 755 /tmp/hubos-build/bin/hubos-replay /usr/bin/hubos-replay \
+    && install -m 755 /tmp/hubos-build/bin/hubos-input /usr/bin/hubos-input \
+    && install -m 755 /tmp/hubos-build/bin/hubos-audio /usr/bin/hubos-audio \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/hubos \
@@ -147,6 +164,22 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/hubos-build/lib/auto-update.sh /usr/lib/hubos/ \
     && install -m 755 /tmp/hubos-build/lib/hubos-game-configs.sh /usr/lib/hubos/ \
     && install -m 755 /tmp/hubos-build/lib/hubos-obs-setup.sh /usr/lib/hubos/ \
+    && install -m 755 /tmp/hubos-build/lib/gamemode-start.sh /usr/lib/hubos/ \
+    && install -m 755 /tmp/hubos-build/lib/gamemode-end.sh /usr/lib/hubos/ \
+    \
+    # ── User systemd services ── \
+    && mkdir -p /etc/skel/.config/systemd/user/default.target.wants \
+    && cp /tmp/hubos-build/systemd-user/hubos-server-status.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/hubos-build/systemd-user/hubos-replay.service /etc/skel/.config/systemd/user/ \
+    && ln -sf ../hubos-server-status.service /etc/skel/.config/systemd/user/default.target.wants/hubos-server-status.service \
+    \
+    # ── PipeWire gaming config ── \
+    && mkdir -p /etc/pipewire/pipewire.conf.d \
+    && cp /tmp/hubos-build/pipewire/pipewire.conf.d/99-hubos-defaults.conf /etc/pipewire/pipewire.conf.d/ \
+    \
+    # ── libinput gaming quirks ── \
+    && mkdir -p /etc/libinput \
+    && cp /tmp/hubos-build/libinput/local-overrides.quirks /etc/libinput/ \
     \
     # ── Calamares installer ── \
     && mkdir -p /usr/share/calamares/branding/hubos /etc/calamares \

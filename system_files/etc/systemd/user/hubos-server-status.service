@@ -1,0 +1,13 @@
+[Unit]
+Description=HubOS Server Status Monitor
+Documentation=https://os.24hgaming.com
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hubos-server-status
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
