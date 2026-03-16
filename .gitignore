@@ -1,3 +1,4 @@
+.build-staging/
 *.iso
 *.iso-CHECKSUM
 *.tar
