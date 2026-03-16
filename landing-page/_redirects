@@ -1,6 +1,3 @@
-# Redirect download URLs to Gitea releases
-# Works with Netlify, Cloudflare Pages, and some static hosts
-/download/hubos-desktop-latest.iso    https://git.raggi.is/24hg/hubos/releases/download/latest/hubos-desktop-latest.iso    302
-/download/hubos-desktop-latest.iso.sha256    https://git.raggi.is/24hg/hubos/releases/download/latest/hubos-desktop-latest.iso.sha256    302
-/download/hubos-nvidia-latest.iso     https://git.raggi.is/24hg/hubos/releases/download/latest/hubos-nvidia-latest.iso     302
-/download/hubos-nvidia-latest.iso.sha256     https://git.raggi.is/24hg/hubos/releases/download/latest/hubos-nvidia-latest.iso.sha256     302
+# ISO files are served directly from /iso/ directory
+# No redirects needed — files are hosted on the same domain
+# This file kept for compatibility with static hosts that support _redirects
