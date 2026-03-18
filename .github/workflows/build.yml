@@ -1,21 +1,9 @@
-# 24HG Forge Build — for Gitea Actions or manual build reference
-#
-# This repo lives on git.raggi.is (Gitea). Since Gitea Actions
-# may not be configured, the primary build method is:
-#   ./scripts/build-and-push.sh [desktop|nvidia|deck]
-#
-# If Gitea Actions IS enabled, this workflow will work with
-# Gitea's act-compatible runner.
+# Legacy reference — actual builds use build-image.yml and build-iso.yml
+# This file kept for Gitea Actions compatibility if needed.
 
-name: Build 24HG Forge
+name: Build 24HG Forge (Gitea)
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "landing-page/**"
   workflow_dispatch:
 
 env:
@@ -33,8 +21,6 @@ jobs:
             base_image: ghcr.io/ublue-os/bazzite
           - variant: nvidia
             base_image: ghcr.io/ublue-os/bazzite-nvidia
-          - variant: deck
-            base_image: ghcr.io/ublue-os/bazzite-deck
 
     steps:
       - name: Checkout
@@ -49,10 +35,8 @@ jobs:
             --build-arg BASE_IMAGE=${{ matrix.base_image }} \
             --build-arg BASE_TAG=stable \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/forge-${{ matrix.variant }}:latest \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/forge-${{ matrix.variant }}:$(date +%Y%m%d) \
             -f Containerfile .
 
       - name: Push image
         run: |
           docker push ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/forge-${{ matrix.variant }}:latest
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/forge-${{ matrix.variant }}:$(date +%Y%m%d)

@@ -10,57 +10,72 @@ on:
       - 'scripts/**'
       - 'hub-app/**'
       - 'branding/**'
-  pull_request:
-    branches: [main]
+      - 'stage-build.sh'
+  workflow_dispatch:
 
 env:
-  IMAGE_NAME: forge
-  IMAGE_REGISTRY: git.raggi.is/24hg
+  IMAGE_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/forge
 
 jobs:
   build:
-    name: Build & Push OCI Image
+    name: Build & Push (${{ matrix.variant }})
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     strategy:
+      fail-fast: false
       matrix:
-        variant: [desktop, nvidia]
+        include:
+          - variant: desktop
+            base_image: ghcr.io/ublue-os/bazzite
+            containerfile: Containerfile
+          - variant: nvidia
+            base_image: ghcr.io/ublue-os/bazzite-nvidia
+            containerfile: Containerfile.nvidia
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Login to Registry
-        if: github.event_name != 'pull_request'
-        run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" | podman login git.raggi.is -u ${{ secrets.REGISTRY_USER }} --password-stdin
+      - name: Stage build files
+        run: ./stage-build.sh
 
-      - name: Set build args
-        id: args
-        run: |
-          if [ "${{ matrix.variant }}" = "nvidia" ]; then
-            echo "base_image=ghcr.io/ublue-os/bazzite-nvidia" >> "$GITHUB_OUTPUT"
-            echo "containerfile=Containerfile.nvidia" >> "$GITHUB_OUTPUT"
-          else
-            echo "base_image=ghcr.io/ublue-os/bazzite" >> "$GITHUB_OUTPUT"
-            echo "containerfile=Containerfile" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build Image
+      - name: Generate tags
+        id: meta
+        run: |
+          DATE=$(date +%Y%m%d)
+          echo "date_tag=${DATE}" >> "$GITHUB_OUTPUT"
+          echo "full_image=${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
         run: |
           podman build \
-            --build-arg BASE_IMAGE=${{ steps.args.outputs.base_image }} \
+            --build-arg BASE_IMAGE=${{ matrix.base_image }} \
             --build-arg BASE_TAG=stable \
-            -f ${{ steps.args.outputs.containerfile }} \
-            -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest \
-            -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-${{ github.sha }} \
+            -f ${{ matrix.containerfile }} \
+            -t ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-latest \
+            -t ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.date_tag }} \
             .
 
-      - name: Push to Registry
+      - name: Push to GHCR
         if: github.event_name != 'pull_request'
         run: |
-          podman push ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest
-          podman push ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-${{ github.sha }}
+          podman push ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-latest
+          podman push ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.date_tag }}
 
       - name: Summary
         run: |
           echo "### 24HG Forge Image Built (${{ matrix.variant }})" >> $GITHUB_STEP_SUMMARY
-          echo "**Image:** \`${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Images pushed:**" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.date_tag }}\`" >> $GITHUB_STEP_SUMMARY

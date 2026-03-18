@@ -16,68 +16,50 @@ on:
           - both
 
 env:
-  IMAGE_NAME: forge
-  IMAGE_REGISTRY: git.raggi.is/24hg
+  IMAGE_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/forge
 
 jobs:
-  build-image:
-    name: Build OCI Image (${{ matrix.variant }})
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        variant: [desktop, nvidia]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Login to Registry
-        run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" | podman login git.raggi.is -u ${{ secrets.REGISTRY_USER }} --password-stdin
-
-      - name: Set base image
-        id: base
-        run: |
-          if [ "${{ matrix.variant }}" = "nvidia" ]; then
-            echo "image=ghcr.io/ublue-os/bazzite-nvidia" >> "$GITHUB_OUTPUT"
-            echo "containerfile=Containerfile.nvidia" >> "$GITHUB_OUTPUT"
-          else
-            echo "image=ghcr.io/ublue-os/bazzite" >> "$GITHUB_OUTPUT"
-            echo "containerfile=Containerfile" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build Image
-        run: |
-          podman build \
-            --build-arg BASE_IMAGE=${{ steps.base.outputs.image }} \
-            --build-arg BASE_TAG=stable \
-            -f ${{ steps.base.outputs.containerfile }} \
-            -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest \
-            .
-
-      - name: Push to Registry
-        run: |
-          podman push ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest
-
   build-iso:
     name: Build ISO (${{ matrix.variant }})
-    needs: build-image
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: read
     strategy:
+      fail-fast: false
       matrix:
         variant: [desktop, nvidia]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build ISO
         uses: jasonn3/build-container-installer@main
         id: build-iso
         with:
-          image_name: ${{ env.IMAGE_NAME }}
-          image_repo: ${{ env.IMAGE_REGISTRY }}
+          image_name: forge
+          image_repo: ${{ env.IMAGE_REGISTRY }}/${{ github.repository_owner }}
           image_tag: ${{ matrix.variant }}-latest
           variant: Kinoite
-          iso_name: forge-${{ matrix.variant }}-${{ github.ref_name }}.iso
+          iso_name: forge-${{ matrix.variant }}-${{ steps.version.outputs.tag }}.iso
           enrollment_password: forge
 
       - name: Generate checksum
@@ -85,7 +67,7 @@ jobs:
           cd ${{ steps.build-iso.outputs.iso_path }}
           sha256sum *.iso > SHA256SUMS
 
-      - name: Upload ISO as artifact
+      - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
           name: forge-${{ matrix.variant }}-iso
@@ -94,35 +76,26 @@ jobs:
             ${{ steps.build-iso.outputs.iso_path }}/SHA256SUMS
           retention-days: 30
 
-      - name: Create Release (on tag)
+      - name: Create/Update Release
         if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          # Use Gitea API for release creation
-          ISO_PATH="${{ steps.build-iso.outputs.iso_path }}"
-          TAG="${{ github.ref_name }}"
-          REPO="${{ github.repository }}"
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "24HG Forge ${{ github.ref_name }}"
+          body: |
+            ## 24HG Forge ${{ github.ref_name }}
 
-          # Create release if it doesn't exist
-          RELEASE_ID=$(curl -s \
-            -H "Authorization: token ${{ secrets.REGISTRY_TOKEN }}" \
-            "https://git.raggi.is/api/v1/repos/${REPO}/releases/tags/${TAG}" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+            Custom gaming Linux distribution built on Bazzite (Fedora Atomic).
 
-          if [ -z "$RELEASE_ID" ]; then
-            RELEASE_ID=$(curl -s -X POST \
-              -H "Authorization: token ${{ secrets.REGISTRY_TOKEN }}" \
-              -H "Content-Type: application/json" \
-              "https://git.raggi.is/api/v1/repos/${REPO}/releases" \
-              -d "{\"tag_name\":\"${TAG}\",\"name\":\"24HG Forge ${TAG}\",\"body\":\"## 24HG Forge ${TAG}\\n\\n### Downloads\\n- **Desktop** (AMD/Intel GPU)\\n- **NVIDIA** (GTX 900+)\\n\\nSee [Roadmap](https://os.24hgaming.com/roadmap.html) for changelog.\"}" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-          fi
+            ### Downloads
+            - **Desktop** (AMD/Intel GPU) — `forge-desktop-${{ github.ref_name }}.iso`
+            - **NVIDIA** (GTX 900+) — `forge-nvidia-${{ github.ref_name }}.iso`
 
-          # Upload ISO and checksums
-          for f in "${ISO_PATH}"/*.iso "${ISO_PATH}"/SHA256SUMS; do
-            if [ -f "$f" ]; then
-              curl -s -X POST \
-                -H "Authorization: token ${{ secrets.REGISTRY_TOKEN }}" \
-                "https://git.raggi.is/api/v1/repos/${REPO}/releases/${RELEASE_ID}/assets?name=$(basename $f)" \
-                -F "attachment=@$f"
-            fi
-          done
+            ### Verify
+            ```bash
+            sha256sum -c SHA256SUMS
+            ```
+
+            See [Changelog](https://os.24hgaming.com/roadmap.html) for details.
+          files: |
+            ${{ steps.build-iso.outputs.iso_path }}/*.iso
+            ${{ steps.build-iso.outputs.iso_path }}/SHA256SUMS
