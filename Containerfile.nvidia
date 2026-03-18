@@ -116,9 +116,7 @@ RUN rpm-ostree install \
     && mkdir -p /etc/skel/Desktop \
     && cp /tmp/forge-build/skel-desktop/*.desktop /etc/skel/Desktop/ \
     \
-    # ── Sound theme ── \
-    && mkdir -p /usr/share/sounds/forge/stereo \
-    && cp -r /tmp/forge-build/sounds/* /usr/share/sounds/forge/ \
+    # ── Sound theme (uses freedesktop defaults) \
     \
     # ── KDE Plasma splash screen ── \
     && mkdir -p /usr/share/plasma/look-and-feel/com.forge.splash/contents/splash \
