@@ -1,4 +1,4 @@
-# HubOS Build — for Gitea Actions or manual build reference
+# 24HG Forge Build — for Gitea Actions or manual build reference
 #
 # This repo lives on git.raggi.is (Gitea). Since Gitea Actions
 # may not be configured, the primary build method is:
@@ -7,7 +7,7 @@
 # If Gitea Actions IS enabled, this workflow will work with
 # Gitea's act-compatible runner.
 
-name: Build HubOS
+name: Build 24HG Forge
 
 on:
   push:
@@ -48,11 +48,11 @@ jobs:
           docker build \
             --build-arg BASE_IMAGE=${{ matrix.base_image }} \
             --build-arg BASE_TAG=stable \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hubos-${{ matrix.variant }}:latest \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hubos-${{ matrix.variant }}:$(date +%Y%m%d) \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/forge-${{ matrix.variant }}:latest \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/forge-${{ matrix.variant }}:$(date +%Y%m%d) \
             -f Containerfile .
 
       - name: Push image
         run: |
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hubos-${{ matrix.variant }}:latest
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/hubos-${{ matrix.variant }}:$(date +%Y%m%d)
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/forge-${{ matrix.variant }}:latest
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/forge-${{ matrix.variant }}:$(date +%Y%m%d)

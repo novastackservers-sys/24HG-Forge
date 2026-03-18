@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=HubOS Demo Tour
-Comment=Take a guided tour of HubOS
-Exec=/usr/bin/hubos-demo start
-Icon=hubos-logo
-Terminal=false
-Categories=System;

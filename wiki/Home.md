@@ -1,6 +1,6 @@
-# HubOS Wiki
+# 24HG Forge Wiki
 
-Welcome to the HubOS documentation. HubOS is a custom Linux gaming distribution built on [Bazzite](https://bazzite.gg/) (Fedora Atomic) by [24 Hour Gaming](https://24hgaming.com).
+Welcome to the 24HG Forge documentation. 24HG Forge is a custom Linux gaming distribution built on [Bazzite](https://bazzite.gg/) (Fedora Atomic) by [24 Hour Gaming](https://24hgaming.com).
 
 ## Quick Links
 
@@ -11,12 +11,12 @@ Welcome to the HubOS documentation. HubOS is a custom Linux gaming distribution 
 - [Troubleshooting](Troubleshooting) -- Common problems and their solutions
 - [Keyboard Shortcuts](Keyboard-Shortcuts) -- Every hotkey at your fingertips
 - [FAQ](FAQ) -- Answers to the 25+ most common questions
-- [Building from Source](Building) -- Build your own HubOS image
-- [Contributing](Contributing) -- Help make HubOS better
+- [Building from Source](Building) -- Build your own 24HG Forge image
+- [Contributing](Contributing) -- Help make 24HG Forge better
 
-## What is HubOS?
+## What is 24HG Forge?
 
-HubOS is a gaming-focused Linux distribution that integrates directly with the 24 Hour Gaming community. It includes **53 purpose-built gaming tools**, connects to **88+ game servers**, and provides a console-like gaming experience on desktop Linux.
+24HG Forge is a gaming-focused Linux distribution that integrates directly with the 24 Hour Gaming community. It includes **53 purpose-built gaming tools**, connects to **88+ game servers**, and provides a console-like gaming experience on desktop Linux.
 
 ### Key Features
 
@@ -25,16 +25,16 @@ HubOS is a gaming-focused Linux distribution that integrates directly with the 2
 - **Atomic updates** -- System updates are safe and reversible. If something breaks, roll back in seconds with `rpm-ostree rollback`.
 - **53 gaming tools** -- Every common gaming pain point on Linux has a dedicated fix tool. Proton issues, shader stuttering, audio latency, display configuration, controller setup -- all one command away.
 - **Community integration** -- Built-in Hub app connects to 24HG servers, chat, forums, tournaments, and leaderboards.
-- **VIP perks** -- HubOS users automatically receive benefits across all 24HG game servers.
+- **VIP perks** -- 24HG Forge users automatically receive benefits across all 24HG game servers.
 
 ### Architecture
 
 ```
 Fedora Atomic (base OS, security, kernel)
   └─ Bazzite (gaming stack: NVIDIA, Proton, MangoHud, Gamescope, codecs)
-      └─ HubOS (24HG overlay)
+      └─ 24HG Forge (24HG overlay)
           ├─ Hub App (Chromium kiosk → hub.24hgaming.com)
-          ├─ 53 Gaming Tools (hubos-*)
+          ├─ 53 Gaming Tools (forge-*)
           ├─ Branding (wallpapers, icons, boot splash, GRUB, SDDM, Plymouth)
           ├─ Gamescope session ("24HG Mode")
           ├─ First-boot setup (Steam, Lutris, Heroic auto-install)
@@ -52,7 +52,7 @@ Fedora Atomic (base OS, security, kernel)
 
 ### Connected Servers
 
-HubOS ships with a built-in server list connecting to 88+ game servers across:
+24HG Forge ships with a built-in server list connecting to 88+ game servers across:
 
 - Counter-Strike 2 (8 servers)
 - Team Fortress 2 (15 servers)
@@ -68,7 +68,7 @@ HubOS ships with a built-in server list connecting to 88+ game servers across:
 - **Discord:** https://discord.gg/ymfEjH6EJN
 - **Hub:** https://hub.24hgaming.com
 - **Website:** https://24hgaming.com/os
-- **Issues:** https://git.raggi.is/24hg/hubos/issues
+- **Issues:** https://git.raggi.is/24hg/forge/issues
 
 ## License
 

@@ -1,8 +1,0 @@
-[Plymouth Theme]
-Name=HubOS
-Description=24 Hour Gaming boot splash
-ModuleName=script
-
-[script]
-ImageDir=/usr/share/plymouth/themes/hubos
-ScriptFile=/usr/share/plymouth/themes/hubos/hubos.script

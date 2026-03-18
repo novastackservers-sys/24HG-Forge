@@ -1,0 +1,13 @@
+[Unit]
+Description=24HG Forge Discord Rich Presence Bridge
+Documentation=https://os.24hgaming.com
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/forge-discord-fix monitor
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

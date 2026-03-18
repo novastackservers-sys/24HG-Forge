@@ -1,11 +1,11 @@
 #!/bin/bash
 # Configure Steam with 24HG community servers in favorites
-# Reads from centralized server list at /usr/share/hubos/servers.json
+# Reads from centralized server list at /usr/share/forge/servers.json
 # Run this after Steam is installed (typically via first-boot Flatpak)
 
 STEAM_DIR="${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam"
 CONFIG_DIR="${STEAM_DIR}/config"
-SERVERS_JSON="/usr/share/hubos/servers.json"
+SERVERS_JSON="/usr/share/forge/servers.json"
 
 echo "Configuring 24HG servers in Steam favorites..."
 

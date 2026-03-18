@@ -1,6 +1,0 @@
-[Unit]
-Description=HubOS Achievement Check
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/hubos-achievements check

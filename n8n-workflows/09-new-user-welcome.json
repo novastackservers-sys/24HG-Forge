@@ -1,0 +1,47 @@
+{
+  "name": "👋 New User Welcome Flow",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "new-user",
+        "options": {}
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "new-user-24hg"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\nconst username = body.username || 'New User';\nconst email = body.email || '';\nconst source = body.source || 'hub';\n\nreturn [{ json: { username, email, source, timestamp: new Date().toISOString() } }];"
+      },
+      "name": "Parse User",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_WEBHOOK_DAILY }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"👋 New Member: {{ $json.username }}\",\n    \"description\": \"A new user just joined 24 Hour Gaming!\",\n    \"color\": 65280,\n    \"fields\": [\n      { \"name\": \"Source\", \"value\": \"{{ $json.source }}\", \"inline\": true }\n    ],\n    \"timestamp\": \"{{ $json.timestamp }}\",\n    \"footer\": { \"text\": \"24HG Hub\" }\n  }]\n}",
+        "options": {}
+      },
+      "name": "Discord Welcome",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Parse User", "type": "main", "index": 0 }]] },
+    "Parse User": { "main": [[{ "node": "Discord Welcome", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Hub" }]
+}

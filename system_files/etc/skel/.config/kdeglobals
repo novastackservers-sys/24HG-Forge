@@ -37,7 +37,7 @@ BackgroundNormal=10,10,20
 ForegroundNormal=200,200,220
 
 [KDE]
-LookAndFeelPackage=hubos
+LookAndFeelPackage=com.hubos.splash
 
 [Icons]
 Theme=Papirus-Dark

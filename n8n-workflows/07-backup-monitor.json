@@ -1,0 +1,76 @@
+{
+  "name": "💾 Backup & Disk Monitor",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 6 * * *" }] }
+      },
+      "name": "Daily at 06:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://panel.novastack.org/api/application/nodes",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [
+          { "name": "Authorization", "value": "Bearer ptla_n6uwix13qMj0lAesO4tHfEMjl6wiuk2uBaxkmslt0Yy" },
+          { "name": "Accept", "value": "application/json" }
+        ]},
+        "options": { "response": { "response": { "responseFormat": "json" } } }
+      },
+      "name": "Get Nodes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const nodes = ($json.data || []).map(n => {\n  const attr = n.attributes;\n  const diskTotal = attr.disk;\n  const diskUsed = attr.allocated_resources?.disk || 0;\n  const memTotal = attr.memory;\n  const memUsed = attr.allocated_resources?.memory || 0;\n  const diskPct = diskTotal > 0 ? ((diskUsed / diskTotal) * 100).toFixed(1) : 0;\n  const memPct = memTotal > 0 ? ((memUsed / memTotal) * 100).toFixed(1) : 0;\n  return {\n    name: attr.name,\n    fqdn: attr.fqdn,\n    diskPct: parseFloat(diskPct),\n    diskUsedGB: (diskUsed / 1024).toFixed(1),\n    diskTotalGB: (diskTotal / 1024).toFixed(1),\n    memPct: parseFloat(memPct),\n    memUsedGB: (memUsed / 1024).toFixed(1),\n    memTotalGB: (memTotal / 1024).toFixed(1),\n    servers: attr.allocated_resources?.servers || 0\n  };\n});\n\nconst warnings = nodes.filter(n => n.diskPct > 80 || n.memPct > 85);\nconst summary = nodes.map(n => `**${n.name}**: ${n.diskPct}% disk (${n.diskUsedGB}/${n.diskTotalGB} GB), ${n.memPct}% mem, ${n.servers} servers`).join('\\n');\n\nreturn [{ json: {\n  nodes,\n  warnings,\n  summary,\n  hasWarnings: warnings.length > 0,\n  timestamp: new Date().toISOString()\n}}];"
+      },
+      "name": "Analyze Capacity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "1", "leftValue": "={{ $json.hasWarnings }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true" } }],
+          "combinator": "and"
+        }
+      },
+      "name": "Has Warnings?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_WEBHOOK_ALERTS }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"⚠️ Disk/Memory Warning\",\n    \"description\": \"{{ $json.summary }}\",\n    \"color\": 16744448,\n    \"timestamp\": \"{{ $json.timestamp }}\",\n    \"footer\": { \"text\": \"24HG Capacity Monitor\" }\n  }]\n}",
+        "options": {}
+      },
+      "name": "Discord Warning",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -100]
+    }
+  ],
+  "connections": {
+    "Daily at 06:00 UTC": { "main": [[{ "node": "Get Nodes", "type": "main", "index": 0 }]] },
+    "Get Nodes": { "main": [[{ "node": "Analyze Capacity", "type": "main", "index": 0 }]] },
+    "Analyze Capacity": { "main": [[{ "node": "Has Warnings?", "type": "main", "index": 0 }]] },
+    "Has Warnings?": { "main": [
+      [{ "node": "Discord Warning", "type": "main", "index": 0 }],
+      []
+    ]}
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Infrastructure" }]
+}

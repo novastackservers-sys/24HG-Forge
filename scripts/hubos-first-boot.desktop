@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=HubOS First Boot Wizard
-Comment=Configure your HubOS installation
-Exec=/usr/bin/hubos-first-boot
-Icon=hubos-logo
-Type=Application
-Categories=System;Settings;
-NoDisplay=true
-X-GNOME-Autostart-enabled=true

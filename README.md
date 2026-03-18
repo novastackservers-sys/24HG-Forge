@@ -1,10 +1,10 @@
-# HubOS — 24HG's Custom Gaming Distribution
+# 24HG Forge — 24HG's Custom Gaming Distribution
 
 A custom Linux distribution built on [Bazzite](https://bazzite.gg/) (Universal Blue / Fedora Atomic) that boots straight into the [24 Hour Gaming](https://24hgaming.com) ecosystem.
 
-## What is HubOS?
+## What is 24HG Forge?
 
-HubOS is a turnkey gaming Linux distro centered around the 24HG community. Install it, boot it, and you're immediately connected to:
+24HG Forge is a turnkey gaming Linux distro centered around the 24HG community. Install it, boot it, and you're immediately connected to:
 
 - **88+ game servers** (CS 1.6, CS2, TF2, Rust, FiveM, Quake, and more)
 - **Community hub** with chat, forums, tournaments, and leaderboards
@@ -50,7 +50,7 @@ ISOs are built automatically by GitHub Actions on push to `main`. You can also b
 
 ## Installation
 
-1. Download the ISO from the [Releases](https://git.raggi.is/admin/hubos/releases) page
+1. Download the ISO from the [Releases](https://git.raggi.is/admin/forge/releases) page
 2. Flash to USB with [Ventoy](https://ventoy.net/), [Rufus](https://rufus.ie/), or `dd`
 3. Boot from USB
 4. Follow the Calamares installer
@@ -58,7 +58,7 @@ ISOs are built automatically by GitHub Actions on push to `main`. You can also b
 
 ## Updating
 
-HubOS uses atomic updates. Your system is always safe:
+24HG Forge uses atomic updates. Your system is always safe:
 
 ```bash
 # Check for updates
@@ -79,7 +79,7 @@ rpm-ostree rollback
 ```
 Fedora Atomic (base OS, security, kernel)
   └─ Bazzite (gaming stack: NVIDIA, Proton, MangoHud, Gamescope, codecs)
-      └─ HubOS (24HG overlay)
+      └─ 24HG Forge (24HG overlay)
           ├─ Hub App (Chromium kiosk → hub.24hgaming.com)
           ├─ Branding (wallpapers, icons, boot splash, GRUB theme)
           ├─ Gamescope session ("24HG Mode")
@@ -100,7 +100,7 @@ Fedora Atomic (base OS, security, kernel)
 - **Website:** https://24hgaming.com/os
 - **Hub:** https://hub.24hgaming.com
 - **Discord:** https://discord.gg/ymfEjH6EJN
-- **Issues:** https://git.raggi.is/admin/hubos/issues
+- **Issues:** https://git.raggi.is/admin/forge/issues
 
 ## License
 

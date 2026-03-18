@@ -1,0 +1,12 @@
+[SddmGreeterTheme]
+Name=24HG Forge
+Description=24 Hour Gaming login theme
+Author=24HG
+Version=1.0
+Website=https://24hgaming.com
+License=MIT
+Type=sddm-theme
+Theme-API=2.0
+Screenshot=preview.png
+MainScript=Main.qml
+TranslationsDirectory=translations

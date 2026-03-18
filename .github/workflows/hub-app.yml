@@ -39,7 +39,7 @@ jobs:
           for size in 16 32 48 64 128 256 512; do
             # Generate PNGs from SVG (or copy placeholder)
             if command -v rsvg-convert &>/dev/null; then
-              rsvg-convert -w $size -h $size ../branding/icons/hubos-logo.svg \
+              rsvg-convert -w $size -h $size ../branding/icons/forge-logo.svg \
                 -o assets/icons/${size}x${size}.png
             else
               # Fallback: create colored placeholder
@@ -59,14 +59,14 @@ jobs:
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
-          name: hubos-hub-appimage
+          name: forge-hub-appimage
           path: hub-app/dist/*.AppImage
           retention-days: 30
 
       - name: Upload RPM
         uses: actions/upload-artifact@v4
         with:
-          name: hubos-hub-rpm
+          name: forge-hub-rpm
           path: hub-app/dist/*.rpm
           retention-days: 30
 

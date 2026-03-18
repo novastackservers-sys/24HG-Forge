@@ -2,16 +2,30 @@
 # ISO files are served directly from /iso/ directory
 
 os.24hgaming.com {
-    root * /srv/landing-page
-    file_server
+    # API — reverse proxy to control room
+    handle /api/* {
+        reverse_proxy localhost:3847
+    }
+
+    # Admin dashboard
+    handle /admin* {
+        root * /srv/control-room
+        try_files {path} /admin.html
+        file_server
+    }
 
     # Allow large file downloads (ISOs)
     handle /iso/* {
+        root * /srv/landing-page
         file_server {
             precompressed gzip
         }
         header Content-Disposition "attachment"
     }
+
+    # Static landing page
+    root * /srv/landing-page
+    file_server
 
     # Clean URLs (optional)
     try_files {path} {path}.html

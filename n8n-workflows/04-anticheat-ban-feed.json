@@ -1,0 +1,49 @@
+{
+  "name": "🚫 Anti-Cheat Ban Feed → Discord",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "anticheat-ban",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "name": "Ban Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "anticheat-ban-24hg"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\n\nconst player = body.player_name || body.player || body.username || 'Unknown';\nconst steamId = body.steam_id || body.steamid || '';\nconst reason = body.reason || body.ban_reason || 'Anti-Cheat Detection';\nconst server = body.server_name || body.server || 'Unknown Server';\nconst source = body.source || body.plugin || 'Unknown';\nconst duration = body.duration || body.ban_duration || 'Permanent';\nconst ip = body.ip || '';\n\n// Severity color based on source\nlet color = 16711680; // red\nif (source.includes('VAC')) color = 10038562; // dark red\nelse if (source.includes('SMAC')) color = 16744448; // orange\nelse if (source.includes('UAC')) color = 15105570; // amber\n\nreturn [{ json: {\n  player, steamId, reason, server, source, duration, ip,\n  color,\n  steamUrl: steamId ? `https://steamcommunity.com/profiles/${steamId}` : '',\n  timestamp: new Date().toISOString()\n}}];"
+      },
+      "name": "Parse Ban",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_WEBHOOK_BANS }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"🚫 Player Banned\",\n    \"color\": {{ $json.color }},\n    \"fields\": [\n      { \"name\": \"Player\", \"value\": \"{{ $json.player }}\", \"inline\": true },\n      { \"name\": \"Server\", \"value\": \"{{ $json.server }}\", \"inline\": true },\n      { \"name\": \"Source\", \"value\": \"{{ $json.source }}\", \"inline\": true },\n      { \"name\": \"Reason\", \"value\": \"{{ $json.reason }}\", \"inline\": false },\n      { \"name\": \"Duration\", \"value\": \"{{ $json.duration }}\", \"inline\": true },\n      { \"name\": \"Steam\", \"value\": \"{{ $json.steamUrl || 'N/A' }}\", \"inline\": true }\n    ],\n    \"timestamp\": \"{{ $json.timestamp }}\",\n    \"footer\": { \"text\": \"24HG Anti-Cheat System\" }\n  }]\n}",
+        "options": {}
+      },
+      "name": "Discord Ban Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "Ban Webhook": { "main": [[{ "node": "Parse Ban", "type": "main", "index": 0 }]] },
+    "Parse Ban": { "main": [[{ "node": "Discord Ban Alert", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Anti-Cheat" }]
+}

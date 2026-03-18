@@ -1,0 +1,28 @@
+services:
+  control-room:
+    build: ./control-room
+    container_name: forge-control-room
+    restart: unless-stopped
+    volumes:
+      - ./landing-page:/srv/landing-page:ro
+      - ./control-room/data:/app/data
+    env_file: .env
+    environment:
+      - PORT=3847
+      - ISO_DIR=/srv/landing-page/iso
+      - LANDING_DIR=/srv/landing-page
+    networks:
+      - coolify
+
+  site:
+    image: nginx:alpine
+    container_name: forge-site
+    restart: unless-stopped
+    volumes:
+      - ./landing-page:/usr/share/nginx/html:ro
+    networks:
+      - coolify
+
+networks:
+  coolify:
+    external: true

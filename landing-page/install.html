@@ -3,15 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Install HubOS — Step-by-Step Guide</title>
-    <meta name="description" content="How to install HubOS on your PC, laptop, or Steam Deck. Detailed guide with screenshots.">
+    <title>Install 24HG Forge — Step-by-Step Guide</title>
+    <meta name="description" content="How to install 24HG Forge on your PC, laptop, or Steam Deck. Detailed guide with screenshots.">
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <nav class="nav">
-    <a href="index.html" class="nav-logo">HubOS</a>
+    <a href="index.html" class="nav-logo">24HG Forge</a>
     <div class="nav-links">
         <a href="index.html">Home</a>
         <a href="install.html" class="active">Install Guide</a>
@@ -25,7 +25,7 @@
 
 <main class="page">
     <h1>Install Guide</h1>
-    <p class="subtitle">Get HubOS running in 15 minutes.</p>
+    <p class="subtitle">Get 24HG Forge running in 15 minutes.</p>
 
     <div class="steps">
         <div class="step">
@@ -78,7 +78,7 @@
                     <div class="tool-card">
                         <h3>dd (Linux/Mac)</h3>
                         <p>Command line. Replace <code>/dev/sdX</code> with your USB device:</p>
-                        <code class="code-block">sudo dd if=hubos-desktop.iso of=/dev/sdX bs=4M status=progress oflag=sync</code>
+                        <code class="code-block">sudo dd if=forge-desktop.iso of=/dev/sdX bs=4M status=progress oflag=sync</code>
                     </div>
                 </div>
 
@@ -109,7 +109,7 @@
                 </ol>
 
                 <div class="info-box">
-                    <strong>Secure Boot:</strong> HubOS supports Secure Boot (inherited from Fedora). You do not need to disable it. If you have issues, try disabling it in BIOS as a troubleshooting step.
+                    <strong>Secure Boot:</strong> 24HG Forge supports Secure Boot (inherited from Fedora). You do not need to disable it. If you have issues, try disabling it in BIOS as a troubleshooting step.
                 </div>
             </div>
         </div>
@@ -118,7 +118,7 @@
             <div class="step-number">4</div>
             <div class="step-content">
                 <h2>Install with Calamares</h2>
-                <p>The HubOS installer will launch automatically. Follow the steps:</p>
+                <p>The 24HG Forge installer will launch automatically. Follow the steps:</p>
                 <ol>
                     <li><strong>Welcome:</strong> Select your language</li>
                     <li><strong>Location:</strong> Pick your timezone</li>
@@ -146,7 +146,7 @@
                 <h2>First boot — you're in!</h2>
                 <p>After installation and reboot:</p>
                 <ol>
-                    <li>HubOS login screen appears — log in with your credentials</li>
+                    <li>24HG Forge login screen appears — log in with your credentials</li>
                     <li>The <strong>First-Boot Wizard</strong> launches automatically:
                         <ul>
                             <li>Detects your GPU and confirms drivers are working</li>
@@ -167,34 +167,34 @@
 
         <h3>Useful commands</h3>
         <table class="command-table">
-            <tr><td><code>hubos-performance gaming</code></td><td>Switch to max performance mode</td></tr>
-            <tr><td><code>hubos-performance balanced</code></td><td>Back to balanced mode</td></tr>
-            <tr><td><code>hubos-diag</code></td><td>System diagnostics (share in Discord for support)</td></tr>
-            <tr><td><code>hubos-diag --paste</code></td><td>Upload diagnostics and get a shareable URL</td></tr>
+            <tr><td><code>forge-performance gaming</code></td><td>Switch to max performance mode</td></tr>
+            <tr><td><code>forge-performance balanced</code></td><td>Back to balanced mode</td></tr>
+            <tr><td><code>forge-diag</code></td><td>System diagnostics (share in Discord for support)</td></tr>
+            <tr><td><code>forge-diag --paste</code></td><td>Upload diagnostics and get a shareable URL</td></tr>
             <tr><td><code>connect-rust</code></td><td>Quick-connect to 24HG Rust server</td></tr>
             <tr><td><code>connect-cs2</code></td><td>Quick-connect to 24HG CS2 server</td></tr>
-            <tr><td><code>hubos-update</code></td><td>Check for and apply OS updates</td></tr>
-            <tr><td><code>hubos-rollback</code></td><td>Roll back to previous OS version</td></tr>
-            <tr><td><code>hubos-game-profiles list</code></td><td>Manage per-game launch profiles</td></tr>
-            <tr><td><code>hubos-controller list</code></td><td>Detect and configure gamepads</td></tr>
-            <tr><td><code>hubos-proton-updater update</code></td><td>Update Proton-GE to latest</td></tr>
-            <tr><td><code>hubos-game-timer stats</code></td><td>View playtime statistics</td></tr>
-            <tr><td><code>hubos-stream setup</code></td><td>Configure streaming to Twitch/YouTube</td></tr>
-            <tr><td><code>hubos-shader-cache status</code></td><td>Manage shader caches</td></tr>
-            <tr><td><code>hubos-compat scan</code></td><td>Check game compatibility across your library</td></tr>
-            <tr><td><code>hubos-crash-fix diagnose</code></td><td>Auto-diagnose why a game crashed</td></tr>
-            <tr><td><code>hubos-display status</code></td><td>Manage monitors, refresh rates, VRR</td></tr>
-            <tr><td><code>hubos-discord-screen setup</code></td><td>Fix Discord screen sharing on Wayland</td></tr>
-            <tr><td><code>hubos-prefix list</code></td><td>Manage Wine/Proton prefixes</td></tr>
-            <tr><td><code>hubos-dualboot status</code></td><td>Dual-boot management and quick reboot</td></tr>
-            <tr><td><code>hubos-migrate scan</code></td><td>Import game settings from Windows</td></tr>
-            <tr><td><code>hubos-benchmark-compare quick</code></td><td>Benchmark your system vs Windows</td></tr>
-            <tr><td><code>hubos-perks status</code></td><td>View your HubOS perks and VIP trial</td></tr>
-            <tr><td><code>hubos-creator-kit setup</code></td><td>Set up OBS for streaming with 24HG branding</td></tr>
-            <tr><td><code>hubos-games list</code></td><td>View all games across Steam, Heroic, Lutris</td></tr>
-            <tr><td><code>hubos-thermal status</code></td><td>Check GPU/CPU temperatures and fan speeds</td></tr>
-            <tr><td><code>hubos-download-mgr status</code></td><td>Manage downloads and bandwidth during gaming</td></tr>
-            <tr><td><code>hubos-session-summary last</code></td><td>View your last gaming session stats</td></tr>
+            <tr><td><code>forge-update</code></td><td>Check for and apply OS updates</td></tr>
+            <tr><td><code>forge-rollback</code></td><td>Roll back to previous OS version</td></tr>
+            <tr><td><code>forge-game-profiles list</code></td><td>Manage per-game launch profiles</td></tr>
+            <tr><td><code>forge-controller list</code></td><td>Detect and configure gamepads</td></tr>
+            <tr><td><code>forge-proton-updater update</code></td><td>Update Proton-GE to latest</td></tr>
+            <tr><td><code>forge-game-timer stats</code></td><td>View playtime statistics</td></tr>
+            <tr><td><code>forge-stream setup</code></td><td>Configure streaming to Twitch/YouTube</td></tr>
+            <tr><td><code>forge-shader-cache status</code></td><td>Manage shader caches</td></tr>
+            <tr><td><code>forge-compat scan</code></td><td>Check game compatibility across your library</td></tr>
+            <tr><td><code>forge-crash-fix diagnose</code></td><td>Auto-diagnose why a game crashed</td></tr>
+            <tr><td><code>forge-display status</code></td><td>Manage monitors, refresh rates, VRR</td></tr>
+            <tr><td><code>forge-discord-screen setup</code></td><td>Fix Discord screen sharing on Wayland</td></tr>
+            <tr><td><code>forge-prefix list</code></td><td>Manage Wine/Proton prefixes</td></tr>
+            <tr><td><code>forge-dualboot status</code></td><td>Dual-boot management and quick reboot</td></tr>
+            <tr><td><code>forge-migrate scan</code></td><td>Import game settings from Windows</td></tr>
+            <tr><td><code>forge-benchmark-compare quick</code></td><td>Benchmark your system vs Windows</td></tr>
+            <tr><td><code>forge-perks status</code></td><td>View your 24HG Forge perks and VIP trial</td></tr>
+            <tr><td><code>forge-creator-kit setup</code></td><td>Set up OBS for streaming with 24HG branding</td></tr>
+            <tr><td><code>forge-games list</code></td><td>View all games across Steam, Heroic, Lutris</td></tr>
+            <tr><td><code>forge-thermal status</code></td><td>Check GPU/CPU temperatures and fan speeds</td></tr>
+            <tr><td><code>forge-download-mgr status</code></td><td>Manage downloads and bandwidth during gaming</td></tr>
+            <tr><td><code>forge-session-summary last</code></td><td>View your last gaming session stats</td></tr>
         </table>
 
         <h3>Keyboard shortcuts</h3>
@@ -205,7 +205,7 @@
         </table>
 
         <h3>System updates</h3>
-        <p>HubOS updates automatically every night. Updates are staged and apply on reboot. You'll get a notification when an update is ready. To update manually:</p>
+        <p>24HG Forge updates automatically every night. Updates are staged and apply on reboot. You'll get a notification when an update is ready. To update manually:</p>
         <code class="code-block">rpm-ostree upgrade && systemctl reboot</code>
         <p>If something breaks, roll back instantly:</p>
         <code class="code-block">rpm-ostree rollback && systemctl reboot</code>
@@ -232,5 +232,6 @@
     </p>
 </footer>
 
+<script>fetch("/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.pathname,referer:document.referrer})}).catch(()=>{})</script>
 </body>
 </html>

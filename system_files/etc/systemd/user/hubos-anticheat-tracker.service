@@ -1,7 +1,0 @@
-[Unit]
-Description=HubOS Anti-Cheat Status Tracker
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/hubos-anticheat-tracker watch

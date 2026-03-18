@@ -1,0 +1,6 @@
+[Unit]
+Description=24HG Forge Achievement Check
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/forge-achievements check

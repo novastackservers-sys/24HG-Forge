@@ -1,0 +1,13 @@
+{
+  "name": "forge-control-room",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "bun run server.ts",
+    "dev": "bun --watch server.ts",
+    "init-db": "bun run init-db.ts"
+  },
+  "dependencies": {
+    "hono": "^4.7.0"
+  }
+}

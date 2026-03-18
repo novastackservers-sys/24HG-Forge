@@ -1,5 +1,5 @@
 #!/bin/bash
-# HubOS Build & Push — Builds the OCI image and pushes to git.raggi.is registry
+# 24HG Forge Build & Push — Builds the OCI image and pushes to git.raggi.is registry
 # Usage: ./scripts/build-and-push.sh [desktop|nvidia|deck|all]
 #
 # This is the primary build method since the repo is on Gitea (git.raggi.is)
@@ -29,11 +29,11 @@ build_variant() {
             ;;
     esac
 
-    local image_name="${REGISTRY}/${OWNER}/hubos-${variant}"
+    local image_name="${REGISTRY}/${OWNER}/forge-${variant}"
 
     echo ""
     echo "=============================="
-    echo "Building HubOS (${variant})"
+    echo "Building 24HG Forge (${variant})"
     echo "Base: ${base_image}:stable"
     echo "Image: ${image_name}"
     echo "=============================="

@@ -3,7 +3,7 @@
 <xbel xmlns:bookmark="http://www.freedesktop.org/standards/desktop-bookmarks"
       xmlns:kdeconnect="http://www.kde.org"
       xmlns:mime="http://www.freedesktop.org/standards/shared-mime-info">
- <bookmark href="file:///home">
+ <bookmark href="file://$HOME">
   <title>Home</title>
   <info>
    <metadata owner="http://freedesktop.org">
@@ -16,7 +16,7 @@
    </metadata>
   </info>
  </bookmark>
- <bookmark href="file:///home/Desktop">
+ <bookmark href="file://$HOME/Desktop">
   <title>Desktop</title>
   <info>
    <metadata owner="http://freedesktop.org">
@@ -29,7 +29,7 @@
    </metadata>
   </info>
  </bookmark>
- <bookmark href="file:///home/Downloads">
+ <bookmark href="file://$HOME/Downloads">
   <title>Downloads</title>
   <info>
    <metadata owner="http://freedesktop.org">
@@ -42,7 +42,7 @@
    </metadata>
   </info>
  </bookmark>
- <bookmark href="file:///home/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/">
+ <bookmark href="file://$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/">
   <title>Steam Games</title>
   <info>
    <metadata owner="http://freedesktop.org">
@@ -55,7 +55,7 @@
    </metadata>
   </info>
  </bookmark>
- <bookmark href="file:///home/Pictures/Screenshots">
+ <bookmark href="file://$HOME/Pictures/Screenshots">
   <title>Screenshots</title>
   <info>
    <metadata owner="http://freedesktop.org">
@@ -68,7 +68,7 @@
    </metadata>
   </info>
  </bookmark>
- <bookmark href="file:///home/Videos/HubOS-Replays">
+ <bookmark href="file://$HOME/Videos/24HG Forge-Replays">
   <title>Replay Clips</title>
   <info>
    <metadata owner="http://freedesktop.org">
@@ -81,44 +81,5 @@
    </metadata>
   </info>
  </bookmark>
- <bookmark href="file:///home/HubOS-Backups">
-  <title>Game Saves Backup</title>
-  <info>
-   <metadata owner="http://freedesktop.org">
-    <bookmark:icon name="folder-backup"/>
-   </metadata>
-   <metadata owner="http://www.kde.org">
-    <ID>1710000007</ID>
-    <IsHidden>false</IsHidden>
-    <isSystemItem>false</isSystemItem>
-   </metadata>
-  </info>
- </bookmark>
- <bookmark href="file:///home/.config/hubos">
-  <title>HubOS Config</title>
-  <info>
-   <metadata owner="http://freedesktop.org">
-    <bookmark:icon name="configure"/>
-   </metadata>
-   <metadata owner="http://www.kde.org">
-    <ID>1710000008</ID>
-    <IsHidden>false</IsHidden>
-    <isSystemItem>false</isSystemItem>
-   </metadata>
-  </info>
- </bookmark>
  <separator/>
- <bookmark href="file:///home/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata/">
-  <title>Proton Prefixes</title>
-  <info>
-   <metadata owner="http://freedesktop.org">
-    <bookmark:icon name="folder-wine"/>
-   </metadata>
-   <metadata owner="http://www.kde.org">
-    <ID>1710000009</ID>
-    <IsHidden>false</IsHidden>
-    <isSystemItem>false</isSystemItem>
-   </metadata>
-  </info>
- </bookmark>
 </xbel>

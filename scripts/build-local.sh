@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build HubOS OCI image locally using podman
+# Build 24HG Forge OCI image locally using podman
 # Usage: ./scripts/build-local.sh [variant]
 # Variants: desktop (default), nvidia, deck
 
@@ -28,10 +28,10 @@ case "$VARIANT" in
 esac
 
 BASE_TAG="stable"
-IMAGE_NAME="hubos-${VARIANT}"
+IMAGE_NAME="forge-${VARIANT}"
 
 echo "=============================="
-echo "Building HubOS (${VARIANT})"
+echo "Building 24HG Forge (${VARIANT})"
 echo "Base: ${BASE_IMAGE}:${BASE_TAG}"
 echo "=============================="
 

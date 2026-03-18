@@ -1,5 +1,5 @@
 [Greeter]
-Theme=com.hubos.splash
+Theme=
 WallpaperPlugin=org.kde.image
 
 [Greeter][Wallpaper][org.kde.image][General]

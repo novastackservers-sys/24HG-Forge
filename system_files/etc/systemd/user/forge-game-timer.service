@@ -1,0 +1,14 @@
+[Unit]
+Description=24HG Forge Game Timer — Track playtime across all launchers
+Documentation=https://os.24hgaming.com
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/forge-game-timer daemon
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

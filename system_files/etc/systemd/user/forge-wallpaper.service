@@ -1,0 +1,6 @@
+[Unit]
+Description=24HG Forge Wallpaper Rotation
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/forge-wallpaper rotate

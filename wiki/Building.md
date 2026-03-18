@@ -1,6 +1,6 @@
-# Building HubOS from Source
+# Building 24HG Forge from Source
 
-HubOS is built as an OCI container image layered on top of Bazzite. The ISO is generated from that image. This guide covers building both locally and via CI/CD.
+24HG Forge is built as an OCI container image layered on top of Bazzite. The ISO is generated from that image. This guide covers building both locally and via CI/CD.
 
 ## Prerequisites
 
@@ -31,31 +31,31 @@ sudo apt install podman git qemu-kvm virt-manager
 ## Clone the Repository
 
 ```bash
-git clone https://git.raggi.is/24hg/hubos.git
-cd hubos
+git clone https://git.raggi.is/24hg/forge.git
+cd forge
 ```
 
 ## Project Structure
 
 ```
-hubos/
+forge/
 ├── Containerfile          # The main build file (like Dockerfile)
 ├── build-iso.sh           # ISO generation script
-├── scripts/               # All 53 hubos-* tools + lib scripts
-│   ├── hubos-neofetch
-│   ├── hubos-diag
-│   ├── hubos-performance
-│   ├── hubos-smart-launch
+├── scripts/               # All 53 forge-* tools + lib scripts
+│   ├── forge-neofetch
+│   ├── forge-diag
+│   ├── forge-performance
+│   ├── forge-smart-launch
 │   ├── ... (50 more tools)
-│   ├── hubos-first-boot-setup.sh
-│   ├── hubos-auto-update.sh
+│   ├── forge-first-boot-setup.sh
+│   ├── forge-auto-update.sh
 │   ├── gamemode-start.sh
 │   ├── gamemode-end.sh
 │   └── build-local.sh     # Local build helper
 ├── hub-app/               # Hub application and tray icon
-│   ├── hubos-hub           # Main Hub app (Chromium kiosk launcher)
-│   ├── hubos-tray           # System tray integration
-│   ├── hubos-gamescope-session  # 24HG Mode session
+│   ├── forge-hub           # Main Hub app (Chromium kiosk launcher)
+│   ├── forge-tray           # System tray integration
+│   ├── forge-gamescope-session  # 24HG Mode session
 │   └── *.desktop            # Desktop entries
 ├── branding/              # Visual assets
 │   ├── wallpapers/         # Desktop wallpapers
@@ -75,7 +75,7 @@ hubos/
 │   │   └── firewalld/      # Firewall rules for gaming
 │   └── usr/
 │       └── share/
-│           ├── hubos/       # Server list, offline page
+│           ├── forge/       # Server list, offline page
 │           ├── plymouth/    # Boot splash
 │           ├── sddm/       # Login theme
 │           ├── plasma/      # KDE splash screen
@@ -110,14 +110,14 @@ The simplest way:
 podman build \
   --build-arg BASE_IMAGE=ghcr.io/ublue-os/bazzite \
   --build-arg BASE_TAG=stable \
-  -t hubos:latest \
+  -t forge:latest \
   .
 
 # NVIDIA variant
 podman build \
   --build-arg BASE_IMAGE=ghcr.io/ublue-os/bazzite-nvidia \
   --build-arg BASE_TAG=stable \
-  -t hubos-nvidia:latest \
+  -t forge-nvidia:latest \
   .
 ```
 
@@ -129,8 +129,8 @@ The Containerfile (single-stage build):
 2. **Copies all files** into a temporary build directory
 3. **Installs packages** via rpm-ostree: chromium, zenity, gamemode, conky, papirus icons, vulkan tools, etc.
 4. **Deploys system files**: sysctl tweaks, systemd services, Plymouth/GRUB/SDDM themes, wallpapers, icons
-5. **Installs all 53 tools** to `/usr/bin/hubos-*`
-6. **Installs lib scripts** to `/usr/lib/hubos/`
+5. **Installs all 53 tools** to `/usr/bin/forge-*`
+6. **Installs lib scripts** to `/usr/lib/forge/`
 7. **Configures user defaults** via `/etc/skel/` (KDE settings, MangoHud, autostart, Flatpak overrides)
 8. **Sets OS identity** in `/usr/lib/os-release`
 9. **Commits the ostree layer**
@@ -157,7 +157,7 @@ podman pull ghcr.io/jasonn3/build-container-installer:latest
 podman run --rm --privileged \
   -v ./iso-output:/build-container-installer/build \
   -e IMAGE_REPO=localhost \
-  -e IMAGE_NAME=hubos \
+  -e IMAGE_NAME=forge \
   -e IMAGE_TAG=latest \
   -e VARIANT=Kinoite \
   ghcr.io/jasonn3/build-container-installer:latest
@@ -172,8 +172,8 @@ qemu-system-x86_64 \
   -enable-kvm \
   -m 4096 \
   -smp 4 \
-  -cdrom iso-output/hubos-desktop-latest.iso \
-  -drive file=hubos-test.qcow2,format=qcow2,if=virtio \
+  -cdrom iso-output/forge-desktop-latest.iso \
+  -drive file=forge-test.qcow2,format=qcow2,if=virtio \
   -boot d \
   -vga qxl \
   -display gtk
@@ -182,14 +182,14 @@ qemu-system-x86_64 \
 Create the test disk first:
 
 ```bash
-qemu-img create -f qcow2 hubos-test.qcow2 50G
+qemu-img create -f qcow2 forge-test.qcow2 50G
 ```
 
 ### virt-manager (GUI)
 
 1. Open virt-manager.
 2. Create a new VM.
-3. Choose "Local install media" and select the HubOS ISO.
+3. Choose "Local install media" and select the 24HG Forge ISO.
 4. Set OS to "Fedora 40" (or newest available).
 5. Assign at least 4 GB RAM and 4 CPUs.
 6. Create a 50 GB disk.
@@ -203,10 +203,10 @@ qemu-img create -f qcow2 hubos-test.qcow2 50G
 
 ## CI/CD with GitHub Actions
 
-HubOS uses GitHub Actions for automated builds. The workflow:
+24HG Forge uses GitHub Actions for automated builds. The workflow:
 
 1. Push to `main` triggers a build.
-2. The OCI image is built and pushed to `git.raggi.is/24hg/hubos`.
+2. The OCI image is built and pushed to `git.raggi.is/24hg/forge`.
 3. The ISO is built from the pushed image.
 4. The ISO is attached to a GitHub Release.
 
@@ -224,21 +224,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build OCI image
-        run: podman build -t git.raggi.is/24hg/hubos:latest .
+        run: podman build -t git.raggi.is/24hg/forge:latest .
       - name: Push to GHCR
-        run: podman push git.raggi.is/24hg/hubos:latest
+        run: podman push git.raggi.is/24hg/forge:latest
       - name: Build ISO
         run: ./build-iso.sh
       - name: Upload ISO
         uses: actions/upload-artifact@v4
         with:
-          name: hubos-iso
+          name: forge-iso
           path: iso-output/*.iso
 ```
 
 ## Creating a Custom Variant
 
-You can fork HubOS and create your own variant:
+You can fork 24HG Forge and create your own variant:
 
 ### 1. Fork the Repository
 
@@ -262,9 +262,9 @@ COPY my-custom-tool /usr/bin/my-custom-tool
 - Wallpapers: `branding/wallpapers/`
 - Icons: `branding/icons/`
 - GRUB theme: `branding/grub/`
-- Plymouth splash: `system_files/usr/share/plymouth/themes/hubos/`
-- SDDM login: `system_files/usr/share/sddm/themes/hubos/`
-- Sound theme: `system_files/usr/share/sounds/hubos/`
+- Plymouth splash: `system_files/usr/share/plymouth/themes/forge/`
+- SDDM login: `system_files/usr/share/sddm/themes/forge/`
+- Sound theme: `system_files/usr/share/sounds/forge/`
 
 ### 4. Edit OS Identity
 
@@ -288,7 +288,7 @@ sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="YourOS (Your Community)"/' /usr/lib/os-re
 Push to your own container registry:
 
 ```bash
-podman tag hubos:latest ghcr.io/yourusername/youros:latest
+podman tag forge:latest ghcr.io/yourusername/youros:latest
 podman push ghcr.io/yourusername/youros:latest
 ```
 

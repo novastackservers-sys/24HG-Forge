@@ -1,19 +1,19 @@
 ---
-componentName: hubos
+componentName: forge
 welcomeStyleCalamares: true
 welcomeExpandingLogo: true
 
 strings:
-    productName: HubOS
-    shortProductName: HubOS
+    productName: 24HG Forge
+    shortProductName: 24HG Forge
     version: "1.0"
     shortVersion: "1.0"
-    versionedName: HubOS 1.0
-    shortVersionedName: HubOS 1.0
-    bootloaderEntryName: HubOS
+    versionedName: 24HG Forge 1.0
+    shortVersionedName: 24HG Forge 1.0
+    bootloaderEntryName: 24HG Forge
     productUrl: https://24hgaming.com/os
     supportUrl: https://discord.gg/ymfEjH6EJN
-    knownIssuesUrl: https://github.com/24hg/hubos/issues
+    knownIssuesUrl: https://github.com/24hg/forge/issues
     releaseNotesUrl: https://24hgaming.com/os/release-notes
 
 images:

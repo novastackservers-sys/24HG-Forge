@@ -1,0 +1,60 @@
+{
+  "name": "🗓️ Rust Wipe Day Reminder → Discord",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 12 * * 3" }] }
+      },
+      "name": "Every Wednesday Noon",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rust force wipe is first Thursday of each month\n// Our server also wipes first Thursday (BP wipe only on forced)\nconst now = new Date();\nconst year = now.getUTCFullYear();\nconst month = now.getUTCMonth();\n\n// Find first Thursday of current month\nconst firstDay = new Date(Date.UTC(year, month, 1));\nlet firstThursday = 1 + ((4 - firstDay.getUTCDay() + 7) % 7);\nconst wipeDate = new Date(Date.UTC(year, month, firstThursday));\n\n// Check if tomorrow is wipe day\nconst tomorrow = new Date(now);\ntomorrow.setUTCDate(tomorrow.getUTCDate() + 1);\n\nconst isWipeTomorrow = tomorrow.getUTCDate() === wipeDate.getUTCDate() && \n                       tomorrow.getUTCMonth() === wipeDate.getUTCMonth();\n\n// Also check if next week is wipe week (early warning)\nconst daysUntilWipe = Math.ceil((wipeDate - now) / 86400000);\nconst isWipeWeek = daysUntilWipe > 0 && daysUntilWipe <= 7;\n\nreturn [{ json: {\n  wipeDate: wipeDate.toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }),\n  isWipeTomorrow,\n  isWipeWeek,\n  daysUntilWipe,\n  shouldNotify: isWipeTomorrow || (isWipeWeek && daysUntilWipe === 7)\n}}];"
+      },
+      "name": "Check Wipe Date",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "1", "leftValue": "={{ $json.shouldNotify }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true" } }],
+          "combinator": "and"
+        }
+      },
+      "name": "Should Notify?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_WEBHOOK_RUST }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"{{ $json.isWipeTomorrow ? '⚠️ WIPE TOMORROW!' : '🗓️ Wipe Week Reminder' }}\",\n    \"description\": \"{{ $json.isWipeTomorrow ? 'No Man\\'s Land wipes TOMORROW!' : 'Wipe day is coming up in ' + $json.daysUntilWipe + ' days.' }}\\n\\n**Wipe Date:** {{ $json.wipeDate }}\\n**Server:** 24HG | No Man\\'s Land | 5x\\n\\nBP wipe only happens on Facepunch forced wipes.\",\n    \"color\": {{ $json.isWipeTomorrow ? 16711680 : 16776960 }},\n    \"timestamp\": \"{{ new Date().toISOString() }}\",\n    \"footer\": { \"text\": \"24HG Rust — No Man's Land\" }\n  }]\n}",
+        "options": {}
+      },
+      "name": "Discord Wipe Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, -100]
+    }
+  ],
+  "connections": {
+    "Every Wednesday Noon": { "main": [[{ "node": "Check Wipe Date", "type": "main", "index": 0 }]] },
+    "Check Wipe Date": { "main": [[{ "node": "Should Notify?", "type": "main", "index": 0 }]] },
+    "Should Notify?": { "main": [
+      [{ "node": "Discord Wipe Alert", "type": "main", "index": 0 }],
+      []
+    ]}
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Game Servers" }]
+}

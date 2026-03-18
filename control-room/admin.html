@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>24HG Forge Control Room</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <link rel="stylesheet" href="/admin/admin.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <!-- Umami Analytics -->
+    <script async src="https://analytics.24hgaming.com/track" data-website-id="a052da7e-3afe-40b1-9354-071901dd26e4"></script>
+</head>
+<body>
+
+<!-- ════ LOGIN SCREEN ════ -->
+<div id="login-screen" class="login-screen">
+    <div class="login-card">
+        <div class="brand">24 Hour Gaming</div>
+        <h1>Control Room</h1>
+        <p class="subtitle">24HG Forge Admin Dashboard</p>
+        <form id="login-form">
+            <div class="form-group">
+                <label>Username</label>
+                <input type="text" id="login-user" required autocomplete="username" autofocus>
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" id="login-pass" required autocomplete="current-password">
+            </div>
+            <button type="submit" class="btn btn-primary" id="login-btn">Sign In</button>
+            <div class="login-error" id="login-error"></div>
+        </form>
+        <p style="margin-top:1.5rem; font-size:0.8rem; color:var(--text-dim);">
+            Sign in with your <a href="https://hub.24hgaming.com">Hub</a> account. Staff access required.
+        </p>
+    </div>
+</div>
+
+<!-- ════ DASHBOARD ════ -->
+<div id="dashboard" class="dashboard" style="display:none;">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            <h2>24HG Forge</h2>
+            <span>Control Room</span>
+        </div>
+        <ul class="sidebar-nav">
+            <li><a href="#overview" class="active" data-page="overview"><span class="icon">&#9632;</span> <span>Overview</span></a></li>
+            <li><a href="#downloads" data-page="downloads"><span class="icon">&#8615;</span> <span>Downloads</span></a></li>
+            <li><a href="#installs" data-page="installs"><span class="icon">&#9881;</span> <span>Installs</span></a></li>
+            <li><a href="#builds" data-page="builds"><span class="icon">&#9881;</span> <span>Builds</span></a></li>
+            <li><a href="#roadmap" data-page="roadmap"><span class="icon">&#9776;</span> <span>Roadmap</span></a></li>
+            <li><a href="#analytics" data-page="analytics"><span class="icon">&#9670;</span> <span>Analytics</span></a></li>
+            <li><a href="#announcements" data-page="announcements"><span class="icon">&#9993;</span> <span>Announcements</span></a></li>
+            <li><a href="#activity" data-page="activity"><span class="icon">&#9202;</span> <span>Activity</span></a></li>
+        </ul>
+        <div class="sidebar-links">
+            <a href="https://hub.24hgaming.com/dashboard/admin" target="_blank" rel="noopener noreferrer" style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 1rem; color:var(--text-dim); font-size:0.8rem; text-decoration:none; border-top:1px solid var(--border);">&#8599; Hub Admin</a>
+        </div>
+        <div class="sidebar-footer">
+            <div class="user-info" id="sidebar-user">—</div>
+            <span class="user-role" id="sidebar-role">—</span>
+            <button onclick="logout()">Sign Out</button>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+
+        <!-- ── OVERVIEW ── -->
+        <div id="page-overview" class="page-section active">
+            <div class="page-header">
+                <h1>Overview</h1>
+                <p>24HG Forge distribution dashboard</p>
+            </div>
+            <div class="stat-grid" id="overview-stats">
+                <div class="stat-card"><div class="label">Total Downloads</div><div class="value" id="stat-downloads-total">—</div></div>
+                <div class="stat-card"><div class="label">Downloads (30d)</div><div class="value" id="stat-downloads-30d">—</div></div>
+                <div class="stat-card"><div class="label">Active Installs (30d)</div><div class="value" id="stat-installs-30d">—</div></div>
+                <div class="stat-card"><div class="label">Active Users (7d)</div><div class="value" id="stat-installs-7d">—</div></div>
+            </div>
+            <div class="chart-grid">
+                <div class="chart-card">
+                    <h3>Downloads per Day (90d)</h3>
+                    <canvas id="chart-downloads-daily"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>Version Breakdown</h3>
+                    <canvas id="chart-versions"></canvas>
+                </div>
+            </div>
+            <div class="chart-grid">
+                <div class="chart-card">
+                    <h3>GPU Distribution</h3>
+                    <canvas id="chart-gpu"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>Display Server</h3>
+                    <canvas id="chart-display"></canvas>
+                </div>
+            </div>
+            <div class="health-grid" id="overview-health"></div>
+        </div>
+
+        <!-- ── DOWNLOADS ── -->
+        <div id="page-downloads" class="page-section">
+            <div class="page-header">
+                <h1>Downloads</h1>
+                <p>ISO download tracking and trends</p>
+            </div>
+            <div class="stat-grid" id="download-stats"></div>
+            <div class="chart-card mb-2">
+                <h3>Download Trend</h3>
+                <canvas id="chart-downloads-trend"></canvas>
+            </div>
+            <div class="table-wrapper">
+                <div class="table-header">
+                    <h3>Recent Downloads</h3>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Time</th><th>Variant</th><th>IP Hash</th><th>User Agent</th></tr></thead>
+                        <tbody id="downloads-table"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── INSTALLS ── -->
+        <div id="page-installs" class="page-section">
+            <div class="page-header">
+                <h1>Active Installs</h1>
+                <p>24HG Forge installations reporting via heartbeat</p>
+            </div>
+            <div class="chart-grid">
+                <div class="chart-card">
+                    <h3>GPU Breakdown</h3>
+                    <canvas id="chart-hw-gpu"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>RAM Distribution</h3>
+                    <canvas id="chart-hw-ram"></canvas>
+                </div>
+            </div>
+            <div class="chart-grid">
+                <div class="chart-card">
+                    <h3>CPU Breakdown</h3>
+                    <canvas id="chart-hw-cpu"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>Display: Wayland vs X11</h3>
+                    <canvas id="chart-hw-display"></canvas>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <div class="table-header">
+                    <h3>All Installs</h3>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Machine ID</th><th>Version</th><th>GPU</th><th>CPU</th><th>RAM</th><th>Display</th><th>Last Seen</th></tr></thead>
+                        <tbody id="installs-table"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── BUILDS ── -->
+        <div id="page-builds" class="page-section">
+            <div class="page-header flex-between">
+                <div>
+                    <h1>Builds</h1>
+                    <p>ISO build management via Gitea CI</p>
+                </div>
+            </div>
+            <div class="build-actions" id="build-actions">
+                <div class="build-card">
+                    <h3>Desktop ISO</h3>
+                    <p>AMD/Intel GPU edition</p>
+                    <button class="btn btn-primary btn-small" onclick="triggerBuild('desktop')" id="btn-build-desktop">Build Desktop ISO</button>
+                </div>
+                <div class="build-card">
+                    <h3>NVIDIA ISO</h3>
+                    <p>NVIDIA GPU edition</p>
+                    <button class="btn btn-primary btn-small" onclick="triggerBuild('nvidia')" id="btn-build-nvidia">Build NVIDIA ISO</button>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <div class="table-header flex-between">
+                    <h3>Build History</h3>
+                    <button class="btn btn-secondary btn-small" onclick="loadBuilds()">Refresh</button>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Run</th><th>Status</th><th>Branch</th><th>Started</th><th>Duration</th></tr></thead>
+                        <tbody id="builds-table"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── ROADMAP ── -->
+        <div id="page-roadmap" class="page-section">
+            <div class="page-header flex-between">
+                <div>
+                    <h1>Roadmap Editor</h1>
+                    <p>Edit versions and publish to the website</p>
+                </div>
+                <div style="display:flex; gap:0.5rem;">
+                    <button class="btn btn-secondary btn-small" onclick="seedRoadmap()" id="btn-seed">Seed from Website</button>
+                    <button class="btn btn-primary btn-small" onclick="addRoadmapEntry()" id="btn-add-roadmap">+ Add Version</button>
+                    <button class="btn btn-primary btn-small" onclick="publishRoadmap()" id="btn-publish" style="background:var(--success);">Publish to Website</button>
+                </div>
+            </div>
+            <div id="roadmap-entries"></div>
+        </div>
+
+        <!-- ── ANALYTICS ── -->
+        <div id="page-analytics" class="page-section">
+            <div class="page-header">
+                <h1>Analytics</h1>
+                <p>Page views, referrers, and traffic sources</p>
+            </div>
+            <div class="stat-grid" id="analytics-stats"></div>
+            <div class="chart-grid">
+                <div class="chart-card">
+                    <h3>Page Views per Day (30d)</h3>
+                    <canvas id="chart-pageviews-daily"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>Views by Page</h3>
+                    <canvas id="chart-pageviews-page"></canvas>
+                </div>
+            </div>
+            <div class="chart-grid">
+                <div class="chart-card">
+                    <h3>Download Referrers</h3>
+                    <canvas id="chart-dl-referers"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>Traffic Sources</h3>
+                    <canvas id="chart-traffic-sources"></canvas>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <div class="table-header"><h3>Top Referrers</h3></div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead><tr><th>Referrer</th><th>Count</th></tr></thead>
+                        <tbody id="referers-table"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── ANNOUNCEMENTS ── -->
+        <div id="page-announcements" class="page-section">
+            <div class="page-header flex-between">
+                <div>
+                    <h1>Announcements</h1>
+                    <p>Manage banner messages shown on the landing page</p>
+                </div>
+                <button class="btn btn-primary btn-small" onclick="showAnnouncementForm()" id="btn-add-announcement">+ New Announcement</button>
+            </div>
+            <div id="announcements-list"></div>
+        </div>
+
+        <!-- ── ACTIVITY ── -->
+        <div id="page-activity" class="page-section">
+            <div class="page-header flex-between">
+                <div>
+                    <h1>Activity Log</h1>
+                    <p>Recent downloads, installs, and admin actions</p>
+                </div>
+                <button class="btn btn-secondary btn-small" onclick="loadActivity()">Refresh</button>
+            </div>
+            <div class="table-wrapper">
+                <div id="activity-list"></div>
+            </div>
+        </div>
+
+    </main>
+</div>
+
+<!-- ════ MODAL (Add/Edit Roadmap Entry) ════ -->
+<div id="modal-overlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeModal()">
+    <div class="modal" id="modal-content"></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════
+// 24HG Forge Control Room — Dashboard Logic
+// ═══════════════════════════════════════
+
+const API = '/api';
+const HUB_API = 'https://api.24hgaming.com';
+let token = localStorage.getItem('forge_token');
+let currentUser = null;
+let charts = {};
+
+// ── Init ──
+document.addEventListener('DOMContentLoaded', () => {
+    if (token) {
+        verifyToken();
+    } else {
+        showLogin();
+    }
+    setupNavigation();
+});
+
+// ── Auth ──
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('login-user').value;
+    const password = document.getElementById('login-pass').value;
+    const errorEl = document.getElementById('login-error');
+    const btn = document.getElementById('login-btn');
+
+    btn.disabled = true;
+    btn.textContent = 'Signing in...';
+    errorEl.textContent = '';
+
+    try {
+        const res = await fetch(`${HUB_API}/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+            errorEl.textContent = data.error || 'Login failed';
+            return;
+        }
+
+        token = data.token;
+        localStorage.setItem('forge_token', token);
+        await verifyToken();
+    } catch (err) {
+        console.error('Login error:', err);
+        errorEl.textContent = 'Connection failed: ' + (err.message || err);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Sign In';
+    }
+});
+
+async function verifyToken() {
+    try {
+        const res = await apiFetch('/auth/verify', { method: 'POST' });
+        if (!res.ok) {
+            const errData = await res.text();
+            console.error('Verify failed:', res.status, errData);
+            throw new Error('Verify returned ' + res.status);
+        }
+        const data = await res.json();
+        currentUser = data.user;
+        showDashboard();
+    } catch (err) {
+        console.error('verifyToken error:', err);
+        logout();
+    }
+}
+
+function logout() {
+    token = null;
+    currentUser = null;
+    localStorage.removeItem('forge_token');
+    showLogin();
+}
+
+function showLogin() {
+    document.getElementById('login-screen').style.display = '';
+    document.getElementById('dashboard').style.display = 'none';
+}
+
+function showDashboard() {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'flex';
+    document.getElementById('sidebar-user').textContent = currentUser.username;
+    document.getElementById('sidebar-role').textContent = currentUser.role;
+
+    // Hide admin-only buttons for non-admins
+    const isAdmin = currentUser.role === 'admin';
+    document.querySelectorAll('#btn-build-desktop, #btn-build-nvidia, #btn-add-roadmap, #btn-publish, #btn-seed, #btn-add-announcement').forEach(el => {
+        el.style.display = isAdmin ? '' : 'none';
+    });
+
+    loadOverview();
+}
+
+// ── API Helper ──
+function apiFetch(path, opts = {}) {
+    const headers = { ...opts.headers };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (opts.body && typeof opts.body === 'object' && !(opts.body instanceof FormData)) {
+        headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(opts.body);
+    }
+    return fetch(`${API}${path}`, { ...opts, headers });
+}
+
+// ── Navigation ──
+function setupNavigation() {
+    document.querySelectorAll('.sidebar-nav a').forEach(link => {
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            const page = link.dataset.page;
+            navigateTo(page);
+        });
+    });
+    // Handle hash navigation
+    window.addEventListener('hashchange', () => {
+        const page = location.hash.slice(1) || 'overview';
+        navigateTo(page, false);
+    });
+}
+
+function navigateTo(page, updateHash = true) {
+    document.querySelectorAll('.page-section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
+
+    const section = document.getElementById(`page-${page}`);
+    const link = document.querySelector(`[data-page="${page}"]`);
+    if (section) section.classList.add('active');
+    if (link) link.classList.add('active');
+    if (updateHash) location.hash = page;
+
+    // Load data for the page
+    const loaders = {
+        overview: loadOverview,
+        downloads: loadDownloads,
+        installs: loadInstalls,
+        builds: loadBuilds,
+        roadmap: loadRoadmap,
+        analytics: loadAnalytics,
+        announcements: loadAnnouncements,
+        activity: loadActivity,
+    };
+    if (loaders[page]) loaders[page]();
+}
+
+// ── Toast ──
+function toast(msg, type = 'info') {
+    const el = document.createElement('div');
+    el.className = `toast ${type}`;
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+}
+
+// ── Chart Helpers ──
+const chartColors = ['#58a6ff', '#50c878', '#ffcc50', '#ff5555', '#a855f7', '#ff79c6', '#8be9fd', '#f1fa8c', '#bd93f9', '#ff6e6e'];
+
+function destroyChart(id) {
+    if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+}
+
+function createDoughnut(canvasId, labels, data) {
+    destroyChart(canvasId);
+    const ctx = document.getElementById(canvasId);
+    if (!ctx) return;
+    charts[canvasId] = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels,
+            datasets: [{ data, backgroundColor: chartColors.slice(0, data.length), borderWidth: 0 }],
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { position: 'right', labels: { color: '#c8c8dc', font: { size: 11 } } },
+            },
+        },
+    });
+}
+
+function createLine(canvasId, labels, datasets) {
+    destroyChart(canvasId);
+    const ctx = document.getElementById(canvasId);
+    if (!ctx) return;
+    charts[canvasId] = new Chart(ctx, {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+            responsive: true,
+            scales: {
+                x: { ticks: { color: '#606080', maxTicksLimit: 15 }, grid: { color: '#1a1a2e' } },
+                y: { ticks: { color: '#606080' }, grid: { color: '#1a1a2e' }, beginAtZero: true },
+            },
+            plugins: {
+                legend: { labels: { color: '#c8c8dc' } },
+            },
+        },
+    });
+}
+
+// ── Overview ──
+async function loadOverview() {
+    try {
+        const [statsRes, hwRes, healthRes] = await Promise.all([
+            apiFetch('/stats'),
+            apiFetch('/stats/hardware'),
+            apiFetch('/health'),
+        ]);
+
+        const stats = await statsRes.json();
+        const hw = await hwRes.json();
+        const health = await healthRes.json();
+
+        document.getElementById('stat-downloads-total').textContent = stats.downloads.total.toLocaleString();
+        document.getElementById('stat-downloads-30d').textContent = stats.downloads.last30.toLocaleString();
+        document.getElementById('stat-installs-30d').textContent = stats.installs.active30.toLocaleString();
+        document.getElementById('stat-installs-7d').textContent = stats.installs.active7.toLocaleString();
+
+        // Daily downloads chart
+        const dailyMap = {};
+        (stats.dailyDownloads || []).forEach(d => {
+            if (!dailyMap[d.date]) dailyMap[d.date] = 0;
+            dailyMap[d.date] += d.count;
+        });
+        const dates = Object.keys(dailyMap).sort();
+        const counts = dates.map(d => dailyMap[d]);
+        createLine('chart-downloads-daily', dates, [{
+            label: 'Downloads',
+            data: counts,
+            borderColor: '#58a6ff',
+            backgroundColor: '#58a6ff20',
+            fill: true,
+            tension: 0.3,
+        }]);
+
+        // Version breakdown
+        const versions = (stats.versionBreakdown || []);
+        if (versions.length > 0) {
+            createDoughnut('chart-versions', versions.map(v => v.label || 'Unknown'), versions.map(v => v.count));
+        }
+
+        // GPU breakdown
+        if (hw.gpu && hw.gpu.length > 0) {
+            createDoughnut('chart-gpu', hw.gpu.map(g => g.label), hw.gpu.map(g => g.count));
+        }
+
+        // Display breakdown
+        if (hw.display && hw.display.length > 0) {
+            createDoughnut('chart-display', hw.display.map(d => d.label), hw.display.map(d => d.count));
+        }
+
+        // Health
+        const healthEl = document.getElementById('overview-health');
+        healthEl.innerHTML = `
+            <div class="health-card">
+                <h3>Disk Usage</h3>
+                <div class="health-value">${health.disk.usedPct}</div>
+                <div class="health-detail">${health.disk.free} free of ${health.disk.total}</div>
+            </div>
+            <div class="health-card">
+                <h3>Server Uptime</h3>
+                <div class="health-value">${health.uptime}</div>
+            </div>
+            ${(health.isoFiles || []).map(f => `
+                <div class="health-card">
+                    <h3>${escapeHTML(f.name)}</h3>
+                    <div class="health-value">${f.size}</div>
+                    <div class="health-detail">Modified: ${new Date(f.modified).toLocaleDateString()}</div>
+                </div>
+            `).join('')}
+        `;
+    } catch (err) {
+        console.error('Failed to load overview:', err);
+        toast('Failed to load overview', 'error');
+    }
+}
+
+// ── Downloads ──
+async function loadDownloads() {
+    try {
+        const [statsRes, dlRes] = await Promise.all([
+            apiFetch('/stats'),
+            apiFetch('/stats/downloads'),
+        ]);
+
+        const stats = await statsRes.json();
+        const dl = await dlRes.json();
+
+        const statsEl = document.getElementById('download-stats');
+        statsEl.innerHTML = `
+            <div class="stat-card"><div class="label">Total</div><div class="value">${stats.downloads.total.toLocaleString()}</div></div>
+            <div class="stat-card"><div class="label">Last 30 Days</div><div class="value">${stats.downloads.last30.toLocaleString()}</div></div>
+            ${(stats.downloads.byVariant || []).map(v => `
+                <div class="stat-card"><div class="label">${escapeHTML(v.variant)} ISO</div><div class="value">${v.count.toLocaleString()}</div></div>
+            `).join('')}
+        `;
+
+        // Trend chart
+        const dailyMap = {};
+        (dl.daily || []).forEach(d => {
+            if (!dailyMap[d.date]) dailyMap[d.date] = 0;
+            dailyMap[d.date] += d.count;
+        });
+        const dates = Object.keys(dailyMap).sort();
+        createLine('chart-downloads-trend', dates, [{
+            label: 'Downloads',
+            data: dates.map(d => dailyMap[d]),
+            borderColor: '#58a6ff',
+            backgroundColor: '#58a6ff20',
+            fill: true,
+            tension: 0.3,
+        }]);
+
+        // Table
+        const tbody = document.getElementById('downloads-table');
+        tbody.innerHTML = (dl.history || []).map(d => `
+            <tr>
+                <td>${new Date(d.timestamp + 'Z').toLocaleString()}</td>
+                <td>${escapeHTML(d.variant)}</td>
+                <td style="font-family:monospace; font-size:0.8rem;">${escapeHTML(d.ip_hash || '')}</td>
+                <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHTML(d.user_agent || '')}">${escapeHTML((d.user_agent || '').slice(0, 60))}</td>
+            </tr>
+        `).join('');
+    } catch (err) {
+        console.error('Failed to load downloads:', err);
+        toast('Failed to load downloads', 'error');
+    }
+}
+
+// ── Installs ──
+async function loadInstalls() {
+    try {
+        const [hwRes, listRes] = await Promise.all([
+            apiFetch('/stats/hardware'),
+            apiFetch('/installs'),
+        ]);
+        const hw = await hwRes.json();
+        const installs = await listRes.json();
+
+        // Charts
+        if (hw.gpu?.length) createDoughnut('chart-hw-gpu', hw.gpu.map(g => g.label), hw.gpu.map(g => g.count));
+        if (hw.ram?.length) createDoughnut('chart-hw-ram', hw.ram.map(r => r.label + ' GB'), hw.ram.map(r => r.count));
+        if (hw.cpu?.length) createDoughnut('chart-hw-cpu', hw.cpu.map(c => c.label), hw.cpu.map(c => c.count));
+        if (hw.display?.length) createDoughnut('chart-hw-display', hw.display.map(d => d.label), hw.display.map(d => d.count));
+
+        // Populate table
+        const tbody = document.getElementById('installs-table');
+        if (!installs.length) {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:2rem; color:var(--text-dim);">No installs yet. Heartbeats will appear after the next ISO build includes the heartbeat client.</td></tr>';
+        } else {
+            tbody.innerHTML = installs.map(i => `<tr>
+                <td title="${escapeHTML(i.machine_id)}">${escapeHTML(i.machine_id.slice(0, 12))}...</td>
+                <td>${escapeHTML(i.version || '—')}</td>
+                <td>${escapeHTML(i.gpu || '—')}</td>
+                <td>${escapeHTML(i.cpu || '—')}</td>
+                <td>${i.ram_gb ? i.ram_gb + ' GB' : '—'}</td>
+                <td>${escapeHTML(i.display || '—')}</td>
+                <td>${i.last_seen ? new Date(i.last_seen).toLocaleString() : '—'}</td>
+            </tr>`).join('');
+        }
+    } catch (err) {
+        console.error('Failed to load installs:', err);
+        toast('Failed to load installs', 'error');
+    }
+}
+
+// ── Builds ──
+async function loadBuilds() {
+    try {
+        const res = await apiFetch('/build/status');
+        const data = await res.json();
+
+        const tbody = document.getElementById('builds-table');
+        if (!data.configured) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:2rem; color:var(--text-dim);">Gitea token not configured. Set GITEA_TOKEN env var.</td></tr>';
+            return;
+        }
+
+        if (!data.runs?.length) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:2rem; color:var(--text-dim);">No builds yet.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = data.runs.map(r => {
+            const statusColor = r.status === 'success' ? 'var(--success)' : r.status === 'failure' ? 'var(--danger)' : 'var(--warning)';
+            return `<tr>
+                <td>#${r.run_number || r.id || '?'}</td>
+                <td style="color:${statusColor}; font-weight:600;">${r.status || r.conclusion || '?'}</td>
+                <td>${r.head_branch || '?'}</td>
+                <td>${r.created_at ? new Date(r.created_at).toLocaleString() : '?'}</td>
+                <td>${r.updated_at && r.created_at ? Math.round((new Date(r.updated_at) - new Date(r.created_at)) / 1000) + 's' : '—'}</td>
+            </tr>`;
+        }).join('');
+    } catch (err) {
+        console.error('Failed to load builds:', err);
+        toast('Failed to load build status', 'error');
+    }
+}
+
+async function triggerBuild(variant) {
+    if (!confirm(`Trigger ${variant} ISO build?`)) return;
+    try {
+        const res = await apiFetch('/build/trigger', {
+            method: 'POST',
+            body: { variant },
+        });
+        const data = await res.json();
+        if (res.ok) {
+            toast(`${variant} build triggered!`, 'success');
+            setTimeout(loadBuilds, 2000);
+        } else {
+            toast(data.error || 'Build failed', 'error');
+        }
+    } catch {
+        toast('Failed to trigger build', 'error');
+    }
+}
+
+// ── Roadmap ──
+let roadmapData = [];
+
+async function loadRoadmap() {
+    try {
+        const res = await apiFetch('/roadmap');
+        roadmapData = await res.json();
+        renderRoadmap();
+    } catch (err) {
+        console.error('Failed to load roadmap:', err);
+        toast('Failed to load roadmap', 'error');
+    }
+}
+
+function renderRoadmap() {
+    const container = document.getElementById('roadmap-entries');
+    const isAdmin = currentUser?.role === 'admin';
+
+    if (!roadmapData.length) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">&#9776;</div>
+                <p>No roadmap entries yet. Click "Seed from Website" to import existing data, or "Add Version" to start fresh.</p>
+            </div>`;
+        return;
+    }
+
+    container.innerHTML = roadmapData.map(entry => {
+        const items = JSON.parse(entry.items || '[]');
+        const doneCount = items.filter(i => i.done).length;
+        const totalCount = items.length;
+
+        return `
+        <div class="roadmap-entry" data-id="${entry.id}">
+            <div class="roadmap-entry-header" onclick="toggleRoadmapEntry(${entry.id})">
+                <span class="status-badge ${entry.status}">${entry.status.toUpperCase()}</span>
+                <span class="version">${escapeHTML(entry.version)}</span>
+                <span class="title">— ${escapeHTML(entry.title)}</span>
+                <span style="margin-left:auto; color:var(--text-dim); font-size:0.8rem;">${doneCount}/${totalCount} items</span>
+            </div>
+            <div class="roadmap-entry-body">
+                ${isAdmin ? `
+                <div class="roadmap-entry-meta">
+                    <input type="text" value="${escapeHTML(entry.version)}" placeholder="Version" onchange="updateEntryField(${entry.id}, 'version', this.value)">
+                    <input type="text" value="${escapeHTML(entry.title)}" placeholder="Title" onchange="updateEntryField(${entry.id}, 'title', this.value)">
+                    <select onchange="updateEntryField(${entry.id}, 'status', this.value)">
+                        <option value="done" ${entry.status==='done'?'selected':''}>Shipped</option>
+                        <option value="next" ${entry.status==='next'?'selected':''}>Next</option>
+                        <option value="planned" ${entry.status==='planned'?'selected':''}>Planned</option>
+                        <option value="vision" ${entry.status==='vision'?'selected':''}>Vision</option>
+                    </select>
+                    <input type="text" value="${escapeHTML(entry.target_date || '')}" placeholder="Target date" onchange="updateEntryField(${entry.id}, 'target_date', this.value)">
+                </div>
+                ` : ''}
+                ${items.map((item, idx) => `
+                <div class="roadmap-item-row">
+                    ${isAdmin ? `<input type="checkbox" ${item.done ? 'checked' : ''} onchange="toggleItem(${entry.id}, ${idx})">` : `<span style="color:${item.done ? 'var(--success)' : 'var(--text-dim)'};">${item.done ? '&#10003;' : '&#9675;'}</span>`}
+                    <div class="item-text">
+                        ${isAdmin ? `<input value="${escapeHTML(item.text)}" onchange="updateItemText(${entry.id}, ${idx}, this.value)">` : `<span>${escapeHTML(item.text)}</span>`}
+                    </div>
+                    ${isAdmin ? `<button class="btn-icon" onclick="removeItem(${entry.id}, ${idx})" title="Remove">&times;</button>` : ''}
+                </div>
+                `).join('')}
+                ${isAdmin ? `
+                <div class="roadmap-entry-actions">
+                    <button class="btn btn-secondary btn-small" onclick="addItem(${entry.id})">+ Add Item</button>
+                    <button class="btn btn-danger btn-small" onclick="deleteEntry(${entry.id})" style="margin-left:auto;">Delete Version</button>
+                </div>
+                ` : ''}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function toggleRoadmapEntry(id) {
+    const el = document.querySelector(`.roadmap-entry[data-id="${id}"]`);
+    if (el) el.classList.toggle('open');
+}
+
+async function updateEntryField(id, field, value) {
+    try {
+        await apiFetch(`/roadmap/${id}`, { method: 'PUT', body: { [field]: value } });
+        // Update local data
+        const entry = roadmapData.find(e => e.id === id);
+        if (entry) entry[field] = value;
+        renderRoadmap();
+        // Re-open the entry
+        setTimeout(() => toggleRoadmapEntry(id), 10);
+    } catch { toast('Failed to update', 'error'); }
+}
+
+function toggleItem(id, idx) {
+    const entry = roadmapData.find(e => e.id === id);
+    if (!entry) return;
+    const items = JSON.parse(entry.items || '[]');
+    items[idx].done = !items[idx].done;
+    updateEntryField(id, 'items', JSON.stringify(items));
+}
+
+function updateItemText(id, idx, text) {
+    const entry = roadmapData.find(e => e.id === id);
+    if (!entry) return;
+    const items = JSON.parse(entry.items || '[]');
+    items[idx].text = text;
+    updateEntryField(id, 'items', JSON.stringify(items));
+}
+
+function removeItem(id, idx) {
+    const entry = roadmapData.find(e => e.id === id);
+    if (!entry) return;
+    const items = JSON.parse(entry.items || '[]');
+    items.splice(idx, 1);
+    updateEntryField(id, 'items', JSON.stringify(items));
+}
+
+function addItem(id) {
+    const text = prompt('New item text:');
+    if (!text) return;
+    const entry = roadmapData.find(e => e.id === id);
+    if (!entry) return;
+    const items = JSON.parse(entry.items || '[]');
+    items.push({ text, done: false });
+    updateEntryField(id, 'items', JSON.stringify(items));
+}
+
+async function addRoadmapEntry() {
+    const version = prompt('Version (e.g. v2.2):');
+    if (!version) return;
+    const title = prompt('Title:');
+    if (!title) return;
+
+    try {
+        const res = await apiFetch('/roadmap', {
+            method: 'POST',
+            body: { version, title, status: 'planned', items: '[]', sort_order: roadmapData.length },
+        });
+        if (res.ok) {
+            toast('Version added', 'success');
+            loadRoadmap();
+        } else {
+            const data = await res.json();
+            toast(data.error || 'Failed', 'error');
+        }
+    } catch { toast('Failed to add version', 'error'); }
+}
+
+async function deleteEntry(id) {
+    if (!confirm('Delete this version?')) return;
+    try {
+        await apiFetch(`/roadmap/${id}`, { method: 'DELETE' });
+        toast('Deleted', 'success');
+        loadRoadmap();
+    } catch { toast('Failed to delete', 'error'); }
+}
+
+async function publishRoadmap() {
+    if (!confirm('Publish roadmap to os.24hgaming.com/roadmap?')) return;
+    try {
+        const res = await apiFetch('/roadmap/publish', { method: 'POST' });
+        if (res.ok) {
+            toast('Roadmap published!', 'success');
+        } else {
+            const data = await res.json();
+            toast(data.error || 'Publish failed', 'error');
+        }
+    } catch { toast('Failed to publish', 'error'); }
+}
+
+async function seedRoadmap() {
+    if (!confirm('Import roadmap data from the existing website? This only works if the database is empty.')) return;
+    try {
+        const res = await apiFetch('/roadmap/seed', { method: 'POST' });
+        const data = await res.json();
+        if (data.ok) {
+            toast(`Seeded ${data.count} versions`, 'success');
+            loadRoadmap();
+        } else {
+            toast(data.message || 'Seed failed', 'error');
+        }
+    } catch { toast('Failed to seed', 'error'); }
+}
+
+// ── Activity ──
+async function loadActivity() {
+    try {
+        const res = await apiFetch('/activity?limit=200');
+        const data = await res.json();
+
+        const container = document.getElementById('activity-list');
+        if (!data.length) {
+            container.innerHTML = '<div class="empty-state"><div class="empty-icon">&#9202;</div><p>No activity yet.</p></div>';
+            return;
+        }
+
+        const iconMap = {
+            download: 'download',
+            new_install: 'install',
+            build_trigger: 'build',
+            roadmap_create: 'roadmap',
+            roadmap_update: 'roadmap',
+            roadmap_delete: 'roadmap',
+            roadmap_publish: 'roadmap',
+            roadmap_seed: 'roadmap',
+        };
+
+        const emojiMap = {
+            download: '&#8615;',
+            new_install: '&#9881;',
+            build_trigger: '&#9881;',
+            roadmap_create: '&#43;',
+            roadmap_update: '&#9998;',
+            roadmap_delete: '&#10005;',
+            roadmap_publish: '&#10003;',
+            roadmap_seed: '&#9776;',
+        };
+
+        container.innerHTML = data.map(item => `
+            <div class="activity-item">
+                <div class="activity-icon ${iconMap[item.type] || 'admin'}">${emojiMap[item.type] || '&#9679;'}</div>
+                <div class="activity-detail">
+                    <div class="activity-text">${escapeHTML(item.detail || '')}</div>
+                    <div class="activity-meta">
+                        ${item.actor ? escapeHTML(item.actor) + ' &middot; ' : ''}
+                        ${new Date(item.timestamp + 'Z').toLocaleString()}
+                        &middot; ${escapeHTML(item.type)}
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    } catch (err) {
+        console.error('Failed to load activity:', err);
+        toast('Failed to load activity', 'error');
+    }
+}
+
+// ── Analytics ──
+async function loadAnalytics() {
+    try {
+        const [pvRes, refRes] = await Promise.all([
+            apiFetch('/stats/pageviews?days=30'),
+            apiFetch('/stats/referers?days=90'),
+        ]);
+        const pv = await pvRes.json();
+        const ref = await refRes.json();
+
+        // Stats
+        document.getElementById('analytics-stats').innerHTML = `
+            <div class="stat-card"><div class="label">Page Views (30d)</div><div class="value">${(pv.total || 0).toLocaleString()}</div></div>
+            <div class="stat-card"><div class="label">Unique Pages</div><div class="value">${(pv.byPage || []).length}</div></div>
+            <div class="stat-card"><div class="label">Referrer Sources</div><div class="value">${(pv.byReferer || []).length}</div></div>
+            <div class="stat-card"><div class="label">Download Referrers</div><div class="value">${(ref.downloads || []).length}</div></div>
+        `;
+
+        // Page views per day
+        if (pv.byDay?.length) {
+            createLine('chart-pageviews-daily', pv.byDay.map(d => d.date), [{
+                label: 'Page Views',
+                data: pv.byDay.map(d => d.count),
+                borderColor: '#a855f7',
+                backgroundColor: '#a855f720',
+                fill: true,
+                tension: 0.3,
+            }]);
+        }
+
+        // Views by page
+        if (pv.byPage?.length) {
+            createDoughnut('chart-pageviews-page', pv.byPage.map(p => p.path), pv.byPage.map(p => p.count));
+        }
+
+        // Download referrers
+        if (ref.downloads?.length) {
+            const labels = ref.downloads.map(r => {
+                try { return new URL(r.referer).hostname; } catch { return r.referer || 'Direct'; }
+            });
+            createDoughnut('chart-dl-referers', labels, ref.downloads.map(r => r.count));
+        }
+
+        // Traffic sources (from page view referrers)
+        if (pv.byReferer?.length) {
+            const labels = pv.byReferer.slice(0, 10).map(r => {
+                try { return new URL(r.referer).hostname; } catch { return r.referer || 'Direct'; }
+            });
+            createDoughnut('chart-traffic-sources', labels, pv.byReferer.slice(0, 10).map(r => r.count));
+        }
+
+        // Referrers table
+        const allReferers = [...(ref.downloads || []), ...(pv.byReferer || [])];
+        const tbody = document.getElementById('referers-table');
+        if (allReferers.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="2" style="text-align:center; padding:2rem; color:var(--text-dim);">No referrer data yet. Add the tracking snippet to landing pages to start collecting.</td></tr>';
+        } else {
+            tbody.innerHTML = allReferers.map(r => `
+                <tr><td>${escapeHTML(r.referer || 'Direct')}</td><td>${r.count}</td></tr>
+            `).join('');
+        }
+    } catch (err) {
+        console.error('Failed to load analytics:', err);
+        toast('Failed to load analytics', 'error');
+    }
+}
+
+// ── Announcements ──
+let announcementsData = [];
+
+async function loadAnnouncements() {
+    try {
+        const res = await apiFetch('/admin/announcements');
+        announcementsData = await res.json();
+        renderAnnouncements();
+    } catch (err) {
+        console.error('Failed to load announcements:', err);
+        toast('Failed to load announcements', 'error');
+    }
+}
+
+function renderAnnouncements() {
+    const container = document.getElementById('announcements-list');
+    const isAdmin = currentUser?.role === 'admin';
+
+    if (!announcementsData.length) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">&#9993;</div>
+                <p>No announcements yet. Create one to show a banner on the landing page.</p>
+            </div>`;
+        return;
+    }
+
+    container.innerHTML = announcementsData.map(a => {
+        const typeColors = { info: 'var(--accent)', warning: 'var(--warning)', success: 'var(--success)', danger: 'var(--danger)' };
+        const color = typeColors[a.type] || typeColors.info;
+        return `
+        <div class="roadmap-entry" style="border-left: 3px solid ${color};">
+            <div class="roadmap-entry-header" onclick="this.parentElement.classList.toggle('open')">
+                <span class="status-badge" style="background:${color}; color:#0a0a14;">${a.active ? 'ACTIVE' : 'INACTIVE'}</span>
+                <span class="version">${escapeHTML(a.title)}</span>
+                <span class="title" style="color:var(--text-dim); font-size:0.8rem;">by ${escapeHTML(a.author || '?')} &middot; ${new Date(a.timestamp + 'Z').toLocaleDateString()}</span>
+            </div>
+            <div class="roadmap-entry-body">
+                <p style="margin-bottom:1rem; white-space:pre-wrap;">${escapeHTML(a.message)}</p>
+                ${isAdmin ? `
+                <div class="roadmap-entry-actions">
+                    <select onchange="updateAnnouncementType(${a.id}, this.value)" style="padding:0.3rem; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.8rem;">
+                        <option value="info" ${a.type==='info'?'selected':''}>Info</option>
+                        <option value="success" ${a.type==='success'?'selected':''}>Success</option>
+                        <option value="warning" ${a.type==='warning'?'selected':''}>Warning</option>
+                        <option value="danger" ${a.type==='danger'?'selected':''}>Danger</option>
+                    </select>
+                    <button class="btn btn-secondary btn-small" onclick="toggleAnnouncement(${a.id}, ${a.active ? 0 : 1})">${a.active ? 'Deactivate' : 'Activate'}</button>
+                    <button class="btn btn-danger btn-small" onclick="deleteAnnouncementEntry(${a.id})" style="margin-left:auto;">Delete</button>
+                </div>
+                ` : ''}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function showAnnouncementForm() {
+    const title = prompt('Announcement title:');
+    if (!title) return;
+    const message = prompt('Message:');
+    if (!message) return;
+    const type = prompt('Type (info/success/warning/danger):', 'info') || 'info';
+
+    apiFetch('/admin/announcements', {
+        method: 'POST',
+        body: { title, message, type },
+    }).then(res => {
+        if (res.ok) { toast('Announcement created', 'success'); loadAnnouncements(); }
+        else toast('Failed to create', 'error');
+    });
+}
+
+async function toggleAnnouncement(id, active) {
+    await apiFetch(`/admin/announcements/${id}`, { method: 'PUT', body: { active } });
+    toast(active ? 'Activated' : 'Deactivated', 'success');
+    loadAnnouncements();
+}
+
+async function updateAnnouncementType(id, type) {
+    await apiFetch(`/admin/announcements/${id}`, { method: 'PUT', body: { type } });
+    loadAnnouncements();
+}
+
+async function deleteAnnouncementEntry(id) {
+    if (!confirm('Delete this announcement?')) return;
+    await apiFetch(`/admin/announcements/${id}`, { method: 'DELETE' });
+    toast('Deleted', 'success');
+    loadAnnouncements();
+}
+
+// ── Modal ──
+function closeModal() {
+    document.getElementById('modal-overlay').style.display = 'none';
+}
+
+// ── Util ──
+function escapeHTML(s) {
+    if (!s) return '';
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+}
+</script>
+
+</body>
+</html>

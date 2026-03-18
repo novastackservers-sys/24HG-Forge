@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=24HG Forge
+Description=24 Hour Gaming boot splash
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/forge
+ScriptFile=/usr/share/plymouth/themes/forge/forge.script

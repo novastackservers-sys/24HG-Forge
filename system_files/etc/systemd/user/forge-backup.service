@@ -1,0 +1,6 @@
+[Unit]
+Description=24HG Forge Game Save Auto-Backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/forge-backup auto

@@ -1,7 +1,7 @@
-# HubOS libinput quirks for gaming mice
+# 24HG Forge libinput quirks for gaming mice
 # Ensures high-DPI gaming mice work correctly without being clamped
 
-[HubOS Gaming Mouse Defaults]
+[24HG Forge Gaming Mouse Defaults]
 MatchUdevType=mouse
 AttrEventCode=REL_X;REL_Y
 ModelBouncingKeys=0

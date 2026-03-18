@@ -1,0 +1,98 @@
+{
+  "name": "📊 Daily Stats Digest → Discord",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 9 * * *" }] }
+      },
+      "name": "Daily at 09:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://panel.novastack.org/api/application/servers?per_page=100",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [
+          { "name": "Authorization", "value": "Bearer ptla_n6uwix13qMj0lAesO4tHfEMjl6wiuk2uBaxkmslt0Yy" },
+          { "name": "Accept", "value": "application/json" }
+        ]},
+        "options": { "response": { "response": { "responseFormat": "json" } } }
+      },
+      "name": "Pterodactyl Servers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, -100]
+    },
+    {
+      "parameters": {
+        "url": "https://api.24hgaming.com/stats/overview",
+        "options": { "response": { "response": { "responseFormat": "json" } } }
+      },
+      "name": "Hub Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 100]
+    },
+    {
+      "parameters": {
+        "url": "https://uptime.24hgaming.com/api/status-page/heartbeat",
+        "options": { "response": { "response": { "responseFormat": "json" } } }
+      },
+      "name": "Uptime Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "name": "Merge Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [500, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\n// Pterodactyl\nconst pteroData = items.find(i => i.json.data && Array.isArray(i.json.data));\nconst servers = pteroData?.json?.data || [];\nconst totalServers = servers.length;\n\n// Hub stats (may fail)\nconst hubData = items.find(i => i.json.total_users !== undefined);\nconst totalUsers = hubData?.json?.total_users || 'N/A';\nconst onlineNow = hubData?.json?.online_now || 'N/A';\nconst newToday = hubData?.json?.new_today || 'N/A';\n\n// Uptime\nconst uptimeData = items.find(i => i.json.heartbeatList || i.json.uptimeList);\nlet uptimeSummary = 'N/A';\nif (uptimeData?.json?.uptimeList) {\n  const vals = Object.values(uptimeData.json.uptimeList);\n  const avg = vals.length > 0 ? (vals.reduce((a, b) => a + (b?.uptime24 || 0), 0) / vals.length * 100).toFixed(1) : 'N/A';\n  uptimeSummary = `${avg}% avg`;\n}\n\nconst today = new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\n\nreturn [{ json: {\n  today,\n  totalServers,\n  totalUsers,\n  onlineNow,\n  newToday,\n  uptimeSummary,\n  timestamp: new Date().toISOString()\n}}];"
+      },
+      "name": "Build Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_WEBHOOK_DAILY }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"📊 24HG Daily Digest\",\n    \"description\": \"{{ $json.today }}\",\n    \"color\": 3447003,\n    \"fields\": [\n      { \"name\": \"🖥️ Game Servers\", \"value\": \"{{ $json.totalServers }} servers\", \"inline\": true },\n      { \"name\": \"👥 Total Users\", \"value\": \"{{ $json.totalUsers }}\", \"inline\": true },\n      { \"name\": \"🟢 Online Now\", \"value\": \"{{ $json.onlineNow }}\", \"inline\": true },\n      { \"name\": \"🆕 New Today\", \"value\": \"{{ $json.newToday }}\", \"inline\": true },\n      { \"name\": \"⏱️ Uptime (24h)\", \"value\": \"{{ $json.uptimeSummary }}\", \"inline\": true }\n    ],\n    \"timestamp\": \"{{ $json.timestamp }}\",\n    \"footer\": { \"text\": \"24 Hour Gaming — Daily Report\" }\n  }]\n}",
+        "options": {}
+      },
+      "name": "Discord Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [940, 100]
+    }
+  ],
+  "connections": {
+    "Daily at 09:00 UTC": { "main": [
+      [{ "node": "Pterodactyl Servers", "type": "main", "index": 0 },
+       { "node": "Hub Stats", "type": "main", "index": 0 },
+       { "node": "Uptime Stats", "type": "main", "index": 0 }]
+    ]},
+    "Pterodactyl Servers": { "main": [[{ "node": "Merge Data", "type": "main", "index": 0 }]] },
+    "Hub Stats": { "main": [[{ "node": "Merge Data", "type": "main", "index": 1 }]] },
+    "Uptime Stats": { "main": [[{ "node": "Merge Data", "type": "main", "index": 0 }]] },
+    "Merge Data": { "main": [[{ "node": "Build Digest", "type": "main", "index": 0 }]] },
+    "Build Digest": { "main": [[{ "node": "Discord Digest", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Reports" }]
+}

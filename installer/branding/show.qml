@@ -1,4 +1,4 @@
-/* HubOS Calamares Installer Slideshow */
+/* 24HG Forge Calamares Installer Slideshow */
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
@@ -24,7 +24,7 @@ Presentation {
                 spacing: 30
 
                 Text {
-                    text: "Welcome to HubOS"
+                    text: "Welcome to 24HG Forge"
                     font.pointSize: 28
                     font.bold: true
                     color: "#ffffff"

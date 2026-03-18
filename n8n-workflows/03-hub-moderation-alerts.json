@@ -1,0 +1,47 @@
+{
+  "name": "🛡️ Hub Moderation Alerts → Discord",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hub-moderation",
+        "options": {}
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "hub-moderation-24hg"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\nconst event = body.event || 'unknown';\nconst data = body.data || body;\n\nlet title = '', description = '', color = 16776960; // yellow\n\nswitch(event) {\n  case 'report_created':\n    title = '🚨 New Report';\n    description = `**${data.reporter || 'User'}** reported **${data.target || 'content'}**\\nReason: ${data.reason || 'No reason'}`;\n    color = 16744448; // orange\n    break;\n  case 'ban_created':\n    title = '🔨 User Banned';\n    description = `**${data.username || 'Unknown'}** banned by **${data.moderator || 'System'}**\\nReason: ${data.reason || 'No reason'}\\nDuration: ${data.duration || 'Permanent'}`;\n    color = 16711680; // red\n    break;\n  case 'ticket_created':\n    title = '🎫 New Support Ticket';\n    description = `**${data.username || 'User'}**: ${data.subject || data.title || 'No subject'}`;\n    color = 3447003; // blue\n    break;\n  case 'user_registered':\n    title = '👋 New User';\n    description = `**${data.username || 'Unknown'}** registered`;\n    color = 65280; // green\n    break;\n  default:\n    title = `📋 ${event}`;\n    description = JSON.stringify(data).slice(0, 500);\n}\n\nreturn [{ json: { title, description, color, event, timestamp: new Date().toISOString() } }];"
+      },
+      "name": "Parse Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_WEBHOOK_MODERATION }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"{{ $json.title }}\",\n    \"description\": \"{{ $json.description }}\",\n    \"color\": {{ $json.color }},\n    \"timestamp\": \"{{ $json.timestamp }}\",\n    \"footer\": { \"text\": \"24HG Hub\" }\n  }]\n}",
+        "options": {}
+      },
+      "name": "Discord Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Parse Event", "type": "main", "index": 0 }]] },
+    "Parse Event": { "main": [[{ "node": "Discord Alert", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Hub" }]
+}

@@ -1,0 +1,13 @@
+[Unit]
+Description=24HG Forge Perks Auto-Claim
+After=forge-hub-bridge.service
+Wants=forge-hub-bridge.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 30
+ExecStart=/usr/bin/forge-perks claim --auto
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

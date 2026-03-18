@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=24HG Mode
+Comment=Boot into 24HG Gaming Hub (fullscreen Gamescope session)
+Exec=/usr/bin/forge-gamescope-session
+Type=Application
+DesktopNames=gamescope

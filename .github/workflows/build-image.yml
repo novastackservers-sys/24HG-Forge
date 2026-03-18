@@ -1,4 +1,4 @@
-name: Build HubOS Image
+name: Build 24HG Forge Image
 
 on:
   push:
@@ -14,7 +14,7 @@ on:
     branches: [main]
 
 env:
-  IMAGE_NAME: hubos
+  IMAGE_NAME: forge
   IMAGE_REGISTRY: git.raggi.is/24hg
 
 jobs:
@@ -62,5 +62,5 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### HubOS Image Built (${{ matrix.variant }})" >> $GITHUB_STEP_SUMMARY
+          echo "### 24HG Forge Image Built (${{ matrix.variant }})" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** \`${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest\`" >> $GITHUB_STEP_SUMMARY

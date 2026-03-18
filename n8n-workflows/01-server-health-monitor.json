@@ -1,0 +1,122 @@
+{
+  "name": "🖥️ Server Health Monitor → Discord",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 5 }] }
+      },
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://panel.novastack.org/api/application/servers?per_page=100",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [
+          { "name": "Authorization", "value": "Bearer ptla_n6uwix13qMj0lAesO4tHfEMjl6wiuk2uBaxkmslt0Yy" },
+          { "name": "Accept", "value": "application/json" }
+        ]},
+        "options": { "response": { "response": { "responseFormat": "json" } } }
+      },
+      "name": "Get All Servers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract server list for client API calls\nconst servers = ($json.data || []).map(s => ({\n  json: {\n    id: s.attributes.id,\n    identifier: s.attributes.identifier,\n    name: s.attributes.name,\n    node: s.attributes.node,\n    description: s.attributes.description || ''\n  }\n}));\nreturn servers;"
+      },
+      "name": "Extract Servers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": { "options": {} },
+      "name": "Loop Servers",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "url": "=https://panel.novastack.org/api/client/servers/{{ $json.identifier }}/resources",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [
+          { "name": "Authorization", "value": "Bearer ptlc_to5CPXu2aw0DlLpYFZOb6IdWgpGjji6AhkYKeyMeCUL" },
+          { "name": "Accept", "value": "application/json" }
+        ]},
+        "options": { "response": { "response": { "responseFormat": "json" } } }
+      },
+      "name": "Get Resources",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = this.getWorkflowStaticData('global');\nstaticData.lastState ??= {};\nstaticData.alertsSent ??= {};\n\nconst loopItem = $('Loop Servers').first().json;\nconst serverId = loopItem.identifier;\nconst serverName = loopItem.name;\n\nconst state = $json?.attributes?.current_state ?? 'unknown';\nconst resources = $json?.attributes?.resources || {};\nconst limits = $json?.attributes?.limits || {};\n\nconst lastState = staticData.lastState[serverId] || 'unknown';\nconst stateChanged = state !== lastState;\nstaticData.lastState[serverId] = state;\n\n// Detect issues\nconst issues = [];\nconst memPct = limits.memory > 0 ? (resources.memory_bytes / (limits.memory * 1024 * 1024)) * 100 : 0;\nconst cpuPct = resources.cpu_absolute || 0;\n\nif (state === 'offline' && lastState === 'running') issues.push('went OFFLINE');\nif (state === 'stopping' && lastState === 'running') issues.push('is STOPPING unexpectedly');\nif (memPct > 90) issues.push(`HIGH MEMORY: ${memPct.toFixed(0)}%`);\nif (cpuPct > 95) issues.push(`HIGH CPU: ${cpuPct.toFixed(0)}%`);\n\n// Only alert once per issue per 30 min\nconst now = Date.now();\nconst alertKey = `${serverId}_${state}`;\nconst lastAlert = staticData.alertsSent[alertKey] || 0;\nconst shouldAlert = issues.length > 0 && stateChanged && (now - lastAlert > 1800000);\n\nif (shouldAlert) staticData.alertsSent[alertKey] = now;\n\nreturn [{\n  json: {\n    serverId, serverName, state, lastState, stateChanged,\n    memPct: memPct.toFixed(1),\n    cpuPct: cpuPct.toFixed(1),\n    diskMB: ((resources.disk_bytes || 0) / 1048576).toFixed(0),\n    issues,\n    shouldAlert\n  }\n}];"
+      },
+      "name": "Detect Issues",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "1", "leftValue": "={{ $json.shouldAlert }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true" } }],
+          "combinator": "and"
+        }
+      },
+      "name": "Should Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_WEBHOOK_ALERTS }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"⚠️ Server Alert: {{ $json.serverName }}\",\n    \"description\": \"{{ $json.issues.join('\\\\n') }}\",\n    \"color\": 16711680,\n    \"fields\": [\n      { \"name\": \"State\", \"value\": \"{{ $json.lastState }} → {{ $json.state }}\", \"inline\": true },\n      { \"name\": \"CPU\", \"value\": \"{{ $json.cpuPct }}%\", \"inline\": true },\n      { \"name\": \"Memory\", \"value\": \"{{ $json.memPct }}%\", \"inline\": true }\n    ],\n    \"timestamp\": \"{{ new Date().toISOString() }}\",\n    \"footer\": { \"text\": \"24HG Server Monitor\" }\n  }]\n}",
+        "options": {}
+      },
+      "name": "Discord Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, -100]
+    },
+    {
+      "parameters": { "options": {} },
+      "name": "Continue Loop",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1540, 100]
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": { "main": [[{ "node": "Get All Servers", "type": "main", "index": 0 }]] },
+    "Get All Servers": { "main": [[{ "node": "Extract Servers", "type": "main", "index": 0 }]] },
+    "Extract Servers": { "main": [[{ "node": "Loop Servers", "type": "main", "index": 0 }]] },
+    "Loop Servers": { "main": [
+      [{ "node": "Get Resources", "type": "main", "index": 0 }],
+      []
+    ]},
+    "Get Resources": { "main": [[{ "node": "Detect Issues", "type": "main", "index": 0 }]] },
+    "Detect Issues": { "main": [[{ "node": "Should Alert?", "type": "main", "index": 0 }]] },
+    "Should Alert?": { "main": [
+      [{ "node": "Discord Alert", "type": "main", "index": 0 }],
+      [{ "node": "Continue Loop", "type": "main", "index": 0 }]
+    ]},
+    "Discord Alert": { "main": [[{ "node": "Loop Servers", "type": "main", "index": 0 }]] },
+    "Continue Loop": { "main": [[{ "node": "Loop Servers", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Infrastructure" }]
+}

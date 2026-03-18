@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Common problems and their solutions. For each issue, the relevant HubOS tool is listed.
+Common problems and their solutions. For each issue, the relevant 24HG Forge tool is listed.
 
 ## Game Won't Launch
 
@@ -10,31 +10,31 @@ Common problems and their solutions. For each issue, the relevant HubOS tool is 
 
 ```bash
 # Check the game's compatibility and logs
-hubos-proton-fix <appid>
+forge-proton-fix <appid>
 
 # Check crash logs
-hubos-crash-fix diagnose <appid>
+forge-crash-fix diagnose <appid>
 
 # Check if the game has anti-cheat that blocks Linux
-hubos-anticheat-tracker check <appid>
+forge-anticheat-tracker check <appid>
 ```
 
 **Common fixes:**
 
 ```bash
 # Auto-fix Proton issues
-hubos-proton-fix <appid> --fix
+forge-proton-fix <appid> --fix
 
 # Try a different Proton version
-hubos-proton-updater update   # Install latest Proton-GE
+forge-proton-updater update   # Install latest Proton-GE
 # Then in Steam: Game → Properties → Compatibility → Force GE-Proton
 
 # Reset the Wine prefix (nuclear option -- backs up saves first)
-hubos-prefix reset <appid>
+forge-prefix reset <appid>
 
 # Install missing dependencies
-hubos-prefix install-deps <appid> vcredist
-hubos-prefix install-deps <appid> dotnet48
+forge-prefix install-deps <appid> vcredist
+forge-prefix install-deps <appid> dotnet48
 ```
 
 ## Black Screen on Boot
@@ -53,15 +53,15 @@ This is almost always an NVIDIA driver issue.
 4. Once booted, run:
 
 ```bash
-hubos-nvidia-wayland fix       # Auto-detect and fix all NVIDIA+Wayland issues
-hubos-nvidia-wayland diagnose  # Show detailed diagnostics
+forge-nvidia-wayland fix       # Auto-detect and fix all NVIDIA+Wayland issues
+forge-nvidia-wayland diagnose  # Show detailed diagnostics
 ```
 
 If you are not using NVIDIA:
 
 ```bash
-hubos-crash-recovery            # General crash recovery tool
-hubos-diag --paste              # Generate diagnostic report
+forge-crash-recovery            # General crash recovery tool
+forge-diag --paste              # Generate diagnostic report
 ```
 
 ## Screen Flickering (NVIDIA)
@@ -69,8 +69,8 @@ hubos-diag --paste              # Generate diagnostic report
 **Symptoms:** Screen flickers, especially on Wayland with NVIDIA GPU.
 
 ```bash
-hubos-nvidia-wayland flicker-fix   # Apply all known flicker fixes
-hubos-nvidia-wayland status        # Check current NVIDIA Wayland state
+forge-nvidia-wayland flicker-fix   # Apply all known flicker fixes
+forge-nvidia-wayland status        # Check current NVIDIA Wayland state
 ```
 
 This tool applies:
@@ -85,19 +85,19 @@ This tool applies:
 
 ```bash
 # Check audio status
-hubos-audio status
+forge-audio status
 
 # List all audio devices
-hubos-audio devices
+forge-audio devices
 
 # Switch output device
-hubos-audio switch "Your Device Name"
+forge-audio switch "Your Device Name"
 
 # Reset to low-latency gaming config
-hubos-audio gaming
+forge-audio gaming
 
 # Reset to desktop defaults
-hubos-audio desktop
+forge-audio desktop
 ```
 
 If audio devices are not detected at all:
@@ -116,25 +116,25 @@ systemctl --user restart pipewire pipewire-pulse wireplumber
 
 ```bash
 # List detected controllers
-hubos-controller list
+forge-controller list
 
 # Test controller input
-hubos-controller test
+forge-controller test
 
 # Fix common issues (udev rules, permissions)
-hubos-controller fix
+forge-controller fix
 
 # Calibrate a controller
-hubos-controller calibrate
+forge-controller calibrate
 ```
 
 **Specific controllers:**
 
 - **Xbox controllers:** Work out of the box (USB and Bluetooth).
-- **PlayStation (DualSense/DualShock):** Work out of the box. If not, try `hubos-controller fix`.
-- **Nintendo Switch Pro:** Works via Bluetooth. May need `hubos-controller fix` for Steam detection.
+- **PlayStation (DualSense/DualShock):** Work out of the box. If not, try `forge-controller fix`.
+- **Nintendo Switch Pro:** Works via Bluetooth. May need `forge-controller fix` for Steam detection.
 - **8BitDo:** Set to XInput mode (hold Start+X while turning on) for best compatibility.
-- **Generic USB gamepads:** Usually work, but may need `hubos-controller calibrate` for correct mappings.
+- **Generic USB gamepads:** Usually work, but may need `forge-controller calibrate` for correct mappings.
 
 ## Discord Screen Share Broken
 
@@ -142,30 +142,30 @@ hubos-controller calibrate
 
 ```bash
 # Apply the fix (configures XDG portal and PipeWire for Discord)
-hubos-discord-screen
+forge-discord-screen
 
 # Verify Discord integration
-hubos-discord-fix
+forge-discord-fix
 ```
 
-The fix works because Discord Flatpak needs PipeWire screen capture portal access. HubOS configures this automatically, but if Discord was installed after HubOS first boot, you may need to run the fix manually.
+The fix works because Discord Flatpak needs PipeWire screen capture portal access. 24HG Forge configures this automatically, but if Discord was installed after 24HG Forge first boot, you may need to run the fix manually.
 
 **For Wayland specifically:**
 
-Discord on Wayland requires the XDG Desktop Portal. HubOS configures this, but if screen share still shows black:
+Discord on Wayland requires the XDG Desktop Portal. 24HG Forge configures this, but if screen share still shows black:
 
 1. Make sure you are sharing a specific window (not "Your Screen").
-2. Or use `hubos-discord-screen` which sets up window/screen capture properly.
+2. Or use `forge-discord-screen` which sets up window/screen capture properly.
 
 ## Flatpak Apps Can't See Drives
 
 **Symptoms:** Steam, Lutris, or other Flatpak apps cannot access your game drives or external storage.
 
 ```bash
-hubos-flatpak-fix
+forge-flatpak-fix
 ```
 
-This reconfigures Flatpak filesystem permissions. HubOS ships with overrides for Steam and Lutris in `~/.config/flatpak-overrides/`, but if you added new drives after installation, run the fix again.
+This reconfigures Flatpak filesystem permissions. 24HG Forge ships with overrides for Steam and Lutris in `~/.config/flatpak-overrides/`, but if you added new drives after installation, run the fix again.
 
 **Manual override for a specific app:**
 
@@ -175,29 +175,29 @@ flatpak override --user --filesystem=/path/to/your/drive com.valvesoftware.Steam
 
 ## NVIDIA Wayland Issues (General)
 
-NVIDIA + Wayland is the most common source of issues on Linux in 2025-2026. HubOS has a dedicated tool:
+NVIDIA + Wayland is the most common source of issues on Linux in 2025-2026. 24HG Forge has a dedicated tool:
 
 ```bash
 # Run the full diagnostic and auto-fix suite
-hubos-nvidia-wayland fix
+forge-nvidia-wayland fix
 
 # Check current status (driver version, Wayland state, environment)
-hubos-nvidia-wayland status
+forge-nvidia-wayland status
 
 # Detailed diagnosis
-hubos-nvidia-wayland diagnose
+forge-nvidia-wayland diagnose
 
 # Optimize for gaming
-hubos-nvidia-wayland optimize
+forge-nvidia-wayland optimize
 
 # Check environment variables
-hubos-nvidia-wayland env
+forge-nvidia-wayland env
 
 # Fix frame sync issues
-hubos-nvidia-wayland sync
+forge-nvidia-wayland sync
 
 # Check driver version and compatibility
-hubos-nvidia-wayland driver-check
+forge-nvidia-wayland driver-check
 ```
 
 ## Update Broke Gaming
@@ -206,7 +206,7 @@ hubos-nvidia-wayland driver-check
 
 ```bash
 # Roll back to the previous system image
-hubos-update-guard rollback
+forge-update-guard rollback
 
 # Or use rpm-ostree directly
 rpm-ostree rollback
@@ -217,8 +217,8 @@ To prevent this in the future:
 
 ```bash
 # Enable update safety checks
-hubos-update-guard check   # Shows what changed and any known issues
-hubos-update-guard apply   # Only applies if safe
+forge-update-guard check   # Shows what changed and any known issues
+forge-update-guard apply   # Only applies if safe
 ```
 
 The update guard checks for:
@@ -236,24 +236,24 @@ The most common cause. First-launch stuttering is caused by shader compilation.
 
 ```bash
 # Check shader cache status
-hubos-shader-cache status
+forge-shader-cache status
 
 # Pre-build shaders for a game (reduces first-launch stutter)
-hubos-shader-cache prebuild <appid>
+forge-shader-cache prebuild <appid>
 
 # Clean and rebuild corrupted caches
-hubos-shader-cache clean
-hubos-shader-cache optimize
+forge-shader-cache clean
+forge-shader-cache optimize
 ```
 
 ### Performance Profile
 
 ```bash
 # Switch to gaming mode (max CPU/GPU performance)
-hubos-performance gaming
+forge-performance gaming
 
 # Check current profile
-hubos-performance status
+forge-performance status
 ```
 
 ### Smart Launch
@@ -261,8 +261,8 @@ hubos-performance status
 Verify that the smart launch daemon is applying per-game optimizations:
 
 ```bash
-hubos-smart-launch status
-hubos-smart-launch rules   # List built-in game rules
+forge-smart-launch status
+forge-smart-launch rules   # List built-in game rules
 ```
 
 ## HDR Not Working
@@ -271,17 +271,17 @@ hubos-smart-launch rules   # List built-in game rules
 
 ```bash
 # Run HDR setup wizard
-hubos-hdr setup
+forge-hdr setup
 
 # Check HDR hardware support
-hubos-hdr status
+forge-hdr status
 
 # Apply per-game HDR profile
-hubos-hdr game <appid>
+forge-hdr game <appid>
 ```
 
 Requirements for HDR:
-- KDE Plasma 6+ (included in HubOS)
+- KDE Plasma 6+ (included in 24HG Forge)
 - HDR-capable monitor
 - AMD GPU (best support), NVIDIA (improving), Intel (experimental)
 - Wayland session (HDR does not work on X11)
@@ -292,16 +292,16 @@ Requirements for HDR:
 
 ```bash
 # Find save locations for a game
-hubos-save-manager find <appid or name>
+forge-save-manager find <appid or name>
 
 # List all detected save locations
-hubos-save-manager list
+forge-save-manager list
 
 # Backup saves for a specific game
-hubos-save-manager backup <appid>
+forge-save-manager backup <appid>
 
 # Restore saves
-hubos-save-manager restore <appid>
+forge-save-manager restore <appid>
 ```
 
 Save locations vary by game:
@@ -315,18 +315,18 @@ Save locations vary by game:
 
 ```bash
 # Open the mod manager for a game
-hubos-mod-manager <appid>
+forge-mod-manager <appid>
 
 # Install a mod from Nexus Mods (nxm:// link handler)
-# Just click "Mod Manager Download" on Nexus Mods -- HubOS handles the rest
+# Just click "Mod Manager Download" on Nexus Mods -- 24HG Forge handles the rest
 ```
 
-HubOS registers as an NXM protocol handler, so clicking "Download with Mod Manager" on Nexus Mods will route to `hubos-mod-manager`.
+24HG Forge registers as an NXM protocol handler, so clicking "Download with Mod Manager" on Nexus Mods will route to `forge-mod-manager`.
 
 For Proton/Wine games, mods go into the Wine prefix:
 ```bash
 # Find the prefix for a game
-hubos-prefix info <appid>
+forge-prefix info <appid>
 ```
 
 ## System Overheating
@@ -335,10 +335,10 @@ hubos-prefix info <appid>
 
 ```bash
 # Check thermal status
-hubos-thermal
+forge-thermal
 
 # Switch to balanced profile (less aggressive GPU/CPU)
-hubos-performance balanced
+forge-performance balanced
 ```
 
 ## Generating a Support Report
@@ -347,10 +347,10 @@ If none of the above fixes your issue, generate a diagnostic report:
 
 ```bash
 # Full system diagnostic
-hubos-diag
+forge-diag
 
 # Upload to termbin for sharing (redacts sensitive info)
-hubos-diag --paste
+forge-diag --paste
 ```
 
 Share the resulting URL in the [24HG Discord](https://discord.gg/ymfEjH6EJN) support channel.

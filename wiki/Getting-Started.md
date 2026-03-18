@@ -1,4 +1,4 @@
-# Getting Started with HubOS
+# Getting Started with 24HG Forge
 
 This guide gets you from zero to gaming in about 15 minutes.
 
@@ -8,9 +8,9 @@ Go to [os.24hgaming.com/download.html](https://os.24hgaming.com/download.html) a
 
 | Your GPU | Download |
 |----------|----------|
-| AMD or Intel | HubOS Desktop |
-| NVIDIA | HubOS NVIDIA |
-| Steam Deck | HubOS Deck |
+| AMD or Intel | 24HG Forge Desktop |
+| NVIDIA | 24HG Forge NVIDIA |
+| Steam Deck | 24HG Forge Deck |
 
 Not sure which GPU you have? On Windows, press `Win+R`, type `dxdiag`, and look under the Display tab.
 
@@ -21,15 +21,15 @@ The ISO is approximately 4-5 GB. While it downloads, grab a USB drive (8 GB mini
 ### Option A: Ventoy (Recommended)
 
 1. Download [Ventoy](https://ventoy.net/) and install it to your USB drive.
-2. Copy the HubOS ISO file onto the Ventoy USB drive.
-3. Boot from the USB and select HubOS from the Ventoy menu.
+2. Copy the 24HG Forge ISO file onto the Ventoy USB drive.
+3. Boot from the USB and select 24HG Forge from the Ventoy menu.
 
 Ventoy is great because you can keep multiple ISOs on the same drive.
 
 ### Option B: Rufus (Windows)
 
 1. Download [Rufus](https://rufus.ie/).
-2. Select your USB drive, select the HubOS ISO.
+2. Select your USB drive, select the 24HG Forge ISO.
 3. Use GPT partition scheme and DD image mode if prompted.
 4. Click Start and wait.
 
@@ -40,7 +40,7 @@ Ventoy is great because you can keep multiple ISOs on the same drive.
 lsblk
 
 # Write the ISO (replace sdX with your USB device)
-sudo dd if=hubos-desktop.iso of=/dev/sdX bs=4M status=progress oflag=sync
+sudo dd if=forge-desktop.iso of=/dev/sdX bs=4M status=progress oflag=sync
 ```
 
 ## Step 3: Boot from USB
@@ -48,11 +48,11 @@ sudo dd if=hubos-desktop.iso of=/dev/sdX bs=4M status=progress oflag=sync
 1. Restart your computer.
 2. Press the boot menu key during startup (usually F12, F2, F11, or Del -- depends on your motherboard).
 3. Select your USB drive from the boot menu.
-4. The HubOS installer will start.
+4. The 24HG Forge installer will start.
 
 If you do not see the USB in the boot menu, you may need to disable Secure Boot in your BIOS settings. See the [Installation Guide](Installation) for details.
 
-## Step 4: Install HubOS
+## Step 4: Install 24HG Forge
 
 The Calamares installer walks you through the process:
 
@@ -65,9 +65,9 @@ The Calamares installer walks you through the process:
 
 ## Step 5: First Boot Experience
 
-When HubOS boots for the first time, the **First Boot Wizard** launches automatically:
+When 24HG Forge boots for the first time, the **First Boot Wizard** launches automatically:
 
-1. **GPU Detection** -- HubOS detects your graphics card and confirms drivers are loaded.
+1. **GPU Detection** -- 24HG Forge detects your graphics card and confirms drivers are loaded.
 2. **Display Setup** -- Choose your preferred resolution and refresh rate.
 3. **24HG Account** -- Log into your 24HG account or create one. This connects you to the community hub.
 4. **Steam Setup** -- Steam (Flatpak) is auto-installed. Sign into your Steam account.
@@ -78,31 +78,31 @@ After the wizard completes, you will see the KDE Plasma desktop with the 24HG Hu
 
 ## Step 6: Claim Your VIP Perks
 
-HubOS users get automatic perks across all 24HG game servers. To claim them:
+24HG Forge users get automatic perks across all 24HG game servers. To claim them:
 
 ```bash
-hubos-perks claim
+forge-perks claim
 ```
 
-Or click the tray icon and select "Claim Perks." This links your 24HG account to your HubOS installation and activates benefits like bonus XP, cosmetics, and priority queue on all 88+ game servers.
+Or click the tray icon and select "Claim Perks." This links your 24HG account to your 24HG Forge installation and activates benefits like bonus XP, cosmetics, and priority queue on all 88+ game servers.
 
 ## Step 7: Connect to 24HG Servers
 
 ### From the Hub App
 
-Click the **24HG Hub** icon on your desktop or taskbar. The hub shows all online servers with player counts. Click any server to connect -- HubOS automatically launches the right game.
+Click the **24HG Hub** icon on your desktop or taskbar. The hub shows all online servers with player counts. Click any server to connect -- 24HG Forge automatically launches the right game.
 
 ### From the Terminal
 
 ```bash
 # See all online servers with player counts
-hubos-server-status
+forge-server-status
 
 # Browse your installed game library
-hubos-games list
+forge-games list
 
 # Launch a specific game
-hubos-games launch "Counter-Strike 2"
+forge-games launch "Counter-Strike 2"
 ```
 
 ## 10 Essential Commands
@@ -111,21 +111,21 @@ These are the commands you will use most often:
 
 | Command | What It Does |
 |---------|--------------|
-| `hubos-neofetch` | Show system info with HubOS branding |
-| `hubos-server-status` | Show all 24HG servers and player counts |
-| `hubos-games list` | List all your installed games |
-| `hubos-performance gaming` | Switch to maximum performance mode |
-| `hubos-proton-fix <game>` | Diagnose and fix Proton/Wine issues |
-| `hubos-replay start` | Start instant replay recording |
-| `hubos-shader-cache status` | Check shader cache health |
-| `hubos-audio gaming` | Switch to low-latency gaming audio |
-| `hubos-backup now` | Backup your game saves and configs |
-| `hubos-diag --paste` | Generate a support diagnostic and get a shareable link |
+| `forge-neofetch` | Show system info with 24HG Forge branding |
+| `forge-server-status` | Show all 24HG servers and player counts |
+| `forge-games list` | List all your installed games |
+| `forge-performance gaming` | Switch to maximum performance mode |
+| `forge-proton-fix <game>` | Diagnose and fix Proton/Wine issues |
+| `forge-replay start` | Start instant replay recording |
+| `forge-shader-cache status` | Check shader cache health |
+| `forge-audio gaming` | Switch to low-latency gaming audio |
+| `forge-backup now` | Backup your game saves and configs |
+| `forge-diag --paste` | Generate a support diagnostic and get a shareable link |
 
 ## What Next?
 
-- **Customize your desktop:** `hubos-wallpaper`, `hubos-sounds`, `hubos-notify-style`
-- **Optimize for your hardware:** `hubos-performance gaming`, `hubos-nvidia-wayland fix`
-- **Fix game issues:** `hubos-crash-fix diagnose <appid>`, `hubos-proton-fix <appid>`
+- **Customize your desktop:** `forge-wallpaper`, `forge-sounds`, `forge-notify-style`
+- **Optimize for your hardware:** `forge-performance gaming`, `forge-nvidia-wayland fix`
+- **Fix game issues:** `forge-crash-fix diagnose <appid>`, `forge-proton-fix <appid>`
 - **Join the community:** Open the Hub app or visit [hub.24hgaming.com](https://hub.24hgaming.com)
 - **Read the full docs:** [Tools Reference](Tools-Reference) covers all 53 tools in detail

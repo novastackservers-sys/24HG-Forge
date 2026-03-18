@@ -1,0 +1,51 @@
+{
+  "name": "🐳 Docker Health Auto-Restart",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 10 }] }
+      },
+      "name": "Every 10 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// List of critical containers to monitor\nconst criticalContainers = [\n  'docker-frontend-1',\n  'docker-api-1',\n  'forge-control-room',\n  'forge-site',\n  'coolify-proxy',\n  'docker-livekit-1',\n  'yagpdb-jg8k0ckocgow440c4ckgggs4'\n];\n\nreturn criticalContainers.map(name => ({ json: { containerName: name } }));"
+      },
+      "name": "Critical Containers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": { "options": {} },
+      "name": "Loop Containers",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// NOTE: This workflow requires n8n to have access to the Docker socket.\n// If running in Docker, mount: -v /var/run/docker.sock:/var/run/docker.sock\n// \n// For now, this is a template that logs which containers to check.\n// In production, you'd use the Docker node or execute commands.\n\nconst containerName = $('Loop Containers').first().json.containerName;\n\n// Placeholder — in production, check container health via Docker API\nreturn [{ json: { \n  containerName, \n  status: 'check_required',\n  note: 'Mount Docker socket to enable auto-restart'\n}}];"
+      },
+      "name": "Check Container",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    }
+  ],
+  "connections": {
+    "Every 10 Minutes": { "main": [[{ "node": "Critical Containers", "type": "main", "index": 0 }]] },
+    "Critical Containers": { "main": [[{ "node": "Loop Containers", "type": "main", "index": 0 }]] },
+    "Loop Containers": { "main": [
+      [{ "node": "Check Container", "type": "main", "index": 0 }],
+      []
+    ]},
+    "Check Container": { "main": [[{ "node": "Loop Containers", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Infrastructure" }]
+}

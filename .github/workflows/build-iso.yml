@@ -1,4 +1,4 @@
-name: Build HubOS ISO
+name: Build 24HG Forge ISO
 
 on:
   push:
@@ -16,7 +16,7 @@ on:
           - both
 
 env:
-  IMAGE_NAME: hubos
+  IMAGE_NAME: forge
   IMAGE_REGISTRY: git.raggi.is/24hg
 
 jobs:
@@ -77,8 +77,8 @@ jobs:
           image_repo: ${{ env.IMAGE_REGISTRY }}
           image_tag: ${{ matrix.variant }}-latest
           variant: Kinoite
-          iso_name: hubos-${{ matrix.variant }}-${{ github.ref_name }}.iso
-          enrollment_password: hubos
+          iso_name: forge-${{ matrix.variant }}-${{ github.ref_name }}.iso
+          enrollment_password: forge
 
       - name: Generate checksum
         run: |
@@ -88,7 +88,7 @@ jobs:
       - name: Upload ISO as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hubos-${{ matrix.variant }}-iso
+          name: forge-${{ matrix.variant }}-iso
           path: |
             ${{ steps.build-iso.outputs.iso_path }}/*.iso
             ${{ steps.build-iso.outputs.iso_path }}/SHA256SUMS
@@ -113,7 +113,7 @@ jobs:
               -H "Authorization: token ${{ secrets.REGISTRY_TOKEN }}" \
               -H "Content-Type: application/json" \
               "https://git.raggi.is/api/v1/repos/${REPO}/releases" \
-              -d "{\"tag_name\":\"${TAG}\",\"name\":\"HubOS ${TAG}\",\"body\":\"## HubOS ${TAG}\\n\\n### Downloads\\n- **Desktop** (AMD/Intel GPU)\\n- **NVIDIA** (GTX 900+)\\n\\nSee [Roadmap](https://os.24hgaming.com/roadmap.html) for changelog.\"}" \
+              -d "{\"tag_name\":\"${TAG}\",\"name\":\"24HG Forge ${TAG}\",\"body\":\"## 24HG Forge ${TAG}\\n\\n### Downloads\\n- **Desktop** (AMD/Intel GPU)\\n- **NVIDIA** (GTX 900+)\\n\\nSee [Roadmap](https://os.24hgaming.com/roadmap.html) for changelog.\"}" \
               | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
           fi
 

@@ -1,0 +1,20 @@
+[Unit]
+Description=24HG Forge Gaming Performance Tweaks
+After=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Disable transparent huge pages (causes micro-stutters)
+ExecStart=/bin/bash -c 'echo madvise > /sys/kernel/mm/transparent_hugepage/enabled'
+ExecStart=/bin/bash -c 'echo madvise > /sys/kernel/mm/transparent_hugepage/defrag'
+
+# Set I/O scheduler to mq-deadline for NVMe/SSD (better latency)
+ExecStart=/bin/bash -c 'for dev in /sys/block/nvme*/queue/scheduler /sys/block/sd*/queue/scheduler; do [ -f "$dev" ] && echo mq-deadline > "$dev" 2>/dev/null; done; true'
+
+# Disable CPU boost throttling during gaming (let gamemode handle fine-tuning)
+ExecStart=/bin/bash -c 'echo 1 > /sys/devices/system/cpu/cpufreq/boost 2>/dev/null; true'
+
+[Install]
+WantedBy=multi-user.target

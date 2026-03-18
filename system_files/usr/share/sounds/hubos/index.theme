@@ -1,8 +1,0 @@
-[Sound Theme]
-Name=HubOS
-Comment=24 Hour Gaming sound theme
-Inherits=freedesktop
-Directories=stereo
-
-[stereo]
-OutputProfile=stereo

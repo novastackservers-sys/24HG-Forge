@@ -1,0 +1,47 @@
+{
+  "name": "📡 Uptime Alerts → Discord",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "uptime-alert",
+        "options": {}
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "uptime-alert-24hg"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\nconst monitor = body.monitor || body.heartbeat?.monitorJSON || {};\nconst heartbeat = body.heartbeat || body.msg || {};\n\nconst name = monitor.name || body.monitorName || 'Unknown';\nconst status = heartbeat.status === 1 ? 'UP' : 'DOWN';\nconst msg = heartbeat.msg || body.msg || '';\nconst url = monitor.url || '';\nconst duration = heartbeat.duration || 0;\n\nconst isDown = status === 'DOWN';\n\nreturn [{ json: {\n  name, status, msg, url, duration,\n  isDown,\n  color: isDown ? 16711680 : 65280,\n  emoji: isDown ? '🔴' : '🟢',\n  timestamp: new Date().toISOString()\n}}];"
+      },
+      "name": "Parse Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_WEBHOOK_ALERTS }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"{{ $json.emoji }} {{ $json.name }} is {{ $json.status }}\",\n    \"description\": \"{{ $json.msg }}\",\n    \"color\": {{ $json.color }},\n    \"fields\": [\n      { \"name\": \"URL\", \"value\": \"{{ $json.url || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Duration\", \"value\": \"{{ $json.duration }}s\", \"inline\": true }\n    ],\n    \"timestamp\": \"{{ $json.timestamp }}\",\n    \"footer\": { \"text\": \"Uptime Kuma → n8n\" }\n  }]\n}",
+        "options": {}
+      },
+      "name": "Discord Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Parse Alert", "type": "main", "index": 0 }]] },
+    "Parse Alert": { "main": [[{ "node": "Discord Notification", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Infrastructure" }]
+}

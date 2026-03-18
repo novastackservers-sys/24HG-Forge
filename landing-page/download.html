@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Download HubOS — Free Gaming Linux</title>
-    <meta name="description" content="Download HubOS for free. Choose Desktop, NVIDIA, or Steam Deck edition. The gaming Linux that boots into the 24HG ecosystem.">
-    <meta property="og:title" content="Download HubOS">
+    <title>Download 24HG Forge — Free Gaming Linux</title>
+    <meta name="description" content="Download 24HG Forge for free. Choose Desktop, NVIDIA, or Steam Deck edition. The gaming Linux that boots into the 24HG ecosystem.">
+    <meta property="og:title" content="Download 24HG Forge">
     <meta property="og:description" content="Free, open source gaming Linux. 53 tools, 88+ servers, 30-day free VIP.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://os.24hgaming.com/download.html">
@@ -16,7 +16,7 @@
 <body>
 
 <nav class="nav">
-    <a href="index.html" class="nav-logo">HubOS</a>
+    <a href="index.html" class="nav-logo">24HG Forge</a>
     <div class="nav-links">
         <a href="index.html">Home</a>
         <a href="install.html">Install Guide</a>
@@ -29,7 +29,7 @@
 </nav>
 
 <section class="hero">
-    <h1>Download HubOS</h1>
+    <h1>Download 24HG Forge</h1>
     <p>The gaming Linux that boots into the 24HG ecosystem. Free, open source, built for gamers.</p>
     <p style="font-size: 0.95rem; color: var(--text-dim);">Current version: <strong>v1.9</strong></p>
 </section>
@@ -44,20 +44,20 @@
             <div class="tool-card" style="flex: 1; min-width: 260px; text-align: center;">
                 <h3>Desktop Edition</h3>
                 <p style="color: var(--text-dim); font-size: 0.9rem; margin-bottom: 0.5rem;">AMD, Intel, or integrated GPU</p>
-                <p>Includes Mesa drivers, Vulkan, and the full HubOS toolkit.</p>
+                <p>Includes Mesa drivers, Vulkan, and the full 24HG Forge toolkit.</p>
                 <p style="font-size: 0.85rem; color: var(--text-dim);">~4 GB</p>
-                <a href="https://os.24hgaming.com/iso/hubos-desktop-latest.iso" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">Download Desktop ISO</a>
+                <a href="/api/download/desktop" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">Download Desktop ISO</a>
                 <br>
-                <a href="https://os.24hgaming.com/iso/hubos-desktop-latest.iso.sha256" style="font-size: 0.8rem; margin-top: 0.5rem; display: inline-block;">SHA256 checksum</a>
+                <a href="/iso/forge-desktop-latest.iso.sha256" style="font-size: 0.8rem; margin-top: 0.5rem; display: inline-block;">SHA256 checksum</a>
             </div>
             <div class="tool-card" style="flex: 1; min-width: 260px; text-align: center;">
                 <h3>NVIDIA Edition</h3>
                 <p style="color: var(--text-dim); font-size: 0.9rem; margin-bottom: 0.5rem;">NVIDIA GTX 900 series and newer</p>
                 <p>Includes proprietary NVIDIA drivers, CUDA, and NVENC.</p>
                 <p style="font-size: 0.85rem; color: var(--text-dim);">~4.5 GB</p>
-                <a href="https://os.24hgaming.com/iso/hubos-nvidia-latest.iso" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">Download NVIDIA ISO</a>
+                <a href="/api/download/nvidia" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">Download NVIDIA ISO</a>
                 <br>
-                <a href="https://os.24hgaming.com/iso/hubos-nvidia-latest.iso.sha256" style="font-size: 0.8rem; margin-top: 0.5rem; display: inline-block;">SHA256 checksum</a>
+                <a href="/iso/forge-nvidia-latest.iso.sha256" style="font-size: 0.8rem; margin-top: 0.5rem; display: inline-block;">SHA256 checksum</a>
             </div>
             <div class="tool-card" style="flex: 1; min-width: 260px; text-align: center; opacity: 0.5;">
                 <h3>Steam Deck Edition</h3>
@@ -72,7 +72,7 @@
     <section>
         <h2>Verify your download</h2>
         <p>After downloading, verify the file integrity with a SHA256 checksum:</p>
-        <code class="code-block">sha256sum hubos-desktop-latest.iso
+        <code class="code-block">sha256sum forge-desktop-latest.iso
 # Compare the output with the .sha256 file</code>
     </section>
 
@@ -92,7 +92,7 @@
             <div class="feature-card">
                 <div class="icon">&#x1f381;</div>
                 <h3>30-Day Free VIP</h3>
-                <p>Every HubOS install gets 30 days of VIP on all 24HG servers, plus a permanent [HubOS] badge.</p>
+                <p>Every 24HG Forge install gets 30 days of VIP on all 24HG servers, plus a permanent [24HG Forge] badge.</p>
             </div>
             <div class="feature-card">
                 <div class="icon">&#x1f5a5;&#xfe0f;</div>
@@ -129,8 +129,8 @@
         <p class="subtitle">Already on Fedora Atomic? Rebase directly — no ISO needed.</p>
 
         <h3>Rebase from Bazzite or any Fedora Atomic</h3>
-        <p>Run this single command to replace your current OS image with HubOS:</p>
-        <code class="code-block">rpm-ostree rebase ostree-image-signed:docker://git.raggi.is/24hg/hubos:latest</code>
+        <p>Run this single command to replace your current OS image with 24HG Forge:</p>
+        <code class="code-block">rpm-ostree rebase ostree-image-signed:docker://git.raggi.is/24hg/forge:latest</code>
         <p>Then reboot:</p>
         <code class="code-block">systemctl reboot</code>
 
@@ -144,7 +144,7 @@
         <div class="tool-cards">
             <div class="tool-card" style="flex: 1; min-width: 200px; text-align: center;">
                 <h3>Install Guide</h3>
-                <p>Step-by-step instructions to flash, boot, and install HubOS.</p>
+                <p>Step-by-step instructions to flash, boot, and install 24HG Forge.</p>
                 <a href="install.html" class="btn btn-small btn-primary">Read the Guide</a>
             </div>
             <div class="tool-card" style="flex: 1; min-width: 200px; text-align: center;">
@@ -171,5 +171,6 @@
     <p style="margin-top: 0.5rem;">Built on Bazzite / Universal Blue / Fedora Atomic. MIT License.</p>
 </footer>
 
+<script>fetch("/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.pathname,referer:document.referrer})}).catch(()=>{})</script>
 </body>
 </html>

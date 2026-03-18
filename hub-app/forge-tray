@@ -1,0 +1,684 @@
+#!/usr/bin/env python3
+"""
+HubOS System Tray — Live server status, quick-connect, gaming tools
+Lightweight system tray daemon for the 24HG gaming ecosystem.
+Uses libappindicator3 (KDE/GNOME compatible via StatusNotifierItem)
+"""
+
+import json
+import os
+import signal
+import subprocess
+import sys
+from collections import defaultdict
+
+# Graceful shutdown
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+try:
+    import gi
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('AppIndicator3', '0.1')
+    from gi.repository import Gtk, AppIndicator3, GLib
+except (ImportError, ValueError):
+    try:
+        import gi
+        gi.require_version('Gtk', '3.0')
+        from gi.repository import Gtk, GLib
+        AppIndicator3 = None
+    except ImportError:
+        print("GTK3 not available, tray disabled", file=sys.stderr)
+        sys.exit(0)
+
+
+SERVERS_JSON = "/usr/share/hubos/servers.json"
+STATUS_CACHE = os.path.expanduser("~/.cache/hubos/server-status.json")
+HUB_STATE = os.path.expanduser("~/.cache/hubos/hub-state.json")
+HUB_URL = "https://hub.24hgaming.com"
+ICON_NAME = "hubos-logo"
+REFRESH_INTERVAL = 30_000  # ms — refresh menu labels every 30s
+
+
+def load_servers():
+    """Load server list from centralized JSON."""
+    try:
+        with open(SERVERS_JSON) as f:
+            return json.load(f)
+    except Exception:
+        return {"servers": [], "game_labels": {}}
+
+
+def load_status():
+    """Load cached server status from hubos-server-status daemon."""
+    try:
+        with open(STATUS_CACHE) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def load_hub_state():
+    """Load hub bridge state (notifications, DMs, friends)."""
+    try:
+        with open(HUB_STATE) as f:
+            data = json.load(f)
+            # Only trust state if updated within last 2 minutes
+            import time
+            if data.get("updated_at", 0) > time.time() - 120:
+                return data
+    except Exception:
+        pass
+    return None
+
+
+def get_server_status(ip, port, status_data):
+    """Get player count for a specific server from cached data."""
+    if not status_data:
+        return None
+    for srv in status_data.get("servers", []):
+        if srv["ip"] == ip and srv["port"] == port:
+            if srv.get("online"):
+                real = srv["players"] - srv.get("bots", 0)
+                return {"players": real, "max": srv["max_players"], "map": srv.get("map", "")}
+    return None
+
+
+def connect_server(widget, ip, port):
+    """Launch Steam connect to a server."""
+    subprocess.Popen(["xdg-open", f"steam://connect/{ip}:{port}"])
+
+
+def open_hub(widget=None):
+    subprocess.Popen(["/usr/bin/hubos-hub"])
+
+
+def open_discord(widget=None):
+    subprocess.Popen(["xdg-open", "https://discord.gg/ymfEjH6EJN"])
+
+
+def open_diag(widget=None):
+    subprocess.Popen(["konsole", "-e", "hubos-diag"])
+
+
+def open_proton_fix(widget=None):
+    subprocess.Popen(["konsole", "-e", "hubos-proton-fix", "--check"])
+
+
+def switch_profile(widget, profile):
+    subprocess.Popen(["/usr/bin/hubos-performance", profile])
+
+
+def toggle_netguard(widget, action):
+    subprocess.Popen(["/usr/bin/hubos-netguard", action])
+
+
+def toggle_replay(widget, action):
+    subprocess.Popen(["/usr/bin/hubos-replay", action])
+
+
+def save_replay(widget):
+    subprocess.Popen(["/usr/bin/hubos-replay", "save"])
+
+
+def switch_audio(widget, device):
+    subprocess.Popen(["/usr/bin/hubos-audio", "switch", device])
+
+
+def toggle_noise_cancel(widget):
+    subprocess.Popen(["konsole", "-e", "hubos-audio", "noise-cancel"])
+
+
+def open_server_status(widget=None):
+    subprocess.Popen(["konsole", "-e", "hubos-server-status", "--once"])
+
+
+class HubOSTray:
+    def __init__(self):
+        self.menu = None
+        self.indicator = None
+        self.status_icon = None
+        self.build_menu()
+        self.setup_indicator()
+        # Refresh menu periodically to update player counts
+        GLib.timeout_add(REFRESH_INTERVAL, self.refresh_menu)
+
+    def build_menu(self):
+        """Build the system tray context menu with live server data."""
+        menu = Gtk.Menu()
+        data = load_servers()
+        labels = data.get("game_labels", {})
+        servers = data.get("servers", [])
+        status_data = load_status()
+
+        # ── Header: total players online ──
+        total_players = 0
+        total_online = 0
+        if status_data:
+            total_players = status_data.get("total_players", 0)
+            total_online = status_data.get("total_online", 0)
+            header = Gtk.MenuItem(label=f"24HG — {total_players} players on {total_online} servers")
+        else:
+            header = Gtk.MenuItem(label="24HG — Loading server status...")
+        header.set_sensitive(False)
+        menu.append(header)
+
+        # ── Hub connection status ──
+        hub_state = load_hub_state()
+        if hub_state and hub_state.get("connected"):
+            username = hub_state.get("username", "?")
+            unread = hub_state.get("unread_notifications", 0)
+            unread_dms = hub_state.get("unread_dms", 0)
+            online_friends = hub_state.get("online_friends", 0)
+
+            hub_label = f"Hub: {username}"
+            badges = []
+            if unread > 0:
+                badges.append(f"{unread} notif")
+            if unread_dms > 0:
+                badges.append(f"{unread_dms} DMs")
+            if online_friends > 0:
+                badges.append(f"{online_friends} friends online")
+            if badges:
+                hub_label += f" — {', '.join(badges)}"
+
+            hub_info = Gtk.MenuItem(label=hub_label)
+            hub_info.set_sensitive(False)
+            menu.append(hub_info)
+        else:
+            hub_info = Gtk.MenuItem(label="Hub: Not connected")
+            hub_info.set_sensitive(False)
+            menu.append(hub_info)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # ── Open Hub ──
+        item = Gtk.MenuItem(label="Open 24HG Hub")
+        item.connect("activate", open_hub)
+        menu.append(item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # ── Quick Connect submenu by game (with player counts) ──
+        by_game = defaultdict(list)
+        for s in servers:
+            by_game[s["game"]].append(s)
+
+        connect_item = Gtk.MenuItem(label="Quick Connect")
+        connect_menu = Gtk.Menu()
+
+        for game in sorted(by_game.keys()):
+            game_label = labels.get(game, game.upper())
+            game_servers = by_game[game]
+
+            # Calculate total players for this game
+            game_players = 0
+            for s in game_servers:
+                st = get_server_status(s["ip"], s["port"], status_data)
+                if st:
+                    game_players += st["players"]
+
+            if game_players > 0:
+                game_item = Gtk.MenuItem(label=f"{game_label} ({len(game_servers)}) — {game_players} playing")
+            else:
+                game_item = Gtk.MenuItem(label=f"{game_label} ({len(game_servers)})")
+
+            game_submenu = Gtk.Menu()
+
+            for s in game_servers:
+                tags = ", ".join(s.get("tags", []))
+                st = get_server_status(s["ip"], s["port"], status_data)
+
+                if st and st["players"] > 0:
+                    srv_label = f"{s['name']} [{st['players']}/{st['max']}]"
+                    if st["map"]:
+                        srv_label += f" {st['map']}"
+                elif st and st["players"] == 0:
+                    srv_label = f"{s['name']} [empty]"
+                else:
+                    srv_label = s["name"]
+                    if tags:
+                        srv_label += f"  [{tags}]"
+
+                srv_item = Gtk.MenuItem(label=srv_label)
+                srv_item.connect("activate", connect_server, s["ip"], s["port"])
+                game_submenu.append(srv_item)
+
+            game_item.set_submenu(game_submenu)
+            connect_menu.append(game_item)
+
+        connect_item.set_submenu(connect_menu)
+        menu.append(connect_item)
+
+        # ── Server Status CLI ──
+        status_item = Gtk.MenuItem(label="Server Status (detailed)")
+        status_item.connect("activate", open_server_status)
+        menu.append(status_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # ── Gaming Tools ──
+        tools_item = Gtk.MenuItem(label="Gaming Tools")
+        tools_menu = Gtk.Menu()
+
+        # Performance profiles
+        perf_item = Gtk.MenuItem(label="Performance")
+        perf_menu = Gtk.Menu()
+        for profile, desc in [("gaming", "Gaming (Max Performance)"),
+                              ("balanced", "Balanced"),
+                              ("powersave", "Power Save")]:
+            p_item = Gtk.MenuItem(label=desc)
+            p_item.connect("activate", switch_profile, profile)
+            perf_menu.append(p_item)
+        perf_item.set_submenu(perf_menu)
+        tools_menu.append(perf_item)
+
+        # Network Guard
+        net_item = Gtk.MenuItem(label="Network Guard")
+        net_menu = Gtk.Menu()
+        for action, desc in [("start", "Activate (Low Latency)"),
+                             ("stop", "Deactivate (Normal)"),
+                             ("status", "Show Status")]:
+            n_item = Gtk.MenuItem(label=desc)
+            n_item.connect("activate", toggle_netguard, action)
+            net_menu.append(n_item)
+        net_item.set_submenu(net_menu)
+        tools_menu.append(net_item)
+
+        # Replay Buffer
+        replay_item = Gtk.MenuItem(label="Instant Replay")
+        replay_menu = Gtk.Menu()
+        start_item = Gtk.MenuItem(label="Start Recording Buffer")
+        start_item.connect("activate", toggle_replay, "start")
+        replay_menu.append(start_item)
+        save_item = Gtk.MenuItem(label="Save Replay Clip")
+        save_item.connect("activate", save_replay)
+        replay_menu.append(save_item)
+        stop_item = Gtk.MenuItem(label="Stop Recording")
+        stop_item.connect("activate", toggle_replay, "stop")
+        replay_menu.append(stop_item)
+        replay_item.set_submenu(replay_menu)
+        tools_menu.append(replay_item)
+
+        # Audio
+        audio_item = Gtk.MenuItem(label="Audio")
+        audio_menu = Gtk.Menu()
+        for action, desc in [("gaming", "Low Latency Mode"),
+                             ("desktop", "Balanced Mode")]:
+            a_item = Gtk.MenuItem(label=desc)
+            a_item.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-audio", a]))
+            audio_menu.append(a_item)
+        nc_item = Gtk.MenuItem(label="Toggle Noise Cancel")
+        nc_item.connect("activate", toggle_noise_cancel)
+        audio_menu.append(nc_item)
+        audio_item.set_submenu(audio_menu)
+        tools_menu.append(audio_item)
+
+        # Proton Troubleshooter
+        proton_item = Gtk.MenuItem(label="Proton Troubleshooter")
+        proton_item.connect("activate", open_proton_fix)
+        tools_menu.append(proton_item)
+
+        # Night Light
+        night_item = Gtk.MenuItem(label="Night Light")
+        night_menu = Gtk.Menu()
+        for action, desc in [("on", "Enable (Warm)"), ("off", "Disable"), ("on 3000", "Very Warm (Late Night)")]:
+            ni = Gtk.MenuItem(label=desc)
+            ni.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-nightlight"] + a.split()))
+            night_menu.append(ni)
+        night_item.set_submenu(night_menu)
+        tools_menu.append(night_item)
+
+        # Screenshot
+        ss_item = Gtk.MenuItem(label="Screenshot")
+        ss_menu = Gtk.Menu()
+        for action, desc in [("full", "Full Screen (Print)"), ("area", "Select Area (Shift+Print)"), ("window", "Active Window")]:
+            si = Gtk.MenuItem(label=desc)
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-screenshot", a]))
+            ss_menu.append(si)
+        ss_item.set_submenu(ss_menu)
+        tools_menu.append(ss_item)
+
+        # Game Profiles
+        gp_item = Gtk.MenuItem(label="Game Profiles")
+        gp_menu = Gtk.Menu()
+        for action, desc in [("list", "List Profiles"), ("create", "Create New Profile")]:
+            gi = Gtk.MenuItem(label=desc)
+            gi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-game-profiles", a]))
+            gp_menu.append(gi)
+        gp_item.set_submenu(gp_menu)
+        tools_menu.append(gp_item)
+
+        # Controller
+        ctrl_item = Gtk.MenuItem(label="Controller")
+        ctrl_menu = Gtk.Menu()
+        for action, desc in [("list", "Detect Controllers"), ("status", "Controller Status"), ("fix", "Fix Common Issues")]:
+            ci = Gtk.MenuItem(label=desc)
+            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-controller", a]))
+            ctrl_menu.append(ci)
+        ctrl_item.set_submenu(ctrl_menu)
+        tools_menu.append(ctrl_item)
+
+        # Streaming
+        strm_item = Gtk.MenuItem(label="Streaming")
+        strm_menu = Gtk.Menu()
+        for action, desc in [("setup", "Setup Streaming"), ("start", "Start Stream"), ("stop", "Stop Stream"), ("status", "Stream Status")]:
+            si = Gtk.MenuItem(label=desc)
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-stream", a]))
+            strm_menu.append(si)
+        strm_item.set_submenu(strm_menu)
+        tools_menu.append(strm_item)
+
+        # Shader Cache
+        shader_item = Gtk.MenuItem(label="Shader Cache")
+        shader_menu = Gtk.Menu()
+        for action, desc in [("status", "Cache Status"), ("optimize", "Optimize Settings"), ("size", "Disk Usage")]:
+            shi = Gtk.MenuItem(label=desc)
+            shi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-shader-cache", a]))
+            shader_menu.append(shi)
+        shader_item.set_submenu(shader_menu)
+        tools_menu.append(shader_item)
+
+        # Game Compatibility
+        compat_item = Gtk.MenuItem(label="Game Compatibility")
+        compat_menu = Gtk.Menu()
+        for action, desc in [("scan", "Scan Library"), ("check", "Check a Game"), ("report", "Full Report")]:
+            ci = Gtk.MenuItem(label=desc)
+            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-compat", a]))
+            compat_menu.append(ci)
+        compat_item.set_submenu(compat_menu)
+        tools_menu.append(compat_item)
+
+        # Crash Diagnosis
+        crash_item = Gtk.MenuItem(label="Crash Diagnosis")
+        crash_menu = Gtk.Menu()
+        for action, desc in [("diagnose", "Diagnose Last Crash"), ("report", "Generate Report"), ("watch", "Watch for Crashes")]:
+            cri = Gtk.MenuItem(label=desc)
+            cri.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-crash-fix", a]))
+            crash_menu.append(cri)
+        crash_item.set_submenu(crash_menu)
+        tools_menu.append(crash_item)
+
+        # Display Manager
+        disp_item = Gtk.MenuItem(label="Display Manager")
+        disp_menu = Gtk.Menu()
+        for action, desc in [("status", "Display Status"), ("profiles", "Manage Profiles"), ("--gui", "Display Settings")]:
+            di = Gtk.MenuItem(label=desc)
+            di.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-display", a]))
+            disp_menu.append(di)
+        disp_item.set_submenu(disp_menu)
+        tools_menu.append(disp_item)
+
+        # Discord Screen Share
+        dscr_item = Gtk.MenuItem(label="Discord Screen Share")
+        dscr_menu = Gtk.Menu()
+        for action, desc in [("setup", "Setup (One-Time)"), ("start", "Start Sharing"), ("stop", "Stop Sharing"), ("fix", "Fix Issues")]:
+            dsi = Gtk.MenuItem(label=desc)
+            dsi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-discord-screen", a]))
+            dscr_menu.append(dsi)
+        dscr_item.set_submenu(dscr_menu)
+        tools_menu.append(dscr_item)
+
+        # Prefix Manager
+        pfx_item = Gtk.MenuItem(label="Proton Prefixes")
+        pfx_menu = Gtk.Menu()
+        for action, desc in [("list", "List All Prefixes"), ("cleanup", "Cleanup Orphans"), ("health", "Health Check")]:
+            pi = Gtk.MenuItem(label=desc)
+            pi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-prefix", a]))
+            pfx_menu.append(pi)
+        pfx_item.set_submenu(pfx_menu)
+        tools_menu.append(pfx_item)
+
+        # Dual Boot
+        dboot_item = Gtk.MenuItem(label="Dual Boot")
+        dboot_menu = Gtk.Menu()
+        for action, desc in [("status", "Boot Status"), ("quick-reboot windows", "Reboot to Windows"), ("time-fix", "Fix Clock Sync")]:
+            dbi = Gtk.MenuItem(label=desc)
+            dbi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-dualboot"] + a.split()))
+            dboot_menu.append(dbi)
+        dboot_item.set_submenu(dboot_menu)
+        tools_menu.append(dboot_item)
+
+        # Thermal Guard
+        therm_item = Gtk.MenuItem(label="Thermal Guard")
+        therm_menu = Gtk.Menu()
+        for action, desc in [("status", "Temperature Status"), ("monitor", "Live Monitor"), ("fan status", "Fan Status")]:
+            ti = Gtk.MenuItem(label=desc)
+            ti.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-thermal"] + a.split()))
+            therm_menu.append(ti)
+        therm_item.set_submenu(therm_menu)
+        tools_menu.append(therm_item)
+
+        # Download Manager
+        dl_item = Gtk.MenuItem(label="Downloads")
+        dl_menu = Gtk.Menu()
+        for action, desc in [("status", "Download Status"), ("pause", "Pause All"), ("resume", "Resume All"), ("gaming-mode on", "Gaming Mode")]:
+            di = Gtk.MenuItem(label=desc)
+            di.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-download-mgr"] + a.split()))
+            dl_menu.append(di)
+        dl_item.set_submenu(dl_menu)
+        tools_menu.append(dl_item)
+
+        # HDR
+        hdr_item = Gtk.MenuItem(label="HDR Gaming")
+        hdr_menu = Gtk.Menu()
+        for action, desc in [("status", "HDR Status"), ("toggle on", "Enable HDR"), ("toggle off", "Disable HDR"), ("setup", "HDR Setup Wizard")]:
+            hi = Gtk.MenuItem(label=desc)
+            hi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-hdr"] + a.split()))
+            hdr_menu.append(hi)
+        hdr_item.set_submenu(hdr_menu)
+        tools_menu.append(hdr_item)
+
+        # Mod Manager
+        mod_item = Gtk.MenuItem(label="Mod Manager")
+        mod_menu = Gtk.Menu()
+        for action, desc in [("status", "Modding Status"), ("install-vortex", "Install Vortex"), ("install-mo2", "Install Mod Organizer 2")]:
+            mi = Gtk.MenuItem(label=desc)
+            mi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-mod-manager", a]))
+            mod_menu.append(mi)
+        mod_item.set_submenu(mod_menu)
+        tools_menu.append(mod_item)
+
+        # NVIDIA Fix (only show if NVIDIA GPU)
+        try:
+            import subprocess as _sp
+            if _sp.run(["lsmod"], capture_output=True, text=True).stdout.find("nvidia") >= 0:
+                nv_item = Gtk.MenuItem(label="NVIDIA Wayland Fix")
+                nv_menu = Gtk.Menu()
+                for action, desc in [("status", "NVIDIA Status"), ("fix", "Auto-Fix All"), ("flicker-fix", "Fix Flickering")]:
+                    ni = Gtk.MenuItem(label=desc)
+                    ni.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-nvidia-wayland", a]))
+                    nv_menu.append(ni)
+                nv_item.set_submenu(nv_menu)
+                tools_menu.append(nv_item)
+        except Exception:
+            pass
+
+        tools_item.set_submenu(tools_menu)
+        menu.append(tools_item)
+
+        # ── Game Library ──
+        games_item = Gtk.MenuItem(label="My Games")
+        games_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-games", "list"]))
+        menu.append(games_item)
+
+        # ── Game Setup ──
+        setup_item = Gtk.MenuItem(label="Game Setup")
+        setup_menu = Gtk.Menu()
+        for game, label in [("gtav", "GTA V"), ("hogwarts", "Hogwarts Legacy"), ("starfield", "Starfield"),
+                            ("forza", "Forza Horizon 5"), ("warframe", "Warframe"), ("minecraft", "Minecraft")]:
+            gi = Gtk.MenuItem(label=label)
+            gi.connect("activate", lambda w, g=game: subprocess.Popen(["konsole", "-e", "hubos-game-setup", g]))
+            setup_menu.append(gi)
+        setup_item.set_submenu(setup_menu)
+        menu.append(setup_item)
+
+        # ── Save Manager ──
+        saves_item = Gtk.MenuItem(label="Save Games")
+        saves_menu = Gtk.Menu()
+        for action, desc in [("list", "Find All Saves"), ("backup", "Backup All Saves"), ("restore", "Restore Saves")]:
+            si = Gtk.MenuItem(label=desc)
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-save-manager", a]))
+            saves_menu.append(si)
+        saves_item.set_submenu(saves_menu)
+        menu.append(saves_item)
+
+        # ── Anti-Cheat Tracker ──
+        ac_item = Gtk.MenuItem(label="Anti-Cheat Status")
+        ac_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-anticheat-tracker", "scan"]))
+        menu.append(ac_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # ── Utilities ──
+        diag = Gtk.MenuItem(label="Diagnostics")
+        diag.connect("activate", open_diag)
+        menu.append(diag)
+
+        bench = Gtk.MenuItem(label="Benchmark")
+        bench.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-benchmark", "full"]))
+        menu.append(bench)
+
+        playtime = Gtk.MenuItem(label="Playtime Stats")
+        playtime.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-game-timer", "stats"]))
+        menu.append(playtime)
+
+        proton_upd = Gtk.MenuItem(label="Update Proton-GE")
+        proton_upd.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-proton-updater", "update"]))
+        menu.append(proton_upd)
+
+        backup = Gtk.MenuItem(label="Backup Game Saves")
+        backup.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-backup", "create"]))
+        menu.append(backup)
+
+        migrate = Gtk.MenuItem(label="Migrate from Windows")
+        migrate.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-migrate", "scan"]))
+        menu.append(migrate)
+
+        bench_cmp = Gtk.MenuItem(label="Benchmark vs Windows")
+        bench_cmp.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-benchmark-compare", "quick"]))
+        menu.append(bench_cmp)
+
+        # ── Perks ──
+        perks_item = Gtk.MenuItem(label="HubOS Perks")
+        perks_menu = Gtk.Menu()
+        for action, desc in [("status", "View My Perks"), ("claim", "Claim Welcome Package"), ("referral show", "Referral Code"), ("rewards show", "Earn More VIP")]:
+            pi = Gtk.MenuItem(label=desc)
+            pi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-perks"] + a.split()))
+            perks_menu.append(pi)
+        perks_item.set_submenu(perks_menu)
+        menu.append(perks_item)
+
+        # ── Creator Kit ──
+        creator_item = Gtk.MenuItem(label="Creator Kit")
+        creator_menu = Gtk.Menu()
+        for action, desc in [("setup", "Setup OBS Profile"), ("scenes", "Generate Stream Scenes"), ("overlay", "Generate Overlays"), ("clip last 30", "Save Last 30s Clip")]:
+            ci = Gtk.MenuItem(label=desc)
+            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-creator-kit"] + a.split()))
+            creator_menu.append(ci)
+        creator_item.set_submenu(creator_menu)
+        menu.append(creator_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # ── Hub Account ──
+        hub_acct = Gtk.MenuItem(label="Hub Account")
+        hub_acct_menu = Gtk.Menu()
+        if hub_state and hub_state.get("connected"):
+            hub_status = Gtk.MenuItem(label=f"Logged in as {hub_state.get('username', '?')}")
+            hub_status.set_sensitive(False)
+            hub_acct_menu.append(hub_status)
+            hub_logout = Gtk.MenuItem(label="Logout")
+            hub_logout.connect("activate", lambda w: subprocess.Popen(["/usr/bin/hubos-hub-bridge", "logout"]))
+            hub_acct_menu.append(hub_logout)
+        else:
+            hub_login = Gtk.MenuItem(label="Login to 24HG Hub")
+            hub_login.connect("activate", lambda w: subprocess.Popen(["/usr/bin/hubos-hub-bridge", "login"]))
+            hub_acct_menu.append(hub_login)
+        hub_acct.set_submenu(hub_acct_menu)
+        menu.append(hub_acct)
+
+        # ── Personalization ──
+        personal_item = Gtk.MenuItem(label="Personalize")
+        personal_menu = Gtk.Menu()
+
+        ach_item = Gtk.MenuItem(label="Achievements")
+        ach_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-achievements", "list"]))
+        personal_menu.append(ach_item)
+
+        wp_item = Gtk.MenuItem(label="Wallpaper")
+        wp_menu = Gtk.Menu()
+        for action, desc in [("random", "Random Wallpaper"), ("rotate", "Time-Based Rotation"), ("list", "Browse Wallpapers")]:
+            wi = Gtk.MenuItem(label=desc)
+            wi.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-wallpaper", a]))
+            wp_menu.append(wi)
+        wp_item.set_submenu(wp_menu)
+        personal_menu.append(wp_item)
+
+        snd_item = Gtk.MenuItem(label="Sounds")
+        snd_menu = Gtk.Menu()
+        for action, desc in [("enable", "Enable HubOS Sounds"), ("disable", "Use Default Sounds"), ("test", "Test All Sounds")]:
+            si = Gtk.MenuItem(label=desc)
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-sounds", a]))
+            snd_menu.append(si)
+        snd_item.set_submenu(snd_menu)
+        personal_menu.append(snd_item)
+
+        notif_item = Gtk.MenuItem(label="Notification Style")
+        notif_menu = Gtk.Menu()
+        for action, desc in [("gaming", "Gaming (Compact, Top-Right)"), ("desktop", "Desktop (Default)"), ("minimal", "Minimal (Quiet)")]:
+            ni = Gtk.MenuItem(label=desc)
+            ni.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-notify-style", a]))
+            notif_menu.append(ni)
+        notif_item.set_submenu(notif_menu)
+        personal_menu.append(notif_item)
+
+        personal_item.set_submenu(personal_menu)
+        menu.append(personal_item)
+
+        discord = Gtk.MenuItem(label="Discord")
+        discord.connect("activate", open_discord)
+        menu.append(discord)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        quit_item = Gtk.MenuItem(label="Quit")
+        quit_item.connect("activate", Gtk.main_quit)
+        menu.append(quit_item)
+
+        menu.show_all()
+        self.menu = menu
+
+    def refresh_menu(self):
+        """Periodically rebuild the menu to update player counts."""
+        self.build_menu()
+        if self.indicator:
+            self.indicator.set_menu(self.menu)
+        return True  # Keep the timer running
+
+    def setup_indicator(self):
+        if AppIndicator3:
+            self.indicator = AppIndicator3.Indicator.new(
+                "hubos-tray",
+                ICON_NAME,
+                AppIndicator3.IndicatorCategory.APPLICATION_STATUS
+            )
+            self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+            self.indicator.set_title("24HG Hub")
+            self.indicator.set_menu(self.menu)
+        else:
+            self.status_icon = Gtk.StatusIcon.new_from_icon_name(ICON_NAME)
+            self.status_icon.set_title("24HG Hub")
+            self.status_icon.set_tooltip_text("24 Hour Gaming — Right-click for servers")
+            self.status_icon.connect("popup-menu",
+                                     lambda i, b, t: self.menu.popup(None, None, None, None, b, t))
+            self.status_icon.connect("activate", open_hub)
+
+
+def main():
+    tray = HubOSTray()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

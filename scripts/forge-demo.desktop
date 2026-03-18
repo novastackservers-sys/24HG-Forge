@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=24HG Forge Demo Tour
+Comment=Take a guided tour of 24HG Forge
+Exec=/usr/bin/forge-demo start
+Icon=forge-logo
+Terminal=false
+Categories=System;

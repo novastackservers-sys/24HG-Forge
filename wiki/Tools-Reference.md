@@ -1,20 +1,20 @@
 # Tools Reference
 
-Complete reference for all HubOS tools. Every tool is installed to `/usr/bin/` and can be run from any terminal.
+Complete reference for all 24HG Forge tools. Every tool is installed to `/usr/bin/` and can be run from any terminal.
 
 ---
 
 ## Core System
 
-### hubos-neofetch
+### forge-neofetch
 
 Custom system info display with 24HG branding. Shows OS, kernel, CPU, GPU, memory, disk, and desktop info in a styled terminal output.
 
 ```
-Usage: hubos-neofetch
+Usage: forge-neofetch
 ```
 
-No commands or options. Runs automatically when you open a terminal (configurable in `~/.bashrc.d/hubos.sh`).
+No commands or options. Runs automatically when you open a terminal (configurable in `~/.bashrc.d/forge.sh`).
 
 **Example output:**
 
@@ -25,7 +25,7 @@ No commands or options. Runs automatically when you open a terminal (configurabl
     ██   ██ ██    ██ ██   ██ ██    ██      ██
     ██   ██  ██████  ██████   ██████  ███████
 
-    OS:      HubOS (24 Hour Gaming)
+    OS:      24HG Forge (24 Hour Gaming)
     Kernel:  6.8.0-100-generic
     CPU:     AMD Ryzen 7 5800X (16 cores)
     GPU:     NVIDIA GeForce RTX 3070
@@ -37,12 +37,12 @@ No commands or options. Runs automatically when you open a terminal (configurabl
 
 ---
 
-### hubos-diag
+### forge-diag
 
 Collect comprehensive system diagnostics for support tickets. Gathers OS, hardware, GPU, audio, network, Steam, Proton, and log information.
 
 ```
-Usage: hubos-diag [--paste]
+Usage: forge-diag [--paste]
 ```
 
 | Flag | Description |
@@ -52,20 +52,20 @@ Usage: hubos-diag [--paste]
 **Examples:**
 
 ```bash
-hubos-diag                # Print diagnostics to terminal
-hubos-diag --paste        # Upload and get URL like https://termbin.com/abc123
+forge-diag                # Print diagnostics to terminal
+forge-diag --paste        # Upload and get URL like https://termbin.com/abc123
 ```
 
 **Sections collected:** OS info, kernel, hardware (CPU, GPU, RAM), disk layout, display server, audio (PipeWire), network, Steam installation, Proton versions, recent journal errors, loaded kernel modules.
 
 ---
 
-### hubos-performance
+### forge-performance
 
 Switch between performance profiles for different use cases. Controls CPU governor, GPU power mode, compositor, and GameMode.
 
 ```
-Usage: hubos-performance [gaming|balanced|powersave|status]
+Usage: forge-performance [gaming|balanced|powersave|status]
 ```
 
 | Command | Description |
@@ -78,21 +78,21 @@ Usage: hubos-performance [gaming|balanced|powersave|status]
 **Examples:**
 
 ```bash
-hubos-performance gaming     # Switch to gaming mode
-hubos-performance status     # Check current profile
-hubos-performance balanced   # Return to balanced mode
+forge-performance gaming     # Switch to gaming mode
+forge-performance status     # Check current profile
+forge-performance balanced   # Return to balanced mode
 ```
 
 **Supports:** powerprofilesctl, direct sysfs, NVIDIA (nvidia-smi), AMD (dpm_force_performance_level), KDE KWin compositor.
 
 ---
 
-### hubos-update-guard
+### forge-update-guard
 
 Safe system updates with rollback protection. Checks for known issues before applying updates.
 
 ```
-Usage: hubos-update-guard [check|apply|rollback|status|history]
+Usage: forge-update-guard [check|apply|rollback|status|history]
 ```
 
 | Command | Description |
@@ -106,35 +106,35 @@ Usage: hubos-update-guard [check|apply|rollback|status|history]
 **Examples:**
 
 ```bash
-hubos-update-guard check      # See what's new and if it's safe
-hubos-update-guard apply      # Update if safe
-hubos-update-guard rollback   # Undo last update
+forge-update-guard check      # See what's new and if it's safe
+forge-update-guard apply      # Update if safe
+forge-update-guard rollback   # Undo last update
 ```
 
-**Config:** Uses a pre-transaction hook at `/usr/lib/hubos/hubos-update-guard-hook.sh`.
+**Config:** Uses a pre-transaction hook at `/usr/lib/forge/forge-update-guard-hook.sh`.
 
 ---
 
 ## Server & Community
 
-### hubos-hub
+### forge-hub
 
 The main 24HG Hub application. Opens hub.24hgaming.com in a Chromium kiosk window with protocol handler support.
 
 ```
-Usage: hubos-hub [url]
+Usage: forge-hub [url]
 ```
 
 Launched via desktop icon, autostart, or `24hg://` protocol links. Connects to the community hub for servers, chat, forums, tournaments, and leaderboards.
 
 ---
 
-### hubos-tray
+### forge-tray
 
 System tray icon for 24HG integration. Shows connection status, server counts, and provides quick actions.
 
 ```
-Usage: hubos-tray
+Usage: forge-tray
 ```
 
 Runs as an autostart service. Provides a tray icon with:
@@ -145,12 +145,12 @@ Runs as an autostart service. Provides a tray icon with:
 
 ---
 
-### hubos-hub-bridge
+### forge-hub-bridge
 
-Background service that bridges HubOS system events to the 24HG Hub. Syncs playtime, achievements, and system info.
+Background service that bridges 24HG Forge system events to the 24HG Hub. Syncs playtime, achievements, and system info.
 
 ```
-Usage: hubos-hub-bridge [daemon|status|sync]
+Usage: forge-hub-bridge [daemon|status|sync]
 ```
 
 | Command | Description |
@@ -159,32 +159,32 @@ Usage: hubos-hub-bridge [daemon|status|sync]
 | `status` | Show bridge connection status |
 | `sync` | Force sync data to hub |
 
-**Systemd:** `hubos-hub-bridge.service` (user, auto-enabled).
+**Systemd:** `forge-hub-bridge.service` (user, auto-enabled).
 
 ---
 
-### hubos-server-status
+### forge-server-status
 
 Show all 24HG game servers with real-time player counts and status.
 
 ```
-Usage: hubos-server-status
+Usage: forge-server-status
 ```
 
-Queries the server list from `/usr/share/hubos/servers.json` and checks each server's status via game query protocols. Shows player counts, map names, and ping.
+Queries the server list from `/usr/share/forge/servers.json` and checks each server's status via game query protocols. Shows player counts, map names, and ping.
 
-**Systemd:** `hubos-server-status.service` (user, auto-enabled) provides periodic updates.
+**Systemd:** `forge-server-status.service` (user, auto-enabled) provides periodic updates.
 
 ---
 
 ## Gaming Performance
 
-### hubos-smart-launch
+### forge-smart-launch
 
 Intelligent per-game optimization daemon. Automatically detects game launches and applies optimal settings (CPU governor, GPU mode, compositor, env vars) per game.
 
 ```
-Usage: hubos-smart-launch [daemon|apply|config|status|rules|log] [appid]
+Usage: forge-smart-launch [daemon|apply|config|status|rules|log] [appid]
 ```
 
 | Command | Description |
@@ -199,23 +199,23 @@ Usage: hubos-smart-launch [daemon|apply|config|status|rules|log] [appid]
 **Examples:**
 
 ```bash
-hubos-smart-launch status         # See what's currently optimized
-hubos-smart-launch rules          # View built-in rules for known games
-hubos-smart-launch config 730     # Edit CS2 optimization profile
+forge-smart-launch status         # See what's currently optimized
+forge-smart-launch rules          # View built-in rules for known games
+forge-smart-launch config 730     # Edit CS2 optimization profile
 ```
 
-**Systemd:** `hubos-smart-launch.service` (user, auto-enabled). Runs as a daemon that monitors `/proc` for game processes.
+**Systemd:** `forge-smart-launch.service` (user, auto-enabled). Runs as a daemon that monitors `/proc` for game processes.
 
-**Config:** `~/.config/hubos/smart-launch/`
+**Config:** `~/.config/forge/smart-launch/`
 
 ---
 
-### hubos-game-profiles
+### forge-game-profiles
 
 Per-game launch profiles with Proton versions, environment variables, resolution, MangoHud configs, and launch arguments.
 
 ```
-Usage: hubos-game-profiles [create|edit|apply|list|delete|search|import|export|help] [options]
+Usage: forge-game-profiles [create|edit|apply|list|delete|search|import|export|help] [options]
 ```
 
 | Command | Description |
@@ -232,21 +232,21 @@ Usage: hubos-game-profiles [create|edit|apply|list|delete|search|import|export|h
 **Examples:**
 
 ```bash
-hubos-game-profiles create 1245620   # Create Elden Ring profile
-hubos-game-profiles list             # List all profiles
-hubos-game-profiles edit 730         # Edit CS2 profile
+forge-game-profiles create 1245620   # Create Elden Ring profile
+forge-game-profiles list             # List all profiles
+forge-game-profiles edit 730         # Edit CS2 profile
 ```
 
-**Config:** `~/.config/hubos/game-profiles/<appid>.json`
+**Config:** `~/.config/forge/game-profiles/<appid>.json`
 
 ---
 
-### hubos-shader-cache
+### forge-shader-cache
 
 Manage shader caches to eliminate first-launch stuttering. Supports Steam (Flatpak and native), DXVK, Mesa, NVIDIA, and AMD caches.
 
 ```
-Usage: hubos-shader-cache [status|clean|size|prebuild|export|import|optimize]
+Usage: forge-shader-cache [status|clean|size|prebuild|export|import|optimize]
 ```
 
 | Command | Description |
@@ -262,10 +262,10 @@ Usage: hubos-shader-cache [status|clean|size|prebuild|export|import|optimize]
 **Examples:**
 
 ```bash
-hubos-shader-cache status           # Check cache health
-hubos-shader-cache prebuild 730     # Pre-build CS2 shaders
-hubos-shader-cache size             # See how much space caches use
-hubos-shader-cache clean            # Clean stale entries
+forge-shader-cache status           # Check cache health
+forge-shader-cache prebuild 730     # Pre-build CS2 shaders
+forge-shader-cache size             # See how much space caches use
+forge-shader-cache clean            # Clean stale entries
 ```
 
 **Cache locations:** `~/.cache/mesa_shader_cache/`, `~/.cache/nvidia/GLCache/`, Steam shader caches.
@@ -274,12 +274,12 @@ hubos-shader-cache clean            # Clean stale entries
 
 ## Game Management
 
-### hubos-games
+### forge-games
 
 Unified game library across all launchers. Shows all installed games from Steam, Lutris, Heroic, and native sources in one place.
 
 ```
-Usage: hubos-games [list|search|launch|info|recent|stats|refresh] [args]
+Usage: forge-games [list|search|launch|info|recent|stats|refresh] [args]
 ```
 
 | Command | Description |
@@ -295,20 +295,20 @@ Usage: hubos-games [list|search|launch|info|recent|stats|refresh] [args]
 **Examples:**
 
 ```bash
-hubos-games list                     # All games, all launchers
-hubos-games search "cyberpunk"       # Find a game
-hubos-games launch "Counter-Strike 2"  # Launch from any launcher
-hubos-games stats                    # Library breakdown
+forge-games list                     # All games, all launchers
+forge-games search "cyberpunk"       # Find a game
+forge-games launch "Counter-Strike 2"  # Launch from any launcher
+forge-games stats                    # Library breakdown
 ```
 
 ---
 
-### hubos-compat
+### forge-compat
 
 Game compatibility checker. Queries ProtonDB, Steam, and anti-cheat databases.
 
 ```
-Usage: hubos-compat [check|search|scan|report|status] [appid|name]
+Usage: forge-compat [check|search|scan|report|status] [appid|name]
 ```
 
 | Command | Description |
@@ -322,20 +322,20 @@ Usage: hubos-compat [check|search|scan|report|status] [appid|name]
 **Examples:**
 
 ```bash
-hubos-compat check 730               # Check CS2
-hubos-compat check "Elden Ring"      # Check by name
-hubos-compat scan                    # Check entire library
-hubos-compat status                  # System readiness
+forge-compat check 730               # Check CS2
+forge-compat check "Elden Ring"      # Check by name
+forge-compat scan                    # Check entire library
+forge-compat status                  # System readiness
 ```
 
 ---
 
-### hubos-anticheat-tracker
+### forge-anticheat-tracker
 
 Track anti-cheat compatibility for your Steam library. Notifies you when games enable Linux support.
 
 ```
-Usage: hubos-anticheat-tracker [scan|watch|status|check|updates|database] [game]
+Usage: forge-anticheat-tracker [scan|watch|status|check|updates|database] [game]
 ```
 
 | Command | Description |
@@ -350,23 +350,23 @@ Usage: hubos-anticheat-tracker [scan|watch|status|check|updates|database] [game]
 **Examples:**
 
 ```bash
-hubos-anticheat-tracker scan          # Full library scan
-hubos-anticheat-tracker check "PUBG"  # Check a specific game
-hubos-anticheat-tracker updates       # Recent changes
+forge-anticheat-tracker scan          # Full library scan
+forge-anticheat-tracker check "PUBG"  # Check a specific game
+forge-anticheat-tracker updates       # Recent changes
 ```
 
-**Systemd:** `hubos-anticheat-tracker.timer` (user, daily). Sends desktop notifications when status changes.
+**Systemd:** `forge-anticheat-tracker.timer` (user, daily). Sends desktop notifications when status changes.
 
-**Data:** `~/.local/share/hubos/anticheat/`
+**Data:** `~/.local/share/forge/anticheat/`
 
 ---
 
-### hubos-game-timer
+### forge-game-timer
 
 Track playtime across all game launchers. Monitors Steam, Lutris, Heroic, native games, and GameMode sessions.
 
 ```
-Usage: hubos-game-timer [start|stop|status|stats|report|export|daemon|help] [game]
+Usage: forge-game-timer [start|stop|status|stats|report|export|daemon|help] [game]
 ```
 
 | Command | Description |
@@ -382,25 +382,25 @@ Usage: hubos-game-timer [start|stop|status|stats|report|export|daemon|help] [gam
 **Examples:**
 
 ```bash
-hubos-game-timer status               # What's running now
-hubos-game-timer stats                # Top 10 by playtime
-hubos-game-timer report weekly        # This week's breakdown
+forge-game-timer status               # What's running now
+forge-game-timer stats                # Top 10 by playtime
+forge-game-timer report weekly        # This week's breakdown
 ```
 
-**Systemd:** `hubos-game-timer.service` (user, auto-enabled).
+**Systemd:** `forge-game-timer.service` (user, auto-enabled).
 
-**Data:** `~/.local/share/hubos/game-timer.json`
+**Data:** `~/.local/share/forge/game-timer.json`
 
 ---
 
 ## Proton & Wine
 
-### hubos-proton-fix
+### forge-proton-fix
 
 Diagnose and fix Proton/Wine game issues. Checks Vulkan, Proton versions, game logs, and common failure modes.
 
 ```
-Usage: hubos-proton-fix [appid|game-name] [--fix]
+Usage: forge-proton-fix [appid|game-name] [--fix]
 ```
 
 | Flag | Description |
@@ -410,9 +410,9 @@ Usage: hubos-proton-fix [appid|game-name] [--fix]
 **Examples:**
 
 ```bash
-hubos-proton-fix 730                 # Diagnose CS2
-hubos-proton-fix "Elden Ring" --fix  # Diagnose and auto-fix
-hubos-proton-fix 252490              # Diagnose Rust
+forge-proton-fix 730                 # Diagnose CS2
+forge-proton-fix "Elden Ring" --fix  # Diagnose and auto-fix
+forge-proton-fix 252490              # Diagnose Rust
 ```
 
 **Checks:** Vulkan drivers, Proton versions, crash logs, missing dependencies (vcredist, .NET, DirectX), anti-cheat status, Wine prefix health.
@@ -421,12 +421,12 @@ hubos-proton-fix 252490              # Diagnose Rust
 
 ---
 
-### hubos-proton-updater
+### forge-proton-updater
 
 Automatically keep Proton-GE up to date. Manages GloriousEggroll's Proton-GE custom builds.
 
 ```
-Usage: hubos-proton-updater [check|update|list|set-default|cleanup|auto] [options]
+Usage: forge-proton-updater [check|update|list|set-default|cleanup|auto] [options]
 ```
 
 | Command | Description |
@@ -441,24 +441,24 @@ Usage: hubos-proton-updater [check|update|list|set-default|cleanup|auto] [option
 **Examples:**
 
 ```bash
-hubos-proton-updater check           # Is there an update?
-hubos-proton-updater update          # Install latest
-hubos-proton-updater list            # See all installed versions
-hubos-proton-updater cleanup         # Remove old versions
+forge-proton-updater check           # Is there an update?
+forge-proton-updater update          # Install latest
+forge-proton-updater list            # See all installed versions
+forge-proton-updater cleanup         # Remove old versions
 ```
 
-**Systemd:** `hubos-proton-updater.timer` (user, weekly check).
+**Systemd:** `forge-proton-updater.timer` (user, weekly check).
 
 **Install path:** `~/.local/share/Steam/compatibilitytools.d/` (Flatpak or native Steam).
 
 ---
 
-### hubos-prefix
+### forge-prefix
 
 Wine/Proton prefix manager. Manages prefixes for Steam games -- list, inspect, health-check, backup, restore, install dependencies, and reset.
 
 ```
-Usage: hubos-prefix [list|info|health|install-deps|backup|restore|cleanup|reset] [options]
+Usage: forge-prefix [list|info|health|install-deps|backup|restore|cleanup|reset] [options]
 ```
 
 | Command | Description |
@@ -482,24 +482,24 @@ Usage: hubos-prefix [list|info|health|install-deps|backup|restore|cleanup|reset]
 **Examples:**
 
 ```bash
-hubos-prefix list                     # See all prefixes and sizes
-hubos-prefix info 730                 # CS2 prefix details
-hubos-prefix health 1245620           # Health-check Elden Ring prefix
-hubos-prefix install-deps 12345 vcredist  # Install VC++ redistributables
-hubos-prefix backup 730               # Backup CS2 prefix
-hubos-prefix reset 12345              # Nuclear reset (backs up saves)
+forge-prefix list                     # See all prefixes and sizes
+forge-prefix info 730                 # CS2 prefix details
+forge-prefix health 1245620           # Health-check Elden Ring prefix
+forge-prefix install-deps 12345 vcredist  # Install VC++ redistributables
+forge-prefix backup 730               # Backup CS2 prefix
+forge-prefix reset 12345              # Nuclear reset (backs up saves)
 ```
 
-**Backup path:** `~/.local/share/hubos/prefix-backups/`
+**Backup path:** `~/.local/share/forge/prefix-backups/`
 
 ---
 
-### hubos-crash-fix
+### forge-crash-fix
 
 Game crash diagnosis and auto-fix tool. Analyzes Steam/Proton crash logs, system journals, and common failure modes.
 
 ```
-Usage: hubos-crash-fix [diagnose|fix|log|report|watch] [appid|name] [options]
+Usage: forge-crash-fix [diagnose|fix|log|report|watch] [appid|name] [options]
 ```
 
 | Command | Description |
@@ -519,23 +519,23 @@ Usage: hubos-crash-fix [diagnose|fix|log|report|watch] [appid|name] [options]
 **Examples:**
 
 ```bash
-hubos-crash-fix diagnose 1245620      # Why did Elden Ring crash?
-hubos-crash-fix fix 730               # Auto-fix CS2 crash issues
-hubos-crash-fix log 252490            # Show Rust crash logs
-hubos-crash-fix report                # Full report for support
-hubos-crash-fix watch                 # Monitor all games
+forge-crash-fix diagnose 1245620      # Why did Elden Ring crash?
+forge-crash-fix fix 730               # Auto-fix CS2 crash issues
+forge-crash-fix log 252490            # Show Rust crash logs
+forge-crash-fix report                # Full report for support
+forge-crash-fix watch                 # Monitor all games
 ```
 
 ---
 
 ## Display & Graphics
 
-### hubos-display
+### forge-display
 
 Multi-monitor and display settings manager. Handles gaming/desktop modes, VRR, profiles, and per-monitor settings. Auto-detects Wayland vs X11.
 
 ```
-Usage: hubos-display [status|list|gaming|desktop|save|load|vrr|resolution] [options]
+Usage: forge-display [status|list|gaming|desktop|save|load|vrr|resolution] [options]
 ```
 
 | Command | Description |
@@ -552,23 +552,23 @@ Usage: hubos-display [status|list|gaming|desktop|save|load|vrr|resolution] [opti
 **Examples:**
 
 ```bash
-hubos-display status                  # Current config
-hubos-display gaming                  # Optimize for gaming
-hubos-display save "triple-monitor"   # Save layout
-hubos-display load "triple-monitor"   # Restore layout
-hubos-display vrr                     # Toggle VRR
+forge-display status                  # Current config
+forge-display gaming                  # Optimize for gaming
+forge-display save "triple-monitor"   # Save layout
+forge-display load "triple-monitor"   # Restore layout
+forge-display vrr                     # Toggle VRR
 ```
 
-**Profiles:** `~/.config/hubos/display-profiles/`
+**Profiles:** `~/.config/forge/display-profiles/`
 
 ---
 
-### hubos-hdr
+### forge-hdr
 
 HDR gaming configuration wizard. Handles hardware detection, KDE Plasma 6 config, gamescope integration, and per-game HDR profiles.
 
 ```
-Usage: hubos-hdr [setup|status|enable|disable|game|calibrate|test] [options]
+Usage: forge-hdr [setup|status|enable|disable|game|calibrate|test] [options]
 ```
 
 | Command | Description |
@@ -584,21 +584,21 @@ Usage: hubos-hdr [setup|status|enable|disable|game|calibrate|test] [options]
 **Examples:**
 
 ```bash
-hubos-hdr setup                       # Full setup wizard
-hubos-hdr status                      # Check HDR support
-hubos-hdr game 1091500                # HDR for Cyberpunk 2077
+forge-hdr setup                       # Full setup wizard
+forge-hdr status                      # Check HDR support
+forge-hdr game 1091500                # HDR for Cyberpunk 2077
 ```
 
-**Config:** `~/.config/hubos/hdr/`
+**Config:** `~/.config/forge/hdr/`
 
 ---
 
-### hubos-nvidia-wayland
+### forge-nvidia-wayland
 
 Auto-detect and fix all NVIDIA + Wayland gaming issues. The most comprehensive NVIDIA Wayland fix tool for Linux.
 
 ```
-Usage: hubos-nvidia-wayland [fix|status|diagnose|optimize|env|flicker-fix|sync|driver-check]
+Usage: forge-nvidia-wayland [fix|status|diagnose|optimize|env|flicker-fix|sync|driver-check]
 ```
 
 | Command | Description |
@@ -615,10 +615,10 @@ Usage: hubos-nvidia-wayland [fix|status|diagnose|optimize|env|flicker-fix|sync|d
 **Examples:**
 
 ```bash
-hubos-nvidia-wayland fix              # Fix everything
-hubos-nvidia-wayland status           # Health check
-hubos-nvidia-wayland flicker-fix      # Just fix flickering
-hubos-nvidia-wayland driver-check     # Check driver
+forge-nvidia-wayland fix              # Fix everything
+forge-nvidia-wayland status           # Health check
+forge-nvidia-wayland flicker-fix      # Just fix flickering
+forge-nvidia-wayland driver-check     # Check driver
 ```
 
 **Config:** `~/.config/environment.d/nvidia-gaming.conf`
@@ -627,12 +627,12 @@ hubos-nvidia-wayland driver-check     # Check driver
 
 ## Audio
 
-### hubos-audio
+### forge-audio
 
 PipeWire audio optimizer. Configures low-latency gaming audio, noise cancellation, and device switching.
 
 ```
-Usage: hubos-audio [gaming|desktop|devices|switch|noise-cancel|status] [name]
+Usage: forge-audio [gaming|desktop|devices|switch|noise-cancel|status] [name]
 ```
 
 | Command | Description |
@@ -647,25 +647,25 @@ Usage: hubos-audio [gaming|desktop|devices|switch|noise-cancel|status] [name]
 **Examples:**
 
 ```bash
-hubos-audio status                    # Current config
-hubos-audio gaming                    # Low-latency mode
-hubos-audio devices                   # List all devices
-hubos-audio switch "Headphones"       # Switch output
-hubos-audio noise-cancel              # Toggle noise cancel
+forge-audio status                    # Current config
+forge-audio gaming                    # Low-latency mode
+forge-audio devices                   # List all devices
+forge-audio switch "Headphones"       # Switch output
+forge-audio noise-cancel              # Toggle noise cancel
 ```
 
-**Config:** `/etc/pipewire/pipewire.conf.d/99-hubos-defaults.conf` (system), managed per-profile.
+**Config:** `/etc/pipewire/pipewire.conf.d/99-forge-defaults.conf` (system), managed per-profile.
 
 ---
 
 ## Input
 
-### hubos-input
+### forge-input
 
 Input latency optimizer for mice and keyboards. Configures acceleration profiles and polling rates for competitive gaming.
 
 ```
-Usage: hubos-input [gaming|desktop|status]
+Usage: forge-input [gaming|desktop|status]
 ```
 
 | Command | Description |
@@ -677,21 +677,21 @@ Usage: hubos-input [gaming|desktop|status]
 **Examples:**
 
 ```bash
-hubos-input gaming                    # Flat mouse accel, max polling
-hubos-input status                    # Current settings
-hubos-input desktop                   # Restore defaults
+forge-input gaming                    # Flat mouse accel, max polling
+forge-input status                    # Current settings
+forge-input desktop                   # Restore defaults
 ```
 
 **Applies to:** xinput (X11), KDE kcminputrc (Wayland), libinput settings.
 
 ---
 
-### hubos-controller
+### forge-controller
 
 Gamepad manager. Detects, calibrates, profiles, remaps, and troubleshoots controllers. Supports Xbox, PlayStation, Nintendo, 8BitDo, and generic HID.
 
 ```
-Usage: hubos-controller [list|test|calibrate|profile|map|fix|status] [device]
+Usage: forge-controller [list|test|calibrate|profile|map|fix|status] [device]
 ```
 
 | Command | Description |
@@ -707,24 +707,24 @@ Usage: hubos-controller [list|test|calibrate|profile|map|fix|status] [device]
 **Examples:**
 
 ```bash
-hubos-controller list                 # See all controllers
-hubos-controller test                 # Test button input
-hubos-controller fix                  # Fix detection issues
-hubos-controller calibrate            # Calibrate joysticks
+forge-controller list                 # See all controllers
+forge-controller test                 # Test button input
+forge-controller fix                  # Fix detection issues
+forge-controller calibrate            # Calibrate joysticks
 ```
 
-**Profiles:** `~/.config/hubos/controller/`
+**Profiles:** `~/.config/forge/controller/`
 
 ---
 
 ## Recording & Streaming
 
-### hubos-replay
+### forge-replay
 
 Instant replay recording (like NVIDIA ShadowPlay). Uses gpu-screen-recorder for zero-overhead hardware-accelerated recording. Saves the last N minutes when you press F9.
 
 ```
-Usage: hubos-replay [start|stop|save|status|config]
+Usage: forge-replay [start|stop|save|status|config]
 ```
 
 | Command | Description |
@@ -738,28 +738,28 @@ Usage: hubos-replay [start|stop|save|status|config]
 **Examples:**
 
 ```bash
-hubos-replay start                    # Start recording
-hubos-replay save                     # Save last 2 minutes
-hubos-replay status                   # Check if recording
-hubos-replay config                   # Change settings
+forge-replay start                    # Start recording
+forge-replay save                     # Save last 2 minutes
+forge-replay status                   # Check if recording
+forge-replay config                   # Change settings
 ```
 
 **Defaults:** 120 seconds buffer, 60 FPS, very_high quality, auto-detect encoder (NVENC/VAAPI).
 
-**Clips saved to:** `~/Videos/HubOS Clips/`
+**Clips saved to:** `~/Videos/24HG Forge Clips/`
 
-**Config:** `~/.config/hubos/replay.conf`
+**Config:** `~/.config/forge/replay.conf`
 
-**Systemd:** `hubos-replay.service` (user, manual start).
+**Systemd:** `forge-replay.service` (user, manual start).
 
 ---
 
-### hubos-stream
+### forge-stream
 
 One-command streaming setup and control. Supports Twitch, YouTube, Kick, and custom RTMP targets. Uses OBS when available, falls back to FFmpeg.
 
 ```
-Usage: hubos-stream [setup|start|stop|status|config|obs-scenes]
+Usage: forge-stream [setup|start|stop|status|config|obs-scenes]
 ```
 
 | Command | Description |
@@ -769,26 +769,26 @@ Usage: hubos-stream [setup|start|stop|status|config|obs-scenes]
 | `stop` | Stop streaming |
 | `status` | Show stream status |
 | `config` | Edit stream settings |
-| `obs-scenes` | Install HubOS-optimized OBS scene templates |
+| `obs-scenes` | Install 24HG Forge-optimized OBS scene templates |
 
 **Examples:**
 
 ```bash
-hubos-stream setup                    # Configure Twitch/YouTube/Kick
-hubos-stream start                    # Go live
-hubos-stream stop                     # Stop streaming
+forge-stream setup                    # Configure Twitch/YouTube/Kick
+forge-stream start                    # Go live
+forge-stream stop                     # Stop streaming
 ```
 
-**Config:** `~/.config/hubos/stream.conf`
+**Config:** `~/.config/forge/stream.conf`
 
 ---
 
-### hubos-creator-kit
+### forge-creator-kit
 
 Content creation utilities. Scene templates, overlay setup, and encoding profiles for streamers and content creators.
 
 ```
-Usage: hubos-creator-kit [setup|templates|overlays|encode|help]
+Usage: forge-creator-kit [setup|templates|overlays|encode|help]
 ```
 
 | Command | Description |
@@ -800,12 +800,12 @@ Usage: hubos-creator-kit [setup|templates|overlays|encode|help]
 
 ---
 
-### hubos-screenshot
+### forge-screenshot
 
-Screenshot tool with HubOS branding and automatic saving. Supports full screen, area selection, and active window capture.
+Screenshot tool with 24HG Forge branding and automatic saving. Supports full screen, area selection, and active window capture.
 
 ```
-Usage: hubos-screenshot [full|area|window]
+Usage: forge-screenshot [full|area|window]
 ```
 
 | Command | Description |
@@ -814,18 +814,18 @@ Usage: hubos-screenshot [full|area|window]
 | `area` | Select area to capture (Shift+Print shortcut) |
 | `window` | Capture active window (Meta+Print shortcut) |
 
-**Saves to:** `~/Pictures/HubOS Screenshots/`
+**Saves to:** `~/Pictures/24HG Forge Screenshots/`
 
 ---
 
 ## Network
 
-### hubos-netguard
+### forge-netguard
 
 Network monitoring for gaming. Tracks connections made by games, detects anomalies, and provides latency diagnostics.
 
 ```
-Usage: hubos-netguard [status|monitor|latency|firewall|help]
+Usage: forge-netguard [status|monitor|latency|firewall|help]
 ```
 
 | Command | Description |
@@ -838,18 +838,18 @@ Usage: hubos-netguard [status|monitor|latency|firewall|help]
 **Examples:**
 
 ```bash
-hubos-netguard status                 # Current connections
-hubos-netguard latency                # Ping game servers
+forge-netguard status                 # Current connections
+forge-netguard latency                # Ping game servers
 ```
 
 ---
 
-### hubos-download-mgr
+### forge-download-mgr
 
 Download manager for game-related downloads. Manages bandwidth allocation and scheduling.
 
 ```
-Usage: hubos-download-mgr [status|limit|schedule|queue|help]
+Usage: forge-download-mgr [status|limit|schedule|queue|help]
 ```
 
 | Command | Description |
@@ -863,12 +863,12 @@ Usage: hubos-download-mgr [status|limit|schedule|queue|help]
 
 ## System Maintenance
 
-### hubos-backup
+### forge-backup
 
-Automated game save and config backup. Backs up saves, HubOS configs, and important dotfiles.
+Automated game save and config backup. Backs up saves, 24HG Forge configs, and important dotfiles.
 
 ```
-Usage: hubos-backup [now|status|restore|list|config|help]
+Usage: forge-backup [now|status|restore|list|config|help]
 ```
 
 | Command | Description |
@@ -879,16 +879,16 @@ Usage: hubos-backup [now|status|restore|list|config|help]
 | `list` | List available backups |
 | `config` | Edit backup settings (paths, schedule, retention) |
 
-**Systemd:** `hubos-backup.timer` (user, daily).
+**Systemd:** `forge-backup.timer` (user, daily).
 
 ---
 
-### hubos-save-manager
+### forge-save-manager
 
 Find, backup, and restore game save files across all launchers and prefix locations.
 
 ```
-Usage: hubos-save-manager [find|list|backup|restore|sync|help] [appid|name]
+Usage: forge-save-manager [find|list|backup|restore|sync|help] [appid|name]
 ```
 
 | Command | Description |
@@ -902,31 +902,31 @@ Usage: hubos-save-manager [find|list|backup|restore|sync|help] [appid|name]
 **Examples:**
 
 ```bash
-hubos-save-manager find 1245620       # Find Elden Ring saves
-hubos-save-manager list               # All save locations
-hubos-save-manager backup 730         # Backup CS2 saves
+forge-save-manager find 1245620       # Find Elden Ring saves
+forge-save-manager list               # All save locations
+forge-save-manager backup 730         # Backup CS2 saves
 ```
 
 ---
 
-### hubos-flatpak-fix
+### forge-flatpak-fix
 
 Fix Flatpak filesystem permissions for Steam, Lutris, and other gaming apps.
 
 ```
-Usage: hubos-flatpak-fix
+Usage: forge-flatpak-fix
 ```
 
 No subcommands. Reconfigures Flatpak overrides so gaming apps can access game drives, external storage, and shared directories.
 
 ---
 
-### hubos-dualboot
+### forge-dualboot
 
 Dual-boot management tool. Detects other operating systems and manages GRUB bootloader.
 
 ```
-Usage: hubos-dualboot [status|repair|timeout] [value]
+Usage: forge-dualboot [status|repair|timeout] [value]
 ```
 
 | Command | Description |
@@ -939,12 +939,12 @@ Usage: hubos-dualboot [status|repair|timeout] [value]
 
 ## Migration & Setup
 
-### hubos-migrate
+### forge-migrate
 
-Migrate settings and data from Windows or another Linux distro to HubOS.
+Migrate settings and data from Windows or another Linux distro to 24HG Forge.
 
 ```
-Usage: hubos-migrate [scan|import|status|help]
+Usage: forge-migrate [scan|import|status|help]
 ```
 
 | Command | Description |
@@ -955,34 +955,34 @@ Usage: hubos-migrate [scan|import|status|help]
 
 ---
 
-### hubos-discord-fix
+### forge-discord-fix
 
-Fix Discord integration on HubOS. Configures PipeWire, XDG portals, and Flatpak permissions.
+Fix Discord integration on 24HG Forge. Configures PipeWire, XDG portals, and Flatpak permissions.
 
 ```
-Usage: hubos-discord-fix
+Usage: forge-discord-fix
 ```
 
-Runs automatically as a systemd service (`hubos-discord-fix.service`). Ensures Discord can access audio, screen share, and system notifications.
+Runs automatically as a systemd service (`forge-discord-fix.service`). Ensures Discord can access audio, screen share, and system notifications.
 
 ---
 
-### hubos-discord-screen
+### forge-discord-screen
 
 Fix Discord screen sharing specifically. Configures PipeWire screen capture portal for Wayland.
 
 ```
-Usage: hubos-discord-screen
+Usage: forge-discord-screen
 ```
 
 ---
 
-### hubos-first-boot
+### forge-first-boot
 
-First boot wizard for new HubOS installations. Guides users through GPU detection, display setup, account connection, and preferences.
+First boot wizard for new 24HG Forge installations. Guides users through GPU detection, display setup, account connection, and preferences.
 
 ```
-Usage: hubos-first-boot
+Usage: forge-first-boot
 ```
 
 Launched automatically via autostart desktop entry on the first login. Can be re-run manually.
@@ -991,12 +991,12 @@ Launched automatically via autostart desktop entry on the first login. Can be re
 
 ## Personalization
 
-### hubos-wallpaper
+### forge-wallpaper
 
-Wallpaper manager with rotation support. Manages HubOS-branded wallpapers and custom wallpaper collections.
+Wallpaper manager with rotation support. Manages 24HG Forge-branded wallpapers and custom wallpaper collections.
 
 ```
-Usage: hubos-wallpaper [set|random|rotate|list|add|help]
+Usage: forge-wallpaper [set|random|rotate|list|add|help]
 ```
 
 | Command | Description |
@@ -1007,16 +1007,16 @@ Usage: hubos-wallpaper [set|random|rotate|list|add|help]
 | `list` | List available wallpapers |
 | `add <file>` | Add a wallpaper to the collection |
 
-**Systemd:** `hubos-wallpaper.timer` (user, for rotation).
+**Systemd:** `forge-wallpaper.timer` (user, for rotation).
 
 ---
 
-### hubos-sounds
+### forge-sounds
 
-Sound theme manager. Switches between HubOS sound themes for system events.
+Sound theme manager. Switches between 24HG Forge sound themes for system events.
 
 ```
-Usage: hubos-sounds [list|set|preview|mute|help]
+Usage: forge-sounds [list|set|preview|mute|help]
 ```
 
 | Command | Description |
@@ -1028,12 +1028,12 @@ Usage: hubos-sounds [list|set|preview|mute|help]
 
 ---
 
-### hubos-achievements
+### forge-achievements
 
 Community achievement tracker. Tracks gaming milestones and syncs with the 24HG Hub.
 
 ```
-Usage: hubos-achievements [list|check|sync|help]
+Usage: forge-achievements [list|check|sync|help]
 ```
 
 | Command | Description |
@@ -1042,16 +1042,16 @@ Usage: hubos-achievements [list|check|sync|help]
 | `check` | Check for newly earned achievements |
 | `sync` | Sync achievements with 24HG Hub |
 
-**Systemd:** `hubos-achievements.timer` (user, periodic check).
+**Systemd:** `forge-achievements.timer` (user, periodic check).
 
 ---
 
-### hubos-tips
+### forge-tips
 
-Display gaming tips and HubOS feature highlights. Shows helpful tips in notifications.
+Display gaming tips and 24HG Forge feature highlights. Shows helpful tips in notifications.
 
 ```
-Usage: hubos-tips [show|random|list|disable|help]
+Usage: forge-tips [show|random|list|disable|help]
 ```
 
 | Command | Description |
@@ -1063,12 +1063,12 @@ Usage: hubos-tips [show|random|list|disable|help]
 
 ---
 
-### hubos-notify-style
+### forge-notify-style
 
 Notification style manager. Configures how desktop notifications appear during gaming.
 
 ```
-Usage: hubos-notify-style [gaming|minimal|full|custom|status|help]
+Usage: forge-notify-style [gaming|minimal|full|custom|status|help]
 ```
 
 | Command | Description |
@@ -1081,17 +1081,17 @@ Usage: hubos-notify-style [gaming|minimal|full|custom|status|help]
 
 ---
 
-### hubos-desktop-setup
+### forge-desktop-setup
 
 Desktop layout and widget configuration. Manages KDE Plasma panel layout, widgets, and desktop shortcuts.
 
 ```
-Usage: hubos-desktop-setup [default|gaming|minimal|reset|help]
+Usage: forge-desktop-setup [default|gaming|minimal|reset|help]
 ```
 
 | Command | Description |
 |---------|-------------|
-| `default` | Apply HubOS default desktop layout |
+| `default` | Apply 24HG Forge default desktop layout |
 | `gaming` | Gaming-focused layout (minimal panels, quick-launch) |
 | `minimal` | Clean minimal layout |
 | `reset` | Reset to factory defaults |
@@ -1100,12 +1100,12 @@ Usage: hubos-desktop-setup [default|gaming|minimal|reset|help]
 
 ## Adoption & Community
 
-### hubos-perks
+### forge-perks
 
-Manage VIP perks for HubOS users on 24HG game servers.
+Manage VIP perks for 24HG Forge users on 24HG game servers.
 
 ```
-Usage: hubos-perks [claim|status|list|help]
+Usage: forge-perks [claim|status|list|help]
 ```
 
 | Command | Description |
@@ -1114,16 +1114,16 @@ Usage: hubos-perks [claim|status|list|help]
 | `status` | Show current perk status |
 | `list` | List all available perks |
 
-**Systemd:** `hubos-perks-claim.service` (user, auto-start to check claim status).
+**Systemd:** `forge-perks-claim.service` (user, auto-start to check claim status).
 
 ---
 
-### hubos-benchmark
+### forge-benchmark
 
 System benchmark tool. Tests GPU, CPU, and storage performance with gaming-relevant workloads.
 
 ```
-Usage: hubos-benchmark [run|gpu|cpu|storage|results|help]
+Usage: forge-benchmark [run|gpu|cpu|storage|results|help]
 ```
 
 | Command | Description |
@@ -1136,12 +1136,12 @@ Usage: hubos-benchmark [run|gpu|cpu|storage|results|help]
 
 ---
 
-### hubos-benchmark-compare
+### forge-benchmark-compare
 
-Compare benchmark results with other HubOS users and community averages.
+Compare benchmark results with other 24HG Forge users and community averages.
 
 ```
-Usage: hubos-benchmark-compare [latest|upload|compare|leaderboard|help]
+Usage: forge-benchmark-compare [latest|upload|compare|leaderboard|help]
 ```
 
 | Command | Description |
@@ -1153,24 +1153,24 @@ Usage: hubos-benchmark-compare [latest|upload|compare|leaderboard|help]
 
 ---
 
-### hubos-demo
+### forge-demo
 
-Interactive HubOS feature demo. Showcases all major tools and features for new users.
+Interactive 24HG Forge feature demo. Showcases all major tools and features for new users.
 
 ```
-Usage: hubos-demo
+Usage: forge-demo
 ```
 
-Launched from the desktop (`hubos-demo.desktop`) or terminal. Walks through each tool category with examples and explanations.
+Launched from the desktop (`forge-demo.desktop`) or terminal. Walks through each tool category with examples and explanations.
 
 ---
 
-### hubos-mod-manager
+### forge-mod-manager
 
 Game mod manager. Handles Nexus Mods NXM protocol links and mod installation for Proton/Wine games.
 
 ```
-Usage: hubos-mod-manager [install|list|enable|disable|update|help] [appid]
+Usage: forge-mod-manager [install|list|enable|disable|update|help] [appid]
 ```
 
 | Command | Description |
@@ -1181,62 +1181,62 @@ Usage: hubos-mod-manager [install|list|enable|disable|update|help] [appid]
 | `disable <mod>` | Disable a mod without removing |
 | `update` | Check for mod updates |
 
-Registered as NXM protocol handler (`hubos-nxm-handler.desktop`). Click "Download with Mod Manager" on Nexus Mods and HubOS handles the rest.
+Registered as NXM protocol handler (`forge-nxm-handler.desktop`). Click "Download with Mod Manager" on Nexus Mods and 24HG Forge handles the rest.
 
 ---
 
 ## Additional Tools
 
-### hubos-crash-recovery
+### forge-crash-recovery
 
 General system crash recovery. Restores from black screen, frozen desktop, or boot failures.
 
 ```
-Usage: hubos-crash-recovery
+Usage: forge-crash-recovery
 ```
 
 Can be run from a TTY (Ctrl+Alt+F2) if the desktop is unresponsive.
 
 ---
 
-### hubos-thermal
+### forge-thermal
 
 System thermal monitoring. Shows CPU and GPU temperatures, fan speeds, and throttling status.
 
 ```
-Usage: hubos-thermal
+Usage: forge-thermal
 ```
 
 Uses `lm_sensors` and GPU-specific tools to display thermal data.
 
 ---
 
-### hubos-session-summary
+### forge-session-summary
 
 Show a summary of the current or last gaming session. Playtime, games played, performance stats.
 
 ```
-Usage: hubos-session-summary
+Usage: forge-session-summary
 ```
 
 ---
 
-### hubos-lock-info
+### forge-lock-info
 
 Customizes the lock screen with gaming-related info (server status, next event, tips).
 
 ```
-Usage: hubos-lock-info
+Usage: forge-lock-info
 ```
 
 ---
 
-### hubos-nightlight
+### forge-nightlight
 
 Toggle night light (blue light filter) for late-night gaming sessions.
 
 ```
-Usage: hubos-nightlight [toggle|on|off|status]
+Usage: forge-nightlight [toggle|on|off|status]
 ```
 
 | Command | Description |
@@ -1250,16 +1250,16 @@ Usage: hubos-nightlight [toggle|on|off|status]
 
 ## Configuration File Locations
 
-All HubOS tools follow the XDG Base Directory specification:
+All 24HG Forge tools follow the XDG Base Directory specification:
 
 | Type | Path | Example |
 |------|------|---------|
-| Config | `~/.config/hubos/<tool>/` | `~/.config/hubos/replay.conf` |
-| Data | `~/.local/share/hubos/<tool>/` | `~/.local/share/hubos/game-timer.json` |
-| Cache | `~/.cache/hubos/<tool>/` | `~/.cache/hubos/anticheat/` |
-| Logs | `~/.local/share/hubos/logs/` | `~/.local/share/hubos/logs/nvidia-wayland-*.log` |
-| System | `/usr/share/hubos/` | `/usr/share/hubos/servers.json` |
-| Lib | `/usr/lib/hubos/` | `/usr/lib/hubos/gamemode-start.sh` |
+| Config | `~/.config/forge/<tool>/` | `~/.config/forge/replay.conf` |
+| Data | `~/.local/share/forge/<tool>/` | `~/.local/share/forge/game-timer.json` |
+| Cache | `~/.cache/forge/<tool>/` | `~/.cache/forge/anticheat/` |
+| Logs | `~/.local/share/forge/logs/` | `~/.local/share/forge/logs/nvidia-wayland-*.log` |
+| System | `/usr/share/forge/` | `/usr/share/forge/servers.json` |
+| Lib | `/usr/lib/forge/` | `/usr/lib/forge/gamemode-start.sh` |
 
 ## Systemd Services Summary
 
@@ -1267,23 +1267,23 @@ All HubOS tools follow the XDG Base Directory specification:
 
 | Service | Description |
 |---------|-------------|
-| `hubos-gaming-tweaks.service` | Sysctl gaming optimizations (boot) |
-| `hubos-first-boot-setup.service` | First-boot system configuration (one-shot) |
-| `hubos-auto-update.timer` | Automatic system update checks |
+| `forge-gaming-tweaks.service` | Sysctl gaming optimizations (boot) |
+| `forge-first-boot-setup.service` | First-boot system configuration (one-shot) |
+| `forge-auto-update.timer` | Automatic system update checks |
 
 ### User Services
 
 | Service | Description | Auto-Enabled |
 |---------|-------------|-------------|
-| `hubos-server-status.service` | Server status monitoring | Yes |
-| `hubos-hub-bridge.service` | Hub data sync | Yes |
-| `hubos-discord-fix.service` | Discord integration fix | Yes |
-| `hubos-game-timer.service` | Playtime tracking daemon | Yes |
-| `hubos-smart-launch.service` | Per-game optimization daemon | Yes |
-| `hubos-perks-claim.service` | VIP perks checker | Yes |
-| `hubos-replay.service` | Instant replay recording | Manual |
-| `hubos-backup.timer` | Automatic backups | Yes (daily) |
-| `hubos-proton-updater.timer` | Proton-GE update check | Yes (weekly) |
-| `hubos-achievements.timer` | Achievement check | Yes |
-| `hubos-anticheat-tracker.timer` | Anti-cheat status check | Yes (daily) |
-| `hubos-wallpaper.timer` | Wallpaper rotation | Yes |
+| `forge-server-status.service` | Server status monitoring | Yes |
+| `forge-hub-bridge.service` | Hub data sync | Yes |
+| `forge-discord-fix.service` | Discord integration fix | Yes |
+| `forge-game-timer.service` | Playtime tracking daemon | Yes |
+| `forge-smart-launch.service` | Per-game optimization daemon | Yes |
+| `forge-perks-claim.service` | VIP perks checker | Yes |
+| `forge-replay.service` | Instant replay recording | Manual |
+| `forge-backup.timer` | Automatic backups | Yes (daily) |
+| `forge-proton-updater.timer` | Proton-GE update check | Yes (weekly) |
+| `forge-achievements.timer` | Achievement check | Yes |
+| `forge-anticheat-tracker.timer` | Anti-cheat status check | Yes (daily) |
+| `forge-wallpaper.timer` | Wallpaper rotation | Yes |

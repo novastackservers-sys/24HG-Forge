@@ -1,5 +1,5 @@
 {
-  "name": "hubos-hub",
+  "name": "forge-hub",
   "version": "1.0.0",
   "description": "24HG Hub — Desktop app for 24 Hour Gaming",
   "main": "main.js",
@@ -26,7 +26,7 @@
       "icon": "assets/icons",
       "category": "Game",
       "desktop": {
-        "StartupWMClass": "hubos-hub",
+        "StartupWMClass": "forge-hub",
         "MimeType": "x-scheme-handler/24hg"
       }
     },

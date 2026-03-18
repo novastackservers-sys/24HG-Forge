@@ -1,6 +1,6 @@
 # Installation Guide
 
-A complete guide to installing HubOS, from system requirements to post-install configuration.
+A complete guide to installing 24HG Forge, from system requirements to post-install configuration.
 
 ## System Requirements
 
@@ -30,7 +30,7 @@ A complete guide to installing HubOS, from system requirements to post-install c
 - **AMD:** GCN 1.0 and newer (open-source Mesa drivers, works out of the box)
 - **Intel:** HD 500 series and newer (open-source Mesa drivers)
 
-## Downloading HubOS
+## Downloading 24HG Forge
 
 Visit [os.24hgaming.com/download.html](https://os.24hgaming.com/download.html) to download the ISO.
 
@@ -38,9 +38,9 @@ Visit [os.24hgaming.com/download.html](https://os.24hgaming.com/download.html) t
 
 | Variant | File | When to Use |
 |---------|------|-------------|
-| Desktop | `hubos-desktop-latest.iso` | AMD or Intel GPU |
-| NVIDIA | `hubos-nvidia-latest.iso` | NVIDIA GPU |
-| Deck | `hubos-deck-latest.iso` | Steam Deck or handheld PCs |
+| Desktop | `forge-desktop-latest.iso` | AMD or Intel GPU |
+| NVIDIA | `forge-nvidia-latest.iso` | NVIDIA GPU |
+| Deck | `forge-deck-latest.iso` | Steam Deck or handheld PCs |
 
 If you have both an Intel iGPU and an NVIDIA dGPU (common in laptops), use the **NVIDIA** variant.
 
@@ -50,13 +50,13 @@ Each ISO comes with a SHA256 checksum file. Verify it to ensure your download is
 
 ```bash
 # Linux
-sha256sum -c hubos-desktop-latest.iso.sha256
+sha256sum -c forge-desktop-latest.iso.sha256
 
 # macOS
-shasum -a 256 -c hubos-desktop-latest.iso.sha256
+shasum -a 256 -c forge-desktop-latest.iso.sha256
 
 # Windows (PowerShell)
-Get-FileHash hubos-desktop-latest.iso -Algorithm SHA256
+Get-FileHash forge-desktop-latest.iso -Algorithm SHA256
 ```
 
 ## Creating the USB Installer
@@ -67,14 +67,14 @@ Get-FileHash hubos-desktop-latest.iso -Algorithm SHA256
 
 1. Download Ventoy from [ventoy.net](https://ventoy.net/en/download.html).
 2. Install Ventoy onto your USB drive (this formats the drive).
-3. Copy the HubOS ISO file onto the USB drive's data partition.
-4. Boot from the USB drive and select HubOS from the Ventoy menu.
+3. Copy the 24HG Forge ISO file onto the USB drive's data partition.
+4. Boot from the USB drive and select 24HG Forge from the Ventoy menu.
 
 ### Method 2: Rufus (Windows)
 
 1. Download [Rufus](https://rufus.ie/).
 2. Insert your USB drive and open Rufus.
-3. Select the HubOS ISO under "Boot selection."
+3. Select the 24HG Forge ISO under "Boot selection."
 4. Set partition scheme to **GPT**.
 5. If prompted for write mode, choose **DD Image**.
 6. Click **Start** and wait for completion.
@@ -91,18 +91,18 @@ sudo umount /dev/sdX*  # Linux
 diskutil unmountDisk /dev/diskN  # macOS
 
 # Write the ISO
-sudo dd if=hubos-desktop-latest.iso of=/dev/sdX bs=4M status=progress oflag=sync  # Linux
-sudo dd if=hubos-desktop-latest.iso of=/dev/rdiskN bs=4m  # macOS
+sudo dd if=forge-desktop-latest.iso of=/dev/sdX bs=4M status=progress oflag=sync  # Linux
+sudo dd if=forge-desktop-latest.iso of=/dev/rdiskN bs=4m  # macOS
 ```
 
 Replace `/dev/sdX` or `/dev/diskN` with your actual USB device. **Using the wrong device will destroy data.**
 
 ### Method 4: Fedora Media Writer
 
-Fedora Media Writer works well since HubOS is Fedora-based:
+Fedora Media Writer works well since 24HG Forge is Fedora-based:
 
 1. Install from [getfedora.org/en/workstation/download/](https://getfedora.org/en/workstation/download/) or your package manager.
-2. Choose "Custom Image" and select the HubOS ISO.
+2. Choose "Custom Image" and select the 24HG Forge ISO.
 3. Select your USB drive and write.
 
 ## BIOS/UEFI Settings
@@ -126,8 +126,8 @@ Press the BIOS key during startup. Common keys by manufacturer:
 
 ### Required Settings
 
-- **Secure Boot:** Disable it. Bazzite (and therefore HubOS) supports Secure Boot with enrolled keys, but disabling it avoids complications during installation. You can re-enable it after install if desired.
-- **Boot Mode:** Set to **UEFI** (not Legacy/CSM). HubOS requires UEFI boot.
+- **Secure Boot:** Disable it. Bazzite (and therefore 24HG Forge) supports Secure Boot with enrolled keys, but disabling it avoids complications during installation. You can re-enable it after install if desired.
+- **Boot Mode:** Set to **UEFI** (not Legacy/CSM). 24HG Forge requires UEFI boot.
 - **Boot Order:** Set USB drive as the first boot device, or use the one-time boot menu (usually F12).
 
 ### NVIDIA-Specific
@@ -139,11 +139,11 @@ If you have an NVIDIA GPU and dual graphics (e.g., laptop with Intel + NVIDIA):
 
 ## Installation Steps
 
-HubOS uses the **Calamares** installer, which provides a graphical step-by-step process.
+24HG Forge uses the **Calamares** installer, which provides a graphical step-by-step process.
 
 ### 1. Welcome Screen
 
-Select your language. HubOS supports all languages that Fedora supports.
+Select your language. 24HG Forge supports all languages that Fedora supports.
 
 ### 2. Location
 
@@ -159,7 +159,7 @@ This is the most important step. You have several options:
 
 #### Option A: Erase Disk (Simplest)
 
-Select "Erase disk" to use the entire drive for HubOS. This **deletes everything** on the selected drive.
+Select "Erase disk" to use the entire drive for 24HG Forge. This **deletes everything** on the selected drive.
 
 - Select the target drive from the dropdown.
 - Optionally enable disk encryption (LUKS). Recommended for laptops.
@@ -167,12 +167,12 @@ Select "Erase disk" to use the entire drive for HubOS. This **deletes everything
 
 #### Option B: Replace a Partition (Dual-Boot)
 
-If you want to keep Windows (or another OS) alongside HubOS:
+If you want to keep Windows (or another OS) alongside 24HG Forge:
 
 1. Before installing, shrink your existing partition in Windows using Disk Management (right-click Start -> Disk Management -> right-click your partition -> Shrink Volume). Leave at least 50 GB of unallocated space.
 2. In Calamares, select "Replace a partition."
 3. Choose the unallocated space.
-4. HubOS will install there without touching your other partitions.
+4. 24HG Forge will install there without touching your other partitions.
 
 #### Option C: Manual Partitioning (Advanced)
 
@@ -211,13 +211,13 @@ Remove the USB drive and reboot.
 
 ## First Boot Wizard
 
-On the first boot after installation, HubOS runs the First Boot Wizard automatically. This one-time setup:
+On the first boot after installation, 24HG Forge runs the First Boot Wizard automatically. This one-time setup:
 
 1. **Detects your GPU** and confirms drivers are working.
 2. **Sets up display** -- resolution, refresh rate, and scaling.
 3. **Installs game launchers** -- Steam (Flatpak), Lutris, and Heroic Game Launcher.
 4. **Connects to 24HG** -- Log into or create your 24HG account.
-5. **Claims VIP perks** -- Links your HubOS installation for server benefits.
+5. **Claims VIP perks** -- Links your 24HG Forge installation for server benefits.
 6. **Configures preferences** -- Wallpaper, sound theme, notification style.
 
 The wizard takes about 2-3 minutes. After it finishes, you are ready to game.
@@ -226,18 +226,18 @@ The wizard takes about 2-3 minutes. After it finishes, you are ready to game.
 
 After the first boot wizard, verify these items:
 
-- [ ] **GPU drivers working:** Run `hubos-diag` and check the GPU section.
+- [ ] **GPU drivers working:** Run `forge-diag` and check the GPU section.
 - [ ] **Steam installed:** Open Steam from the taskbar or run `flatpak run com.valvesoftware.Steam`.
-- [ ] **Sound working:** Run `hubos-audio status` to check audio devices.
+- [ ] **Sound working:** Run `forge-audio status` to check audio devices.
 - [ ] **Network connected:** Check the system tray for network status.
 - [ ] **Hub connected:** The 24HG Hub tray icon should show a green indicator.
-- [ ] **Instant replay:** Run `hubos-replay start` to enable replay recording.
-- [ ] **Performance mode:** Run `hubos-performance status` to check your current profile.
-- [ ] **Backups configured:** Run `hubos-backup status` to verify automatic backup timer.
+- [ ] **Instant replay:** Run `forge-replay start` to enable replay recording.
+- [ ] **Performance mode:** Run `forge-performance status` to check your current profile.
+- [ ] **Backups configured:** Run `forge-backup status` to verify automatic backup timer.
 
 ## Dual-Boot Setup
 
-### Windows + HubOS
+### Windows + 24HG Forge
 
 If you installed alongside Windows, GRUB (the bootloader) will auto-detect Windows and show it in the boot menu. Select the OS you want at each boot.
 
@@ -264,30 +264,30 @@ reg add HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation /v RealTimeIsU
 
 ### Managing Dual-Boot
 
-HubOS includes a dedicated dual-boot management tool:
+24HG Forge includes a dedicated dual-boot management tool:
 
 ```bash
-hubos-dualboot status    # Show detected operating systems
-hubos-dualboot repair    # Fix bootloader issues
-hubos-dualboot timeout   # Set GRUB timeout
+forge-dualboot status    # Show detected operating systems
+forge-dualboot repair    # Fix bootloader issues
+forge-dualboot timeout   # Set GRUB timeout
 ```
 
 ## Rebasing from Bazzite or Fedora
 
-If you already run Bazzite or Fedora Atomic, you can rebase to HubOS without reinstalling:
+If you already run Bazzite or Fedora Atomic, you can rebase to 24HG Forge without reinstalling:
 
 ```bash
 # From Bazzite (Desktop/AMD/Intel)
-rpm-ostree rebase ostree-unverified-registry:git.raggi.is/24hg/hubos:latest
+rpm-ostree rebase ostree-unverified-registry:git.raggi.is/24hg/forge:latest
 
 # From Bazzite (NVIDIA)
-rpm-ostree rebase ostree-unverified-registry:git.raggi.is/24hg/hubos-nvidia:latest
+rpm-ostree rebase ostree-unverified-registry:git.raggi.is/24hg/forge-nvidia:latest
 
 # Reboot to apply
 systemctl reboot
 ```
 
-After rebooting, HubOS branding and tools will be active. Run `hubos-first-boot` to trigger the setup wizard.
+After rebooting, 24HG Forge branding and tools will be active. Run `forge-first-boot` to trigger the setup wizard.
 
 ### Rolling Back
 
@@ -298,9 +298,9 @@ rpm-ostree rollback
 systemctl reboot
 ```
 
-## Updating HubOS
+## Updating 24HG Forge
 
-HubOS updates are atomic and safe. The system checks for updates automatically (daily timer), but you can update manually:
+24HG Forge updates are atomic and safe. The system checks for updates automatically (daily timer), but you can update manually:
 
 ```bash
 # Check if an update is available
@@ -313,10 +313,10 @@ rpm-ostree upgrade
 systemctl reboot
 ```
 
-Or use the HubOS update tool with safety checks:
+Or use the 24HG Forge update tool with safety checks:
 
 ```bash
-hubos-update-guard check     # Check for updates with safety analysis
-hubos-update-guard apply     # Apply update if safe
-hubos-update-guard rollback  # Roll back to previous version
+forge-update-guard check     # Check for updates with safety analysis
+forge-update-guard apply     # Apply update if safe
+forge-update-guard rollback  # Roll back to previous version
 ```
