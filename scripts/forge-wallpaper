@@ -1,17 +1,17 @@
 #!/bin/bash
-# HubOS Wallpaper Manager — Time-aware wallpaper rotation for gaming desktops
+# 24HG Forge Wallpaper Manager — Time-aware wallpaper rotation for gaming desktops
 # Automatically selects wallpapers that match the mood of the day, or lets
-# you pick your own from the curated HubOS collection.
+# you pick your own from the curated 24HG Forge collection.
 #
-# Usage: hubos-wallpaper [rotate|set <name|path>|list|random|schedule|download]
+# Usage: forge-wallpaper [rotate|set <name|path>|list|random|schedule|download]
 
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-WALLPAPER_DIR="/usr/share/hubos/wallpapers"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/hubos/wallpapers"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hubos"
+WALLPAPER_DIR="/usr/share/forge/wallpapers"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/forge/wallpapers"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge"
 STATE_FILE="$CONFIG_DIR/wallpaper-state"
 LOG_FILE="$CACHE_DIR/wallpaper.log"
 
@@ -98,7 +98,7 @@ JSEOF
 
     # ── SDDM login screen (requires root) ────────────────────────────────
     if [[ $EUID -eq 0 ]]; then
-        local sddm_theme_conf="/etc/sddm.conf.d/hubos-wallpaper.conf"
+        local sddm_theme_conf="/etc/sddm.conf.d/forge-wallpaper.conf"
         mkdir -p /etc/sddm.conf.d
         cat > "$sddm_theme_conf" <<SDDMEOF
 [Theme]
@@ -230,7 +230,7 @@ cmd_rotate() {
 
     if [[ ${#candidates[@]} -eq 0 ]]; then
         warn "No wallpapers found in $WALLPAPER_DIR"
-        warn "Run 'hubos-wallpaper download' to get the community wallpaper pack."
+        warn "Run 'forge-wallpaper download' to get the community wallpaper pack."
         return 1
     fi
 
@@ -254,7 +254,7 @@ cmd_set() {
     local target="${1:-}"
 
     if [[ -z "$target" ]]; then
-        err "Usage: hubos-wallpaper set <name|path>"
+        err "Usage: forge-wallpaper set <name|path>"
     fi
 
     # If it's already a valid path, use it directly
@@ -294,7 +294,7 @@ cmd_set() {
     fi
 
     if [[ -z "$found" ]]; then
-        err "Wallpaper '$target' not found. Run 'hubos-wallpaper list' to see available options."
+        err "Wallpaper '$target' not found. Run 'forge-wallpaper list' to see available options."
     fi
 
     apply_wallpaper "$found"
@@ -302,7 +302,7 @@ cmd_set() {
 
 cmd_list() {
     echo ""
-    msg "\033[1mHubOS Wallpaper Collection\033[0m"
+    msg "\033[1m24HG Forge Wallpaper Collection\033[0m"
     echo ""
 
     local total=0
@@ -342,7 +342,7 @@ cmd_random() {
     mapfile -t all_wallpapers < <(get_all_wallpapers)
 
     if [[ ${#all_wallpapers[@]} -eq 0 ]]; then
-        err "No wallpapers found. Run 'hubos-wallpaper download' to get started."
+        err "No wallpapers found. Run 'forge-wallpaper download' to get started."
     fi
 
     local pick="${all_wallpapers[RANDOM % ${#all_wallpapers[@]}]}"
@@ -358,19 +358,19 @@ cmd_schedule() {
 
             # Enable the systemd user timer
             systemctl --user daemon-reload 2>/dev/null || true
-            systemctl --user enable --now hubos-wallpaper.timer 2>/dev/null
+            systemctl --user enable --now forge-wallpaper.timer 2>/dev/null
 
-            if systemctl --user is-active hubos-wallpaper.timer &>/dev/null; then
+            if systemctl --user is-active forge-wallpaper.timer &>/dev/null; then
                 msg "\033[1;32mScheduled rotation active.\033[0m"
                 msg "Wallpaper will change at 6:00, 12:00, 18:00, and 22:00."
                 echo ""
-                systemctl --user status hubos-wallpaper.timer --no-pager 2>/dev/null || true
+                systemctl --user status forge-wallpaper.timer --no-pager 2>/dev/null || true
             else
                 # Fallback to cron if systemd user session isn't available
                 warn "systemd user timer not available, falling back to cron..."
 
-                local cron_entry="0 6,12,18,22 * * * /usr/bin/hubos-wallpaper rotate"
-                if crontab -l 2>/dev/null | grep -qF "hubos-wallpaper rotate"; then
+                local cron_entry="0 6,12,18,22 * * * /usr/bin/forge-wallpaper rotate"
+                if crontab -l 2>/dev/null | grep -qF "forge-wallpaper rotate"; then
                     msg "Cron schedule already exists."
                 else
                     (crontab -l 2>/dev/null; echo "$cron_entry") | crontab -
@@ -382,11 +382,11 @@ cmd_schedule() {
         disable|off)
             msg "Disabling automatic wallpaper rotation..."
 
-            systemctl --user disable --now hubos-wallpaper.timer 2>/dev/null || true
+            systemctl --user disable --now forge-wallpaper.timer 2>/dev/null || true
 
             # Also remove cron fallback if present
-            if crontab -l 2>/dev/null | grep -qF "hubos-wallpaper rotate"; then
-                crontab -l 2>/dev/null | grep -vF "hubos-wallpaper rotate" | crontab -
+            if crontab -l 2>/dev/null | grep -qF "forge-wallpaper rotate"; then
+                crontab -l 2>/dev/null | grep -vF "forge-wallpaper rotate" | crontab -
                 msg "Cron schedule removed."
             fi
 
@@ -395,20 +395,20 @@ cmd_schedule() {
 
         status)
             echo ""
-            if systemctl --user is-active hubos-wallpaper.timer &>/dev/null; then
+            if systemctl --user is-active forge-wallpaper.timer &>/dev/null; then
                 msg "\033[1;32mSystemd timer: active\033[0m"
-                systemctl --user status hubos-wallpaper.timer --no-pager 2>/dev/null || true
-            elif crontab -l 2>/dev/null | grep -qF "hubos-wallpaper rotate"; then
+                systemctl --user status forge-wallpaper.timer --no-pager 2>/dev/null || true
+            elif crontab -l 2>/dev/null | grep -qF "forge-wallpaper rotate"; then
                 msg "\033[1;32mCron schedule: active\033[0m"
-                crontab -l 2>/dev/null | grep "hubos-wallpaper"
+                crontab -l 2>/dev/null | grep "forge-wallpaper"
             else
-                msg "\033[2mNo active schedule.\033[0m Run 'hubos-wallpaper schedule enable' to start."
+                msg "\033[2mNo active schedule.\033[0m Run 'forge-wallpaper schedule enable' to start."
             fi
             echo ""
             ;;
 
         *)
-            err "Usage: hubos-wallpaper schedule [enable|disable|status]"
+            err "Usage: forge-wallpaper schedule [enable|disable|status]"
             ;;
     esac
 }
@@ -418,7 +418,7 @@ cmd_download() {
     local target_dir="$CACHE_DIR"
 
     echo ""
-    msg "\033[1mHubOS Wallpaper Downloader\033[0m"
+    msg "\033[1m24HG Forge Wallpaper Downloader\033[0m"
     echo ""
 
     if [[ -n "$source_url" ]]; then
@@ -466,14 +466,14 @@ cmd_download() {
             err "Download failed."
         fi
     else
-        msg "Download community wallpaper packs from the HubOS collection."
+        msg "Download community wallpaper packs from the 24HG Forge collection."
         echo ""
         echo "  Usage:"
-        echo "    hubos-wallpaper download <url>"
+        echo "    forge-wallpaper download <url>"
         echo ""
         echo "  Examples:"
-        echo "    hubos-wallpaper download https://hub.24hgaming.com/wallpapers/pack-v1.tar.gz"
-        echo "    hubos-wallpaper download https://example.com/cool-wallpaper.png"
+        echo "    forge-wallpaper download https://hub.24hgaming.com/wallpapers/pack-v1.tar.gz"
+        echo "    forge-wallpaper download https://example.com/cool-wallpaper.png"
         echo ""
         echo -e "  \033[2mCommunity packs will be available at hub.24hgaming.com in a future update.\033[0m"
         echo ""
@@ -485,7 +485,7 @@ cmd_download() {
 usage() {
     cat <<'HELP'
 
-  hubos-wallpaper — Time-aware wallpaper management for HubOS
+  forge-wallpaper — Time-aware wallpaper management for 24HG Forge
 
   Commands:
     rotate              Change wallpaper based on time of day
@@ -501,8 +501,8 @@ usage() {
     Evening   (18:00–22:00)  Warm sunset tones
     Night     (22:00–06:00)  Dark, moody gaming atmosphere
 
-  Wallpapers are stored in /usr/share/hubos/wallpapers/ organized by
-  time-of-day subdirectories. Downloaded packs go to ~/.cache/hubos/wallpapers/.
+  Wallpapers are stored in /usr/share/forge/wallpapers/ organized by
+  time-of-day subdirectories. Downloaded packs go to ~/.cache/forge/wallpapers/.
 
 HELP
 }
@@ -521,10 +521,10 @@ case "$ACTION" in
     download|dl)        cmd_download "$@" ;;
     -h|--help|help)     usage ;;
     "")
-        msg "No command specified. Run \033[1mhubos-wallpaper --help\033[0m for usage."
+        msg "No command specified. Run \033[1mforge-wallpaper --help\033[0m for usage."
         exit 1
         ;;
     *)
-        err "Unknown command: $ACTION. Run 'hubos-wallpaper --help' for usage."
+        err "Unknown command: $ACTION. Run 'forge-wallpaper --help' for usage."
         ;;
 esac

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HubOS Hub Bridge — Deep integration between HubOS desktop and the 24HG Hub
+24HG Forge Hub Bridge — Deep integration between 24HG Forge desktop and the 24HG Hub
 Connects to hub.24hgaming.com API, delivers desktop notifications for:
   - Direct messages
   - @mentions in chat
@@ -25,9 +25,9 @@ import urllib.error
 # ── Configuration ──
 API_URL = "https://api.24hgaming.com"
 HUB_URL = "https://hub.24hgaming.com"
-CONFIG_DIR = os.path.expanduser("~/.config/hubos")
+CONFIG_DIR = os.path.expanduser("~/.config/forge")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "hub-token")
-CACHE_DIR = os.path.expanduser("~/.cache/hubos")
+CACHE_DIR = os.path.expanduser("~/.cache/forge")
 STATE_FILE = os.path.join(CACHE_DIR, "hub-state.json")
 POLL_INTERVAL = 15  # seconds between API polls
 FRIENDS_INTERVAL = 60  # seconds between friend status checks
@@ -85,7 +85,7 @@ def api_get(endpoint, token):
         return {"error": str(e)}
 
 
-def notify(title, body, icon="hubos-logo", urgency="normal", action_url=None):
+def notify(title, body, icon="forge-logo", urgency="normal", action_url=None):
     """Send desktop notification."""
     cmd = [
         "notify-send",
@@ -245,7 +245,7 @@ def login_prompt():
         result = subprocess.run([
             "zenity", "--forms",
             "--title=24HG Hub Login",
-            "--text=Login to connect HubOS to your 24HG account",
+            "--text=Login to connect 24HG Forge to your 24HG account",
             "--add-entry=Username or Email",
             "--add-password=Password",
         ], capture_output=True, text=True, timeout=120)
@@ -282,7 +282,7 @@ def do_login(username, password):
 def main():
     global last_notification_id
 
-    print("HubOS Hub Bridge starting...")
+    print("24HG Forge Hub Bridge starting...")
 
     # Load or get token
     token = load_token()
@@ -297,17 +297,17 @@ def main():
                 save_token(token)
                 notify("24HG Connected", f"Logged in as {username}. Hub notifications active.")
             else:
-                print("Login failed. Run 'hubos-hub-bridge login' to try again.")
+                print("Login failed. Run 'forge-hub-bridge login' to try again.")
                 sys.exit(1)
         else:
             print("No credentials provided. Hub bridge inactive.")
-            print("Run 'hubos-hub-bridge login' to connect your account.")
+            print("Run 'forge-hub-bridge login' to connect your account.")
             sys.exit(0)
 
     # Verify token
     user = check_user_info(token)
     if not user:
-        print("Token expired or invalid. Run 'hubos-hub-bridge login' to re-authenticate.")
+        print("Token expired or invalid. Run 'forge-hub-bridge login' to re-authenticate.")
         os.remove(TOKEN_FILE) if os.path.exists(TOKEN_FILE) else None
         sys.exit(1)
 
@@ -380,7 +380,7 @@ def cmd_login():
             print(f"Logged in as {name}. Token saved.")
             notify("24HG Connected", f"Logged in as {name}. Hub notifications active.")
             # Restart the bridge service
-            subprocess.run(["systemctl", "--user", "restart", "hubos-hub-bridge"], capture_output=True)
+            subprocess.run(["systemctl", "--user", "restart", "forge-hub-bridge"], capture_output=True)
         else:
             print("Login failed. Check your credentials.")
     else:
@@ -392,7 +392,7 @@ def cmd_status():
     state = load_state()
     token = load_token()
 
-    print("=== HubOS Hub Bridge ===")
+    print("=== 24HG Forge Hub Bridge ===")
     if state.get("connected"):
         print(f"Status: Connected as {state.get('username', '?')}")
         print(f"Unread notifications: {state.get('unread_notifications', 0)}")
@@ -404,17 +404,17 @@ def cmd_status():
             print(f"Last update: {age}s ago")
     elif token:
         print("Status: Token saved but bridge not running")
-        print("Start with: systemctl --user start hubos-hub-bridge")
+        print("Start with: systemctl --user start forge-hub-bridge")
     else:
         print("Status: Not connected")
-        print("Login with: hubos-hub-bridge login")
+        print("Login with: forge-hub-bridge login")
 
 
 def cmd_logout():
     """Remove stored token."""
     if os.path.exists(TOKEN_FILE):
         os.remove(TOKEN_FILE)
-    subprocess.run(["systemctl", "--user", "stop", "hubos-hub-bridge"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "stop", "forge-hub-bridge"], capture_output=True)
     update_state({"connected": False, "updated_at": int(time.time())})
     print("Logged out. Hub bridge stopped.")
     notify("24HG Disconnected", "Hub notifications disabled.")
@@ -432,8 +432,8 @@ if __name__ == "__main__":
         elif cmd == "daemon":
             main()
         else:
-            print("HubOS Hub Bridge — Connect your desktop to 24HG Hub")
-            print("Usage: hubos-hub-bridge [login|logout|status|daemon]")
+            print("24HG Forge Hub Bridge — Connect your desktop to 24HG Hub")
+            print("Usage: forge-hub-bridge [login|logout|status|daemon]")
             print()
             print("  login   — Login to your 24HG account")
             print("  logout  — Disconnect and remove token")

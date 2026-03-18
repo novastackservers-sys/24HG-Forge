@@ -1,21 +1,21 @@
 #!/bin/bash
 #
-# hubos-sounds — Generate, install, and manage the HubOS sound theme
-# Part of HubOS (24 Hour Gaming)
+# forge-sounds — Generate, install, and manage the 24HG Forge sound theme
+# Part of 24HG Forge (24 Hour Gaming)
 #
-# Usage: hubos-sounds {install|enable|disable|test|status|list} [args...]
+# Usage: forge-sounds {install|enable|disable|test|status|list} [args...]
 #
 
 set -euo pipefail
 
-THEME_NAME="hubos"
+THEME_NAME="forge"
 SYSTEM_DIR="/usr/share/sounds/${THEME_NAME}/stereo"
 USER_DIR="${HOME}/.local/share/sounds/${THEME_NAME}/stereo"
 USER_THEME_DIR="${HOME}/.local/share/sounds/${THEME_NAME}"
 SYSTEM_THEME_DIR="/usr/share/sounds/${THEME_NAME}"
 SAMPLE_RATE=44100
 INDEX_THEME_CONTENT="[Sound Theme]
-Name=HubOS
+Name=24HG Forge
 Comment=24 Hour Gaming sound theme
 Inherits=freedesktop
 Directories=stereo
@@ -304,7 +304,7 @@ cmd_install() {
     require_cmd bc
     choose_install_dir
 
-    log_info "Installing HubOS sound theme to ${INSTALL_DIR}"
+    log_info "Installing 24HG Forge sound theme to ${INSTALL_DIR}"
     mkdir -p "${INSTALL_DIR}"
 
     # Write index.theme
@@ -329,7 +329,7 @@ cmd_install() {
 }
 
 cmd_enable() {
-    log_info "Enabling HubOS sound theme..."
+    log_info "Enabling 24HG Forge sound theme..."
 
     # KDE Plasma (kwriteconfig6 or kwriteconfig5)
     local kwrite=""
@@ -356,7 +356,7 @@ cmd_enable() {
     fi
 
     echo ""
-    log_ok "HubOS sound theme enabled"
+    log_ok "24HG Forge sound theme enabled"
 }
 
 cmd_disable() {
@@ -399,12 +399,12 @@ cmd_test() {
     elif [[ -d "$USER_DIR" ]]; then
         snd_dir="$USER_DIR"
     else
-        log_err "HubOS sounds not installed. Run '$(basename "$0") install' first."
+        log_err "24HG Forge sounds not installed. Run '$(basename "$0") install' first."
         exit 1
     fi
 
     if [[ "$target" == "all" ]]; then
-        log_info "Playing all HubOS sounds from ${snd_dir}"
+        log_info "Playing all 24HG Forge sounds from ${snd_dir}"
         echo ""
         for name in "${SOUND_NAMES[@]}"; do
             local file="${snd_dir}/${name}.oga"
@@ -431,7 +431,7 @@ cmd_test() {
 }
 
 cmd_status() {
-    echo "HubOS Sound Theme Status"
+    echo "24HG Forge Sound Theme Status"
     echo "========================"
     echo ""
 
@@ -495,7 +495,7 @@ cmd_status() {
 }
 
 cmd_list() {
-    echo "HubOS Sound Theme — Available Sounds"
+    echo "24HG Forge Sound Theme — Available Sounds"
     echo "====================================="
     echo ""
     printf "  %-28s %s\n" "SOUND NAME" "DESCRIPTION"
@@ -511,8 +511,8 @@ cmd_usage() {
     echo "Usage: $(basename "$0") <command> [args]"
     echo ""
     echo "Commands:"
-    echo "  install     Generate sound files and install the HubOS theme"
-    echo "  enable      Set HubOS as the active sound theme"
+    echo "  install     Generate sound files and install the 24HG Forge theme"
+    echo "  enable      Set 24HG Forge as the active sound theme"
     echo "  disable     Revert to default freedesktop sound theme"
     echo "  test [name] Play a specific sound or all sounds"
     echo "  status      Show current theme and installation info"

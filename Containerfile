@@ -148,6 +148,7 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/desktop/forge-hub.desktop /etc/skel/.config/autostart/ \
     && cp /tmp/forge-build/desktop/forge-tray.desktop /etc/skel/.config/autostart/ \
     && cp /tmp/forge-build/desktop/forge-first-boot.desktop /etc/skel/.config/autostart/ \
+    && cp /tmp/forge-build/desktop/forge-update-prompt.desktop /etc/skel/.config/autostart/ \
     \
     # ── CLI tools ── \
     && install -m 755 /tmp/forge-build/bin/forge-neofetch /usr/bin/forge-neofetch \
@@ -205,6 +206,7 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/forge-build/bin/forge-update-guard /usr/bin/forge-update-guard \
     && install -m 755 /tmp/forge-build/bin/forge-save-manager /usr/bin/forge-save-manager \
     && install -m 755 /tmp/forge-build/bin/forge-nvidia-wayland /usr/bin/forge-nvidia-wayland \
+    && install -m 755 /tmp/forge-build/bin/forge-update-prompt /usr/bin/forge-update-prompt \
     \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/forge \

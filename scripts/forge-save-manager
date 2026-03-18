@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HubOS Save Game Manager — Find, backup, and restore saves across all launchers"""
+"""24HG Forge Save Game Manager — Find, backup, and restore saves across all launchers"""
 
 import argparse
 import hashlib
@@ -17,9 +17,9 @@ from pathlib import Path
 
 VERSION = "1.0.0"
 HOME = Path.home()
-BACKUP_DIR = HOME / "HubOS-Backups" / "saves"
-STATE_FILE = HOME / ".config" / "hubos" / "save-manager-state.json"
-CONFIG_FILE = HOME / ".config" / "hubos" / "save-manager.json"
+BACKUP_DIR = HOME / "24HG Forge-Backups" / "saves"
+STATE_FILE = HOME / ".config" / "forge" / "save-manager-state.json"
+CONFIG_FILE = HOME / ".config" / "forge" / "save-manager.json"
 MAX_BACKUPS = 5
 
 STEAM_ROOT = HOME / ".local" / "share" / "Steam"
@@ -857,7 +857,7 @@ def notify(title, body):
     """Send desktop notification if available."""
     try:
         subprocess.run(
-            ["notify-send", "-a", "HubOS Save Manager", "-i", "document-save", title, body],
+            ["notify-send", "-a", "24HG Forge Save Manager", "-i", "document-save", title, body],
             capture_output=True, timeout=5
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -1322,7 +1322,7 @@ def discover_all_saves(verbose=False):
 
 def cmd_find(args):
     """Find all save game locations across the system."""
-    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager{C.RESET}")
+    print(f"\n{C.BOLD}{C.BCYAN}  24HG Forge Save Game Manager{C.RESET}")
     print(f"{C.DIM}  Scanning for save games across all launchers...{C.RESET}\n")
 
     saves = discover_all_saves(verbose=True)
@@ -1369,7 +1369,7 @@ def cmd_list(args):
         return
 
     if not saves:
-        print(f"\n  {C.YELLOW}No save games found. Run 'hubos-save-manager find' first.{C.RESET}\n")
+        print(f"\n  {C.YELLOW}No save games found. Run 'forge-save-manager find' first.{C.RESET}\n")
         return
 
     # Merge saves for same game
@@ -1394,7 +1394,7 @@ def cmd_list(args):
                           key=lambda x: x[1]["mtime"] or datetime.min, reverse=True)
 
     # Table header
-    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager{C.RESET}\n")
+    print(f"\n{C.BOLD}{C.BCYAN}  24HG Forge Save Game Manager{C.RESET}\n")
     header = (f" {C.BOLD}{'Game':<28}{'Location':<22}{'Saves':>6}"
               f"{'Size':>10}   {'Last Save':<16}{C.RESET}")
     print(header)
@@ -1428,7 +1428,7 @@ def cmd_backup(args):
     auto_mode = args.auto if hasattr(args, "auto") and args.auto else False
 
     if not auto_mode:
-        print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager — Backup{C.RESET}\n")
+        print(f"\n{C.BOLD}{C.BCYAN}  24HG Forge Save Game Manager — Backup{C.RESET}\n")
 
     saves = discover_all_saves()
     if not saves:
@@ -1571,7 +1571,7 @@ def _rotate_backups():
 
 def cmd_restore(args):
     """Restore save games from backup."""
-    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager — Restore{C.RESET}\n")
+    print(f"\n{C.BOLD}{C.BCYAN}  24HG Forge Save Game Manager — Restore{C.RESET}\n")
 
     if not BACKUP_DIR.exists():
         print(f"  {C.YELLOW}No backups found at {BACKUP_DIR}{C.RESET}\n")
@@ -1602,7 +1602,7 @@ def cmd_restore(args):
                       f"{C.DIM}({games} games, {size}){C.RESET}")
             else:
                 print(f"    {C.WHITE}{b.name}{C.RESET}  {C.DIM}(no metadata){C.RESET}")
-        print(f"\n  {C.DIM}Usage: hubos-save-manager restore <backup-date|latest> [game name]{C.RESET}\n")
+        print(f"\n  {C.DIM}Usage: forge-save-manager restore <backup-date|latest> [game name]{C.RESET}\n")
 
         if args.json:
             info = []
@@ -1723,14 +1723,14 @@ def cmd_restore(args):
 
 def cmd_sync(args):
     """Sync saves to/from Hub cloud account."""
-    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager — Cloud Sync{C.RESET}\n")
+    print(f"\n{C.BOLD}{C.BCYAN}  24HG Forge Save Game Manager — Cloud Sync{C.RESET}\n")
 
     config = load_config()
 
     if not config.get("hub_token"):
-        print(f"  {C.YELLOW}Not logged in to HubOS account.{C.RESET}")
-        print(f"  {C.DIM}Run 'hubos-hub-bridge login' first, then enable sync:{C.RESET}")
-        print(f"  {C.DIM}  hubos-save-manager sync --setup{C.RESET}\n")
+        print(f"  {C.YELLOW}Not logged in to 24HG Forge account.{C.RESET}")
+        print(f"  {C.DIM}Run 'forge-hub-bridge login' first, then enable sync:{C.RESET}")
+        print(f"  {C.DIM}  forge-save-manager sync --setup{C.RESET}\n")
         return
 
     if hasattr(args, "setup") and args.setup:
@@ -1751,7 +1751,7 @@ def cmd_sync(args):
         return
 
     if not config.get("passphrase"):
-        print(f"  {C.RED}Encryption passphrase not set. Run: hubos-save-manager sync --setup{C.RESET}\n")
+        print(f"  {C.RED}Encryption passphrase not set. Run: forge-save-manager sync --setup{C.RESET}\n")
         return
 
     if direction == "upload":
@@ -1839,7 +1839,7 @@ def _sync_upload(config):
     print(f"  {C.DIM}Encrypted archive: {human_size(enc_size)}{C.RESET}")
 
     # Upload to Hub API
-    hub_url = "https://hub.24hgaming.com/api/hubos/saves/upload"
+    hub_url = "https://hub.24hgaming.com/api/forge/saves/upload"
     token = config.get("hub_token", "")
 
     try:
@@ -1871,7 +1871,7 @@ def _sync_download(config):
     """Download saves from Hub."""
     print(f"  {C.DIM}Downloading saves from Hub...{C.RESET}")
 
-    hub_url = "https://hub.24hgaming.com/api/hubos/saves/download"
+    hub_url = "https://hub.24hgaming.com/api/forge/saves/download"
     token = config.get("hub_token", "")
     enc_path = BACKUP_DIR / "sync-download.tar.zst.enc"
     dec_path = BACKUP_DIR / "sync-download.tar.zst"
@@ -1918,7 +1918,7 @@ def _sync_download(config):
         )
         if result.returncode == 0:
             print(f"\n  {C.BGREEN}Download complete!{C.RESET}")
-            print(f"  {C.DIM}Use 'hubos-save-manager restore latest' to restore saves.{C.RESET}\n")
+            print(f"  {C.DIM}Use 'forge-save-manager restore latest' to restore saves.{C.RESET}\n")
         else:
             print(f"  {C.RED}Extraction failed.{C.RESET}\n")
     except (subprocess.TimeoutExpired, OSError) as e:
@@ -1929,7 +1929,7 @@ def _sync_download(config):
 
 def cmd_watch(args):
     """Watch for save changes in real-time using inotify."""
-    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager — Watch Mode{C.RESET}\n")
+    print(f"\n{C.BOLD}{C.BCYAN}  24HG Forge Save Game Manager — Watch Mode{C.RESET}\n")
 
     try:
         import inotify.adapters
@@ -2034,7 +2034,7 @@ def _watch_polling(args):
 
 def cmd_cleanup(args):
     """Find and manage save storage."""
-    print(f"\n{C.BOLD}{C.BCYAN}  HubOS Save Game Manager — Cleanup{C.RESET}\n")
+    print(f"\n{C.BOLD}{C.BCYAN}  24HG Forge Save Game Manager — Cleanup{C.RESET}\n")
 
     saves = discover_all_saves()
     if not saves:
@@ -2128,8 +2128,8 @@ def cmd_cleanup(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="hubos-save-manager",
-        description="HubOS Save Game Manager — Find, backup, and restore saves across all launchers",
+        prog="forge-save-manager",
+        description="24HG Forge Save Game Manager — Find, backup, and restore saves across all launchers",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""commands:
   find      Scan system for all save game locations
@@ -2141,13 +2141,13 @@ def main():
   cleanup   Find duplicates, orphans, and manage storage
 
 examples:
-  hubos-save-manager find
-  hubos-save-manager list
-  hubos-save-manager backup
-  hubos-save-manager backup "Elden Ring"
-  hubos-save-manager restore latest "Cyberpunk 2077"
-  hubos-save-manager watch
-  hubos-save-manager cleanup
+  forge-save-manager find
+  forge-save-manager list
+  forge-save-manager backup
+  forge-save-manager backup "Elden Ring"
+  forge-save-manager restore latest "Cyberpunk 2077"
+  forge-save-manager watch
+  forge-save-manager cleanup
 """
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")

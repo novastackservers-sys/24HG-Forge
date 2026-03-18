@@ -1,14 +1,14 @@
 #!/bin/bash
-# HubOS Gaming Benchmark
+# 24HG Forge Gaming Benchmark
 # Tests system performance with gaming-relevant metrics.
 # Gives users a score to compare with others in the community.
 #
-# Usage: hubos-benchmark [quick|full|gpu|cpu|disk|ram|network]
+# Usage: forge-benchmark [quick|full|gpu|cpu|disk|ram|network]
 
 set -euo pipefail
 
 ACTION="${1:-quick}"
-RESULTS_DIR="$HOME/.local/share/hubos"
+RESULTS_DIR="$HOME/.local/share/forge"
 RESULTS_FILE="$RESULTS_DIR/benchmark.json"
 
 mkdir -p "$RESULTS_DIR"
@@ -118,7 +118,7 @@ bench_gpu() {
 bench_disk() {
     header "Disk I/O Benchmark"
 
-    local TEST_FILE="/tmp/hubos-bench-$$"
+    local TEST_FILE="/tmp/forge-bench-$$"
 
     # Sequential write
     echo -n "  Sequential write: "
@@ -224,7 +224,7 @@ bench_network() {
 }
 
 summary() {
-    header "HubOS Gaming Readiness"
+    header "24HG Forge Gaming Readiness"
     echo ""
 
     # Check critical gaming components
@@ -304,14 +304,14 @@ summary() {
 
 case "$ACTION" in
     quick)
-        echo -e "${BOLD}${CYAN}HubOS Quick Benchmark${RESET}"
+        echo -e "${BOLD}${CYAN}24HG Forge Quick Benchmark${RESET}"
         bench_cpu > /dev/null
         bench_gpu
         bench_network
         summary
         ;;
     full)
-        echo -e "${BOLD}${CYAN}HubOS Full System Benchmark${RESET}"
+        echo -e "${BOLD}${CYAN}24HG Forge Full System Benchmark${RESET}"
         echo "This will take a few minutes..."
         bench_cpu
         bench_gpu
@@ -327,8 +327,8 @@ case "$ACTION" in
     network) bench_network ;;
     check)   summary ;;
     *)
-        echo "HubOS Gaming Benchmark"
-        echo "Usage: hubos-benchmark [quick|full|gpu|cpu|disk|ram|network|check]"
+        echo "24HG Forge Gaming Benchmark"
+        echo "Usage: forge-benchmark [quick|full|gpu|cpu|disk|ram|network|check]"
         echo ""
         echo "  quick   — Fast overview (GPU, network, readiness check)"
         echo "  full    — Complete benchmark suite"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-hubos-lock-info - Generate lock screen info overlay for HubOS.
+forge-lock-info - Generate lock screen info overlay for 24HG Forge.
 
 Reads cached server status and hub state, outputs a formatted text block
 suitable for rendering on the KDE lock screen or other overlay surfaces.
@@ -13,22 +13,22 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-CACHE_DIR = Path.home() / ".cache" / "hubos"
+CACHE_DIR = Path.home() / ".cache" / "forge"
 SERVER_STATUS_FILE = CACHE_DIR / "server-status.json"
 HUB_STATE_FILE = CACHE_DIR / "hub-state.json"
 
 TIPS = [
     "Press Super+G to toggle Gaming Mode for max performance.",
-    "Use hubos-proton-fix if a game won't launch through Steam.",
+    "Use forge-proton-fix if a game won't launch through Steam.",
     "Right-click the desktop for quick access to server status.",
-    "Check hubos-achievements to see your gaming milestones.",
-    "Use hubos-benchmark to test your system after driver updates.",
+    "Check forge-achievements to see your gaming milestones.",
+    "Use forge-benchmark to test your system after driver updates.",
     "Join the 24HG Discord for community events and giveaways.",
-    "hubos-diag creates a full system report for troubleshooting.",
+    "forge-diag creates a full system report for troubleshooting.",
     "Flatpak apps auto-update in the background. No action needed.",
-    "Use hubos-game-timer to track your playtime across all games.",
+    "Use forge-game-timer to track your playtime across all games.",
     "The 24HG Hub shows live player counts for every server.",
-    "Toggle performance profiles with hubos-performance.",
+    "Toggle performance profiles with forge-performance.",
     "Screenshots are saved to ~/Pictures/Screenshots by default.",
     "Press Ctrl+Alt+T to open a terminal anywhere.",
     "Server status updates every 60 seconds in the background.",

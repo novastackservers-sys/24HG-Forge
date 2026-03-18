@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# HubOS Thermal Guard — Temperature monitoring and protection for gaming
-# Usage: hubos-thermal [monitor|status|warn|fan|log|limits] [options]
+# 24HG Forge Thermal Guard — Temperature monitoring and protection for gaming
+# Usage: forge-thermal [monitor|status|warn|fan|log|limits] [options]
 
 set -euo pipefail
 
 # ─── Configuration paths ────────────────────────────────────────────────────────
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hubos"
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/hubos/thermal"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/hubos"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/forge/thermal"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/forge"
 CONFIG_FILE="$CONFIG_DIR/thermal.json"
 CACHE_FILE="$CACHE_DIR/thermal.json"
 LOG_DIR="$DATA_DIR"
@@ -443,7 +443,7 @@ sparkline() {
 notify() {
     local urgency="$1" title="$2" body="$3"
     if command -v notify-send &>/dev/null; then
-        notify-send -u "$urgency" -i "dialog-warning" -a "HubOS Thermal Guard" "$title" "$body" 2>/dev/null || true
+        notify-send -u "$urgency" -i "dialog-warning" -a "24HG Forge Thermal Guard" "$title" "$body" 2>/dev/null || true
     fi
 }
 
@@ -501,7 +501,7 @@ rotate_logs() {
 
 # ─── COMMAND: status ─────────────────────────────────────────────────────────────
 cmd_status() {
-    echo -e "${BOLD}HubOS Thermal Guard — Status${RESET}"
+    echo -e "${BOLD}24HG Forge Thermal Guard — Status${RESET}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     local gpu_temp cpu_temp chipset_temp
@@ -662,7 +662,7 @@ cmd_monitor() {
                 gpu_crit_since=$now
                 notify "critical" "GPU Critical: ${gpu_temp}°C" "GPU temperature is dangerously high. Consider reducing load."
             elif (( now - gpu_crit_since >= 60 )) && [[ "$fps_capped" == "false" ]]; then
-                notify "critical" "GPU sustained at ${gpu_temp}°C" "Sustained critical temperature for 60s.\nConsider: reduce resolution, enable frame cap, improve airflow.\nRun: hubos-thermal fan max"
+                notify "critical" "GPU sustained at ${gpu_temp}°C" "Sustained critical temperature for 60s.\nConsider: reduce resolution, enable frame cap, improve airflow.\nRun: forge-thermal fan max"
                 # Offer to cap FPS via MangoHud
                 if [[ -n "$game" ]]; then
                     notify "critical" "Auto-protect available" "Run 'mangohud fps_limit=60' or set MANGOHUD_CONFIG=fps_limit=60 to cap FPS."
@@ -733,7 +733,7 @@ cmd_monitor() {
         # Clear screen
         tput clear 2>/dev/null || echo -en "\033[H\033[2J"
 
-        echo -e " ${BOLD}HubOS Thermal Guard${RESET}                          ${DIM}[${mode_label}]${RESET}"
+        echo -e " ${BOLD}24HG Forge Thermal Guard${RESET}                          ${DIM}[${mode_label}]${RESET}"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         printf " GPU:  ${gpu_color}%3d°C${RESET}  %s  [%b]     Peak: %d°C\n" "$gpu_temp" "$gpu_bar" "$gpu_status" "$gpu_peak"
         printf " CPU:  ${cpu_color}%3d°C${RESET}  %s  [%b]     Peak: %d°C\n" "$cpu_temp" "$cpu_bar" "$cpu_status" "$cpu_peak"
@@ -793,9 +793,9 @@ cmd_warn() {
             local component="${1:-}"
             local value="${2:-}"
             if [[ -z "$component" || -z "$value" ]]; then
-                echo "Usage: hubos-thermal warn set <gpu|cpu|ssd> <temperature>"
-                echo "       hubos-thermal warn set gpu-crit <temperature>"
-                echo "       hubos-thermal warn set cpu-crit <temperature>"
+                echo "Usage: forge-thermal warn set <gpu|cpu|ssd> <temperature>"
+                echo "       forge-thermal warn set gpu-crit <temperature>"
+                echo "       forge-thermal warn set cpu-crit <temperature>"
                 exit 1
             fi
             case "$component" in
@@ -816,7 +816,7 @@ cmd_warn() {
             cmd_warn show
             ;;
         show)
-            echo -e "${BOLD}HubOS Thermal Guard — Warning Thresholds${RESET}"
+            echo -e "${BOLD}24HG Forge Thermal Guard — Warning Thresholds${RESET}"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             printf " GPU:   warn = ${YELLOW}%d°C${RESET}   critical = ${RED}%d°C${RESET}\n" "$GPU_WARN" "$GPU_CRIT"
             printf " CPU:   warn = ${YELLOW}%d°C${RESET}   critical = ${RED}%d°C${RESET}\n" "$CPU_WARN" "$CPU_CRIT"
@@ -826,11 +826,11 @@ cmd_warn() {
             echo "Color ranges (GPU):  <${GREEN}$((GPU_WARN - 15))°C${RESET} OK | ${YELLOW}$((GPU_WARN - 15))-${GPU_WARN}°C${RESET} WARM | ${ORANGE}${GPU_WARN}-${GPU_CRIT}°C${RESET} HOT | ${RED}>${GPU_CRIT}°C${RESET} CRITICAL"
             echo "Color ranges (CPU):  <${GREEN}$((CPU_WARN - 15))°C${RESET} OK | ${YELLOW}$((CPU_WARN - 15))-${CPU_WARN}°C${RESET} WARM | ${ORANGE}${CPU_WARN}-${CPU_CRIT}°C${RESET} HOT | ${RED}>${CPU_CRIT}°C${RESET} CRITICAL"
             echo ""
-            echo "Set thresholds: hubos-thermal warn set <gpu|cpu|ssd> <temp>"
+            echo "Set thresholds: forge-thermal warn set <gpu|cpu|ssd> <temp>"
             [[ -f "$CONFIG_FILE" ]] && echo -e "${DIM}Config: $CONFIG_FILE${RESET}"
             ;;
         *)
-            echo "Usage: hubos-thermal warn [set|show]"
+            echo "Usage: forge-thermal warn [set|show]"
             exit 1
             ;;
     esac
@@ -843,7 +843,7 @@ cmd_fan() {
 
     case "$subcmd" in
         status)
-            echo -e "${BOLD}HubOS Thermal Guard — Fan Status${RESET}"
+            echo -e "${BOLD}24HG Forge Thermal Guard — Fan Status${RESET}"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             local gpu_fan cpu_fan
             gpu_fan=$(read_gpu_fan)
@@ -919,7 +919,7 @@ cmd_fan() {
 
             if [[ "$changed" == "false" ]]; then
                 echo -e " ${YELLOW}No fan controls could be modified. May need root access or fan control is not supported.${RESET}"
-                echo "  Try: sudo hubos-thermal fan auto"
+                echo "  Try: sudo forge-thermal fan auto"
             fi
             ;;
         max)
@@ -951,10 +951,10 @@ cmd_fan() {
 
             if [[ "$changed" == "false" ]]; then
                 echo -e " ${YELLOW}No fan controls could be modified. May need root access.${RESET}"
-                echo "  Try: sudo hubos-thermal fan max"
+                echo "  Try: sudo forge-thermal fan max"
             else
                 echo ""
-                echo -e " ${YELLOW}Note: Run 'hubos-thermal fan auto' to restore automatic control when done.${RESET}"
+                echo -e " ${YELLOW}Note: Run 'forge-thermal fan auto' to restore automatic control when done.${RESET}"
             fi
             ;;
         quiet)
@@ -986,14 +986,14 @@ cmd_fan() {
 
             if [[ "$changed" == "false" ]]; then
                 echo -e " ${YELLOW}No fan controls could be modified. May need root access.${RESET}"
-                echo "  Try: sudo hubos-thermal fan quiet"
+                echo "  Try: sudo forge-thermal fan quiet"
             else
                 echo ""
-                echo -e " ${ORANGE}Warning: Monitor temps closely in quiet mode. Run 'hubos-thermal fan auto' if temps rise.${RESET}"
+                echo -e " ${ORANGE}Warning: Monitor temps closely in quiet mode. Run 'forge-thermal fan auto' if temps rise.${RESET}"
             fi
             ;;
         *)
-            echo "Usage: hubos-thermal fan [status|auto|max|quiet]"
+            echo "Usage: forge-thermal fan [status|auto|max|quiet]"
             exit 1
             ;;
     esac
@@ -1006,13 +1006,13 @@ cmd_log() {
 
     case "$subcmd" in
         show)
-            echo -e "${BOLD}HubOS Thermal Guard — Temperature History${RESET}"
+            echo -e "${BOLD}24HG Forge Thermal Guard — Temperature History${RESET}"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
             local log_file="$LOG_DIR/thermal-$(date +%Y-%m-%d).csv"
             if [[ ! -f "$log_file" ]]; then
                 echo " No temperature data logged today."
-                echo " Start monitoring with: hubos-thermal monitor"
+                echo " Start monitoring with: forge-thermal monitor"
                 return
             fi
 
@@ -1084,12 +1084,12 @@ if games:
             done
             ;;
         session)
-            echo -e "${BOLD}HubOS Thermal Guard — Last Gaming Session${RESET}"
+            echo -e "${BOLD}24HG Forge Thermal Guard — Last Gaming Session${RESET}"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
             local log_file="$LOG_DIR/thermal-$(date +%Y-%m-%d).csv"
             if [[ ! -f "$log_file" ]]; then
-                echo " No data for today. Try: hubos-thermal log show"
+                echo " No data for today. Try: forge-thermal log show"
                 return
             fi
 
@@ -1204,7 +1204,7 @@ print('       ● GPU  ○ CPU')
             fi
             ;;
         *)
-            echo "Usage: hubos-thermal log [show|session|export [file]]"
+            echo "Usage: forge-thermal log [show|session|export [file]]"
             exit 1
             ;;
     esac
@@ -1212,7 +1212,7 @@ print('       ● GPU  ○ CPU')
 
 # ─── COMMAND: limits ─────────────────────────────────────────────────────────────
 cmd_limits() {
-    echo -e "${BOLD}HubOS Thermal Guard — Hardware Thermal Limits${RESET}"
+    echo -e "${BOLD}24HG Forge Thermal Guard — Hardware Thermal Limits${RESET}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     local gpu_temp cpu_temp
@@ -1400,9 +1400,9 @@ cmd_limits() {
 # ─── Help ────────────────────────────────────────────────────────────────────────
 show_help() {
     cat <<'HELP'
-HubOS Thermal Guard — Temperature monitoring and protection for gaming
+24HG Forge Thermal Guard — Temperature monitoring and protection for gaming
 
-Usage: hubos-thermal <command> [options]
+Usage: forge-thermal <command> [options]
 
 Commands:
   monitor       Real-time temperature dashboard (default)
@@ -1436,14 +1436,14 @@ Log commands:
   log export    Export all logs to CSV
 
 Data locations:
-  Config:    ~/.config/hubos/thermal.json
-  Logs:      ~/.local/share/hubos/thermal/
-  Cache:     ~/.cache/hubos/thermal.json (for widgets)
+  Config:    ~/.config/forge/thermal.json
+  Logs:      ~/.local/share/forge/thermal/
+  Cache:     ~/.cache/forge/thermal.json (for widgets)
 
 Temperature ranges:
   GPU:  <70°C OK | 70-85°C WARM | 85-95°C HOT | >95°C CRITICAL
   CPU:  <65°C OK | 65-80°C WARM | 80-90°C HOT | >90°C CRITICAL
-  (Thresholds are configurable via 'hubos-thermal warn set')
+  (Thresholds are configurable via 'forge-thermal warn set')
 
 The monitor will NEVER forcefully kill a game — it only warns and suggests
 actions like reducing resolution, enabling frame caps, or improving airflow.
@@ -1492,7 +1492,7 @@ case "$COMMAND" in
     help)     show_help ;;
     *)
         echo "Unknown command: $COMMAND"
-        echo "Run 'hubos-thermal --help' for usage."
+        echo "Run 'forge-thermal --help' for usage."
         exit 1
         ;;
 esac

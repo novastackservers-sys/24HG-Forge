@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# HubOS Live Demo Mode
+# 24HG Forge Live Demo Mode
 # Interactive guided tour for the bootable USB live experience.
 # Shows off the OS features and encourages installation.
 #
-# Usage: hubos-demo [start|tour|benchmark|servers|install]
+# Usage: forge-demo [start|tour|benchmark|servers|install]
 
 set -euo pipefail
 
@@ -11,20 +11,20 @@ set -euo pipefail
 
 VERSION="1.0.0"
 ACTION="${1:-start}"
-DATA_DIR="/usr/share/hubos"
+DATA_DIR="/usr/share/forge"
 WALLPAPER_DIR="$DATA_DIR/wallpapers"
-CONFIG_DIR="$HOME/.config/hubos"
-CACHE_DIR="$HOME/.cache/hubos"
-DEMO_FLAG="/tmp/hubos-demo-shown"
-TOUR_STEP_FILE="/tmp/hubos-demo-step"
-LOG_FILE="/tmp/hubos-demo.log"
+CONFIG_DIR="$HOME/.config/forge"
+CACHE_DIR="$HOME/.cache/forge"
+DEMO_FLAG="/tmp/forge-demo-shown"
+TOUR_STEP_FILE="/tmp/forge-demo-step"
+LOG_FILE="/tmp/forge-demo.log"
 
 MANGOHUD_CONF="$HOME/.config/MangoHud/MangoHud.conf"
 
 HUB_URL="https://hub.24hgaming.com"
 BRAND="24 Hour Gaming"
 BRAND_SHORT="24HG"
-OS_NAME="HubOS"
+OS_NAME="24HG Forge"
 
 TOUR_STEPS=5
 BENCHMARK_DURATION=15
@@ -52,7 +52,7 @@ log() {
     echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
 }
 
-log "hubos-demo $ACTION started (v$VERSION)"
+log "forge-demo $ACTION started (v$VERSION)"
 
 # ── UI Abstraction ───────────────────────────────────────────────────────────
 # Prefer kdialog (KDE native) → zenity fallback → terminal fallback
@@ -123,7 +123,7 @@ ui_progress_start() {
             ;;
         zenity)
             # Return a pipe fd for zenity progress
-            local pipe="/tmp/hubos-demo-progress-$$"
+            local pipe="/tmp/forge-demo-progress-$$"
             mkfifo "$pipe" 2>/dev/null || true
             zenity --progress --title="$title" --text="$title" \
                 --percentage=0 --auto-close --width=400 < "$pipe" 2>/dev/null &
@@ -235,7 +235,7 @@ ui_choose() {
 
 # Desktop notification
 notify() {
-    local title="$1" msg="$2" icon="${3:-hubos-logo}"
+    local title="$1" msg="$2" icon="${3:-forge-logo}"
     if command -v notify-send &>/dev/null; then
         notify-send -i "$icon" "$title" "$msg" 2>/dev/null || true
     fi
@@ -268,7 +268,7 @@ is_live_environment() {
 is_demo_disabled() {
     # Check boot parameter
     if [[ -f /proc/cmdline ]]; then
-        grep -q 'hubos\.nodemo' /proc/cmdline 2>/dev/null && return 0
+        grep -q 'forge\.nodemo' /proc/cmdline 2>/dev/null && return 0
     fi
     return 1
 }
@@ -349,9 +349,9 @@ set_demo_wallpaper() {
 
     # Find best wallpaper
     for candidate in \
-        "$WALLPAPER_DIR/hubos-hero.png" \
-        "$WALLPAPER_DIR/hubos-demo.png" \
-        "$WALLPAPER_DIR/hubos-default.png" \
+        "$WALLPAPER_DIR/forge-hero.png" \
+        "$WALLPAPER_DIR/forge-demo.png" \
+        "$WALLPAPER_DIR/forge-default.png" \
         "$WALLPAPER_DIR"/*.png; do
         if [[ -f "$candidate" ]]; then
             wp="$candidate"
@@ -390,7 +390,7 @@ configure_mangohud_demo() {
 
     if [[ ! -f "$MANGOHUD_CONF" ]]; then
         cat > "$MANGOHUD_CONF" <<'MHEOF'
-### HubOS Demo MangoHud Config
+### 24HG Forge Demo MangoHud Config
 legacy_layout=false
 gpu_stats
 gpu_temp
@@ -672,7 +672,7 @@ tour_step_performance() {
     perf_text+="MangoHud shows FPS, GPU/CPU temps, and frame timing.\n"
     perf_text+="GameMode tunes your system for peak gaming performance.\n\n"
     perf_text+="Performance profiles: gaming / balanced / powersave\n"
-    perf_text+="Switch anytime with: hubos-performance gaming"
+    perf_text+="Switch anytime with: forge-performance gaming"
 
     case "$UI_MODE" in
         kdialog|zenity)
@@ -688,7 +688,7 @@ tour_step_performance() {
             echo -e "  ${WHITE}GameMode${RESET} tunes your system for peak gaming performance."
             echo ""
             echo -e "  Performance profiles: ${GREEN}gaming${RESET} / ${YELLOW}balanced${RESET} / ${BLUE}powersave${RESET}"
-            echo -e "  Switch anytime with: ${DIM}hubos-performance gaming${RESET}"
+            echo -e "  Switch anytime with: ${DIM}forge-performance gaming${RESET}"
             echo ""
 
             # Quick demo of MangoHud toggle
@@ -708,9 +708,9 @@ tour_step_performance() {
 tour_step_tools() {
     echo -e "\n${BOLD}${MAGENTA}── Step 4 of $TOUR_STEPS: One-Click Everything ──${RESET}\n"
 
-    # Count available hubos tools
+    # Count available forge tools
     local tool_count=0
-    for tool in /usr/bin/hubos-*; do
+    for tool in /usr/bin/forge-*; do
         [[ -x "$tool" ]] && (( tool_count++ )) || true
     done
     (( tool_count < 10 )) && tool_count=40  # Fallback for live demo
@@ -793,7 +793,7 @@ tour_step_install() {
             if ui_yesno "Ready to Install?" "$install_text"; then
                 launch_installer
             else
-                ui_info "$OS_NAME" "No problem! You can install later.\n\nTake the USB home — it works on any PC.\n\nVisit: 24hgaming.com/hubos"
+                ui_info "$OS_NAME" "No problem! You can install later.\n\nTake the USB home — it works on any PC.\n\nVisit: 24hgaming.com/forge"
             fi
             ;;
         terminal)
@@ -808,7 +808,7 @@ tour_step_install() {
                 echo ""
                 echo -e "  ${GREEN}No problem!${RESET} You can install later."
                 echo -e "  Take the USB home — it works on any PC."
-                echo -e "  Visit: ${UNDERLINE}24hgaming.com/hubos${RESET}"
+                echo -e "  Visit: ${UNDERLINE}24hgaming.com/forge${RESET}"
                 echo ""
             fi
             ;;
@@ -847,12 +847,12 @@ launch_installer() {
         log "Launching Anaconda (liveinst)"
         notify "$OS_NAME" "Installer launching..."
         liveinst &>/dev/null &
-    elif [[ -f /usr/bin/install-hubos ]]; then
-        log "Launching install-hubos"
-        /usr/bin/install-hubos &
+    elif [[ -f /usr/bin/install-forge ]]; then
+        log "Launching install-forge"
+        /usr/bin/install-forge &
     else
         echo -e "  ${YELLOW}Installer not found in live environment.${RESET}"
-        echo -e "  ${DIM}Download: 24hgaming.com/hubos${RESET}"
+        echo -e "  ${DIM}Download: 24hgaming.com/forge${RESET}"
         log "No installer found"
         return 0
     fi
@@ -868,9 +868,9 @@ launch_installer() {
     echo ""
 
     # Offer something to do while waiting
-    if command -v hubos-tips &>/dev/null; then
+    if command -v forge-tips &>/dev/null; then
         echo -e "  ${DIM}Showing tips while you wait...${RESET}\n"
-        hubos-tips 2>/dev/null || true
+        forge-tips 2>/dev/null || true
     fi
 }
 
@@ -963,7 +963,7 @@ run_tour() {
 
     echo ""
     echo -e "${BOLD}${GREEN}Tour complete!${RESET} Thanks for checking out $OS_NAME."
-    echo -e "${DIM}Visit 24hgaming.com/hubos for more info.${RESET}"
+    echo -e "${DIM}Visit 24hgaming.com/forge for more info.${RESET}"
     echo ""
 
     notify "$OS_NAME Demo" "Tour complete! Thanks for trying $OS_NAME."
@@ -975,17 +975,17 @@ show_servers() {
     echo ""
     echo -e "${BOLD}${CYAN}━━━ $BRAND_SHORT Server Status ━━━${RESET}\n"
 
-    if command -v hubos-server-status &>/dev/null; then
-        hubos-server-status --once 2>/dev/null || {
+    if command -v forge-server-status &>/dev/null; then
+        forge-server-status --once 2>/dev/null || {
             echo -e "  ${YELLOW}Server status tool not available in live mode.${RESET}"
             echo -e "  ${DIM}Install $OS_NAME for live server monitoring.${RESET}"
         }
-    elif [[ -f /usr/share/hubos/servers.json ]]; then
+    elif [[ -f /usr/share/forge/servers.json ]]; then
         # Parse servers.json manually
         if command -v python3 &>/dev/null; then
             python3 -c "
 import json
-with open('/usr/share/hubos/servers.json') as f:
+with open('/usr/share/forge/servers.json') as f:
     servers = json.load(f)
 print(f'  {len(servers)} servers configured:')
 print()
@@ -997,7 +997,7 @@ for game, count in sorted(games.items()):
     print(f'  {game}: {count} servers')
 " 2>/dev/null || echo -e "  ${DIM}Could not parse server list.${RESET}"
         else
-            echo -e "  ${DIM}Server data available at /usr/share/hubos/servers.json${RESET}"
+            echo -e "  ${DIM}Server data available at /usr/share/forge/servers.json${RESET}"
         fi
     else
         echo -e "  ${WHITE}$BRAND_SHORT runs 88+ game servers including:${RESET}"
@@ -1111,19 +1111,19 @@ cmd_start() {
     configure_mangohud_demo
 
     # Start server status daemon in background
-    if command -v hubos-server-status &>/dev/null; then
-        if ! pgrep -f "hubos-server-status" &>/dev/null; then
+    if command -v forge-server-status &>/dev/null; then
+        if ! pgrep -f "forge-server-status" &>/dev/null; then
             log "Starting server status daemon"
-            hubos-server-status &>/dev/null &
+            forge-server-status &>/dev/null &
             disown 2>/dev/null || true
         fi
     fi
 
     # Launch system tray if available
-    if command -v hubos-desktop-setup &>/dev/null; then
-        if ! pgrep -f "hubos-desktop-setup" &>/dev/null; then
+    if command -v forge-desktop-setup &>/dev/null; then
+        if ! pgrep -f "forge-desktop-setup" &>/dev/null; then
             log "Starting desktop setup / system tray"
-            hubos-desktop-setup tray &>/dev/null &
+            forge-desktop-setup tray &>/dev/null &
             disown 2>/dev/null || true
         fi
     fi
@@ -1137,7 +1137,7 @@ cmd_start() {
 show_help() {
     echo -e "${BOLD}${WHITE}$OS_NAME Live Demo Mode${RESET} ${DIM}v$VERSION${RESET}"
     echo ""
-    echo -e "${BOLD}Usage:${RESET} hubos-demo [command]"
+    echo -e "${BOLD}Usage:${RESET} forge-demo [command]"
     echo ""
     echo -e "${BOLD}Commands:${RESET}"
     echo -e "  ${CYAN}start${RESET}       Launch the full demo experience (default)"
@@ -1150,9 +1150,9 @@ show_help() {
     echo ""
     echo -e "${BOLD}Live Boot:${RESET}"
     echo -e "  Auto-launches 10s after desktop loads on live USB."
-    echo -e "  Disable with boot parameter: ${DIM}hubos.nodemo${RESET}"
+    echo -e "  Disable with boot parameter: ${DIM}forge.nodemo${RESET}"
     echo ""
-    echo -e "${DIM}$BRAND — 24hgaming.com/hubos${RESET}"
+    echo -e "${DIM}$BRAND — 24hgaming.com/forge${RESET}"
 }
 
 # ── Benchmark Command ────────────────────────────────────────────────────────
@@ -1160,9 +1160,9 @@ show_help() {
 cmd_benchmark() {
     echo -e "\n${BOLD}${WHITE}$OS_NAME Quick Benchmark${RESET}\n"
 
-    # If hubos-benchmark exists, delegate to it
-    if command -v hubos-benchmark &>/dev/null; then
-        hubos-benchmark quick 2>/dev/null || {
+    # If forge-benchmark exists, delegate to it
+    if command -v forge-benchmark &>/dev/null; then
+        forge-benchmark quick 2>/dev/null || {
             echo -e "  ${YELLOW}Full benchmark unavailable, running built-in test...${RESET}"
             run_quick_benchmark
         }
@@ -1211,5 +1211,5 @@ case "$ACTION" in
         ;;
 esac
 
-log "hubos-demo $ACTION finished"
+log "forge-demo $ACTION finished"
 exit 0

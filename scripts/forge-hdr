@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HubOS HDR Gaming Wizard — End-to-end HDR setup for Linux gaming
+# 24HG Forge HDR Gaming Wizard — End-to-end HDR setup for Linux gaming
 # The most comprehensive HDR configuration tool for any Linux distro.
 # Handles hardware detection, KDE Plasma 6 config, gamescope integration,
 # NVIDIA/AMD/Intel quirks, and per-game HDR profiles.
@@ -10,7 +10,7 @@ set -euo pipefail
 # Paths & globals
 # ---------------------------------------------------------------------------
 
-HDR_CONFIG_DIR="$HOME/.config/hubos/hdr"
+HDR_CONFIG_DIR="$HOME/.config/forge/hdr"
 HDR_GAME_PROFILES="$HDR_CONFIG_DIR/game-profiles"
 HDR_ENV_FILE="$HDR_CONFIG_DIR/environment"
 HDR_STATE_FILE="$HDR_CONFIG_DIR/state"
@@ -418,7 +418,7 @@ write_hdr_env() {
 
     if [[ "$enable" == "true" ]]; then
         cat > "$HDR_ENV_FILE" <<'ENVEOF'
-# HubOS HDR environment — sourced by hubos-smart-launch and Steam
+# 24HG Forge HDR environment — sourced by forge-smart-launch and Steam
 export DXVK_HDR=1
 export PROTON_ENABLE_WAYLAND=1
 export ENABLE_HDR_WSI=1
@@ -426,7 +426,7 @@ ENVEOF
         ok "HDR environment variables written to $HDR_ENV_FILE"
     else
         cat > "$HDR_ENV_FILE" <<'ENVEOF'
-# HubOS HDR environment — HDR disabled
+# 24HG Forge HDR environment — HDR disabled
 unset DXVK_HDR
 unset ENABLE_HDR_WSI
 # Keep Wayland for Proton (beneficial even without HDR)
@@ -439,13 +439,13 @@ ENVEOF
     local envd_dir="$HOME/.config/environment.d"
     mkdir -p "$envd_dir"
     if [[ "$enable" == "true" ]]; then
-        cat > "$envd_dir/50-hubos-hdr.conf" <<'ENVEOF'
+        cat > "$envd_dir/50-forge-hdr.conf" <<'ENVEOF'
 DXVK_HDR=1
 PROTON_ENABLE_WAYLAND=1
 ENABLE_HDR_WSI=1
 ENVEOF
     else
-        rm -f "$envd_dir/50-hubos-hdr.conf"
+        rm -f "$envd_dir/50-forge-hdr.conf"
     fi
 
     log "Environment: HDR=$enable"
@@ -568,7 +568,7 @@ save_game_profile() {
     local hdr_quality="${3:-unknown}"
 
     cat > "$HDR_GAME_PROFILES/${appid}.conf" <<EOF
-# HubOS HDR profile for AppID $appid
+# 24HG Forge HDR profile for AppID $appid
 LAUNCH_OPTIONS=${launch_opts}
 HDR_QUALITY=${hdr_quality}
 CONFIGURED=$(date -Iseconds)
@@ -593,7 +593,7 @@ load_game_profile() {
 notify() {
     local title="$1" body="${2:-}" icon="${3:-video-display}"
     if command -v notify-send &>/dev/null; then
-        notify-send -a "HubOS HDR" -i "$icon" "$title" "$body" 2>/dev/null || true
+        notify-send -a "24HG Forge HDR" -i "$icon" "$title" "$body" 2>/dev/null || true
     fi
 }
 
@@ -603,7 +603,7 @@ notify() {
 
 cmd_setup() {
     echo ""
-    echo -e "${BOLD}${MAGENTA}  HubOS HDR Setup Wizard${RESET}"
+    echo -e "${BOLD}${MAGENTA}  24HG Forge HDR Setup Wizard${RESET}"
     echo -e "${DIM}  End-to-end HDR configuration for Linux gaming${RESET}"
     echo ""
 
@@ -738,7 +738,7 @@ cmd_setup() {
         echo -e "  ${BOLD}${gs_cmd} -- %command%${RESET}"
         echo ""
         info "Add this to Steam game launch options for per-game HDR."
-        dim "Or use: hubos-hdr game <appid> to configure a specific game."
+        dim "Or use: forge-hdr game <appid> to configure a specific game."
     else
         info "Gamescope not available — using system-wide HDR only."
         dim "System-wide HDR through KDE Plasma works but some games"
@@ -777,7 +777,7 @@ cmd_setup() {
     if [[ "${yn,,}" != "n" ]]; then
         cmd_test
     else
-        info "Skipping test — run 'hubos-hdr test' anytime."
+        info "Skipping test — run 'forge-hdr test' anytime."
     fi
 
     # Save state
@@ -789,10 +789,10 @@ cmd_setup() {
     echo -e "${BOLD}${GREEN}  HDR setup complete!${RESET}"
     echo ""
     dim "Quick commands:"
-    dim "  hubos-hdr status    — Check current HDR state"
-    dim "  hubos-hdr toggle    — Quick on/off"
-    dim "  hubos-hdr game ID   — Configure a game"
-    dim "  hubos-hdr fix       — Troubleshoot issues"
+    dim "  forge-hdr status    — Check current HDR state"
+    dim "  forge-hdr toggle    — Quick on/off"
+    dim "  forge-hdr game ID   — Configure a game"
+    dim "  forge-hdr fix       — Troubleshoot issues"
     echo ""
 
     notify "HDR Setup Complete" "Your display is now configured for HDR gaming." "video-display"
@@ -805,7 +805,7 @@ cmd_setup() {
 
 cmd_status() {
     echo ""
-    echo -e "${BOLD}${MAGENTA}  HubOS HDR Status${RESET}"
+    echo -e "${BOLD}${MAGENTA}  24HG Forge HDR Status${RESET}"
     echo ""
 
     # Session
@@ -966,7 +966,7 @@ cmd_test() {
             --target-colorspace-hint=yes --target-trc=pq \
             --vf=format=colorlevels=full:colormatrix=bt.2020-ncl:primaries=bt.2020:gamma=pq \
             "lavfi://[testsrc2=duration=10:size=1920x1080:rate=60,format=gbrp10le]" \
-            --title="HubOS HDR Test" 2>/dev/null && tested=true || true
+            --title="24HG Forge HDR Test" 2>/dev/null && tested=true || true
     fi
 
     # Method 2: vkcube or vkcube-hdr
@@ -1033,7 +1033,7 @@ cmd_test() {
             ;;
         *)
             warn "HDR test did not pass."
-            info "Try running 'hubos-hdr fix' for troubleshooting."
+            info "Try running 'forge-hdr fix' for troubleshooting."
             save_state "test_passed" "false"
             ;;
     esac
@@ -1049,7 +1049,7 @@ cmd_game() {
 
     if [[ -z "$appid" ]]; then
         echo ""
-        echo -e "${BOLD}Usage:${RESET} hubos-hdr game <steam_appid>"
+        echo -e "${BOLD}Usage:${RESET} forge-hdr game <steam_appid>"
         echo ""
         echo -e "${BOLD}Known HDR games:${RESET}"
         for entry in "${HDR_GAMES[@]}"; do
@@ -1181,7 +1181,7 @@ cmd_toggle() {
             save_state "hdr_enabled" "true"
             ok "HDR is now ON"
             notify "HDR Enabled" "System HDR and DXVK HDR are active." "video-display"
-            dim "Tip: Bind Meta+H to 'hubos-hdr toggle' for quick switching."
+            dim "Tip: Bind Meta+H to 'forge-hdr toggle' for quick switching."
             echo ""
             ;;
 
@@ -1200,7 +1200,7 @@ cmd_toggle() {
             ;;
 
         *)
-            err "Usage: hubos-hdr toggle [on|off]"
+            err "Usage: forge-hdr toggle [on|off]"
             return 1
             ;;
     esac
@@ -1214,7 +1214,7 @@ cmd_toggle() {
 
 cmd_fix() {
     echo ""
-    echo -e "${BOLD}${MAGENTA}  HubOS HDR Troubleshooter${RESET}"
+    echo -e "${BOLD}${MAGENTA}  24HG Forge HDR Troubleshooter${RESET}"
     echo ""
 
     local issues=()
@@ -1279,7 +1279,7 @@ cmd_fix() {
         echo "    1. Log out"
         echo "    2. On the login screen, click the session selector (bottom-left)"
         echo "    3. Choose 'Plasma (Wayland)'"
-        echo "    4. Log in and re-run 'hubos-hdr setup'"
+        echo "    4. Log in and re-run 'forge-hdr setup'"
         echo ""
     fi
 
@@ -1333,7 +1333,7 @@ cmd_fix() {
         echo "  KDE Plasma's HDR compositing is not turned on."
         echo ""
         echo "  Fix:"
-        echo "    hubos-hdr toggle on"
+        echo "    forge-hdr toggle on"
         echo ""
         echo "  Or manually:"
         echo "    kwriteconfig6 --file kwinrc --group Compositing --key AllowHDR true"
@@ -1348,9 +1348,9 @@ cmd_fix() {
         echo "  DXVK_HDR and/or ENABLE_HDR_WSI are not in the current environment."
         echo ""
         echo "  Fix:"
-        echo "    hubos-hdr toggle on   # sets environment + KDE"
+        echo "    forge-hdr toggle on   # sets environment + KDE"
         echo ""
-        echo "  Or add to ~/.config/environment.d/50-hubos-hdr.conf:"
+        echo "  Or add to ~/.config/environment.d/50-forge-hdr.conf:"
         echo "    DXVK_HDR=1"
         echo "    ENABLE_HDR_WSI=1"
         echo "    PROTON_ENABLE_WAYLAND=1"
@@ -1364,7 +1364,7 @@ cmd_fix() {
         echo "  This usually means HDR is not active at the compositor level."
         echo ""
         echo "  Fix:"
-        echo "    1. Ensure KDE HDR is enabled: hubos-hdr toggle on"
+        echo "    1. Ensure KDE HDR is enabled: forge-hdr toggle on"
         echo "    2. Check monitor OSD settings — enable HDR input"
         echo "    3. Try a different cable (HDMI 2.0+ or DP 1.4+)"
         echo "    4. Some monitors need a specific input port for HDR"
@@ -1385,7 +1385,7 @@ cmd_fix() {
     echo -e "  ${BOLD}Black screen when enabling HDR:${RESET}"
     echo "    1. Wait 15 seconds — KWin may recover automatically"
     echo "    2. If stuck, switch to TTY: Ctrl+Alt+F2"
-    echo "    3. Run: hubos-hdr toggle off"
+    echo "    3. Run: forge-hdr toggle off"
     echo "    4. Switch back: Ctrl+Alt+F1"
     echo "    5. Check driver version and cable quality"
     echo ""
@@ -1428,7 +1428,7 @@ cmd_gamescope() {
 
     if [[ -z "$appid" ]]; then
         echo ""
-        echo -e "${BOLD}Usage:${RESET} hubos-hdr gamescope <steam_appid>"
+        echo -e "${BOLD}Usage:${RESET} forge-hdr gamescope <steam_appid>"
         echo ""
         echo "Launches a game through gamescope with HDR enabled."
         echo "This constructs the optimal gamescope command for your hardware."
@@ -1504,10 +1504,10 @@ cmd_gamescope() {
 
 usage() {
     echo ""
-    echo -e "${BOLD}HubOS HDR Gaming Wizard${RESET}"
+    echo -e "${BOLD}24HG Forge HDR Gaming Wizard${RESET}"
     echo -e "${DIM}End-to-end HDR setup for Linux gaming${RESET}"
     echo ""
-    echo -e "${BOLD}Usage:${RESET} hubos-hdr <command> [options]"
+    echo -e "${BOLD}Usage:${RESET} forge-hdr <command> [options]"
     echo ""
     echo -e "${BOLD}Commands:${RESET}"
     echo "  setup              Full HDR setup wizard (hardware detect + configure)"
@@ -1519,11 +1519,11 @@ usage() {
     echo "  gamescope [appid]  Launch a game through gamescope with HDR"
     echo ""
     echo -e "${BOLD}Examples:${RESET}"
-    echo "  hubos-hdr setup                   # First-time HDR setup"
-    echo "  hubos-hdr game 1091500            # Configure Cyberpunk 2077"
-    echo "  hubos-hdr toggle on               # Quick enable"
-    echo "  hubos-hdr gamescope 2358720       # Launch Black Myth Wukong"
-    echo "  hubos-hdr status                  # Check everything"
+    echo "  forge-hdr setup                   # First-time HDR setup"
+    echo "  forge-hdr game 1091500            # Configure Cyberpunk 2077"
+    echo "  forge-hdr toggle on               # Quick enable"
+    echo "  forge-hdr gamescope 2358720       # Launch Black Myth Wukong"
+    echo "  forge-hdr status                  # Check everything"
     echo ""
     echo -e "${BOLD}HDR requires:${RESET}"
     echo "  - Wayland session (not X11)"

@@ -1,9 +1,9 @@
 #!/bin/bash
-# HubOS Input Latency Optimizer
+# 24HG Forge Input Latency Optimizer
 # Configures mouse, keyboard, and controller input for minimal latency.
 # Critical for competitive FPS players.
 #
-# Usage: hubos-input [gaming|desktop|status]
+# Usage: forge-input [gaming|desktop|status]
 
 set -euo pipefail
 
@@ -123,7 +123,7 @@ case "$ACTION" in
         ;;
 
     status)
-        echo "=== HubOS Input Status ==="
+        echo "=== 24HG Forge Input Status ==="
 
         # Mouse acceleration
         echo ""
@@ -164,8 +164,8 @@ case "$ACTION" in
         ;;
 
     *)
-        echo "HubOS Input Latency Optimizer"
-        echo "Usage: hubos-input [gaming|desktop|status]"
+        echo "24HG Forge Input Latency Optimizer"
+        echo "Usage: forge-input [gaming|desktop|status]"
         echo ""
         echo "  gaming   — Zero mouse accel, fast keyboard, disable touchpad"
         echo "  desktop  — Normal mouse accel, standard keyboard"

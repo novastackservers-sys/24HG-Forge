@@ -1,13 +1,13 @@
 #!/bin/bash
-# HubOS Game Save Backup
+# 24HG Forge Game Save Backup
 # Backs up game save data, configs, and Wine prefixes.
 # No other Linux gaming distro does this properly.
 #
-# Usage: hubos-backup [create|restore|list|auto]
+# Usage: forge-backup [create|restore|list|auto]
 
 set -euo pipefail
 
-BACKUP_DIR="$HOME/.local/share/hubos/backups"
+BACKUP_DIR="$HOME/.local/share/forge/backups"
 ACTION="${1:-list}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -37,7 +37,7 @@ declare -A SAVE_PATHS=(
 
 # Additional config paths to always back up
 CONFIG_PATHS=(
-    "$HOME/.config/hubos"
+    "$HOME/.config/forge"
     "$HOME/.config/MangoHud"
     "$HOME/.config/gamemode.ini"
     "$HOME/.config/obs-studio"
@@ -45,13 +45,13 @@ CONFIG_PATHS=(
 )
 
 create_backup() {
-    local NAME="${2:-hubos-backup}"
+    local NAME="${2:-forge-backup}"
     local BACKUP_FILE="$BACKUP_DIR/${NAME}_${TIMESTAMP}.tar.zst"
     local TEMP_LIST=$(mktemp)
 
     mkdir -p "$BACKUP_DIR"
 
-    echo "=== HubOS Game Save Backup ==="
+    echo "=== 24HG Forge Game Save Backup ==="
     echo "Creating backup: $BACKUP_FILE"
     echo ""
 
@@ -91,7 +91,7 @@ create_backup() {
         done
     fi
 
-    # Collect HubOS and gaming configs
+    # Collect 24HG Forge and gaming configs
     for CFG in "${CONFIG_PATHS[@]}"; do
         if [ -e "$CFG" ]; then
             echo "  Config: $CFG..."
@@ -127,7 +127,7 @@ create_backup() {
         SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
         echo ""
         echo "Backup complete: $BACKUP_FILE ($SIZE)"
-        notify-send -a "24HG" -i "hubos-logo" "Backup Complete" \
+        notify-send -a "24HG" -i "forge-logo" "Backup Complete" \
             "$NAME ($SIZE)" 2>/dev/null || true
     else
         echo "Backup failed!"
@@ -143,7 +143,7 @@ restore_backup() {
         echo "Available backups:"
         list_backups
         echo ""
-        echo "Usage: hubos-backup restore <path-to-backup.tar.zst>"
+        echo "Usage: forge-backup restore <path-to-backup.tar.zst>"
         exit 1
     fi
 
@@ -172,7 +172,7 @@ restore_backup() {
     zstd -d < "$BACKUP_FILE" | tar -xf - -C / 2>/dev/null
 
     echo "Restore complete."
-    notify-send -a "24HG" -i "hubos-logo" "Restore Complete" \
+    notify-send -a "24HG" -i "forge-logo" "Restore Complete" \
         "Game saves restored from backup" 2>/dev/null || true
 }
 
@@ -182,7 +182,7 @@ list_backups() {
         return
     fi
 
-    echo "=== HubOS Backups ==="
+    echo "=== 24HG Forge Backups ==="
     echo "Location: $BACKUP_DIR"
     echo ""
 
@@ -226,8 +226,8 @@ case "$ACTION" in
     list)    list_backups ;;
     auto)    auto_backup ;;
     *)
-        echo "HubOS Game Save Backup"
-        echo "Usage: hubos-backup [create|restore|list|auto]"
+        echo "24HG Forge Game Save Backup"
+        echo "Usage: forge-backup [create|restore|list|auto]"
         echo ""
         echo "  create [name]    — Create a backup of all game saves"
         echo "  restore <file>   — Restore from a backup file"

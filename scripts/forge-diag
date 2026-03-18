@@ -1,6 +1,6 @@
 #!/bin/bash
-# HubOS Diagnostics — Collect system info for support tickets
-# Usage: hubos-diag [--paste]
+# 24HG Forge Diagnostics — Collect system info for support tickets
+# Usage: forge-diag [--paste]
 #   --paste: Upload to termbin.com and return URL (redacts sensitive info)
 
 set -euo pipefail
@@ -23,7 +23,7 @@ redact_ip() {
 
 collect() {
     echo "============================================"
-    echo "  HubOS Diagnostics Report"
+    echo "  24HG Forge Diagnostics Report"
     echo "  Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
     echo "============================================"
     echo ""
@@ -128,15 +128,15 @@ collect() {
     echo "MangoHud: ${MANGOHUD:-not set}"
     echo ""
 
-    echo "── HubOS Services ──"
-    for svc in hubos-gaming-tweaks hubos-first-boot-setup hubos-auto-update.timer; do
+    echo "── 24HG Forge Services ──"
+    for svc in forge-gaming-tweaks forge-first-boot-setup forge-auto-update.timer; do
         STATUS=$(systemctl is-active "$svc" 2>/dev/null || echo "missing")
         echo "  $svc: $STATUS"
     done
     echo ""
 
-    echo "── Journal (last 20 HubOS entries) ──"
-    journalctl -t hubos-update -t hubos -n 20 --no-pager 2>/dev/null || echo "No entries"
+    echo "── Journal (last 20 24HG Forge entries) ──"
+    journalctl -t forge-update -t forge -n 20 --no-pager 2>/dev/null || echo "No entries"
     echo ""
 
     echo "── Errors (last 10 critical/error) ──"
@@ -144,7 +144,7 @@ collect() {
     echo ""
 
     echo "============================================"
-    echo "  End of HubOS Diagnostics"
+    echo "  End of 24HG Forge Diagnostics"
     echo "============================================"
 }
 

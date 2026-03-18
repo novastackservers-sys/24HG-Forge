@@ -1,16 +1,16 @@
 #!/bin/bash
-# HubOS Notification Style — Configure KDE Plasma notification appearance
+# 24HG Forge Notification Style — Configure KDE Plasma notification appearance
 # Switches between gaming-optimized, desktop, and minimal notification profiles
 # to keep your screen clean during gameplay.
 #
-# Usage: hubos-notify-style [gaming|desktop|minimal|status]
+# Usage: forge-notify-style [gaming|desktop|minimal|status]
 
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 NOTIFY_RC="${XDG_CONFIG_HOME:-$HOME/.config}/plasmanotifyrc"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hubos"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge"
 STATE_FILE="$CONFIG_DIR/notify-style"
 
 mkdir -p "$CONFIG_DIR"
@@ -227,7 +227,7 @@ cmd_status() {
 usage() {
     cat <<'HELP'
 
-  hubos-notify-style — Configure notification appearance for HubOS
+  forge-notify-style — Configure notification appearance for 24HG Forge
 
   Profiles:
     gaming      Compact top-right popups, 3s timeout, DND during fullscreen
@@ -257,7 +257,7 @@ case "$ACTION" in
     status|info)        cmd_status ;;
     -h|--help|help)     usage ;;
     "")
-        msg "No profile specified. Run \033[1mhubos-notify-style --help\033[0m for usage."
+        msg "No profile specified. Run \033[1mforge-notify-style --help\033[0m for usage."
         cmd_status
         ;;
     *)

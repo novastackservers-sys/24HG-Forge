@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# HubOS Mod Manager Bridge — Making game modding work on Linux
+# 24HG Forge Mod Manager Bridge — Making game modding work on Linux
 #
 # Bridges the gap between Windows mod managers (Vortex, MO2) and Linux.
 # Handles Proton prefix detection, path translation, mod deployment,
 # Nexus Mods integration, and nxm:// protocol handling.
 #
-# Part of HubOS — a gaming-first Linux distro based on Bazzite/Fedora Atomic.
+# Part of 24HG Forge — a gaming-first Linux distro based on Bazzite/Fedora Atomic.
 
 # ─────────────────────────────────────────────────────────────────────
 # Constants & Configuration
 # ─────────────────────────────────────────────────────────────────────
 
 readonly VERSION="1.0.0"
-readonly SCRIPT_NAME="hubos-mod-manager"
+readonly SCRIPT_NAME="forge-mod-manager"
 readonly MOD_ROOT="${HOME}/Games/Mods"
 readonly MO2_ROOT="${HOME}/Games/ModOrganizer2"
 readonly VORTEX_ROOT="${HOME}/Games/Vortex"
-readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hubos/mod-manager"
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge/mod-manager"
 readonly NEXUS_KEY_FILE="${CONFIG_DIR}/nexus-api-key"
 readonly NEXUS_API="https://api.nexusmods.com/v1"
-readonly NXM_DESKTOP="/usr/share/applications/hubos-nxm-handler.desktop"
+readonly NXM_DESKTOP="/usr/share/applications/forge-nxm-handler.desktop"
 
 # Colors
 readonly RED='\033[0;31m'
@@ -431,11 +431,11 @@ cmd_setup() {
     # ── Step 4: Create symlinks inside prefix ──
     header "Setting up prefix symlinks"
 
-    # Create a HubOS mods folder accessible from Windows side
-    local win_mods="${drive_c}/HubOS_Mods"
+    # Create a 24HG Forge mods folder accessible from Windows side
+    local win_mods="${drive_c}/24HG Forge_Mods"
     if [[ ! -L "$win_mods" ]] && [[ ! -d "$win_mods" ]]; then
         ln -sf "${mod_base}" "${win_mods}"
-        detail "Symlink: C:\\HubOS_Mods -> ${mod_base}"
+        detail "Symlink: C:\\24HG Forge_Mods -> ${mod_base}"
     else
         detail "Symlink already exists: ${win_mods}"
     fi
@@ -501,7 +501,7 @@ cmd_setup() {
     ensure_dir "${CONFIG_DIR}"
     local game_conf="${CONFIG_DIR}/${appid}.conf"
     cat > "$game_conf" << CONF
-# HubOS Mod Manager — ${name}
+# 24HG Forge Mod Manager — ${name}
 APPID=${appid}
 GAME_NAME="${name}"
 SAFE_NAME="${safe_name}"
@@ -744,12 +744,12 @@ cmd_install_vortex() {
 
     # Create desktop shortcut
     header "Creating desktop shortcut"
-    local desktop_file="${HOME}/.local/share/applications/hubos-vortex.desktop"
+    local desktop_file="${HOME}/.local/share/applications/forge-vortex.desktop"
     local vortex_exe="${vortex_prefix}/drive_c/Program Files/Black Tree Gaming Ltd/Vortex/Vortex.exe"
 
     cat > "${desktop_file}" << DESKTOP
 [Desktop Entry]
-Name=Vortex Mod Manager (HubOS)
+Name=Vortex Mod Manager (24HG Forge)
 Comment=Manage game mods with Vortex via Wine
 Exec=env WINEPREFIX="${vortex_prefix}" wine "${vortex_exe}"
 Icon=vortex
@@ -769,9 +769,9 @@ DESKTOP
     ensure_dir "${vortex_appdata}"
 
     # Link our mods directory so Vortex can see it
-    if [[ ! -L "${drive_c}/HubOS_Mods" ]]; then
-        ln -sf "${MOD_ROOT}" "${drive_c}/HubOS_Mods"
-        detail "Linked mods root: C:\\HubOS_Mods -> ${MOD_ROOT}"
+    if [[ ! -L "${drive_c}/24HG Forge_Mods" ]]; then
+        ln -sf "${MOD_ROOT}" "${drive_c}/24HG Forge_Mods"
+        detail "Linked mods root: C:\\24HG Forge_Mods -> ${MOD_ROOT}"
     fi
 
     # Summary
@@ -784,8 +784,8 @@ DESKTOP
     echo -e "  ${BOLD}To launch:${NC} Click 'Vortex Mod Manager' in your app menu"
     echo -e "  ${BOLD}Or run:${NC}    WINEPREFIX=${vortex_prefix} wine '${vortex_exe}'"
     echo ""
-    echo -e "  ${YELLOW}Note:${NC} Configure Vortex to use C:\\HubOS_Mods as the staging base"
-    echo -e "  ${YELLOW}Note:${NC} Point game paths to C:\\HubOS_Mods\\[Game]\\staging"
+    echo -e "  ${YELLOW}Note:${NC} Configure Vortex to use C:\\24HG Forge_Mods as the staging base"
+    echo -e "  ${YELLOW}Note:${NC} Point game paths to C:\\24HG Forge_Mods\\[Game]\\staging"
     echo ""
 }
 
@@ -926,9 +926,9 @@ MO2INI
 
     # Create symlinks inside prefix for game access
     local drive_c="${mo2_prefix}/drive_c"
-    if [[ ! -L "${drive_c}/HubOS_Mods" ]]; then
-        ln -sf "${MOD_ROOT}" "${drive_c}/HubOS_Mods"
-        detail "Linked mods root: C:\\HubOS_Mods"
+    if [[ ! -L "${drive_c}/24HG Forge_Mods" ]]; then
+        ln -sf "${MOD_ROOT}" "${drive_c}/24HG Forge_Mods"
+        detail "Linked mods root: C:\\24HG Forge_Mods"
     fi
 
     # Link Steam library for game detection
@@ -942,10 +942,10 @@ MO2INI
 
     # Create desktop shortcut
     header "Creating desktop shortcut"
-    local desktop_file="${HOME}/.local/share/applications/hubos-mo2.desktop"
+    local desktop_file="${HOME}/.local/share/applications/forge-mo2.desktop"
     cat > "${desktop_file}" << DESKTOP
 [Desktop Entry]
-Name=Mod Organizer 2 (HubOS)
+Name=Mod Organizer 2 (24HG Forge)
 Comment=Manage game mods with MO2 via Wine
 Exec=env WINEPREFIX="${mo2_prefix}" wine "${mo2_exe}"
 Icon=mo2
@@ -1175,7 +1175,7 @@ cmd_deploy() {
                 if [[ ! -f "$plugins_file" ]]; then
                     info "Creating plugins.txt with discovered plugins..."
                     ensure_dir "$appdata_path"
-                    printf "# Auto-generated by HubOS Mod Manager\n" > "$plugins_file"
+                    printf "# Auto-generated by 24HG Forge Mod Manager\n" > "$plugins_file"
                     for pf in "${plugin_files[@]}"; do
                         printf "*%s\n" "$pf" >> "$plugins_file"
                     done
@@ -1327,8 +1327,8 @@ cmd_paths() {
         fi
     done < <(find_library_folders 2>/dev/null)
 
-    # HubOS mod staging
-    echo -e "\n${BOLD}  HubOS Mod Manager${NC}"
+    # 24HG Forge mod staging
+    echo -e "\n${BOLD}  24HG Forge Mod Manager${NC}"
     local mod_base="${MOD_ROOT}/${safe_name}"
     if [[ -d "$mod_base" ]]; then
         echo "    Downloads: ${mod_base}/downloads/"
@@ -1692,7 +1692,7 @@ nexus_handle_nxm() {
         error "Could not get download URL"
         # Send desktop notification
         if command -v notify-send &>/dev/null; then
-            notify-send "HubOS Mod Manager" "Download failed — Premium may be required" --icon=dialog-error
+            notify-send "24HG Forge Mod Manager" "Download failed — Premium may be required" --icon=dialog-error
         fi
         return 1
     fi
@@ -1729,13 +1729,13 @@ nexus_handle_nxm() {
 
     # Send notification
     if command -v notify-send &>/dev/null; then
-        notify-send "HubOS Mod Manager" "Downloading: ${file_name}" --icon=folder-download
+        notify-send "24HG Forge Mod Manager" "Downloading: ${file_name}" --icon=folder-download
     fi
 
     curl -L --progress-bar -o "$output_file" "$dl_url" || {
         error "Download failed"
         if command -v notify-send &>/dev/null; then
-            notify-send "HubOS Mod Manager" "Download failed: ${file_name}" --icon=dialog-error
+            notify-send "24HG Forge Mod Manager" "Download failed: ${file_name}" --icon=dialog-error
         fi
         return 1
     }
@@ -1743,7 +1743,7 @@ nexus_handle_nxm() {
     success "Downloaded: ${output_file}"
 
     if command -v notify-send &>/dev/null; then
-        notify-send "HubOS Mod Manager" "Downloaded: ${file_name}\nDeploy: hubos-mod-manager deploy ${domain}" --icon=dialog-information
+        notify-send "24HG Forge Mod Manager" "Downloaded: ${file_name}\nDeploy: forge-mod-manager deploy ${domain}" --icon=dialog-information
     fi
 }
 
@@ -1751,14 +1751,14 @@ nexus_register_protocol() {
     header "Registering nxm:// protocol handler"
 
     # Write the .desktop file for nxm:// handling
-    local handler_desktop="${HOME}/.local/share/applications/hubos-nxm-handler.desktop"
+    local handler_desktop="${HOME}/.local/share/applications/forge-nxm-handler.desktop"
     ensure_dir "$(dirname "$handler_desktop")"
 
     cat > "${handler_desktop}" << 'DESKTOP'
 [Desktop Entry]
-Name=HubOS Mod Download Handler
+Name=24HG Forge Mod Download Handler
 Comment=Handle nxm:// links from Nexus Mods
-Exec=/usr/bin/hubos-mod-manager nexus handle %u
+Exec=/usr/bin/forge-mod-manager nexus handle %u
 Type=Application
 NoDisplay=true
 MimeType=x-scheme-handler/nxm;
@@ -1767,7 +1767,7 @@ DESKTOP
 
     # Register with xdg
     if command -v xdg-mime &>/dev/null; then
-        xdg-mime default hubos-nxm-handler.desktop x-scheme-handler/nxm
+        xdg-mime default forge-nxm-handler.desktop x-scheme-handler/nxm
         success "Registered nxm:// protocol handler"
     else
         warn "xdg-mime not available — handler desktop file written but not registered"
@@ -1779,7 +1779,7 @@ DESKTOP
         update-desktop-database "${HOME}/.local/share/applications/" 2>/dev/null || true
     fi
 
-    info "Browser nxm:// links will now be handled by HubOS Mod Manager"
+    info "Browser nxm:// links will now be handled by 24HG Forge Mod Manager"
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1787,7 +1787,7 @@ DESKTOP
 # ─────────────────────────────────────────────────────────────────────
 
 cmd_status() {
-    header "HubOS Mod Manager Status"
+    header "24HG Forge Mod Manager Status"
 
     # Steam detection
     echo -e "\n${BOLD}  Steam${NC}"
@@ -1847,7 +1847,7 @@ cmd_status() {
         # Check if nxm handler is registered
         local nxm_handler
         nxm_handler="$(xdg-mime query default x-scheme-handler/nxm 2>/dev/null || echo "")"
-        if [[ "$nxm_handler" == *"hubos"* ]]; then
+        if [[ "$nxm_handler" == *"forge"* ]]; then
             echo -e "    nxm:// handler: ${GREEN}Registered${NC}"
         else
             echo -e "    nxm:// handler: ${YELLOW}Not registered${NC} — run: $SCRIPT_NAME nexus register"
@@ -1921,7 +1921,7 @@ cmd_status() {
 # ─────────────────────────────────────────────────────────────────────
 
 cmd_help() {
-    echo -e "${BOLD}${CYAN}HubOS Mod Manager${NC} v${VERSION}"
+    echo -e "${BOLD}${CYAN}24HG Forge Mod Manager${NC} v${VERSION}"
     echo "Making game modding work on Linux"
     echo ""
     echo -e "${BOLD}USAGE:${NC}"

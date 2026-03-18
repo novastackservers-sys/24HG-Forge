@@ -1,6 +1,6 @@
 #!/bin/bash
-# HubOS Performance Profile Switcher
-# Usage: hubos-performance [gaming|balanced|powersave|status]
+# 24HG Forge Performance Profile Switcher
+# Usage: forge-performance [gaming|balanced|powersave|status]
 
 set -euo pipefail
 
@@ -39,19 +39,19 @@ case "$ACTION" in
         gamemoded -r 2>/dev/null || true
 
         # Optimize input (flat mouse accel, fast keyboard)
-        /usr/bin/hubos-input gaming 2>/dev/null || true
+        /usr/bin/forge-input gaming 2>/dev/null || true
 
         # Activate network guard
-        /usr/bin/hubos-netguard start 2>/dev/null || true
+        /usr/bin/forge-netguard start 2>/dev/null || true
 
         # Switch to low-latency audio
-        /usr/bin/hubos-audio gaming 2>/dev/null || true
+        /usr/bin/forge-audio gaming 2>/dev/null || true
 
         echo "Gaming mode active. CPU: performance, GPU: max, compositor: suspended"
         echo "  + Input: raw/flat mouse, fast keyboard"
         echo "  + Network: low-latency mode, gaming DNS"
         echo "  + Audio: 5ms buffer"
-        echo "Run 'hubos-performance balanced' when done gaming."
+        echo "Run 'forge-performance balanced' when done gaming."
         ;;
 
     balanced)
@@ -75,13 +75,13 @@ case "$ACTION" in
         fi
 
         # Restore desktop input
-        /usr/bin/hubos-input desktop 2>/dev/null || true
+        /usr/bin/forge-input desktop 2>/dev/null || true
 
         # Restore network
-        /usr/bin/hubos-netguard stop 2>/dev/null || true
+        /usr/bin/forge-netguard stop 2>/dev/null || true
 
         # Restore balanced audio
-        /usr/bin/hubos-audio desktop 2>/dev/null || true
+        /usr/bin/forge-audio desktop 2>/dev/null || true
 
         echo "Balanced mode active."
         ;;
@@ -105,7 +105,7 @@ case "$ACTION" in
         ;;
 
     status)
-        echo "=== HubOS Performance Status ==="
+        echo "=== 24HG Forge Performance Status ==="
 
         # Power profile
         if command -v powerprofilesctl &>/dev/null; then
@@ -142,7 +142,7 @@ case "$ACTION" in
         ;;
 
     *)
-        echo "Usage: hubos-performance [gaming|balanced|powersave|status]"
+        echo "Usage: forge-performance [gaming|balanced|powersave|status]"
         echo ""
         echo "  gaming    — Max performance (CPU perf governor, GPU max clocks)"
         echo "  balanced  — Default balanced mode"

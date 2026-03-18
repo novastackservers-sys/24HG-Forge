@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-HubOS Perks Manager — Claim and manage HubOS-exclusive gaming perks
+24HG Forge Perks Manager — Claim and manage 24HG Forge-exclusive gaming perks
 
-Install HubOS → Get 30 days free VIP on all 24HG servers + permanent HubOS badge.
+Install 24HG Forge → Get 30 days free VIP on all 24HG servers + permanent 24HG Forge badge.
 
 Commands:
-  claim    — Claim the HubOS welcome package (30-day VIP, badge, referral code)
+  claim    — Claim the 24HG Forge welcome package (30-day VIP, badge, referral code)
   status   — Show current perks (VIP days, badge, referrals, rewards)
-  badge    — Manage HubOS badge visibility and preview
+  badge    — Manage 24HG Forge badge visibility and preview
   referral — Referral system (share code, enter friend's code, stats)
   rewards  — Activity-based VIP extensions (playtime, streaming, bugs, etc.)
 
 Hub API endpoints used (for backend implementation):
-  POST /api/hubos/claim-perks      — Claim welcome package
-  GET  /api/hubos/perks-status     — Get current perks
-  POST /api/hubos/referral/enter   — Enter referral code
-  GET  /api/hubos/referral/stats   — Get referral stats
-  POST /api/hubos/rewards/claim    — Claim activity reward
-  GET  /api/hubos/rewards/available — List available rewards
+  POST /api/forge/claim-perks      — Claim welcome package
+  GET  /api/forge/perks-status     — Get current perks
+  POST /api/forge/referral/enter   — Enter referral code
+  GET  /api/forge/referral/stats   — Get referral stats
+  POST /api/forge/rewards/claim    — Claim activity reward
+  GET  /api/forge/rewards/available — List available rewards
 
-Also runs as a systemd one-shot on first login (hubos-perks-claim.service):
+Also runs as a systemd one-shot on first login (forge-perks-claim.service):
   - Auto-claims perks if user is logged in
   - Reminds user to log in if not authenticated
 
@@ -41,12 +41,12 @@ from datetime import datetime, timezone
 # ── Configuration ──
 API_URL = "https://api.24hgaming.com"
 HUB_URL = "https://hub.24hgaming.com"
-CONFIG_DIR = os.path.expanduser("~/.config/hubos")
-CACHE_DIR = os.path.expanduser("~/.cache/hubos")
+CONFIG_DIR = os.path.expanduser("~/.config/forge")
+CACHE_DIR = os.path.expanduser("~/.cache/forge")
 PERKS_FILE = os.path.join(CONFIG_DIR, "perks.json")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "hub-token")
 STATE_FILE = os.path.join(CACHE_DIR, "hub-state.json")
-HUBOS_VERSION_FILE = "/etc/hubos-release"
+HUBOS_VERSION_FILE = "/etc/forge-release"
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -83,11 +83,11 @@ GUI_MODE = "--gui" in sys.argv
 # Utility Functions
 # ═══════════════════════════════════════════
 
-def notify(title, body, icon="hubos-perks"):
+def notify(title, body, icon="forge-perks"):
     """Send a desktop notification via notify-send."""
     try:
         subprocess.run(
-            ["notify-send", "-i", icon, "-a", "HubOS Perks", title, body],
+            ["notify-send", "-i", icon, "-a", "24HG Forge Perks", title, body],
             timeout=5, capture_output=True
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -202,8 +202,8 @@ def save_perks(data):
     os.chmod(PERKS_FILE, 0o600)
 
 
-def get_hubos_version():
-    """Read HubOS version from release file."""
+def get_forge_version():
+    """Read 24HG Forge version from release file."""
     if os.path.exists(HUBOS_VERSION_FILE):
         try:
             with open(HUBOS_VERSION_FILE) as f:
@@ -338,16 +338,16 @@ def api_post(endpoint, token, data=None):
 # ═══════════════════════════════════════════
 
 def cmd_claim():
-    """Claim the HubOS welcome package."""
+    """Claim the 24HG Forge welcome package."""
     # Check if already claimed
     perks = load_perks()
     if perks and perks.get("claimed"):
-        msg = "You have already claimed your HubOS welcome package!"
+        msg = "You have already claimed your 24HG Forge welcome package!"
         if GUI_MODE:
             zenity_info("Already Claimed", msg)
         else:
             print(f"\n  {YELLOW}{msg}{RESET}")
-            print(f"  Run {CYAN}hubos-perks status{RESET} to see your perks.\n")
+            print(f"  Run {CYAN}forge-perks status{RESET} to see your perks.\n")
         return
 
     # Verify hub login
@@ -356,35 +356,35 @@ def cmd_claim():
     if not token or not hub_state:
         msg = "You need to log into the 24HG Hub first."
         if AUTO_MODE:
-            notify("HubOS Perks", "Log into the 24HG Hub to claim your free VIP perks!")
-            print(f"  {YELLOW}Not logged in.{RESET} Log in to claim your HubOS perks.")
-            print(f"  Run: {CYAN}hubos-hub-bridge login{RESET}")
+            notify("24HG Forge Perks", "Log into the 24HG Hub to claim your free VIP perks!")
+            print(f"  {YELLOW}Not logged in.{RESET} Log in to claim your 24HG Forge perks.")
+            print(f"  Run: {CYAN}forge-hub-bridge login{RESET}")
             return
         if GUI_MODE:
             zenity_info("Login Required",
-                        f"{msg}\n\nRun 'hubos-hub-bridge login' first,\n"
+                        f"{msg}\n\nRun 'forge-hub-bridge login' first,\n"
                         "then try claiming again.")
         else:
             print(f"\n  {RED}{msg}{RESET}")
-            print(f"  Run: {CYAN}hubos-hub-bridge login{RESET}")
-            print(f"  Then: {CYAN}hubos-perks claim{RESET}\n")
+            print(f"  Run: {CYAN}forge-hub-bridge login{RESET}")
+            print(f"  Then: {CYAN}forge-perks claim{RESET}\n")
         return
 
     user_id = hub_state.get("user_id", hub_state.get("id", "unknown"))
     username = hub_state.get("username", "Gamer")
 
     if not AUTO_MODE and not GUI_MODE:
-        print(f"\n  {CYAN}{BOLD}Claiming HubOS Welcome Package...{RESET}")
+        print(f"\n  {CYAN}{BOLD}Claiming 24HG Forge Welcome Package...{RESET}")
         print(f"  {DIM}Generating hardware fingerprint...{RESET}")
 
     # Build claim payload
     fingerprint = generate_hardware_fingerprint()
-    hubos_version = get_hubos_version()
+    forge_version = get_forge_version()
     install_date = get_install_date()
 
     payload = {
         "hub_user_id": user_id,
-        "hubos_version": hubos_version,
+        "forge_version": forge_version,
         "hardware_fingerprint": fingerprint,
         "install_date": install_date,
     }
@@ -392,7 +392,7 @@ def cmd_claim():
     if not AUTO_MODE and not GUI_MODE:
         print(f"  {DIM}Contacting 24HG Hub...{RESET}")
 
-    result = api_post("/api/hubos/claim-perks", token, payload)
+    result = api_post("/api/forge/claim-perks", token, payload)
 
     if result.get("offline"):
         # Cache the claim attempt for retry
@@ -431,7 +431,7 @@ def cmd_claim():
         "referral_code": result.get("referral_code", ""),
         "chat_color": "cyan",
         "reserved_slots": 2,
-        "hubos_version": hubos_version,
+        "forge_version": forge_version,
         "hardware_fingerprint": fingerprint,
     }
     save_perks(perks_data)
@@ -442,20 +442,20 @@ def cmd_claim():
 
     if AUTO_MODE:
         notify(
-            "Welcome to HubOS!",
+            "Welcome to 24HG Forge!",
             f"Your 30-day VIP trial is active on all 24HG servers!\n"
-            f"Badge: [HubOS] | Referral: {referral}"
+            f"Badge: [24HG Forge] | Referral: {referral}"
         )
-        print(f"  {GREEN}HubOS perks claimed for {username}!{RESET}")
+        print(f"  {GREEN}24HG Forge perks claimed for {username}!{RESET}")
         return
 
     if GUI_MODE:
         zenity_info(
-            "Welcome to HubOS!",
+            "Welcome to 24HG Forge!",
             f"Congratulations, {username}!\n\n"
             f"You have received:\n"
             f"  - 30-day VIP trial on ALL 24HG servers\n"
-            f"  - [HubOS] badge on your hub profile + in-game\n"
+            f"  - [24HG Forge] badge on your hub profile + in-game\n"
             f"  - Exclusive cyan chat color\n"
             f"  - 2 reserved server slots\n"
             f"  - Referral code: {referral}\n\n"
@@ -467,18 +467,18 @@ def cmd_claim():
     # Terminal output — full congratulations
     print(f"\n  {GREEN}{BOLD}{'=' * 56}{RESET}")
     print(f"  {GREEN}{BOLD}  CONGRATULATIONS, {username}!{RESET}")
-    print(f"  {GREEN}{BOLD}  Welcome to the HubOS family!{RESET}")
+    print(f"  {GREEN}{BOLD}  Welcome to the 24HG Forge family!{RESET}")
     print(f"  {GREEN}{BOLD}{'=' * 56}{RESET}\n")
 
     draw_box("YOUR HUBOS PERKS", [
         f"{GREEN}+{RESET} {BOLD}30-day VIP trial{RESET} on ALL 24HG game servers",
         f"  {DIM}Expires: {vip_exp}{RESET}",
         "",
-        f"{GREEN}+{RESET} {BOLD}[HubOS] badge{RESET} on hub profile and in-game",
+        f"{GREEN}+{RESET} {BOLD}[24HG Forge] badge{RESET} on hub profile and in-game",
         f"  {DIM}Visible to all players{RESET}",
         "",
         f"{GREEN}+{RESET} {BOLD}Exclusive chat color{RESET}: {CYAN}cyan{RESET}",
-        f"  {DIM}Matching the HubOS theme{RESET}",
+        f"  {DIM}Matching the 24HG Forge theme{RESET}",
         "",
         f"{GREEN}+{RESET} {BOLD}2 reserved server slots{RESET}",
         f"  {DIM}Join even when servers are full{RESET}",
@@ -487,12 +487,12 @@ def cmd_claim():
         f"  {DIM}Share with friends for +7 days VIP each{RESET}",
     ])
 
-    print(f"  {DIM}Earn more VIP time: {CYAN}hubos-perks rewards{RESET}")
-    print(f"  {DIM}Share your code:    {CYAN}hubos-perks referral share{RESET}")
-    print(f"  {DIM}Check your perks:   {CYAN}hubos-perks status{RESET}\n")
+    print(f"  {DIM}Earn more VIP time: {CYAN}forge-perks rewards{RESET}")
+    print(f"  {DIM}Share your code:    {CYAN}forge-perks referral share{RESET}")
+    print(f"  {DIM}Check your perks:   {CYAN}forge-perks status{RESET}\n")
 
     notify(
-        "Welcome to HubOS!",
+        "Welcome to 24HG Forge!",
         f"30-day VIP activated on all 24HG servers!\n"
         f"Referral code: {referral}"
     )
@@ -509,7 +509,7 @@ def cmd_status():
 
     # Try to refresh from API
     if token:
-        remote = api_get("/api/hubos/perks-status", token)
+        remote = api_get("/api/forge/perks-status", token)
         if not remote.get("error") and not remote.get("offline"):
             # Merge remote data into local
             if perks is None:
@@ -533,14 +533,14 @@ def cmd_status():
                 zenity_info("Pending", msg)
             else:
                 print(f"\n  {YELLOW}{msg}{RESET}")
-                print(f"  Run {CYAN}hubos-perks claim{RESET} to retry now.\n")
+                print(f"  Run {CYAN}forge-perks claim{RESET} to retry now.\n")
         else:
             msg = "No perks claimed yet."
             if GUI_MODE:
-                zenity_info("No Perks", f"{msg}\n\nRun 'hubos-perks claim' to get started!")
+                zenity_info("No Perks", f"{msg}\n\nRun 'forge-perks claim' to get started!")
             else:
                 print(f"\n  {YELLOW}{msg}{RESET}")
-                print(f"  Run {CYAN}hubos-perks claim{RESET} to get your free VIP!\n")
+                print(f"  Run {CYAN}forge-perks claim{RESET} to get your free VIP!\n")
         return
 
     # Calculate VIP days remaining
@@ -580,7 +580,7 @@ def cmd_status():
         f"{BOLD}VIP Trial:{RESET}     {vip_status}",
         f"  {DIM}Expires: {vip_expires}{RESET}",
         "",
-        f"{BOLD}Badge:{RESET}         {'[HubOS]' if badge_on else DIM + '[Hidden]' + RESET}"
+        f"{BOLD}Badge:{RESET}         {'[24HG Forge]' if badge_on else DIM + '[Hidden]' + RESET}"
         f"  {'(' + GREEN + 'visible' + RESET + ')' if badge_on else '(' + DIM + 'hidden' + RESET + ')'}",
         "",
         f"{BOLD}Chat Color:{RESET}    {CYAN}{chat_color}{RESET}",
@@ -596,14 +596,14 @@ def cmd_status():
             f"User: {username}\n\n"
             f"VIP Trial: {days_left} days remaining\n"
             f"Expires: {vip_expires}\n\n"
-            f"Badge: {'[HubOS] (visible)' if badge_on else '[Hidden]'}\n"
+            f"Badge: {'[24HG Forge] (visible)' if badge_on else '[Hidden]'}\n"
             f"Chat Color: {chat_color}\n"
             f"Server Slots: {reserved} reserved\n\n"
             f"Referral Code: {referral_code}\n"
             f"Friends Invited: {referral_count}\n"
             f"Bonus Days Earned: +{bonus_days}"
         )
-        zenity_info("HubOS Perks Status", plain)
+        zenity_info("24HG Forge Perks Status", plain)
     else:
         draw_box("HUBOS PERKS STATUS", lines)
 
@@ -613,11 +613,11 @@ def cmd_status():
 # ═══════════════════════════════════════════
 
 def cmd_badge():
-    """Manage HubOS badge."""
+    """Manage 24HG Forge badge."""
     perks = load_perks()
     if not perks or not perks.get("claimed"):
         print(f"\n  {YELLOW}No perks claimed yet.{RESET}")
-        print(f"  Run {CYAN}hubos-perks claim{RESET} first.\n")
+        print(f"  Run {CYAN}forge-perks claim{RESET} first.\n")
         return
 
     sub = sys.argv[2] if len(sys.argv) > 2 else "show"
@@ -630,13 +630,13 @@ def cmd_badge():
         # Update on server
         token = load_token()
         if token:
-            api_post("/api/hubos/claim-perks", token, {
+            api_post("/api/forge/claim-perks", token, {
                 "badge_visible": perks["badge_visible"]
             })
 
         state = "visible" if perks["badge_visible"] else "hidden"
         if GUI_MODE:
-            zenity_info("Badge Updated", f"Your [HubOS] badge is now {state}.")
+            zenity_info("Badge Updated", f"Your [24HG Forge] badge is now {state}.")
         else:
             print(f"\n  Badge is now {GREEN if perks['badge_visible'] else DIM}{state}{RESET}.\n")
 
@@ -645,19 +645,19 @@ def cmd_badge():
         username = perks.get("username", "Gamer")
         if GUI_MODE:
             zenity_info("Badge Preview",
-                        f"In-game:\n  [HubOS] {username}: gg\n\n"
-                        f"Hub profile:\n  {username} [HubOS]\n\n"
+                        f"In-game:\n  [24HG Forge] {username}: gg\n\n"
+                        f"Hub profile:\n  {username} [24HG Forge]\n\n"
                         f"Status: {'Visible' if badge_vis else 'Hidden'}")
         else:
             print(f"\n  {BOLD}Badge Preview{RESET}\n")
             print(f"  In-game chat:")
             if badge_vis:
-                print(f"    {CYAN}[HubOS]{RESET} {username}: gg")
+                print(f"    {CYAN}[24HG Forge]{RESET} {username}: gg")
             else:
                 print(f"    {username}: gg  {DIM}(badge hidden){RESET}")
             print(f"\n  Hub profile:")
             if badge_vis:
-                print(f"    {username} {CYAN}[HubOS]{RESET}")
+                print(f"    {username} {CYAN}[24HG Forge]{RESET}")
             else:
                 print(f"    {username}  {DIM}(badge hidden){RESET}")
             print()
@@ -665,17 +665,17 @@ def cmd_badge():
     else:  # show
         badge_vis = perks.get("badge_visible", True)
         lines = [
-            f"{BOLD}HubOS Badge:{RESET} {CYAN}[HubOS]{RESET}",
+            f"{BOLD}24HG Forge Badge:{RESET} {CYAN}[24HG Forge]{RESET}",
             "",
             f"Status: {GREEN + 'Visible' + RESET if badge_vis else DIM + 'Hidden' + RESET}",
             f"Granted: {perks.get('claimed_at', 'Unknown')[:10]}",
             "",
             f"Commands:",
-            f"  {CYAN}hubos-perks badge toggle{RESET}   Toggle visibility",
-            f"  {CYAN}hubos-perks badge preview{RESET}  Preview appearance",
+            f"  {CYAN}forge-perks badge toggle{RESET}   Toggle visibility",
+            f"  {CYAN}forge-perks badge preview{RESET}  Preview appearance",
         ]
         if GUI_MODE:
-            choice = zenity_list("HubOS Badge", ["Action", "Description"], [
+            choice = zenity_list("24HG Forge Badge", ["Action", "Description"], [
                 ["Toggle", f"Currently {'visible' if badge_vis else 'hidden'}"],
                 ["Preview", "See how your badge looks"],
             ])
@@ -698,7 +698,7 @@ def cmd_referral():
     perks = load_perks()
     if not perks or not perks.get("claimed"):
         print(f"\n  {YELLOW}No perks claimed yet.{RESET}")
-        print(f"  Run {CYAN}hubos-perks claim{RESET} first.\n")
+        print(f"  Run {CYAN}forge-perks claim{RESET} first.\n")
         return
 
     sub = sys.argv[2] if len(sys.argv) > 2 else "show"
@@ -708,10 +708,10 @@ def cmd_referral():
     if sub == "share":
         # Copy code to clipboard and generate Discord message
         discord_msg = (
-            f"Hey! I'm using **HubOS** (the gaming Linux distro) and loving it.\n"
+            f"Hey! I'm using **24HG Forge** (the gaming Linux distro) and loving it.\n"
             f"Use my referral code **{referral_code}** when you install to get "
             f"**30 days free VIP** on all 24HG servers + we both get **+7 bonus days**!\n"
-            f"Download: https://hubos.24hgaming.com\n"
+            f"Download: https://forge.24hgaming.com\n"
             f"Discord: https://discord.gg/ymfEjH6EJN"
         )
 
@@ -745,7 +745,7 @@ def cmd_referral():
                 except (FileNotFoundError, subprocess.TimeoutExpired):
                     code = None
             else:
-                print(f"\n  {RED}Usage: hubos-perks referral enter <code>{RESET}\n")
+                print(f"\n  {RED}Usage: forge-perks referral enter <code>{RESET}\n")
                 return
         else:
             code = sys.argv[3].strip().upper()
@@ -757,7 +757,7 @@ def cmd_referral():
             print(f"\n  {RED}Not logged in. Log in first.{RESET}\n")
             return
 
-        result = api_post("/api/hubos/referral/enter", token, {"code": code})
+        result = api_post("/api/forge/referral/enter", token, {"code": code})
         if result.get("error"):
             msg = f"Failed: {result['error']}"
             if GUI_MODE:
@@ -777,7 +777,7 @@ def cmd_referral():
         # Fetch referral stats from API
         stats = {"referrals": 0, "bonus_days": 0, "recent": []}
         if token:
-            remote = api_get("/api/hubos/referral/stats", token)
+            remote = api_get("/api/forge/referral/stats", token)
             if not remote.get("error") and not remote.get("offline"):
                 stats = remote
 
@@ -793,7 +793,7 @@ def cmd_referral():
             "",
             f"{BOLD}How It Works:{RESET}",
             f"  Share your code with friends",
-            f"  They enter it during HubOS setup",
+            f"  They enter it during 24HG Forge setup",
             f"  {GREEN}Both of you get +7 days VIP{RESET}",
         ]
 
@@ -808,8 +808,8 @@ def cmd_referral():
         lines.extend([
             "",
             f"Commands:",
-            f"  {CYAN}hubos-perks referral share{RESET}        Copy & share",
-            f"  {CYAN}hubos-perks referral enter <code>{RESET} Enter a code",
+            f"  {CYAN}forge-perks referral share{RESET}        Copy & share",
+            f"  {CYAN}forge-perks referral enter <code>{RESET} Enter a code",
         ])
 
         if GUI_MODE:
@@ -843,14 +843,14 @@ REWARD_DEFINITIONS = [
     {
         "id": "referral_install",
         "name": "Friend Recruiter",
-        "desc": "Invite a friend who installs HubOS",
+        "desc": "Invite a friend who installs 24HG Forge",
         "bonus": 7,
         "icon": "+",
     },
     {
         "id": "twitch_stream",
         "name": "Streamer",
-        "desc": "Stream on Twitch with #HubOS tag",
+        "desc": "Stream on Twitch with #24HG Forge tag",
         "bonus": 5,
         "icon": "~",
     },
@@ -883,7 +883,7 @@ def cmd_rewards():
     perks = load_perks()
     if not perks or not perks.get("claimed"):
         print(f"\n  {YELLOW}No perks claimed yet.{RESET}")
-        print(f"  Run {CYAN}hubos-perks claim{RESET} first.\n")
+        print(f"  Run {CYAN}forge-perks claim{RESET} first.\n")
         return
 
     sub = sys.argv[2] if len(sys.argv) > 2 else "show"
@@ -894,7 +894,7 @@ def cmd_rewards():
     earned = []
     claimable = []
     if token:
-        remote = api_get("/api/hubos/rewards/available", token)
+        remote = api_get("/api/forge/rewards/available", token)
         if not remote.get("error") and not remote.get("offline"):
             available = {r["id"]: r for r in remote.get("rewards", [])}
             earned = remote.get("earned", [])
@@ -933,14 +933,14 @@ def cmd_rewards():
                     if rdef:
                         print(f"    {CYAN}{rid}{RESET} — {rdef['name']} "
                               f"({GREEN}+{rdef['bonus']} days{RESET})")
-                print(f"\n  Usage: {CYAN}hubos-perks rewards claim <reward_id>{RESET}\n")
+                print(f"\n  Usage: {CYAN}forge-perks rewards claim <reward_id>{RESET}\n")
                 return
 
         if not token:
             print(f"\n  {RED}Not logged in.{RESET}\n")
             return
 
-        result = api_post("/api/hubos/rewards/claim", token,
+        result = api_post("/api/forge/rewards/claim", token,
                           {"reward_id": reward_id})
         if result.get("error"):
             msg = f"Failed: {result['error']}"
@@ -997,7 +997,7 @@ def cmd_rewards():
             f"{BOLD}Total Bonus Earned:{RESET} "
             f"{GREEN}+{perks.get('bonus_days', 0)} days{RESET}",
             "",
-            f"Claim: {CYAN}hubos-perks rewards claim <id>{RESET}",
+            f"Claim: {CYAN}forge-perks rewards claim <id>{RESET}",
         ])
 
         if GUI_MODE:
@@ -1044,17 +1044,17 @@ def auto_claim():
 
     if token and hub_state:
         # User is logged in — auto-claim
-        print("HubOS Perks: Auto-claiming welcome package...")
+        print("24HG Forge Perks: Auto-claiming welcome package...")
         cmd_claim()
     else:
         # Not logged in — send reminder
         notify(
-            "Claim Your HubOS Perks!",
+            "Claim Your 24HG Forge Perks!",
             "Log into the 24HG Hub to get 30 days free VIP "
             "on all game servers!\n\n"
-            "Run: hubos-perks claim"
+            "Run: forge-perks claim"
         )
-        print("HubOS Perks: User not logged in. Sent reminder notification.")
+        print("24HG Forge Perks: User not logged in. Sent reminder notification.")
 
 
 # ═══════════════════════════════════════════
@@ -1064,10 +1064,10 @@ def auto_claim():
 def show_help():
     """Show usage information."""
     if GUI_MODE:
-        choice = zenity_list("HubOS Perks Manager", ["Command", "Description"], [
-            ["Claim", "Claim your HubOS welcome package (30-day VIP + badge)"],
+        choice = zenity_list("24HG Forge Perks Manager", ["Command", "Description"], [
+            ["Claim", "Claim your 24HG Forge welcome package (30-day VIP + badge)"],
             ["Status", "View your current perks and VIP time"],
-            ["Badge", "Manage your [HubOS] badge"],
+            ["Badge", "Manage your [24HG Forge] badge"],
             ["Referral", "Share your referral code and earn bonus days"],
             ["Rewards", "View activity-based VIP extensions"],
         ])
@@ -1085,19 +1085,19 @@ def show_help():
         return
 
     print(f"""
-  {CYAN}{BOLD}HubOS Perks Manager{RESET}
-  {DIM}Claim and manage HubOS-exclusive gaming perks{RESET}
+  {CYAN}{BOLD}24HG Forge Perks Manager{RESET}
+  {DIM}Claim and manage 24HG Forge-exclusive gaming perks{RESET}
 
-  {BOLD}Usage:{RESET}  hubos-perks <command> [options]
+  {BOLD}Usage:{RESET}  forge-perks <command> [options]
 
   {BOLD}Commands:{RESET}
-    {CYAN}claim{RESET}      Claim the HubOS welcome package
-               {DIM}30-day VIP, [HubOS] badge, cyan chat, referral code{RESET}
+    {CYAN}claim{RESET}      Claim the 24HG Forge welcome package
+               {DIM}30-day VIP, [24HG Forge] badge, cyan chat, referral code{RESET}
 
     {CYAN}status{RESET}     Show current perks status
                {DIM}VIP time remaining, badge, referrals, rewards{RESET}
 
-    {CYAN}badge{RESET}      Manage HubOS badge
+    {CYAN}badge{RESET}      Manage 24HG Forge badge
                {DIM}badge show | badge toggle | badge preview{RESET}
 
     {CYAN}referral{RESET}   Referral system
@@ -1112,7 +1112,7 @@ def show_help():
 
   {BOLD}Perks Include:{RESET}
     {GREEN}+{RESET} 30-day VIP trial on ALL 24HG game servers
-    {GREEN}+{RESET} [HubOS] badge on hub profile and in-game
+    {GREEN}+{RESET} [24HG Forge] badge on hub profile and in-game
     {GREEN}+{RESET} Exclusive cyan chat color
     {GREEN}+{RESET} 2 reserved server slots
     {GREEN}+{RESET} Personal referral code (earn +7 days per friend)

@@ -1,4 +1,4 @@
-# HubOS GRUB configuration
-GRUB_DISTRIBUTOR="HubOS"
-GRUB_THEME="/usr/share/hubos/grub/theme.txt"
+# 24HG Forge GRUB configuration
+GRUB_DISTRIBUTOR="24HG Forge"
+GRUB_THEME="/usr/share/forge/grub/theme.txt"
 GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX split_lock_detect=off tsc=reliable clocksource=tsc usbhid.mousepoll=1"

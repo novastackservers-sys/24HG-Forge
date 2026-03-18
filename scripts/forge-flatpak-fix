@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# HubOS Flatpak Gaming Permission Fixer — Auto-fix sandbox issues for gaming apps
-# Part of HubOS — a custom Linux gaming distro based on Bazzite/Fedora Atomic
+# 24HG Forge Flatpak Gaming Permission Fixer — Auto-fix sandbox issues for gaming apps
+# Part of 24HG Forge — a custom Linux gaming distro based on Bazzite/Fedora Atomic
 set -euo pipefail
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 readonly VERSION="1.0.0"
-readonly SCRIPT_NAME="hubos-flatpak-fix"
+readonly SCRIPT_NAME="forge-flatpak-fix"
 readonly OVERRIDES_DIR="$HOME/.local/share/flatpak/overrides"
 
 # Color codes
@@ -74,13 +74,13 @@ dimtext() { echo -e "  ${DIM}$1${RESET}"; }
 
 gui_notify() {
     if $GUI_MODE && command -v zenity &>/dev/null; then
-        zenity --info --title="HubOS Flatpak Fix" --text="$1" --no-wrap 2>/dev/null || true
+        zenity --info --title="24HG Forge Flatpak Fix" --text="$1" --no-wrap 2>/dev/null || true
     fi
 }
 
 gui_confirm() {
     if $GUI_MODE && command -v zenity &>/dev/null; then
-        zenity --question --title="HubOS Flatpak Fix" --text="$1" --no-wrap 2>/dev/null
+        zenity --question --title="24HG Forge Flatpak Fix" --text="$1" --no-wrap 2>/dev/null
         return $?
     else
         read -rp "  $1 [y/N] " answer
@@ -1238,7 +1238,7 @@ fix_drives_silent() {
 # ─── First boot integration ─────────────────────────────────────────────────
 
 cmd_first_boot() {
-    # Called during HubOS first-boot setup
+    # Called during 24HG Forge first-boot setup
     # Silently pre-configures all installed gaming Flatpaks
 
     detect_installed_apps
@@ -1266,13 +1266,13 @@ cmd_first_boot() {
     # Fix drives
     fix_drives_silent >/dev/null 2>&1 || true
 
-    echo "hubos-flatpak-fix: configured $FIX_COUNT gaming app(s) on first boot"
+    echo "forge-flatpak-fix: configured $FIX_COUNT gaming app(s) on first boot"
 }
 
 # ─── Usage ───────────────────────────────────────────────────────────────────
 
 usage() {
-    echo -e "${BOLD}HubOS Flatpak Gaming Permission Fixer${RESET} v$VERSION"
+    echo -e "${BOLD}24HG Forge Flatpak Gaming Permission Fixer${RESET} v$VERSION"
     echo "Auto-detect and fix Flatpak sandbox permission issues for gaming apps."
     echo ""
     echo -e "${BOLD}Usage:${RESET}"
@@ -1331,7 +1331,7 @@ main() {
     # Check for flatpak
     if ! command -v flatpak &>/dev/null; then
         echo -e "${RED}Error:${RESET} flatpak is not installed."
-        echo "HubOS should have flatpak pre-installed. Something is wrong with your system."
+        echo "24HG Forge should have flatpak pre-installed. Something is wrong with your system."
         exit 1
     fi
 

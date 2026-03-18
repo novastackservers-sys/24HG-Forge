@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-HubOS Proton Troubleshooter — Diagnose and fix Proton/Wine game issues
+24HG Forge Proton Troubleshooter — Diagnose and fix Proton/Wine game issues
 Checks Vulkan, Proton versions, game logs, and common failure modes.
-Usage: hubos-proton-fix [appid|game-name] [--fix]
+Usage: forge-proton-fix [appid|game-name] [--fix]
 """
 
 import glob
@@ -227,19 +227,19 @@ def fix_prefix(steam_dir, appid):
 
 def main():
     if len(sys.argv) < 2:
-        print("HubOS Proton Troubleshooter")
-        print("Usage: hubos-proton-fix <appid or game name> [--fix]")
+        print("24HG Forge Proton Troubleshooter")
+        print("Usage: forge-proton-fix <appid or game name> [--fix]")
         print("")
         print("Examples:")
-        print("  hubos-proton-fix 252490        # Diagnose Rust by AppID")
-        print("  hubos-proton-fix rust           # Diagnose by name")
-        print("  hubos-proton-fix rust --fix     # Attempt automatic fixes")
-        print("  hubos-proton-fix --check        # General system check")
+        print("  forge-proton-fix 252490        # Diagnose Rust by AppID")
+        print("  forge-proton-fix rust           # Diagnose by name")
+        print("  forge-proton-fix rust --fix     # Attempt automatic fixes")
+        print("  forge-proton-fix --check        # General system check")
         sys.exit(0)
 
     # General system check
     if sys.argv[1] == "--check":
-        print("=== HubOS Proton System Check ===\n")
+        print("=== 24HG Forge Proton System Check ===\n")
 
         steam_dir = find_steam()
         if not steam_dir:
@@ -364,7 +364,7 @@ def main():
         if do_fix:
             fix_prefix(steam_dir, appid)
         else:
-            print(f"\nRun 'hubos-proton-fix {appid} --fix' to attempt automatic fixes")
+            print(f"\nRun 'forge-proton-fix {appid} --fix' to attempt automatic fixes")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=24HG Forge Update Prompt
+Comment=Check for system updates and prompt user
+Exec=/usr/bin/forge-update-prompt
+Icon=forge-logo
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel
+X-GNOME-Autostart-Phase=Application

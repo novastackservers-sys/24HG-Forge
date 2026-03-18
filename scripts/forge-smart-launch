@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-HubOS Smart Game Launch — Intelligent per-game optimization daemon
+24HG Forge Smart Game Launch — Intelligent per-game optimization daemon
 
 Automatically detects game launches and applies optimal settings per-game.
-Makes HubOS feel like a premium gaming OS with zero user configuration.
+Makes 24HG Forge feel like a premium gaming OS with zero user configuration.
 
 Commands:
     daemon              Run background monitoring daemon
@@ -13,7 +13,7 @@ Commands:
     rules               List all built-in game rules
     log                 Show recent launch history
 
-Part of HubOS — The 24 Hour Gaming Operating System
+Part of 24HG Forge — The 24 Hour Gaming Operating System
 https://24hgaming.com
 """
 
@@ -36,15 +36,15 @@ from typing import Any, Dict, List, Optional, Tuple
 # Constants
 # ---------------------------------------------------------------------------
 
-APP_NAME = "hubos-smart-launch"
+APP_NAME = "forge-smart-launch"
 VERSION = "1.0.0"
 
 XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 XDG_DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
 XDG_STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
 
-CONFIG_DIR = XDG_CONFIG / "hubos" / "smart-launch"
-STATE_DIR = XDG_STATE / "hubos" / "smart-launch"
+CONFIG_DIR = XDG_CONFIG / "forge" / "smart-launch"
+STATE_DIR = XDG_STATE / "forge" / "smart-launch"
 LOG_DIR = STATE_DIR / "logs"
 OVERRIDES_FILE = CONFIG_DIR / "overrides.json"
 SESSION_LOG = STATE_DIR / "sessions.json"
@@ -58,8 +58,8 @@ POLL_INTERVAL = 2  # seconds
 PROCESS_SETTLE_TIME = 3  # wait for process tree to settle before applying
 
 # Performance profile binary
-HUBOS_PERFORMANCE = "/usr/bin/hubos-performance"
-HUBOS_SESSION_SUMMARY = "/usr/bin/hubos-session-summary"
+HUBOS_PERFORMANCE = "/usr/bin/forge-performance"
+HUBOS_SESSION_SUMMARY = "/usr/bin/forge-session-summary"
 
 # ---------------------------------------------------------------------------
 # MangoHud Presets
@@ -626,7 +626,7 @@ def run_cmd(cmd: List[str], check: bool = False, timeout: int = 10) -> subproces
 
 def notify(title: str, body: str, icon: str = "input-gaming") -> None:
     """Send desktop notification via notify-send."""
-    run_cmd(["notify-send", "-a", "HubOS", "-i", icon, title, body])
+    run_cmd(["notify-send", "-a", "24HG Forge", "-i", icon, title, body])
 
 
 def read_proc_cmdline(pid: int) -> str:
@@ -800,7 +800,7 @@ class OptimizationEngine:
 
         # 9. Send notification
         notify(
-            f"HubOS optimizing for {game_name}...",
+            f"24HG Forge optimizing for {game_name}...",
             f"Profile: {perf} | HUD: {mangohud} | Priority: {rule.get('priority', 'normal')}",
             "input-gaming",
         )
@@ -1048,12 +1048,12 @@ class OptimizationEngine:
         save_json(SESSION_LOG, sessions)
 
     def _trigger_session_summary(self) -> None:
-        """Call hubos-session-summary for post-game report."""
+        """Call forge-session-summary for post-game report."""
         if Path(HUBOS_SESSION_SUMMARY).exists():
             run_cmd([HUBOS_SESSION_SUMMARY, "generate"], timeout=30)
             log.info("Session summary triggered")
         else:
-            log.debug("hubos-session-summary not found, skipping")
+            log.debug("forge-session-summary not found, skipping")
 
 
 # ---------------------------------------------------------------------------
@@ -1218,7 +1218,7 @@ class SmartLaunchDaemon:
     def run(self) -> None:
         """Main daemon loop."""
         ensure_dirs()
-        log.info("HubOS Smart Launch daemon starting (v%s)", VERSION)
+        log.info("24HG Forge Smart Launch daemon starting (v%s)", VERSION)
         log.info("Monitoring for game launches (poll interval: %ds)", POLL_INTERVAL)
         log.info("Loaded %d builtin rules, %d user overrides",
                  len(BUILTIN_RULES), len(self.rules.overrides))
@@ -1237,7 +1237,7 @@ class SmartLaunchDaemon:
             if self.engine.active_game:
                 log.info("Daemon stopping — reverting active optimizations")
                 self.engine.revert()
-            log.info("HubOS Smart Launch daemon stopped")
+            log.info("24HG Forge Smart Launch daemon stopped")
 
     def _tick(self) -> None:
         """Single monitoring cycle."""
@@ -1316,7 +1316,7 @@ def cmd_apply(appid: str) -> None:
         print("No running game process found (optimizations applied without priority/env)")
 
     engine.apply(appid, pid)
-    print("Optimizations applied. Run 'hubos-smart-launch status' to verify.")
+    print("Optimizations applied. Run 'forge-smart-launch status' to verify.")
 
 
 def cmd_config(appid: str, set_value: Optional[str] = None) -> None:
@@ -1339,7 +1339,7 @@ def cmd_config(appid: str, set_value: Optional[str] = None) -> None:
     rule = rules.get(appid)
     if rule is None:
         print(f"No rules found for AppID: {appid}")
-        print(f"Add custom rules with: hubos-smart-launch config {appid} --set key=value")
+        print(f"Add custom rules with: forge-smart-launch config {appid} --set key=value")
         return
 
     print(f"{'='*60}")
@@ -1381,7 +1381,7 @@ def cmd_status() -> None:
     state = load_json(CURRENT_STATE_FILE)
 
     print(f"{'='*60}")
-    print(f"  HubOS Smart Launch — Status")
+    print(f"  24HG Forge Smart Launch — Status")
     print(f"{'='*60}")
 
     if state and state.get("game"):
@@ -1411,7 +1411,7 @@ def cmd_status() -> None:
         print(f"  Status:         Idle — waiting for game launch")
 
     # Daemon status
-    result = run_cmd(["systemctl", "--user", "is-active", "hubos-smart-launch.service"])
+    result = run_cmd(["systemctl", "--user", "is-active", "forge-smart-launch.service"])
     daemon_status = result.stdout.strip() if result.returncode == 0 else "unknown"
     print(f"\n  Daemon Status:  {daemon_status}")
 
@@ -1429,7 +1429,7 @@ def cmd_rules() -> None:
     all_rules = rules.all_rules()
 
     print(f"{'='*90}")
-    print(f"  HubOS Smart Launch — Game Optimization Rules ({len(all_rules)} games)")
+    print(f"  24HG Forge Smart Launch — Game Optimization Rules ({len(all_rules)} games)")
     print(f"{'='*90}")
     print(f"  {'AppID':<12} {'Game':<35} {'Perf':<10} {'HUD':<14} {'Proton':<12} {'Priority':<8}")
     print(f"  {'-'*12} {'-'*35} {'-'*10} {'-'*14} {'-'*12} {'-'*8}")
@@ -1469,7 +1469,7 @@ def cmd_log(count: int = 20) -> None:
     recent = list(reversed(sessions[-count:]))
 
     print(f"{'='*90}")
-    print(f"  HubOS Smart Launch — Recent Sessions (last {min(count, len(recent))})")
+    print(f"  24HG Forge Smart Launch — Recent Sessions (last {min(count, len(recent))})")
     print(f"{'='*90}")
     print(f"  {'Date':<12} {'Time':<8} {'Game':<30} {'Duration':<12} {'Optimizations':<20}")
     print(f"  {'-'*12} {'-'*8} {'-'*30} {'-'*12} {'-'*20}")
@@ -1547,18 +1547,18 @@ def _find_game_pid(appid: str) -> Optional[int]:
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
-        prog="hubos-smart-launch",
-        description="HubOS Smart Game Launch — Intelligent per-game optimization daemon",
+        prog="forge-smart-launch",
+        description="24HG Forge Smart Game Launch — Intelligent per-game optimization daemon",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  hubos-smart-launch daemon              Start background daemon\n"
-            "  hubos-smart-launch apply 252490         Apply Rust optimizations\n"
-            "  hubos-smart-launch config 730           View CS2 config\n"
-            "  hubos-smart-launch config 730 --set mangohud=full\n"
-            "  hubos-smart-launch status               Show current state\n"
-            "  hubos-smart-launch rules                List all game rules\n"
-            "  hubos-smart-launch log                  Show recent sessions\n"
+            "  forge-smart-launch daemon              Start background daemon\n"
+            "  forge-smart-launch apply 252490         Apply Rust optimizations\n"
+            "  forge-smart-launch config 730           View CS2 config\n"
+            "  forge-smart-launch config 730 --set mangohud=full\n"
+            "  forge-smart-launch status               Show current state\n"
+            "  forge-smart-launch rules                List all game rules\n"
+            "  forge-smart-launch log                  Show recent sessions\n"
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")

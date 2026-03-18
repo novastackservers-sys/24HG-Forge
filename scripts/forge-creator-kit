@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# HubOS Content Creator Kit
-# Streamlined toolkit for content creators using HubOS — generates OBS scenes,
+# 24HG Forge Content Creator Kit
+# Streamlined toolkit for content creators using 24HG Forge — generates OBS scenes,
 # overlays, intros, clips, and branded assets for 24 Hour Gaming streamers.
 #
-# Usage: hubos-creator-kit [setup|scenes|overlay|clip|watermark|intro|export]
+# Usage: forge-creator-kit [setup|scenes|overlay|clip|watermark|intro|export]
 
 set -euo pipefail
 
@@ -22,10 +22,10 @@ COLOR_ACCENT="#ff6b35"      # Orange accent
 COLOR_TEXT="#e0e0e0"        # Light text
 COLOR_TEXT_BRIGHT="#ffffff"  # White
 
-CREATOR_DIR="$HOME/HubOS-Creator"
+CREATOR_DIR="$HOME/24HG Forge-Creator"
 OVERLAYS_DIR="$CREATOR_DIR/overlays"
 CLIPS_DIR="$CREATOR_DIR/clips"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hubos"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge"
 CONFIG_FILE="$CONFIG_DIR/creator-kit.conf"
 
 # OBS paths — Flatpak and native
@@ -89,7 +89,7 @@ load_config() {
 save_config() {
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_FILE" <<EOF
-# HubOS Creator Kit Configuration
+# 24HG Forge Creator Kit Configuration
 # Generated $(date -Iseconds)
 WM_ENABLED="$WM_ENABLED"
 WM_POSITION="$WM_POSITION"
@@ -161,7 +161,7 @@ detect_gpu_vendor() {
 
 # ─── Command: setup ──────────────────────────────────────────────────
 cmd_setup() {
-    header "HubOS Creator Kit — Initial Setup"
+    header "24HG Forge Creator Kit — Initial Setup"
 
     # Step 1: Detect OBS
     step "Detecting OBS Studio installation..."
@@ -213,8 +213,8 @@ cmd_setup() {
     success "Encoder: $encoder_label"
 
     # Step 4: Create OBS profile
-    step "Creating HubOS Creator OBS profile..."
-    local profiles_dir="$OBS_DIR/basic/profiles/HubOS Creator"
+    step "Creating 24HG Forge Creator OBS profile..."
+    local profiles_dir="$OBS_DIR/basic/profiles/24HG Forge Creator"
     mkdir -p "$profiles_dir"
 
     local base_cx=1920 base_cy=1080 out_cx=1920 out_cy=1080 fps=60
@@ -243,7 +243,7 @@ cmd_setup() {
 
     cat > "$profiles_dir/basic.ini" <<PROFILE
 [General]
-Name=HubOS Creator
+Name=24HG Forge Creator
 
 [Video]
 BaseCX=$base_cx
@@ -275,7 +275,7 @@ Tune=zerolatency
 RateControl=CBR
 
 [AdvOut.Recording]
-RecFilePath=$HOME/Videos/HubOS Recordings/
+RecFilePath=$HOME/Videos/24HG Forge Recordings/
 RecFormat2=mkv
 RecEncoder=$obs_rec_encoder
 Bitrate=15000
@@ -389,10 +389,10 @@ REOF
             local zip_name
             zip_name=$(basename "$font_url")
             if curl -fsSL -o "/tmp/$zip_name" "$font_url" 2>/dev/null; then
-                unzip -qo "/tmp/$zip_name" -d "/tmp/hubos-fonts-$$" 2>/dev/null || true
-                find "/tmp/hubos-fonts-$$" -name '*.ttf' -o -name '*.otf' 2>/dev/null | \
+                unzip -qo "/tmp/$zip_name" -d "/tmp/forge-fonts-$$" 2>/dev/null || true
+                find "/tmp/forge-fonts-$$" -name '*.ttf' -o -name '*.otf' 2>/dev/null | \
                     while read -r f; do cp "$f" "$fonts_dir/"; done
-                rm -rf "/tmp/hubos-fonts-$$" "/tmp/$zip_name"
+                rm -rf "/tmp/forge-fonts-$$" "/tmp/$zip_name"
             fi
         done
         fc-cache -f "$fonts_dir" 2>/dev/null || true
@@ -400,25 +400,25 @@ REOF
     fi
 
     # Step 8: Create directories
-    mkdir -p "$CREATOR_DIR" "$OVERLAYS_DIR" "$CLIPS_DIR" "$HOME/Videos/HubOS Recordings"
+    mkdir -p "$CREATOR_DIR" "$OVERLAYS_DIR" "$CLIPS_DIR" "$HOME/Videos/24HG Forge Recordings"
 
     save_config
 
     echo ""
     header "Setup Complete"
-    echo -e "  ${BOLD}Profile:${NC}     HubOS Creator (${quality_preset}, $encoder_label)"
+    echo -e "  ${BOLD}Profile:${NC}     24HG Forge Creator (${quality_preset}, $encoder_label)"
     echo -e "  ${BOLD}Replay:${NC}      2 min buffer, Ctrl+F9 to save"
     echo -e "  ${BOLD}Creator dir:${NC} $CREATOR_DIR"
     echo ""
     echo -e "  ${DIM}Next steps:${NC}"
-    echo -e "    ${CYAN}hubos-creator-kit scenes${NC}   — Generate branded OBS scenes"
-    echo -e "    ${CYAN}hubos-creator-kit overlay${NC}  — Generate stream overlay images"
-    echo -e "    ${CYAN}hubos-creator-kit intro${NC}    — Generate stream intro video"
+    echo -e "    ${CYAN}forge-creator-kit scenes${NC}   — Generate branded OBS scenes"
+    echo -e "    ${CYAN}forge-creator-kit overlay${NC}  — Generate stream overlay images"
+    echo -e "    ${CYAN}forge-creator-kit intro${NC}    — Generate stream intro video"
 }
 
 # ─── Command: scenes ─────────────────────────────────────────────────
 cmd_scenes() {
-    header "HubOS Creator Kit — OBS Scene Collection"
+    header "24HG Forge Creator Kit — OBS Scene Collection"
 
     load_config
     if [ -z "$OBS_DIR" ]; then
@@ -435,7 +435,7 @@ cmd_scenes() {
 
     local scene_file="$scenes_dir/24HG Creator Kit.json"
     local webcam_overlay="$OVERLAYS_DIR/webcam-frame.png"
-    local watermark_img="$OVERLAYS_DIR/hubos-watermark.png"
+    local watermark_img="$OVERLAYS_DIR/forge-watermark.png"
     local lower_third="$OVERLAYS_DIR/lower-third.png"
     local starting_bg="$OVERLAYS_DIR/starting-soon-bg.png"
     local brb_bg="$OVERLAYS_DIR/brb-bg.png"
@@ -529,7 +529,7 @@ cmd_scenes() {
         },
         {
             "prev_ver": 503316482,
-            "name": "HubOS Watermark",
+            "name": "24HG Forge Watermark",
             "uuid": "a1b2c3d4-0005-4000-8000-000000000005",
             "id": "image_source",
             "versioned_id": "image_source",
@@ -799,7 +799,7 @@ SCENEEOF
             "id": "text_ft2_source_v2",
             "versioned_id": "text_ft2_source_v2",
             "settings": {
-                "text": "Join us at 24hgaming.com\nDiscord: $BRAND_DISCORD\nPowered by HubOS",
+                "text": "Join us at 24hgaming.com\nDiscord: $BRAND_DISCORD\nPowered by 24HG Forge",
                 "font": {
                     "face": "Inter",
                     "size": 28,
@@ -903,7 +903,7 @@ SCENEEOF
                     "align": 5
                 },
                 {
-                    "name": "HubOS Watermark",
+                    "name": "24HG Forge Watermark",
                     "source_uuid": "a1b2c3d4-0005-4000-8000-000000000005",
                     "id": 4,
                     "pos": {"x": 1750.0, "y": 1020.0},
@@ -1146,7 +1146,7 @@ SCENEEOF
                     "align": 5
                 },
                 {
-                    "name": "HubOS Watermark",
+                    "name": "24HG Forge Watermark",
                     "source_uuid": "a1b2c3d4-0005-4000-8000-000000000005",
                     "id": 4,
                     "pos": {"x": 1750.0, "y": 1020.0},
@@ -1253,7 +1253,7 @@ SCENEEOF
     echo -e "    ${CYAN}Ending${NC}        — Thanks card, social links, server info"
     echo ""
     echo -e "  ${DIM}Import in OBS: Scene Collection > Import > select the JSON file${NC}"
-    echo -e "  ${DIM}Run 'hubos-creator-kit overlay' to generate the overlay images${NC}"
+    echo -e "  ${DIM}Run 'forge-creator-kit overlay' to generate the overlay images${NC}"
 }
 
 # ─── ImageMagick Helpers ─────────────────────────────────────────────
@@ -1277,12 +1277,12 @@ _generate_watermark_image() {
     _magick_cmd -size 320x60 xc:transparent \
         -font "Inter" -pointsize 28 -weight 600 \
         -fill "#ffffff${alpha_hex}" \
-        -gravity center -annotate +0+0 "Powered by HubOS" \
+        -gravity center -annotate +0+0 "Powered by 24HG Forge" \
         "$output" 2>/dev/null || \
     _magick_cmd -size 320x60 xc:transparent \
         -pointsize 28 \
         -fill "#ffffff${alpha_hex}" \
-        -gravity center -annotate +0+0 "Powered by HubOS" \
+        -gravity center -annotate +0+0 "Powered by 24HG Forge" \
         "$output"
 }
 
@@ -1327,7 +1327,7 @@ _generate_scene_background() {
 
 # ─── Command: overlay ────────────────────────────────────────────────
 cmd_overlay() {
-    header "HubOS Creator Kit — Stream Overlay Generator"
+    header "24HG Forge Creator Kit — Stream Overlay Generator"
 
     require_cmd convert ImageMagick || require_cmd magick ImageMagick || exit 1
 
@@ -1372,11 +1372,11 @@ cmd_overlay() {
         -gravity west -annotate +24+0 "Playing on 24HG  |  os.24hgaming.com" \
         -pointsize 16 \
         -fill "rgba(0,212,255,0.8)" \
-        -gravity east -annotate +24+0 "Powered by HubOS" \
+        -gravity east -annotate +24+0 "Powered by 24HG Forge" \
         "$OVERLAYS_DIR/dark/lower-third.png" 2>/dev/null || \
     _magick_cmd -size 1920x100 xc:"rgba(10,10,20,0.85)" \
         -pointsize 24 -fill white \
-        -gravity center -annotate +0+0 "Playing on 24HG | os.24hgaming.com | Powered by HubOS" \
+        -gravity center -annotate +0+0 "Playing on 24HG | os.24hgaming.com | Powered by 24HG Forge" \
         "$OVERLAYS_DIR/dark/lower-third.png"
 
     # 4. Lower third banner — light
@@ -1391,7 +1391,7 @@ cmd_overlay() {
         -gravity west -annotate +24+0 "Playing on 24HG  |  os.24hgaming.com" \
         -pointsize 16 \
         -fill "#0088aa" \
-        -gravity east -annotate +24+0 "Powered by HubOS" \
+        -gravity east -annotate +24+0 "Powered by 24HG Forge" \
         "$OVERLAYS_DIR/light/lower-third.png" 2>/dev/null || \
     _magick_cmd -size 1920x100 xc:"rgba(240,240,255,0.90)" \
         -pointsize 24 -fill "#1a1a2e" \
@@ -1400,20 +1400,20 @@ cmd_overlay() {
 
     # 5. Watermark — dark
     current=$((current + 1)); progress_bar $current $total "Watermark (dark)"
-    _generate_watermark_image "$OVERLAYS_DIR/dark/hubos-watermark.png" "$WM_OPACITY"
+    _generate_watermark_image "$OVERLAYS_DIR/dark/forge-watermark.png" "$WM_OPACITY"
 
     # 6. Watermark — light
     current=$((current + 1)); progress_bar $current $total "Watermark (light)"
     _magick_cmd -size 320x60 xc:transparent \
         -pointsize 28 \
         -fill "rgba(26,26,46,0.30)" \
-        -gravity center -annotate +0+0 "Powered by HubOS" \
-        "$OVERLAYS_DIR/light/hubos-watermark.png" 2>/dev/null || \
+        -gravity center -annotate +0+0 "Powered by 24HG Forge" \
+        "$OVERLAYS_DIR/light/forge-watermark.png" 2>/dev/null || \
     _magick_cmd -size 320x60 xc:transparent \
         -pointsize 28 \
         -fill "rgba(26,26,46,0.30)" \
-        -gravity center -annotate +0+0 "Powered by HubOS" \
-        "$OVERLAYS_DIR/light/hubos-watermark.png"
+        -gravity center -annotate +0+0 "Powered by 24HG Forge" \
+        "$OVERLAYS_DIR/light/forge-watermark.png"
 
     # 7. Social bar — dark
     current=$((current + 1)); progress_bar $current $total "Social bar (dark)"
@@ -1512,7 +1512,7 @@ cmd_overlay() {
     echo -e "  ${BOLD}Files:${NC}"
     echo -e "    webcam-frame.png     — Rounded cyan border with LIVE indicator"
     echo -e "    lower-third.png      — \"Playing on 24HG\" banner"
-    echo -e "    hubos-watermark.png  — Semi-transparent \"Powered by HubOS\""
+    echo -e "    forge-watermark.png  — Semi-transparent \"Powered by 24HG Forge\""
     echo -e "    social-bar.png       — Discord and Hub links"
     echo -e "    alert-follower.png   — Follower alert background"
     echo -e "    alert-subscriber.png — Subscriber alert background"
@@ -1541,11 +1541,11 @@ cmd_clip() {
             _clip_gif "${1:-10}"
             ;;
         help|*)
-            echo -e "${BOLD}HubOS Creator Kit — Clip Tool${NC}"
+            echo -e "${BOLD}24HG Forge Creator Kit — Clip Tool${NC}"
             echo ""
-            echo -e "  ${CYAN}hubos-creator-kit clip last [seconds]${NC}     — Save last N seconds"
-            echo -e "  ${CYAN}hubos-creator-kit clip screenshot${NC}         — Capture screenshot"
-            echo -e "  ${CYAN}hubos-creator-kit clip gif [seconds]${NC}      — Capture animated GIF"
+            echo -e "  ${CYAN}forge-creator-kit clip last [seconds]${NC}     — Save last N seconds"
+            echo -e "  ${CYAN}forge-creator-kit clip screenshot${NC}         — Capture screenshot"
+            echo -e "  ${CYAN}forge-creator-kit clip gif [seconds]${NC}      — Capture animated GIF"
             echo ""
             echo -e "  Clips saved to: $CLIPS_DIR"
             echo -e "  Watermark: ${WM_ENABLED} (${WM_OPACITY}% opacity, ${WM_POSITION})"
@@ -1563,7 +1563,7 @@ _clip_last() {
 
     # Try gpu-screen-recorder replay first
     if command -v gpu-screen-recorder &>/dev/null; then
-        local replay_pid_file="${XDG_RUNTIME_DIR:-/tmp}/hubos-replay/replay.pid"
+        local replay_pid_file="${XDG_RUNTIME_DIR:-/tmp}/forge-replay/replay.pid"
         if [ -f "$replay_pid_file" ] && kill -0 "$(cat "$replay_pid_file")" 2>/dev/null; then
             # Signal the replay buffer to save
             kill -USR1 "$(cat "$replay_pid_file")" 2>/dev/null
@@ -1571,7 +1571,7 @@ _clip_last() {
             # Wait a moment for file to appear
             sleep 2
             local latest_clip
-            latest_clip=$(find "$HOME/Videos/HubOS Clips" -name '*.mp4' -newer "$replay_pid_file" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+            latest_clip=$(find "$HOME/Videos/24HG Forge Clips" -name '*.mp4' -newer "$replay_pid_file" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
             if [ -n "$latest_clip" ] && [ -f "$latest_clip" ]; then
                 if [ "$WM_ENABLED" = "true" ]; then
                     _apply_watermark_video "$latest_clip" "$output"
@@ -1666,7 +1666,7 @@ _clip_screenshot() {
     step "Capturing screenshot..."
 
     # Capture
-    local raw_output="/tmp/hubos-screenshot-raw-$$.png"
+    local raw_output="/tmp/forge-screenshot-raw-$$.png"
     if [ -n "${WAYLAND_DISPLAY:-}" ]; then
         if command -v grim &>/dev/null; then
             grim "$raw_output"
@@ -1707,7 +1707,7 @@ _clip_screenshot() {
         _magick_cmd "$raw_output" \
             -pointsize 20 \
             -fill "rgba(255,255,255,0.${WM_OPACITY})" \
-            -gravity "$wm_gravity" -annotate +15+15 "Powered by HubOS" \
+            -gravity "$wm_gravity" -annotate +15+15 "Powered by 24HG Forge" \
             "$output" 2>/dev/null || cp "$raw_output" "$output"
         rm -f "$raw_output"
     else
@@ -1730,11 +1730,11 @@ _clip_gif() {
     local screen_res
     screen_res=$(detect_resolution)
     # Scale to 640px wide for reasonable GIF size
-    local palette="/tmp/hubos-gif-palette-$$.png"
+    local palette="/tmp/forge-gif-palette-$$.png"
 
     if [ -n "${WAYLAND_DISPLAY:-}" ]; then
         if command -v wf-recorder &>/dev/null; then
-            local tmp_vid="/tmp/hubos-gif-raw-$$.mp4"
+            local tmp_vid="/tmp/forge-gif-raw-$$.mp4"
             wf-recorder -d /dev/dri/renderD128 -f "$tmp_vid" --duration "$duration" 2>/dev/null &
             local rec_pid=$!
             _show_recording_timer "$duration" "$rec_pid"
@@ -1778,7 +1778,7 @@ _apply_watermark_video() {
     local alpha
     alpha=$(awk "BEGIN{printf \"%.2f\", $WM_OPACITY / 100}")
     ffmpeg -y -i "$input" \
-        -vf "drawtext=text='Powered by HubOS':fontsize=18:fontcolor=white@${alpha}:x=${wm_x}:y=${wm_y}" \
+        -vf "drawtext=text='Powered by 24HG Forge':fontsize=18:fontcolor=white@${alpha}:x=${wm_x}:y=${wm_y}" \
         -c:a copy "$output" &>/dev/null
 }
 
@@ -1808,7 +1808,7 @@ cmd_watermark() {
                     success "Watermark position: $WM_POSITION"
                     ;;
                 *)
-                    echo -e "  ${BOLD}Usage:${NC} hubos-creator-kit watermark position <corner>"
+                    echo -e "  ${BOLD}Usage:${NC} forge-creator-kit watermark position <corner>"
                     echo -e "  ${DIM}Options: top-left, top-right, bottom-left, bottom-right${NC}"
                     ;;
             esac
@@ -1820,7 +1820,7 @@ cmd_watermark() {
                 save_config
                 success "Watermark opacity: ${WM_OPACITY}%"
             else
-                echo -e "  ${BOLD}Usage:${NC} hubos-creator-kit watermark opacity <0-100>"
+                echo -e "  ${BOLD}Usage:${NC} forge-creator-kit watermark opacity <0-100>"
             fi
             ;;
         preview)
@@ -1842,11 +1842,11 @@ cmd_watermark() {
                     -gravity center -annotate +0+0 "Game Screen Preview" \
                     -pointsize 14 \
                     -fill "rgba(255,255,255,0.${WM_OPACITY})" \
-                    -gravity "$wm_gravity" -annotate +10+10 "Powered by HubOS" \
+                    -gravity "$wm_gravity" -annotate +10+10 "Powered by 24HG Forge" \
                     "$preview" 2>/dev/null || \
                 _magick_cmd -size 960x540 xc:"${COLOR_BG}" \
                     -pointsize 14 -fill white \
-                    -gravity southeast -annotate +10+10 "Powered by HubOS" \
+                    -gravity southeast -annotate +10+10 "Powered by 24HG Forge" \
                     "$preview"
                 success "Preview saved: $preview"
                 # Try to open it
@@ -1858,7 +1858,7 @@ cmd_watermark() {
             fi
             ;;
         status|*)
-            echo -e "${BOLD}HubOS Creator Kit — Watermark Settings${NC}"
+            echo -e "${BOLD}24HG Forge Creator Kit — Watermark Settings${NC}"
             echo ""
             echo -e "  Enabled:  ${WM_ENABLED}"
             echo -e "  Position: ${WM_POSITION}"
@@ -1876,14 +1876,14 @@ cmd_watermark() {
 
 # ─── Command: intro ──────────────────────────────────────────────────
 cmd_intro() {
-    header "HubOS Creator Kit — Intro Video Generator"
+    header "24HG Forge Creator Kit — Intro Video Generator"
 
     require_cmd ffmpeg ffmpeg || exit 1
     mkdir -p "$CREATOR_DIR"
 
     local intro_output="$CREATOR_DIR/intro.mp4"
     local transition_output="$CREATOR_DIR/transition.mp4"
-    local tmp_dir="/tmp/hubos-intro-$$"
+    local tmp_dir="/tmp/forge-intro-$$"
     mkdir -p "$tmp_dir"
 
     local total=6 current=0
@@ -1953,18 +1953,18 @@ cmd_intro() {
         cp "$tmp_dir/logo_text.png" "$tmp_dir/logo_glow.png"
     fi
 
-    # Step 3: Generate "Powered by HubOS" text frame
+    # Step 3: Generate "Powered by 24HG Forge" text frame
     current=$((current + 1)); progress_bar $current $total "Subtitle frame"
     if command -v magick &>/dev/null || command -v convert &>/dev/null; then
         _magick_cmd -size ${frame_w}x${frame_h} xc:transparent \
             -pointsize 36 \
             -fill "${COLOR_TEXT}" \
-            -gravity center -annotate +0+60 "Powered by HubOS" \
+            -gravity center -annotate +0+60 "Powered by 24HG Forge" \
             "$tmp_dir/subtitle.png" 2>/dev/null || \
         _magick_cmd -size ${frame_w}x${frame_h} xc:transparent \
             -pointsize 36 \
             -fill "${COLOR_TEXT}" \
-            -gravity center -annotate +0+60 "Powered by HubOS" \
+            -gravity center -annotate +0+60 "Powered by 24HG Forge" \
             "$tmp_dir/subtitle.png"
     fi
 
@@ -1974,7 +1974,7 @@ cmd_intro() {
     # Build the 5-second intro:
     #   0.0-1.0s: Dark background with particles fade in
     #   1.0-2.5s: 24HG logo fades in with glow
-    #   2.5-3.5s: "Powered by HubOS" fades in
+    #   2.5-3.5s: "Powered by 24HG Forge" fades in
     #   3.5-5.0s: Everything holds, then fades out
     local bg_input="$tmp_dir/base.png"
     [ -f "$tmp_dir/particles_0.png" ] && bg_input="$tmp_dir/particles_0.png"
@@ -2005,17 +2005,17 @@ cmd_intro() {
         # Simple fallback with just text overlay
         ffmpeg -y \
             -f lavfi -i "color=c=0x0a0a14:s=${frame_w}x${frame_h}:d=5:r=30" \
-            -vf "drawtext=text='24HG':fontsize=120:fontcolor=${COLOR_PRIMARY}:x=(w-tw)/2:y=(h-th)/2-40:alpha='if(lt(t,1),0,if(lt(t,2),(t-1),1))',drawtext=text='Powered by HubOS':fontsize=36:fontcolor=${COLOR_TEXT}:x=(w-tw)/2:y=(h-th)/2+60:alpha='if(lt(t,2.5),0,if(lt(t,3.5),(t-2.5),1))',fade=out:st=4.2:d=0.8" \
+            -vf "drawtext=text='24HG':fontsize=120:fontcolor=${COLOR_PRIMARY}:x=(w-tw)/2:y=(h-th)/2-40:alpha='if(lt(t,1),0,if(lt(t,2),(t-1),1))',drawtext=text='Powered by 24HG Forge':fontsize=36:fontcolor=${COLOR_TEXT}:x=(w-tw)/2:y=(h-th)/2+60:alpha='if(lt(t,2.5),0,if(lt(t,3.5),(t-2.5),1))',fade=out:st=4.2:d=0.8" \
             -c:v libx264 -preset medium -crf 18 \
             -pix_fmt yuv420p \
             "$intro_output" &>/dev/null
     fi
 
-    # Step 5: Add sound effect if hubos-sounds exist
+    # Step 5: Add sound effect if forge-sounds exist
     current=$((current + 1)); progress_bar $current $total "Audio"
-    local sound_file="/usr/share/hubos/sounds/intro.ogg"
+    local sound_file="/usr/share/forge/sounds/intro.ogg"
     if [ ! -f "$sound_file" ]; then
-        sound_file="${XDG_DATA_HOME:-$HOME/.local/share}/hubos/sounds/intro.ogg"
+        sound_file="${XDG_DATA_HOME:-$HOME/.local/share}/forge/sounds/intro.ogg"
     fi
     if [ -f "$sound_file" ] && [ -f "$intro_output" ]; then
         local tmp_with_audio="${intro_output%.mp4}_audio.mp4"
@@ -2025,7 +2025,7 @@ cmd_intro() {
         mv "$tmp_with_audio" "$intro_output"
         info "Added intro sound effect"
     else
-        info "No intro sound found — video-only (place intro.ogg in hubos sounds directory)"
+        info "No intro sound found — video-only (place intro.ogg in forge sounds directory)"
     fi
 
     # Step 6: Generate 3-second transition video
@@ -2063,14 +2063,14 @@ cmd_intro() {
 
 # ─── Command: export ─────────────────────────────────────────────────
 cmd_export() {
-    header "HubOS Creator Kit — Export & Share"
+    header "24HG Forge Creator Kit — Export & Share"
 
     load_config
     mkdir -p "$CREATOR_DIR"
 
     local timestamp
     timestamp=$(date +%Y%m%d_%H%M%S)
-    local zip_name="hubos-creator-kit_${timestamp}.zip"
+    local zip_name="forge-creator-kit_${timestamp}.zip"
     local zip_path="$CREATOR_DIR/$zip_name"
 
     require_cmd zip zip || exit 1
@@ -2081,18 +2081,18 @@ cmd_export() {
     local readme="$CREATOR_DIR/README-CreatorKit.txt"
     cat > "$readme" <<READMEEOF
 =============================================================
-  HubOS Content Creator Kit
+  24HG Forge Content Creator Kit
   Generated: $(date -Iseconds)
 =============================================================
 
 This bundle contains branded streaming assets for 24 Hour
-Gaming (24HG) content creators using HubOS.
+Gaming (24HG) content creators using 24HG Forge.
 
 CONTENTS:
   overlays/         — Stream overlay images (dark + light)
     webcam-frame.png     Rounded webcam border
     lower-third.png      "Playing on 24HG" banner
-    hubos-watermark.png  Semi-transparent watermark
+    forge-watermark.png  Semi-transparent watermark
     social-bar.png       Discord & Hub links
     alert-*.png          Alert box backgrounds
     *-bg.png             Scene background cards
@@ -2111,11 +2111,11 @@ SETUP:
      scene, or use transition.mp4 as a Stinger transition.
 
 CUSTOMIZING:
-  Run 'hubos-creator-kit overlay' to regenerate overlays.
-  Run 'hubos-creator-kit watermark' to adjust watermark.
-  Run 'hubos-creator-kit intro' to regenerate intro video.
+  Run 'forge-creator-kit overlay' to regenerate overlays.
+  Run 'forge-creator-kit watermark' to adjust watermark.
+  Run 'forge-creator-kit intro' to regenerate intro video.
 
-Share this kit with other HubOS creators!
+Share this kit with other 24HG Forge creators!
 
   Website: os.24hgaming.com
   Discord: discord.gg/ymfEjH6EJN
@@ -2175,7 +2175,7 @@ READMEEOF
         echo -e "  ${BOLD}File:${NC} $zip_path"
         echo -e "  ${BOLD}Size:${NC} $size"
         echo ""
-        echo -e "  ${DIM}Share this zip with other HubOS creators!${NC}"
+        echo -e "  ${DIM}Share this zip with other 24HG Forge creators!${NC}"
         echo -e "  ${DIM}They can import the scenes and overlays into their OBS.${NC}"
     else
         error "Failed to create export zip"
@@ -2186,10 +2186,10 @@ READMEEOF
 
 # ─── Usage / Main ────────────────────────────────────────────────────
 usage() {
-    echo -e "${BOLD}HubOS Content Creator Kit${NC} v${VERSION}"
+    echo -e "${BOLD}24HG Forge Content Creator Kit${NC} v${VERSION}"
     echo -e "${DIM}Branded streaming toolkit for 24HG content creators${NC}"
     echo ""
-    echo -e "${BOLD}Usage:${NC} hubos-creator-kit <command> [args]"
+    echo -e "${BOLD}Usage:${NC} forge-creator-kit <command> [args]"
     echo ""
     echo -e "${BOLD}Commands:${NC}"
     echo -e "  ${CYAN}setup${NC}         One-time creator setup (OBS profile, encoder, replay buffer)"
@@ -2201,14 +2201,14 @@ usage() {
     echo -e "  ${CYAN}export${NC}        Package all creator assets into a shareable zip"
     echo ""
     echo -e "${BOLD}Examples:${NC}"
-    echo -e "  hubos-creator-kit setup"
-    echo -e "  hubos-creator-kit clip last 30"
-    echo -e "  hubos-creator-kit clip screenshot"
-    echo -e "  hubos-creator-kit clip gif 10"
-    echo -e "  hubos-creator-kit watermark position bottom-right"
-    echo -e "  hubos-creator-kit watermark opacity 20"
+    echo -e "  forge-creator-kit setup"
+    echo -e "  forge-creator-kit clip last 30"
+    echo -e "  forge-creator-kit clip screenshot"
+    echo -e "  forge-creator-kit clip gif 10"
+    echo -e "  forge-creator-kit watermark position bottom-right"
+    echo -e "  forge-creator-kit watermark opacity 20"
     echo ""
-    echo -e "${DIM}Assets saved to: ~/HubOS-Creator/${NC}"
+    echo -e "${DIM}Assets saved to: ~/24HG Forge-Creator/${NC}"
 }
 
 main() {
@@ -2229,7 +2229,7 @@ main() {
             usage
             ;;
         version|--version|-v)
-            echo "hubos-creator-kit v${VERSION}"
+            echo "forge-creator-kit v${VERSION}"
             ;;
         *)
             error "Unknown command: $command"

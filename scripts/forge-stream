@@ -1,15 +1,15 @@
 #!/bin/bash
-# HubOS Stream — One-command streaming setup and control
+# 24HG Forge Stream — One-command streaming setup and control
 # Supports Twitch, YouTube, Kick, and custom RTMP targets.
 # Uses OBS (Flatpak) when available, falls back to FFmpeg direct capture.
 #
-# Usage: hubos-stream [setup|start|stop|status|config|obs-scenes]
+# Usage: forge-stream [setup|start|stop|status|config|obs-scenes]
 
 set -euo pipefail
 
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hubos"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge"
 CONFIG_FILE="$CONFIG_DIR/stream.conf"
-STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/hubos-stream"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/forge-stream"
 PID_FILE="$STATE_DIR/stream.pid"
 LOG_FILE="$STATE_DIR/stream.log"
 OBS_SCENE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/obs-studio/basic/scenes"
@@ -46,8 +46,8 @@ load_config() {
 
 save_config() {
     cat > "$CONFIG_FILE" <<EOF
-# HubOS Stream Configuration
-# Generated $(date -Iseconds) — edit with: hubos-stream config
+# 24HG Forge Stream Configuration
+# Generated $(date -Iseconds) — edit with: forge-stream config
 PLATFORM="$PLATFORM"
 STREAM_KEY="$STREAM_KEY"
 QUALITY_PRESET="$QUALITY_PRESET"
@@ -127,11 +127,11 @@ cmd_setup() {
         exit 1
     fi
 
-    echo "Starting HubOS Stream Setup Wizard..."
+    echo "Starting 24HG Forge Stream Setup Wizard..."
 
     # 1) Platform
     PLATFORM=$(zenity --list --radiolist \
-        --title="HubOS Stream — Platform" \
+        --title="24HG Forge Stream — Platform" \
         --text="Choose your streaming platform:" \
         --column="Pick" --column="Platform" --column="Description" \
         TRUE  "twitch"  "Twitch.tv" \
@@ -143,14 +143,14 @@ cmd_setup() {
     # 2) Custom RTMP URL (if needed)
     if [ "$PLATFORM" = "custom" ]; then
         CUSTOM_RTMP_URL=$(zenity --entry \
-            --title="HubOS Stream — Custom RTMP" \
+            --title="24HG Forge Stream — Custom RTMP" \
             --text="Enter the RTMP ingest URL (without stream key):" \
             --width=450 2>/dev/null) || { echo "Setup cancelled."; exit 0; }
     fi
 
     # 3) Stream key
     STREAM_KEY=$(zenity --password \
-        --title="HubOS Stream — Stream Key" \
+        --title="24HG Forge Stream — Stream Key" \
         --text="Enter your ${PLATFORM} stream key:" \
         --width=400 2>/dev/null) || { echo "Setup cancelled."; exit 0; }
 
@@ -161,7 +161,7 @@ cmd_setup() {
 
     # 4) Quality preset
     QUALITY_PRESET=$(zenity --list --radiolist \
-        --title="HubOS Stream — Quality" \
+        --title="24HG Forge Stream — Quality" \
         --text="Choose a quality preset:" \
         --column="Pick" --column="Preset" --column="Details" \
         TRUE  "1080p60" "1920x1080 @ 60fps — 6000 kbps" \
@@ -181,7 +181,7 @@ cmd_setup() {
     esac
 
     ENCODER=$(zenity --list --radiolist \
-        --title="HubOS Stream — Encoder" \
+        --title="24HG Forge Stream — Encoder" \
         --text="Select encoder (auto-detected: ${DETECTED^^}):" \
         --column="Pick" --column="Encoder" --column="Description" \
         "$NVENC_STATE" "nvenc" "NVIDIA NVENC (best for NVIDIA GPUs)" \
@@ -206,7 +206,7 @@ cmd_setup() {
 
     if [ -n "$MIC_LIST" ]; then
         AUDIO_INPUT=$(echo "$MIC_LIST" | tr '|' '\n' | zenity --list --radiolist \
-            --title="HubOS Stream — Microphone" \
+            --title="24HG Forge Stream — Microphone" \
             --text="Select your microphone (or cancel to skip):" \
             --column="Pick" --column="Device" --column="Description" \
             --width=600 --height=400 2>/dev/null) || AUDIO_INPUT=""
@@ -226,9 +226,9 @@ cmd_setup() {
     echo ""
     cmd_config_show
     echo ""
-    echo "Start streaming with: hubos-stream start"
+    echo "Start streaming with: forge-stream start"
 
-    notify-send -a "HubOS" -i "video-display" "Stream Setup Complete" \
+    notify-send -a "24HG Forge" -i "video-display" "Stream Setup Complete" \
         "Platform: ${PLATFORM}, Quality: ${QUALITY_PRESET}" 2>/dev/null || true
 }
 
@@ -335,18 +335,18 @@ cmd_start() {
     fi
 
     if [ -z "$STREAM_KEY" ]; then
-        echo "No stream key configured. Run: hubos-stream setup"
+        echo "No stream key configured. Run: forge-stream setup"
         exit 1
     fi
 
     # Already running?
     if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
         echo "Stream already running (PID: $(cat "$PID_FILE"))"
-        echo "Stop first with: hubos-stream stop"
+        echo "Stop first with: forge-stream stop"
         exit 1
     fi
 
-    echo "Starting HubOS Stream..."
+    echo "Starting 24HG Forge Stream..."
     echo "  Platform: ${PLATFORM^^}"
     echo "  Quality:  $QUALITY_PRESET (${PRESET_RES[$QUALITY_PRESET]} @ ${PRESET_FPS[$QUALITY_PRESET]}fps, ${PRESET_BITRATE[$QUALITY_PRESET]}kbps)"
     echo "  Encoder:  ${ENCODER^^}"
@@ -357,7 +357,7 @@ cmd_start() {
         echo ""
 
         # Create/select OBS profile for this platform
-        local OBS_PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/obs-studio/basic/profiles/HubOS-${PLATFORM}"
+        local OBS_PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/obs-studio/basic/profiles/24HG Forge-${PLATFORM}"
         mkdir -p "$OBS_PROFILE_DIR"
 
         local RES="${PRESET_RES[$QUALITY_PRESET]}"
@@ -381,7 +381,7 @@ cmd_start() {
 
         cat > "$OBS_PROFILE_DIR/basic.ini" <<OBSEOF
 [General]
-Name=HubOS-${PLATFORM}
+Name=24HG Forge-${PLATFORM}
 
 [Stream]
 Mode=CustomRTMP
@@ -411,14 +411,14 @@ SampleRate=44100
 ChannelSetup=Stereo
 OBSEOF
 
-        flatpak run com.obsproject.Studio --profile "HubOS-${PLATFORM}" &
+        flatpak run com.obsproject.Studio --profile "24HG Forge-${PLATFORM}" &
         local OBS_PID=$!
         echo "$OBS_PID" > "$PID_FILE"
         date +%s > "$STATE_DIR/start_time"
         echo "$PLATFORM" > "$STATE_DIR/platform"
         echo "OBS launched (PID: $OBS_PID). Use OBS to go live."
-        notify-send -a "HubOS" -i "video-display" "OBS Ready" \
-            "Profile: HubOS-${PLATFORM} loaded. Press Start Streaming in OBS." 2>/dev/null || true
+        notify-send -a "24HG Forge" -i "video-display" "OBS Ready" \
+            "Profile: 24HG Forge-${PLATFORM} loaded. Press Start Streaming in OBS." 2>/dev/null || true
         return
     fi
 
@@ -457,7 +457,7 @@ OBSEOF
 
     echo "Stream is LIVE! (PID: $FFPID)"
     echo "Log: $LOG_FILE"
-    notify-send -a "HubOS" -i "video-display" "Stream Live" \
+    notify-send -a "24HG Forge" -i "video-display" "Stream Live" \
         "Streaming to ${PLATFORM^^} at ${QUALITY_PRESET}" 2>/dev/null || true
 }
 
@@ -492,7 +492,7 @@ cmd_stop() {
     fi
 
     # Also stop wf-recorder if it was used
-    pkill -f "wf-recorder.*hubos" 2>/dev/null || true
+    pkill -f "wf-recorder.*forge" 2>/dev/null || true
 
     local UPTIME_STR=""
     if [ -f "$STATE_DIR/start_time" ]; then
@@ -505,7 +505,7 @@ cmd_stop() {
     fi
 
     rm -f "$PID_FILE" "$STATE_DIR/start_time" "$STATE_DIR/platform"
-    notify-send -a "HubOS" -i "video-display" "Stream Ended" \
+    notify-send -a "24HG Forge" -i "video-display" "Stream Ended" \
         "Duration: ${UPTIME_STR:-unknown}" 2>/dev/null || true
 }
 
@@ -515,7 +515,7 @@ cmd_status() {
     load_config
 
     echo "╔══════════════════════════════════════╗"
-    echo "║         HubOS Stream Status          ║"
+    echo "║         24HG Forge Stream Status          ║"
     echo "╠══════════════════════════════════════╣"
 
     if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
@@ -570,7 +570,7 @@ cmd_status() {
 
 cmd_config_show() {
     load_config
-    echo "HubOS Stream Configuration"
+    echo "24HG Forge Stream Configuration"
     echo "──────────────────────────"
     echo "  Platform:      ${PLATFORM}"
     echo "  Stream Key:    ${STREAM_KEY:+****$(echo "$STREAM_KEY" | tail -c 5)}"
@@ -582,7 +582,7 @@ cmd_config_show() {
     echo ""
     echo "  Config file:   $CONFIG_FILE"
     echo ""
-    echo "Edit with: hubos-stream setup"
+    echo "Edit with: forge-stream setup"
 }
 
 cmd_config() {
@@ -618,14 +618,14 @@ cmd_config() {
 cmd_obs_scenes() {
     load_config
 
-    local SCENE_FILE="$STATE_DIR/hubos-scenes.json"
+    local SCENE_FILE="$STATE_DIR/forge-scenes.json"
     local RES="${PRESET_RES[$QUALITY_PRESET]}"
     local WIDTH="${RES%x*}"
     local HEIGHT="${RES#*x}"
 
     cat > "$SCENE_FILE" <<SCENEEOF
 {
-    "name": "HubOS Scenes",
+    "name": "24HG Forge Scenes",
     "current_scene": "Gaming",
     "current_program_scene": "Gaming",
     "scene_order": [
@@ -858,12 +858,12 @@ SCENEEOF
 
     # Import into OBS
     mkdir -p "$OBS_SCENE_DIR" 2>/dev/null || true
-    local DEST="$OBS_SCENE_DIR/HubOS Scenes.json"
+    local DEST="$OBS_SCENE_DIR/24HG Forge Scenes.json"
     if [ -d "$OBS_SCENE_DIR" ]; then
         cp "$SCENE_FILE" "$DEST"
         echo "Imported to: $DEST"
         echo ""
-        echo "In OBS: Scene Collection → Import → select 'HubOS Scenes'"
+        echo "In OBS: Scene Collection → Import → select '24HG Forge Scenes'"
     else
         echo ""
         echo "OBS scenes directory not found. Copy manually:"
@@ -883,10 +883,10 @@ SCENEEOF
 
 cmd_help() {
     cat <<'HELPEOF'
-HubOS Stream — One-command streaming setup
+24HG Forge Stream — One-command streaming setup
 
 USAGE:
-    hubos-stream <command> [options]
+    forge-stream <command> [options]
 
 COMMANDS:
     setup                Interactive setup wizard (platform, key, quality, encoder, audio)
@@ -921,13 +921,13 @@ ENCODERS:
     auto                 Auto-detect best available encoder
 
 EXAMPLES:
-    hubos-stream setup                   # First-time interactive setup
-    hubos-stream start                   # Start streaming to configured platform
-    hubos-stream start twitch            # Start streaming to Twitch
-    hubos-stream stop                    # End the stream
-    hubos-stream status                  # Check if you're live
-    hubos-stream config quality 720p60   # Switch to 720p60
-    hubos-stream obs-scenes              # Generate OBS scenes
+    forge-stream setup                   # First-time interactive setup
+    forge-stream start                   # Start streaming to configured platform
+    forge-stream start twitch            # Start streaming to Twitch
+    forge-stream stop                    # End the stream
+    forge-stream status                  # Check if you're live
+    forge-stream config quality 720p60   # Switch to 720p60
+    forge-stream obs-scenes              # Generate OBS scenes
 
 DEPENDENCIES:
     Required:  ffmpeg
@@ -951,7 +951,7 @@ case "${1:-help}" in
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown command: $1"
-        echo "Run 'hubos-stream help' for usage."
+        echo "Run 'forge-stream help' for usage."
         exit 1
         ;;
 esac

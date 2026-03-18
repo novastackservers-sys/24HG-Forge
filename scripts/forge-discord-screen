@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# HubOS Discord Wayland Screen Share Fix
+# 24HG Forge Discord Wayland Screen Share Fix
 # ═══════════════════════════════════════════════════════════════════════
 # Fixes the well-known Discord screen sharing issue on Wayland by
 # configuring xwaylandvideobridge, PipeWire audio routing, OBS virtual
 # camera fallback, and XDG portal preferences.
 #
-# Designed for HubOS (custom Linux gaming distro based on Bazzite/Fedora
+# Designed for 24HG Forge (custom Linux gaming distro based on Bazzite/Fedora
 # Atomic, KDE Plasma on Wayland).
 #
-# Usage: hubos-discord-screen [setup|start|stop|status|fix|test] [--gui]
+# Usage: forge-discord-screen [setup|start|stop|status|fix|test] [--gui]
 #
 # Copyright (c) 2026 24 Hour Gaming — MIT License
 # ═══════════════════════════════════════════════════════════════════════
@@ -18,9 +18,9 @@ set -euo pipefail
 # ─── Constants & Paths ───────────────────────────────────────────────
 
 readonly VERSION="1.0.0"
-readonly SCRIPT_NAME="hubos-discord-screen"
-readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hubos"
-readonly STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/hubos-discord-screen"
+readonly SCRIPT_NAME="forge-discord-screen"
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge"
+readonly STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/forge-discord-screen"
 readonly XDG_RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 readonly DISCORD_FLATPAK="com.discordapp.Discord"
 readonly XWVB_FLATPAK="org.kde.xwaylandvideobridge"
@@ -72,7 +72,7 @@ log_to_file() {
 notify() {
     local title="$1" body="${2:-}" icon="${3:-dialog-information}"
     if command -v notify-send &>/dev/null; then
-        notify-send -a "HubOS Discord Screen" -i "$icon" "$title" "$body" 2>/dev/null || true
+        notify-send -a "24HG Forge Discord Screen" -i "$icon" "$title" "$body" 2>/dev/null || true
     fi
     log_to_file "NOTIFY: $title — $body"
 }
@@ -81,19 +81,19 @@ notify() {
 
 gui_info() {
     if [[ "$GUI_MODE" == true ]] && command -v zenity &>/dev/null; then
-        zenity --info --title="HubOS Discord Screen" --text="$1" --width=400 2>/dev/null || true
+        zenity --info --title="24HG Forge Discord Screen" --text="$1" --width=400 2>/dev/null || true
     fi
 }
 
 gui_error() {
     if [[ "$GUI_MODE" == true ]] && command -v zenity &>/dev/null; then
-        zenity --error --title="HubOS Discord Screen" --text="$1" --width=400 2>/dev/null || true
+        zenity --error --title="24HG Forge Discord Screen" --text="$1" --width=400 2>/dev/null || true
     fi
 }
 
 gui_question() {
     if [[ "$GUI_MODE" == true ]] && command -v zenity &>/dev/null; then
-        zenity --question --title="HubOS Discord Screen" --text="$1" --width=400 2>/dev/null
+        zenity --question --title="24HG Forge Discord Screen" --text="$1" --width=400 2>/dev/null
         return $?
     fi
     return 0
@@ -101,7 +101,7 @@ gui_question() {
 
 gui_progress() {
     if [[ "$GUI_MODE" == true ]] && command -v zenity &>/dev/null; then
-        zenity --progress --title="HubOS Discord Screen" --text="$1" \
+        zenity --progress --title="24HG Forge Discord Screen" --text="$1" \
             --pulsate --auto-close --width=400 2>/dev/null || true
     fi
 }
@@ -238,7 +238,7 @@ cmd_setup() {
     dtype=$(discord_type)
 
     echo ""
-    echo "${C_BOLD}HubOS Discord Wayland Screen Share — Setup${C_RESET}"
+    echo "${C_BOLD}24HG Forge Discord Wayland Screen Share — Setup${C_RESET}"
     echo "${C_DIM}Session: $session | Discord: $dtype | v$VERSION${C_RESET}"
     echo ""
 
@@ -270,7 +270,7 @@ cmd_setup() {
     echo ""
 
     notify "Setup Complete" "Discord screen sharing configured. Restart your session." "dialog-positive"
-    gui_info "Setup complete!\n\nLog out and back in, then run:\n  hubos-discord-screen start"
+    gui_info "Setup complete!\n\nLog out and back in, then run:\n  forge-discord-screen start"
     log_to_file "SETUP: completed successfully"
 }
 
@@ -336,7 +336,7 @@ setup_pipewire_virtual_sink() {
 
     if [[ ! -f "$wp_sink_conf" ]]; then
         cat > "$wp_sink_conf" << 'WPEOF'
-# HubOS Discord Share — Persistent virtual audio sink
+# 24HG Forge Discord Share — Persistent virtual audio sink
 # This creates a null sink that game audio can be routed through
 # so Discord can capture game audio via its monitor source.
 monitor.alsa.rules = [
@@ -345,7 +345,7 @@ monitor.alsa.rules = [
 wireplumber.components = [
 ]
 
-# The actual sink is created dynamically by hubos-discord-screen start
+# The actual sink is created dynamically by forge-discord-screen start
 # This file ensures WirePlumber doesn't interfere with it
 wireplumber.settings = {
   ["discord-share-configured"] = true
@@ -422,11 +422,11 @@ setup_autostart() {
 [Desktop Entry]
 Type=Application
 Name=XWayland Video Bridge
-Comment=Bridges Wayland screen capture to XWayland apps like Discord (HubOS)
+Comment=Bridges Wayland screen capture to XWayland apps like Discord (24HG Forge)
 Exec=$xwvb_cmd
 X-KDE-autostart-after=plasma-workspace
 X-KDE-StartupNotify=false
-X-HubOS-Component=discord-screen
+X-24HG Forge-Component=discord-screen
 NoDisplay=true
 EOF
 
@@ -465,9 +465,9 @@ EOF
         fi
     elif [[ "$dtype" == "native" ]]; then
         # For native Discord, set env in the session
-        local env_file="$ENV_DIR/hubos-discord-screen.conf"
+        local env_file="$ENV_DIR/forge-discord-screen.conf"
         cat > "$env_file" << 'EOF'
-# HubOS Discord Screen Sharing — Environment overrides
+# 24HG Forge Discord Screen Sharing — Environment overrides
 DISCORD_DISABLE_GPU_SANDBOX=1
 XDG_CURRENT_DESKTOP=KDE
 EOF
@@ -544,7 +544,7 @@ setup_kwin_rule() {
     cat >> "$kwin_rules" << EOF
 
 [${rule_num}]
-Description=Hide xwaylandvideobridge window (HubOS)
+Description=Hide xwaylandvideobridge window (24HG Forge)
 minimizeRule=3
 minimized=true
 skippagerRule=3
@@ -613,7 +613,7 @@ cmd_start() {
     session=$(detect_session)
 
     echo ""
-    echo "${C_BOLD}HubOS Discord Screen Share — Start Session${C_RESET}"
+    echo "${C_BOLD}24HG Forge Discord Screen Share — Start Session${C_RESET}"
     echo "${C_DIM}Session: $session | Discord: $(discord_type)${C_RESET}"
     echo ""
 
@@ -748,7 +748,7 @@ cmd_start() {
 
 cmd_stop() {
     echo ""
-    echo "${C_BOLD}HubOS Discord Screen Share — Stop Session${C_RESET}"
+    echo "${C_BOLD}24HG Forge Discord Screen Share — Stop Session${C_RESET}"
     echo ""
 
     local cleaned=false
@@ -852,7 +852,7 @@ cmd_status() {
     dtype=$(discord_type)
 
     echo ""
-    echo "${C_BOLD}HubOS Discord Screen Share — Status${C_RESET}"
+    echo "${C_BOLD}24HG Forge Discord Screen Share — Status${C_RESET}"
     echo "${C_DIM}Session: $session | Discord: $dtype | v$VERSION${C_RESET}"
     echo ""
 
@@ -1002,7 +1002,7 @@ cmd_fix() {
     dtype=$(discord_type)
 
     echo ""
-    echo "${C_BOLD}HubOS Discord Screen Share — Auto Fix${C_RESET}"
+    echo "${C_BOLD}24HG Forge Discord Screen Share — Auto Fix${C_RESET}"
     echo "${C_DIM}Session: $session | Discord: $dtype${C_RESET}"
     echo ""
 
@@ -1255,7 +1255,7 @@ cmd_test() {
     session=$(detect_session)
 
     echo ""
-    echo "${C_BOLD}HubOS Discord Screen Share — Test${C_RESET}"
+    echo "${C_BOLD}24HG Forge Discord Screen Share — Test${C_RESET}"
     echo "${C_DIM}Session: $session${C_RESET}"
     echo ""
 
@@ -1495,7 +1495,7 @@ cmd_test() {
         fail "$failed test(s) failed"
         echo ""
         echo "  Run '${C_CYAN}$SCRIPT_NAME fix${C_RESET}' to attempt automatic repair."
-        notify "Tests Failed" "$failed test(s) failed. Run 'hubos-discord-screen fix'." "dialog-warning"
+        notify "Tests Failed" "$failed test(s) failed. Run 'forge-discord-screen fix'." "dialog-warning"
     fi
 
     gui_info "Test results:\n\nPassed: $passed\nFailed: $failed\nSkipped: $skipped"
@@ -1509,7 +1509,7 @@ cmd_test() {
 
 cmd_help() {
     echo ""
-    echo "${C_BOLD}HubOS Discord Wayland Screen Share Fix${C_RESET} ${C_DIM}v$VERSION${C_RESET}"
+    echo "${C_BOLD}24HG Forge Discord Wayland Screen Share Fix${C_RESET} ${C_DIM}v$VERSION${C_RESET}"
     echo ""
     echo "Fixes Discord screen sharing on Wayland by configuring"
     echo "xwaylandvideobridge, PipeWire audio routing, and XDG portals."
@@ -1560,7 +1560,7 @@ cmd_help() {
     echo "  Discord can use as an audio input source."
     echo ""
     echo "${C_DIM}Supports both Flatpak and native Discord installations.${C_RESET}"
-    echo "${C_DIM}Designed for HubOS (Bazzite/Fedora Atomic, KDE Plasma on Wayland).${C_RESET}"
+    echo "${C_DIM}Designed for 24HG Forge (Bazzite/Fedora Atomic, KDE Plasma on Wayland).${C_RESET}"
     echo ""
 }
 

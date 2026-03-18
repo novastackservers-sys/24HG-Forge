@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HubOS Unified Game Library — All your games from every launcher in one place
+"""24HG Forge Unified Game Library — All your games from every launcher in one place
 
 Commands:
     list                 Show all installed games across all launchers
@@ -58,7 +58,7 @@ def c(text, *codes):
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
-CACHE_DIR = Path.home() / ".cache" / "hubos"
+CACHE_DIR = Path.home() / ".cache" / "forge"
 CACHE_FILE = CACHE_DIR / "game-library.json"
 CACHE_TTL = 1800  # 30 minutes
 
@@ -1310,7 +1310,7 @@ def cmd_search(lib, args):
     lib.load()
     query = " ".join(args.query)
     if not query:
-        print(c("  Usage: hubos-games search <query>", C.YELLOW))
+        print(c("  Usage: forge-games search <query>", C.YELLOW))
         return
 
     results = lib.search(query)
@@ -1331,13 +1331,13 @@ def cmd_launch(lib, args):
     lib.load()
     identifier = " ".join(args.game)
     if not identifier:
-        print(c("  Usage: hubos-games launch <name|id>", C.YELLOW))
+        print(c("  Usage: forge-games launch <name|id>", C.YELLOW))
         return
 
     game = lib.find_game(identifier)
     if not game:
         print(c(f"  Game not found: '{identifier}'", C.RED))
-        print(c("  Try: hubos-games search <query>", C.DIM))
+        print(c("  Try: forge-games search <query>", C.DIM))
         return
 
     print(f"  Launching {c(game.name, C.BOLD)} via {c(game.launcher, _launcher_color(game.launcher))}...")
@@ -1393,7 +1393,7 @@ def cmd_info(lib, args):
     lib.load()
     identifier = " ".join(args.game)
     if not identifier:
-        print(c("  Usage: hubos-games info <name|id>", C.YELLOW))
+        print(c("  Usage: forge-games info <name|id>", C.YELLOW))
         return
 
     game = lib.find_game(identifier)
@@ -1436,7 +1436,7 @@ def cmd_recent(lib, args):
         print(f"  {c(f'[{i}]', C.BOLD, C.CYAN)}  {g.name:<35s}  {c(g.launcher, launcher_col):<15s}  {lp:<14s}  {c(g.status, status_col)}")
 
     print(f"  {c('━' * 70, C.DIM)}")
-    print(c("  Launch with: hubos-games launch <number>", C.DIM))
+    print(c("  Launch with: forge-games launch <number>", C.DIM))
 
 
 def cmd_stats(lib, args):
@@ -1447,7 +1447,7 @@ def cmd_stats(lib, args):
         if args.json:
             print(json.dumps({"total_games": 0}, indent=2))
         else:
-            print(c("  No games found. Run: hubos-games refresh", C.YELLOW))
+            print(c("  No games found. Run: forge-games refresh", C.YELLOW))
         return
 
     total = len(lib.games)
@@ -1571,24 +1571,24 @@ def cmd_refresh(lib, args):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="hubos-games",
-        description="HubOS Unified Game Library — All your games from every launcher in one place",
+        prog="forge-games",
+        description="24HG Forge Unified Game Library — All your games from every launcher in one place",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
-  hubos-games list                  Show all installed games
-  hubos-games list --sort name      Sort by name
-  hubos-games list --launcher steam Only Steam games
-  hubos-games search witcher        Find games matching 'witcher'
-  hubos-games launch rust           Launch Rust via its launcher
-  hubos-games launch 3              Launch game #3 from the list
-  hubos-games info "cyberpunk"      Detailed info about a game
-  hubos-games recent                Recently played games
-  hubos-games stats                 Library statistics
-  hubos-games refresh               Force rescan all launchers
+  forge-games list                  Show all installed games
+  forge-games list --sort name      Sort by name
+  forge-games list --launcher steam Only Steam games
+  forge-games search witcher        Find games matching 'witcher'
+  forge-games launch rust           Launch Rust via its launcher
+  forge-games launch 3              Launch game #3 from the list
+  forge-games info "cyberpunk"      Detailed info about a game
+  forge-games recent                Recently played games
+  forge-games stats                 Library statistics
+  forge-games refresh               Force rescan all launchers
 """,
     )
 
-    # Global flags (on parent parser for `hubos-games --json list` style)
+    # Global flags (on parent parser for `forge-games --json list` style)
     parser.add_argument("--json", action="store_true", help="Output in JSON format")
     parser.add_argument("--short", action="store_true", help="Compact listing")
 

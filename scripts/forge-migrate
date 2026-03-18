@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# HubOS Windows Migration Assistant
-# Migrate game settings, keybinds, and configs from Windows to HubOS (Linux)
-# Part of the HubOS gaming distribution (based on Bazzite/Fedora Atomic)
+# 24HG Forge Windows Migration Assistant
+# Migrate game settings, keybinds, and configs from Windows to 24HG Forge (Linux)
+# Part of the 24HG Forge gaming distribution (based on Bazzite/Fedora Atomic)
 
 ###############################################################################
 # Constants & Globals
 ###############################################################################
 
 VERSION="1.0.0"
-PROGRAM_NAME="hubos-migrate"
-HUBOS_DATA_DIR="${HOME}/.local/share/hubos"
+PROGRAM_NAME="forge-migrate"
+HUBOS_DATA_DIR="${HOME}/.local/share/forge"
 MIGRATE_DIR="${HUBOS_DATA_DIR}/migrate"
 BACKUP_DIR="${HUBOS_DATA_DIR}/migrate-backups"
 SCAN_CACHE="${MIGRATE_DIR}/last-scan.json"
@@ -202,10 +202,10 @@ parse_library_folders() {
 }
 
 # Zenity wrapper for GUI mode
-gui_info()  { zenity --info --title="HubOS Migrate" --text="$1" --width=400 2>/dev/null || true; }
-gui_error() { zenity --error --title="HubOS Migrate" --text="$1" --width=400 2>/dev/null || true; }
-gui_ask()   { zenity --question --title="HubOS Migrate" --text="$1" --width=400 2>/dev/null; }
-gui_progress() { zenity --progress --title="HubOS Migrate" --text="$1" --auto-close --width=400 2>/dev/null || true; }
+gui_info()  { zenity --info --title="24HG Forge Migrate" --text="$1" --width=400 2>/dev/null || true; }
+gui_error() { zenity --error --title="24HG Forge Migrate" --text="$1" --width=400 2>/dev/null || true; }
+gui_ask()   { zenity --question --title="24HG Forge Migrate" --text="$1" --width=400 2>/dev/null; }
+gui_progress() { zenity --progress --title="24HG Forge Migrate" --text="$1" --auto-close --width=400 2>/dev/null || true; }
 
 gui_select_game() {
     local games=("$@")
@@ -213,7 +213,7 @@ gui_select_game() {
     for g in "${games[@]}"; do
         items+=(FALSE "$g" "${GAME_NAMES[$g]:-$g}")
     done
-    zenity --list --checklist --title="HubOS Migrate - Select Games" \
+    zenity --list --checklist --title="24HG Forge Migrate - Select Games" \
         --column="Select" --column="ID" --column="Game" \
         --width=500 --height=400 "${items[@]}" 2>/dev/null | tr '|' '\n'
 }
@@ -381,7 +381,7 @@ scan_game_configs() {
     echo -e "  ${YELLOW}[PARTIAL]${NC} = Some settings can be migrated"
     echo -e "  ${RED}[NO LINUX]${NC} = Game not available on Linux (saved for reference)"
     echo ""
-    log_info "Run ${BOLD}hubos-migrate import all${NC} to migrate everything, or ${BOLD}hubos-migrate import <game>${NC} for a specific game"
+    log_info "Run ${BOLD}forge-migrate import all${NC} to migrate everything, or ${BOLD}forge-migrate import <game>${NC} for a specific game"
 
     # Save scan results
     save_scan_cache "$win_root"
@@ -771,7 +771,7 @@ save_scan_cache() {
         echo "{"
         echo "  \"scan_date\": \"$(date -Iseconds)\","
         echo "  \"windows_root\": \"${win_root}\","
-        echo "  \"hubos_version\": \"${VERSION}\","
+        echo "  \"forge_version\": \"${VERSION}\","
         echo "  \"games\": {"
         local first=true
         for game_id in $(echo "${!FOUND_GAMES[@]}" | tr ' ' '\n' | sort); do
@@ -841,7 +841,7 @@ log_import() {
 import_all() {
     if [[ ${#FOUND_GAMES[@]} -eq 0 ]]; then
         if ! load_scan_cache; then
-            log_error "No scan results found. Run ${BOLD}hubos-migrate scan${NC} first."
+            log_error "No scan results found. Run ${BOLD}forge-migrate scan${NC} first."
             return 1
         fi
     fi
@@ -895,7 +895,7 @@ import_game() {
     # Ensure we have scan data
     if [[ -z "${FOUND_GAMES[$game_id]+x}" ]]; then
         if ! load_scan_cache || [[ -z "${FOUND_GAMES[$game_id]+x}" ]]; then
-            log_error "No data for ${game_id}. Run ${BOLD}hubos-migrate scan${NC} first."
+            log_error "No data for ${game_id}. Run ${BOLD}forge-migrate scan${NC} first."
             return 1
         fi
     fi
@@ -1456,7 +1456,7 @@ map_resolution() {
 
 do_export() {
     local output_path="${1:-}"
-    local export_name="hubos-settings-$(timestamp)"
+    local export_name="forge-settings-$(timestamp)"
 
     if [[ -z "$output_path" ]]; then
         # Default to current directory or home
@@ -1466,7 +1466,7 @@ do_export() {
     fi
 
     local staging_dir
-    staging_dir=$(mktemp -d "/tmp/hubos-export-XXXXXX")
+    staging_dir=$(mktemp -d "/tmp/forge-export-XXXXXX")
     local meta_dir="${staging_dir}/metadata"
     mkdir -p "$meta_dir"
 
@@ -1483,7 +1483,7 @@ do_export() {
     # Export metadata
     {
         echo "export_date: $(date -Iseconds)"
-        echo "hubos_version: ${VERSION}"
+        echo "forge_version: ${VERSION}"
         echo "hostname: $(hostname)"
         echo "kernel: $(uname -r)"
         echo "steam_path: ${linux_steam:-none}"
@@ -1585,7 +1585,7 @@ do_export() {
 show_status() {
     echo ""
     echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD} HubOS Migration Status${NC}"
+    echo -e "${BOLD} 24HG Forge Migration Status${NC}"
     echo -e "${BOLD}========================================${NC}"
     echo ""
 
@@ -1609,7 +1609,7 @@ show_status() {
             done
         fi
     else
-        echo -e "  ${DIM}No scan performed yet. Run: hubos-migrate scan${NC}"
+        echo -e "  ${DIM}No scan performed yet. Run: forge-migrate scan${NC}"
     fi
 
     echo ""
@@ -1700,7 +1700,7 @@ run_gui() {
     fi
 
     local action
-    action=$(zenity --list --title="HubOS Windows Migration Assistant" \
+    action=$(zenity --list --title="24HG Forge Windows Migration Assistant" \
         --column="Action" --column="Description" \
         --width=500 --height=350 \
         "scan"   "Scan for Windows game settings" \
@@ -1737,7 +1737,7 @@ run_gui() {
         export)
             local dest
             dest=$(zenity --file-selection --save --title="Export settings to..." \
-                --filename="hubos-settings.tar.gz" 2>/dev/null) || return 0
+                --filename="forge-settings.tar.gz" 2>/dev/null) || return 0
             do_export "$dest"
             gui_info "Export complete: $dest"
             ;;
@@ -1760,7 +1760,7 @@ cmd_scan() {
     echo "  ╠═╣║ ║╠╩╗║ ║╚═╗  ║║║││ ┬├┬┘├─┤ │ ├┤ "
     echo "  ╩ ╩╚═╝╚═╝╚═╝╚═╝  ╩ ╩┴└─┘┴└─┴ ┴ ┴ └─┘"
     echo -e "${NC}"
-    echo -e "  ${DIM}Windows → HubOS Game Settings Scanner${NC}"
+    echo -e "  ${DIM}Windows → 24HG Forge Game Settings Scanner${NC}"
     echo ""
 
     ensure_dirs
@@ -1789,7 +1789,7 @@ cmd_scan() {
         echo -e "  ${BOLD}Tips:${NC}"
         echo -e "    1. Mount your Windows partition:  ${CYAN}sudo mount /dev/sdXN /mnt/windows${NC}"
         echo -e "    2. Plug in a USB drive with Windows configs"
-        echo -e "    3. Specify a path manually:  ${CYAN}hubos-migrate scan --path /mnt/windows${NC}"
+        echo -e "    3. Specify a path manually:  ${CYAN}forge-migrate scan --path /mnt/windows${NC}"
         echo ""
         return 1
     fi
@@ -1838,8 +1838,8 @@ cmd_import() {
     if [[ -z "$target" ]]; then
         echo ""
         echo -e "${BOLD}Usage:${NC}"
-        echo -e "  hubos-migrate import all       Import all found settings"
-        echo -e "  hubos-migrate import <game>     Import specific game"
+        echo -e "  forge-migrate import all       Import all found settings"
+        echo -e "  forge-migrate import <game>     Import specific game"
         echo ""
         echo -e "${BOLD}Available games:${NC}"
         for game_id in $(echo "${!GAME_NAMES[@]}" | tr ' ' '\n' | sort); do
@@ -1858,7 +1858,7 @@ cmd_import() {
                 echo ""
                 import_game "$target"
             else
-                die "Unknown game: $target. Run ${BOLD}hubos-migrate import${NC} to see available games."
+                die "Unknown game: $target. Run ${BOLD}forge-migrate import${NC} to see available games."
             fi
             ;;
     esac
@@ -1881,11 +1881,11 @@ cmd_status() {
 
 show_help() {
     echo ""
-    echo -e "${BOLD}${CYAN}HubOS Windows Migration Assistant${NC} v${VERSION}"
-    echo -e "${DIM}Migrate game settings and configs from Windows to HubOS${NC}"
+    echo -e "${BOLD}${CYAN}24HG Forge Windows Migration Assistant${NC} v${VERSION}"
+    echo -e "${DIM}Migrate game settings and configs from Windows to 24HG Forge${NC}"
     echo ""
     echo -e "${BOLD}USAGE:${NC}"
-    echo "  hubos-migrate <command> [options]"
+    echo "  forge-migrate <command> [options]"
     echo ""
     echo -e "${BOLD}COMMANDS:${NC}"
     echo "  scan              Scan for Windows game settings on mounted partitions"
@@ -1902,15 +1902,15 @@ show_help() {
     echo "  --version, -v     Show version"
     echo ""
     echo -e "${BOLD}EXAMPLES:${NC}"
-    echo "  hubos-migrate scan                          # Auto-detect and scan"
-    echo "  hubos-migrate scan --path /mnt/windows      # Scan specific partition"
-    echo "  hubos-migrate import all                    # Import everything found"
-    echo "  hubos-migrate import cs2                    # Import CS2 configs only"
-    echo "  hubos-migrate import steam                  # Import Steam configs"
-    echo "  hubos-migrate export                        # Export to current directory"
-    echo "  hubos-migrate export /media/usb/            # Export to USB drive"
-    echo "  hubos-migrate status                        # Show what's been done"
-    echo "  hubos-migrate --gui                         # Graphical mode"
+    echo "  forge-migrate scan                          # Auto-detect and scan"
+    echo "  forge-migrate scan --path /mnt/windows      # Scan specific partition"
+    echo "  forge-migrate import all                    # Import everything found"
+    echo "  forge-migrate import cs2                    # Import CS2 configs only"
+    echo "  forge-migrate import steam                  # Import Steam configs"
+    echo "  forge-migrate export                        # Export to current directory"
+    echo "  forge-migrate export /media/usb/            # Export to USB drive"
+    echo "  forge-migrate status                        # Show what's been done"
+    echo "  forge-migrate --gui                         # Graphical mode"
     echo ""
     echo -e "${BOLD}SUPPORTED GAMES:${NC}"
     for game_id in $(echo "${!GAME_NAMES[@]}" | tr ' ' '\n' | sort); do
@@ -1923,7 +1923,7 @@ show_help() {
     echo -e "${BOLD}BACKUP LOCATION:${NC}"
     echo "  ${BACKUP_DIR}"
     echo ""
-    echo -e "${DIM}Part of HubOS — the gaming-first Linux distribution by 24 Hour Gaming${NC}"
+    echo -e "${DIM}Part of 24HG Forge — the gaming-first Linux distribution by 24 Hour Gaming${NC}"
     echo ""
 }
 
@@ -1938,7 +1938,7 @@ main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --help|-h)    show_help; exit 0 ;;
-            --version|-v) echo "hubos-migrate v${VERSION}"; exit 0 ;;
+            --version|-v) echo "forge-migrate v${VERSION}"; exit 0 ;;
             --gui)        GUI_MODE=true; shift ;;
             --verbose)    VERBOSE=true; shift ;;
             --dry-run)    DRY_RUN=true; shift ;;
@@ -1953,7 +1953,7 @@ main() {
                 shift
                 ;;
             -*)
-                die "Unknown option: $1. Run hubos-migrate --help for usage."
+                die "Unknown option: $1. Run forge-migrate --help for usage."
                 ;;
             *)
                 if [[ -z "$command" ]]; then
@@ -1979,7 +1979,7 @@ main() {
         export)  cmd_export "${args[0]:-}" ;;
         status)  cmd_status ;;
         "")      show_help; exit 0 ;;
-        *)       die "Unknown command: $command. Run hubos-migrate --help for usage." ;;
+        *)       die "Unknown command: $command. Run forge-migrate --help for usage." ;;
     esac
 }
 

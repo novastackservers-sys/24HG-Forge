@@ -1,5 +1,5 @@
 #!/bin/bash
-# hubos-desktop-setup — Configure KDE Plasma desktop for HubOS gaming environment
+# forge-desktop-setup — Configure KDE Plasma desktop for 24HG Forge gaming environment
 # Safe to run multiple times (idempotent).
 
 set -euo pipefail
@@ -17,17 +17,17 @@ if command -v kwriteconfig6 &>/dev/null; then
 elif command -v kwriteconfig5 &>/dev/null; then
     KWC=kwriteconfig5
 else
-    echo "[hubos] ERROR: Neither kwriteconfig6 nor kwriteconfig5 found." >&2
+    echo "[forge] ERROR: Neither kwriteconfig6 nor kwriteconfig5 found." >&2
     exit 1
 fi
 
-log() { echo "[hubos] $*"; }
+log() { echo "[forge] $*"; }
 
 # ---------------------------------------------------------------------------
 # apply — Full desktop customization
 # ---------------------------------------------------------------------------
 apply_all() {
-    log "Applying HubOS desktop customizations..."
+    log "Applying 24HG Forge desktop customizations..."
 
     # --- Cursor theme ---
     log "Setting cursor theme: breeze_cursors, size 28"
@@ -68,20 +68,20 @@ apply_all() {
     $KWC --file kwinrc --group TabBox --key LayoutName "org.kde.breeze.desktop"
 
     # --- Konsole color scheme ---
-    log "Setting Konsole default profile to HubOS color scheme"
+    log "Setting Konsole default profile to 24HG Forge color scheme"
     local konsole_dir="$HOME/.local/share/konsole"
     mkdir -p "$konsole_dir"
 
-    # Create HubOS Konsole profile if it doesn't exist
-    if [ ! -f "$konsole_dir/HubOS.profile" ]; then
-        cat > "$konsole_dir/HubOS.profile" <<'PROFILE'
+    # Create 24HG Forge Konsole profile if it doesn't exist
+    if [ ! -f "$konsole_dir/24HG Forge.profile" ]; then
+        cat > "$konsole_dir/24HG Forge.profile" <<'PROFILE'
 [Appearance]
-ColorScheme=HubOS
+ColorScheme=24HG Forge
 Font=Hack,11,-1,5,50,0,0,0,0,0
 
 [General]
 Command=/bin/bash
-Name=HubOS
+Name=24HG Forge
 Parent=FALLBACK/
 
 [Scrolling]
@@ -93,8 +93,8 @@ BlinkingCursorEnabled=true
 PROFILE
     fi
 
-    # Set HubOS as default Konsole profile
-    $KWC --file konsolerc --group "Desktop Entry" --key DefaultProfile "HubOS.profile"
+    # Set 24HG Forge as default Konsole profile
+    $KWC --file konsolerc --group "Desktop Entry" --key DefaultProfile "24HG Forge.profile"
 
     # --- Desktop shortcuts ---
     log "Creating desktop shortcuts"
@@ -108,9 +108,9 @@ PROFILE
 [Desktop Entry]
 Type=Application
 Name=Hub
-Comment=HubOS Gaming Hub
-Exec=hubos-hub
-Icon=hubos
+Comment=24HG Forge Gaming Hub
+Exec=forge-hub
+Icon=forge
 Terminal=false
 Categories=Game;
 DESKTOP
@@ -168,22 +168,22 @@ DESKTOP
     fi
 
     # 24hg:// protocol
-    local hubos_handler="$HOME/.local/share/applications/hubos-protocol.desktop"
-    mkdir -p "$(dirname "$hubos_handler")"
-    if [ ! -f "$hubos_handler" ]; then
-        cat > "$hubos_handler" <<'HANDLER'
+    local forge_handler="$HOME/.local/share/applications/forge-protocol.desktop"
+    mkdir -p "$(dirname "$forge_handler")"
+    if [ ! -f "$forge_handler" ]; then
+        cat > "$forge_handler" <<'HANDLER'
 [Desktop Entry]
 Type=Application
-Name=HubOS Protocol Handler
-Exec=hubos-hub --uri %u
-Icon=hubos
+Name=24HG Forge Protocol Handler
+Exec=forge-hub --uri %u
+Icon=forge
 Terminal=false
 MimeType=x-scheme-handler/24hg;
 NoDisplay=true
 HANDLER
     fi
     if ! grep -q "x-scheme-handler/24hg" "$mimeapps" 2>/dev/null; then
-        echo "x-scheme-handler/24hg=hubos-protocol.desktop" >> "$mimeapps"
+        echo "x-scheme-handler/24hg=forge-protocol.desktop" >> "$mimeapps"
     fi
 
     # Update MIME database
@@ -193,7 +193,7 @@ HANDLER
 
     # --- Wallpaper ---
     log "Setting wallpaper if available"
-    local wallpaper="/usr/share/wallpapers/hubos-dark.png"
+    local wallpaper="/usr/share/wallpapers/forge-dark.png"
     if [ -f "$wallpaper" ]; then
         if command -v qdbus &>/dev/null; then
             qdbus org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "
@@ -213,9 +213,9 @@ HANDLER
     # --- Create required directories ---
     log "Creating gaming directories"
     mkdir -p "$HOME/Pictures/Screenshots"
-    mkdir -p "$HOME/Videos/HubOS-Replays"
-    mkdir -p "$HOME/HubOS-Backups"
-    mkdir -p "$HOME/.config/hubos"
+    mkdir -p "$HOME/Videos/24HG Forge-Replays"
+    mkdir -p "$HOME/24HG Forge-Backups"
+    mkdir -p "$HOME/.config/forge"
 
     # --- Reload KWin if running ---
     if command -v qdbus &>/dev/null && qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null; then
@@ -281,10 +281,10 @@ apply_desktop() {
 }
 
 # ---------------------------------------------------------------------------
-# reset — Reset all HubOS desktop customizations
+# reset — Reset all 24HG Forge desktop customizations
 # ---------------------------------------------------------------------------
 reset_all() {
-    log "Resetting HubOS desktop customizations..."
+    log "Resetting 24HG Forge desktop customizations..."
 
     # Reset cursor
     $KWC --file kcminputrc --group Mouse --key cursorTheme --delete 2>/dev/null || true
@@ -330,10 +330,10 @@ case "${1:-apply}" in
     *)
         echo "Usage: $0 {apply|gaming|desktop|reset}"
         echo ""
-        echo "  apply   — Apply all HubOS desktop customizations (default)"
+        echo "  apply   — Apply all 24HG Forge desktop customizations (default)"
         echo "  gaming  — Switch to gaming-optimized settings (no effects)"
         echo "  desktop — Restore full desktop effects"
-        echo "  reset   — Remove all HubOS customizations"
+        echo "  reset   — Remove all 24HG Forge customizations"
         exit 1
         ;;
 esac

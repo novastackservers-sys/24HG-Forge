@@ -1,19 +1,19 @@
 #!/bin/bash
-# HubOS Game Profile Manager
+# 24HG Forge Game Profile Manager
 # Manages per-game launch profiles with Proton versions, env vars, resolution,
 # MangoHud configs, launch arguments, and performance profiles.
 #
-# Profiles stored as JSON in ~/.config/hubos/game-profiles/<appid>.json
+# Profiles stored as JSON in ~/.config/forge/game-profiles/<appid>.json
 #
-# Usage: hubos-game-profiles <command> [options]
+# Usage: forge-game-profiles <command> [options]
 # Commands: create, edit, apply, list, delete, search, import, export, help
 
 set -euo pipefail
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
-PROFILES_DIR="${HOME}/.config/hubos/game-profiles"
-HUBOS_PROTON_DIR="/var/lib/hubos/proton-ge"
+PROFILES_DIR="${HOME}/.config/forge/game-profiles"
+HUBOS_PROTON_DIR="/var/lib/forge/proton-ge"
 
 # Possible Steam root directories (checked in order)
 STEAM_PATHS=(
@@ -24,8 +24,8 @@ STEAM_PATHS=(
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
-_log() { echo "[hubos-game-profiles] $*"; }
-_err() { echo "[hubos-game-profiles] ERROR: $*" >&2; }
+_log() { echo "[forge-game-profiles] $*"; }
+_err() { echo "[forge-game-profiles] ERROR: $*" >&2; }
 _die() { _err "$@"; exit 1; }
 
 _has_zenity() { command -v zenity &>/dev/null && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; }
@@ -175,13 +175,13 @@ _find_proton_versions() {
         done
     done
 
-    # HubOS-managed Proton-GE
+    # 24HG Forge-managed Proton-GE
     if [ -d "$HUBOS_PROTON_DIR" ]; then
         for d in "$HUBOS_PROTON_DIR"/*/; do
             [ -d "$d" ] || continue
             local name
             name="$(basename "$d")"
-            versions+=("hubos:${name}")
+            versions+=("forge:${name}")
         done
     fi
 
@@ -370,7 +370,7 @@ with open(vdf_path, 'r', errors='replace') as f:
     content = f.read()
 
 # Back up first
-backup = vdf_path + ".hubos-backup"
+backup = vdf_path + ".forge-backup"
 if not os.path.exists(backup):
     shutil.copy2(vdf_path, backup)
 
@@ -417,7 +417,7 @@ PYEOF
 
 cmd_create() {
     local input="${1:-}"
-    [ -z "$input" ] && _die "Usage: hubos-game-profiles create <appid|name>"
+    [ -z "$input" ] && _die "Usage: forge-game-profiles create <appid|name>"
 
     local appid game_name
     appid="$(_resolve_game "$input")"
@@ -502,7 +502,7 @@ cmd_create() {
 
 cmd_edit() {
     local input="${1:-}"
-    [ -z "$input" ] && _die "Usage: hubos-game-profiles edit <appid|name>"
+    [ -z "$input" ] && _die "Usage: forge-game-profiles edit <appid|name>"
 
     local appid profile_path
     appid="$(_resolve_game "$input")"
@@ -577,7 +577,7 @@ cmd_edit() {
 
 cmd_apply() {
     local input="${1:-}"
-    [ -z "$input" ] && _die "Usage: hubos-game-profiles apply <appid|name>"
+    [ -z "$input" ] && _die "Usage: forge-game-profiles apply <appid|name>"
 
     local appid profile_path
     appid="$(_resolve_game "$input")"
@@ -597,9 +597,9 @@ cmd_apply() {
 
     # Apply performance profile
     if [ -n "$perf_profile" ] && [ "$perf_profile" != "balanced" ]; then
-        if command -v hubos-performance &>/dev/null; then
+        if command -v forge-performance &>/dev/null; then
             _log "Setting performance profile: $perf_profile"
-            hubos-performance "$perf_profile" 2>/dev/null || true
+            forge-performance "$perf_profile" 2>/dev/null || true
         fi
     fi
 
@@ -613,7 +613,7 @@ cmd_apply() {
         case "$ptype" in
             steam)  _log "  Steam built-in: $pname" ;;
             ge)     _log "  GE-Proton: $pname (in compatibilitytools.d)" ;;
-            hubos)  _log "  HubOS Proton-GE: $pname (in $HUBOS_PROTON_DIR)" ;;
+            forge)  _log "  24HG Forge Proton-GE: $pname (in $HUBOS_PROTON_DIR)" ;;
         esac
     fi
 
@@ -649,7 +649,7 @@ cmd_list() {
     profiles=("$PROFILES_DIR"/*.json)
     if [ ! -f "${profiles[0]:-}" ]; then
         _log "No game profiles found."
-        _log "Create one with: hubos-game-profiles create <appid|name>"
+        _log "Create one with: forge-game-profiles create <appid|name>"
         return 0
     fi
 
@@ -683,7 +683,7 @@ PYEOF
 
 cmd_delete() {
     local input="${1:-}"
-    [ -z "$input" ] && _die "Usage: hubos-game-profiles delete <appid|name>"
+    [ -z "$input" ] && _die "Usage: forge-game-profiles delete <appid|name>"
 
     local appid profile_path
     appid="$(_resolve_game "$input")"
@@ -706,7 +706,7 @@ cmd_delete() {
 
 cmd_search() {
     local query="${1:-}"
-    [ -z "$query" ] && _die "Usage: hubos-game-profiles search <name>"
+    [ -z "$query" ] && _die "Usage: forge-game-profiles search <name>"
 
     _log "Searching installed Steam games for '$query'..."
 
@@ -773,7 +773,7 @@ PYEOF
 
 cmd_export() {
     local input="${1:-}"
-    [ -z "$input" ] && _die "Usage: hubos-game-profiles export <appid|name> [output_file]"
+    [ -z "$input" ] && _die "Usage: forge-game-profiles export <appid|name> [output_file]"
 
     local output="${2:-}"
     local appid profile_path
@@ -792,7 +792,7 @@ cmd_export() {
 
 cmd_import() {
     local source="${1:-}"
-    [ -z "$source" ] && _die "Usage: hubos-game-profiles import <file|url>"
+    [ -z "$source" ] && _die "Usage: forge-game-profiles import <file|url>"
 
     local json=""
 
@@ -833,13 +833,13 @@ cmd_import() {
 
 cmd_help() {
     cat << 'EOF'
-HubOS Game Profile Manager
+24HG Forge Game Profile Manager
 ===========================
 Manage per-game launch profiles for Steam games with Proton, MangoHud,
 resolution overrides, environment variables, and performance tuning.
 
 USAGE
-    hubos-game-profiles <command> [arguments]
+    forge-game-profiles <command> [arguments]
 
 COMMANDS
     create <appid|name>         Create a new game profile (interactive)
@@ -854,26 +854,26 @@ COMMANDS
 
 EXAMPLES
     # Search for a game by name
-    hubos-game-profiles search counter-strike
+    forge-game-profiles search counter-strike
 
     # Create a profile for CS2 (AppID 730)
-    hubos-game-profiles create 730
+    forge-game-profiles create 730
 
     # Create by name (fuzzy-matched to installed games)
-    hubos-game-profiles create "Rust"
+    forge-game-profiles create "Rust"
 
     # Apply the profile (writes to Steam's localconfig.vdf)
-    hubos-game-profiles apply 730
+    forge-game-profiles apply 730
 
     # List all profiles
-    hubos-game-profiles list
+    forge-game-profiles list
 
     # Export and share a profile
-    hubos-game-profiles export 730 ~/cs2-profile.json
+    forge-game-profiles export 730 ~/cs2-profile.json
 
     # Import a shared profile
-    hubos-game-profiles import ~/cs2-profile.json
-    hubos-game-profiles import https://example.com/profiles/cs2.json
+    forge-game-profiles import ~/cs2-profile.json
+    forge-game-profiles import https://example.com/profiles/cs2.json
 
 PROFILE FIELDS
     proton_version       Proton/GE-Proton version to use
@@ -882,17 +882,17 @@ PROFILE FIELDS
     mangohud_config      Custom MangoHud config string
     env_vars             Space-separated KEY=VALUE environment variables
     launch_args          Extra command-line arguments
-    performance_profile  HubOS perf profile: gaming or balanced
+    performance_profile  24HG Forge perf profile: gaming or balanced
 
 PROTON DETECTION
     The script scans for Proton versions in:
     - Steam built-in:    <steam>/steamapps/common/Proton*/
     - GE-Proton:         <steam>/compatibilitytools.d/GE-Proton*/
-    - HubOS managed:     /var/lib/hubos/proton-ge/
+    - 24HG Forge managed:     /var/lib/forge/proton-ge/
 
 PROFILE STORAGE
     Profiles are stored as JSON files in:
-    ~/.config/hubos/game-profiles/<appid>.json
+    ~/.config/forge/game-profiles/<appid>.json
 
 STEAM PATHS
     Auto-detects Steam installation at:
@@ -921,7 +921,7 @@ main() {
         import)  cmd_import "$@" ;;
         export)  cmd_export "$@" ;;
         help|--help|-h)  cmd_help ;;
-        *)       _die "Unknown command: $cmd. Run 'hubos-game-profiles help' for usage." ;;
+        *)       _die "Unknown command: $cmd. Run 'forge-game-profiles help' for usage." ;;
     esac
 }
 

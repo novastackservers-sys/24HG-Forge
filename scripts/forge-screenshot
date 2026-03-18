@@ -1,17 +1,17 @@
 #!/bin/bash
-# HubOS Screenshot Tool
+# 24HG Forge Screenshot Tool
 # Captures screenshots with optional annotation and sharing.
 # Integrates with the 24HG Hub clip gallery.
 #
-# Usage: hubos-screenshot [full|area|window|last]
+# Usage: forge-screenshot [full|area|window|last]
 # Keybind: Print = full, Shift+Print = area, Alt+Print = window
 
 set -euo pipefail
 
-SCREENSHOTS_DIR="$HOME/Pictures/HubOS Screenshots"
+SCREENSHOTS_DIR="$HOME/Pictures/24HG Forge Screenshots"
 ACTION="${1:-full}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-FILENAME="hubos_${TIMESTAMP}.png"
+FILENAME="forge_${TIMESTAMP}.png"
 FILEPATH="$SCREENSHOTS_DIR/$FILENAME"
 
 mkdir -p "$SCREENSHOTS_DIR"
@@ -130,7 +130,7 @@ case "$ACTION" in
         show_last
         ;;
     list)
-        echo "=== HubOS Screenshots ==="
+        echo "=== 24HG Forge Screenshots ==="
         echo "Directory: $SCREENSHOTS_DIR"
         echo ""
         COUNT=$(find "$SCREENSHOTS_DIR" -name "*.png" 2>/dev/null | wc -l)
@@ -141,8 +141,8 @@ case "$ACTION" in
             awk '{print "  " $NF " (" $5 ")"}'
         ;;
     *)
-        echo "HubOS Screenshot Tool"
-        echo "Usage: hubos-screenshot [full|area|window|last|list]"
+        echo "24HG Forge Screenshot Tool"
+        echo "Usage: forge-screenshot [full|area|window|last|list]"
         echo ""
         echo "  full   — Capture entire screen"
         echo "  area   — Select region to capture"

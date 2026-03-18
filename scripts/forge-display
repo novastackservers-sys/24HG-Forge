@@ -1,11 +1,11 @@
 #!/bin/bash
-# hubos-display — Multi-monitor and display settings manager for HubOS
+# forge-display — Multi-monitor and display settings manager for 24HG Forge
 # Manages gaming/desktop display modes, VRR, HDR, profiles, and per-monitor settings.
 # Auto-detects Wayland vs X11 and uses appropriate tools.
 
 set -euo pipefail
 
-PROFILE_DIR="$HOME/.config/hubos/display-profiles"
+PROFILE_DIR="$HOME/.config/forge/display-profiles"
 mkdir -p "$PROFILE_DIR"
 
 # ---------------------------------------------------------------------------
@@ -406,8 +406,8 @@ cmd_refresh() {
     local rate="${2:-}"
 
     if [[ -z "$monitor" || -z "$rate" ]]; then
-        err "Usage: hubos-display refresh <monitor> <rate>"
-        err "Example: hubos-display refresh DP-1 144"
+        err "Usage: forge-display refresh <monitor> <rate>"
+        err "Example: forge-display refresh DP-1 144"
         return 1
     fi
 
@@ -444,8 +444,8 @@ cmd_resolution() {
     local res="${2:-}"
 
     if [[ -z "$monitor" || -z "$res" ]]; then
-        err "Usage: hubos-display resolution <monitor> <resolution>"
-        err "Example: hubos-display resolution DP-1 2560x1440"
+        err "Usage: forge-display resolution <monitor> <resolution>"
+        err "Example: forge-display resolution DP-1 2560x1440"
         return 1
     fi
 
@@ -472,7 +472,7 @@ cmd_vrr() {
     local state="${1:-}"
 
     if [[ -z "$state" ]] || [[ "$state" != "on" && "$state" != "off" ]]; then
-        err "Usage: hubos-display vrr <on|off>"
+        err "Usage: forge-display vrr <on|off>"
         return 1
     fi
 
@@ -527,7 +527,7 @@ cmd_hdr() {
     local state="${1:-}"
 
     if [[ -z "$state" ]] || [[ "$state" != "on" && "$state" != "off" ]]; then
-        err "Usage: hubos-display hdr <on|off>"
+        err "Usage: forge-display hdr <on|off>"
         return 1
     fi
 
@@ -558,7 +558,7 @@ cmd_hdr() {
     fi
 
     # Set environment variable for DXVK HDR (used by Proton/Wine games)
-    local env_file="$HOME/.config/hubos/display-env.sh"
+    local env_file="$HOME/.config/forge/display-env.sh"
     mkdir -p "$(dirname "$env_file")"
 
     if [[ "$state" == "on" ]]; then
@@ -589,7 +589,7 @@ cmd_profile() {
     local name="${1:-}"
 
     if [[ -z "$name" ]]; then
-        err "Usage: hubos-display profile <name>"
+        err "Usage: forge-display profile <name>"
         return 1
     fi
 
@@ -679,7 +679,7 @@ cmd_save() {
     local name="${1:-}"
 
     if [[ -z "$name" ]]; then
-        err "Usage: hubos-display save <name>"
+        err "Usage: forge-display save <name>"
         return 1
     fi
 
@@ -789,12 +789,12 @@ cmd_list() {
     if [[ $found -eq 0 ]]; then
         echo "  (none)"
         echo ""
-        info "Save one with: hubos-display save <name>"
+        info "Save one with: forge-display save <name>"
     fi
 }
 
 cmd_status() {
-    echo -e "${BOLD}HubOS Display Status${RESET}"
+    echo -e "${BOLD}24HG Forge Display Status${RESET}"
     echo -e "${DIM}Session: ${SESSION_TYPE}${RESET}"
     echo ""
 
@@ -907,17 +907,17 @@ _enable_compositor() {
 
 usage() {
     cat <<'USAGE'
-hubos-display — Multi-monitor and display manager for HubOS
+forge-display — Multi-monitor and display manager for 24HG Forge
 
 Usage:
-  hubos-display <command> [options]
+  forge-display <command> [options]
 
 Commands:
   detect                       Detect and list all connected monitors
   gaming [monitor]             Optimize display for gaming (max refresh, VRR, disable secondaries)
   desktop                      Restore all monitors to normal desktop mode
-  refresh <monitor> <rate>     Set refresh rate (e.g., hubos-display refresh DP-1 144)
-  resolution <monitor> <res>   Set resolution (e.g., hubos-display resolution DP-1 2560x1440)
+  refresh <monitor> <rate>     Set refresh rate (e.g., forge-display refresh DP-1 144)
+  resolution <monitor> <res>   Set resolution (e.g., forge-display resolution DP-1 2560x1440)
   vrr <on|off>                 Toggle Variable Refresh Rate (FreeSync/G-Sync)
   hdr <on|off>                 Toggle HDR output
   profile <name>               Load a saved display profile
@@ -925,19 +925,19 @@ Commands:
   list                         List saved display profiles
   status                       Show current display configuration and status
 
-Profiles are stored in: ~/.config/hubos/display-profiles/
+Profiles are stored in: ~/.config/forge/display-profiles/
 
 Auto-detects session type (X11/Wayland) and uses appropriate tools:
   X11:     xrandr
   Wayland: kscreen-doctor (KDE) or wlr-randr (wlroots)
 
 Examples:
-  hubos-display detect
-  hubos-display gaming DP-1
-  hubos-display save my-gaming-setup
-  hubos-display profile my-gaming-setup
-  hubos-display vrr on
-  hubos-display hdr on
+  forge-display detect
+  forge-display gaming DP-1
+  forge-display save my-gaming-setup
+  forge-display profile my-gaming-setup
+  forge-display vrr on
+  forge-display hdr on
 USAGE
 }
 

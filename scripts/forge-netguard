@@ -1,16 +1,16 @@
 #!/bin/bash
-# HubOS Network Latency Guardian
+# 24HG Forge Network Latency Guardian
 # Optimizes network for gaming by prioritizing game traffic,
 # pausing background updates, and setting fast DNS during game sessions.
 #
-# Usage: hubos-netguard [start|stop|status]
+# Usage: forge-netguard [start|stop|status]
 # Designed to be triggered by GameMode hooks or manually.
 
 set -euo pipefail
 
 GAMING_DNS="1.1.1.1"
 GAMING_DNS_V6="2606:4700:4700::1111"
-STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/hubos-netguard"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/forge-netguard"
 STATE_FILE="$STATE_DIR/active"
 
 mkdir -p "$STATE_DIR"
@@ -66,8 +66,8 @@ start_guard() {
     # Baloo file indexer (KDE)
     balooctl6 suspend 2>/dev/null || balooctl suspend 2>/dev/null || true
 
-    # HubOS auto-update
-    sudo systemctl stop hubos-auto-update.timer 2>/dev/null || true
+    # 24HG Forge auto-update
+    sudo systemctl stop forge-auto-update.timer 2>/dev/null || true
 
     # ── 4. Network stack tuning for low-latency ──
     # Disable Nagle's algorithm delay
@@ -84,7 +84,7 @@ start_guard() {
     echo "  - Background services paused"
     echo "  - TCP low-latency mode enabled"
 
-    notify-send -a "24HG" -i "hubos-logo" "Network Optimized" \
+    notify-send -a "24HG" -i "forge-logo" "Network Optimized" \
         "Gaming network mode active. Background services paused." 2>/dev/null || true
 }
 
@@ -112,7 +112,7 @@ stop_guard() {
     sudo systemctl start packagekit.service 2>/dev/null || true
     systemctl --user start tracker-miner-fs-3.service 2>/dev/null || true
     balooctl6 resume 2>/dev/null || balooctl resume 2>/dev/null || true
-    sudo systemctl start hubos-auto-update.timer 2>/dev/null || true
+    sudo systemctl start forge-auto-update.timer 2>/dev/null || true
 
     # Restore normal TCP settings
     sudo sysctl -qw net.ipv4.tcp_low_latency=0 2>/dev/null || true
@@ -121,12 +121,12 @@ stop_guard() {
     rm -f "$STATE_FILE"
     echo "Network Guardian deactivated — normal mode restored"
 
-    notify-send -a "24HG" -i "hubos-logo" "Network Restored" \
+    notify-send -a "24HG" -i "forge-logo" "Network Restored" \
         "Gaming network mode deactivated." 2>/dev/null || true
 }
 
 show_status() {
-    echo "=== HubOS Network Latency Guardian ==="
+    echo "=== 24HG Forge Network Latency Guardian ==="
     if [ -f "$STATE_FILE" ]; then
         local IFACE
         IFACE=$(cat "$STATE_FILE")
@@ -170,7 +170,7 @@ case "${1:-status}" in
         fi
         ;;
     *)
-        echo "Usage: hubos-netguard [start|stop|status|auto]"
+        echo "Usage: forge-netguard [start|stop|status|auto]"
         echo ""
         echo "  start  — Activate gaming network optimization"
         echo "  stop   — Restore normal network settings"

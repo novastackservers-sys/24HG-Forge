@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# HubOS Wine/Proton Prefix Manager
-# Manages Wine/Proton prefixes for Steam games on HubOS (Bazzite/Fedora Atomic).
+# 24HG Forge Wine/Proton Prefix Manager
+# Manages Wine/Proton prefixes for Steam games on 24HG Forge (Bazzite/Fedora Atomic).
 # Supports both Flatpak and native Steam installations.
 #
-# Usage: hubos-prefix <command> [options]
+# Usage: forge-prefix <command> [options]
 #   list                          List all prefixes (sorted by size)
 #   info <appid>                  Detailed prefix information
 #   health <appid>                Health-check a prefix
@@ -21,11 +21,11 @@ set -euo pipefail
 # ─── Constants ──────────────────────────────────────────────────────────────
 
 VERSION="1.0.0"
-PROGRAM_NAME="hubos-prefix"
+PROGRAM_NAME="forge-prefix"
 
 STEAM_FLATPAK_DIR="$HOME/.var/app/com.valvesoftware.Steam/data/Steam"
 STEAM_NATIVE_DIR="$HOME/.local/share/Steam"
-BACKUP_DIR="$HOME/.local/share/hubos/prefix-backups"
+BACKUP_DIR="$HOME/.local/share/forge/prefix-backups"
 
 # Critical prefix structure
 CRITICAL_FILES=("pfx/system.reg" "pfx/user.reg")
@@ -110,13 +110,13 @@ human_size() {
 # Zenity wrapper
 gui_info() {
     if $GUI_MODE && command -v zenity &>/dev/null; then
-        zenity --info --title="HubOS Prefix Manager" --text="$1" --width=500 2>/dev/null
+        zenity --info --title="24HG Forge Prefix Manager" --text="$1" --width=500 2>/dev/null
     fi
 }
 
 gui_question() {
     if $GUI_MODE && command -v zenity &>/dev/null; then
-        zenity --question --title="HubOS Prefix Manager" --text="$1" --width=400 2>/dev/null
+        zenity --question --title="24HG Forge Prefix Manager" --text="$1" --width=400 2>/dev/null
         return $?
     else
         read -rp "$1 [y/N] " ans
@@ -1413,7 +1413,7 @@ EOF
 
 show_usage() {
     cat <<EOF
-${BOLD}HubOS Wine/Proton Prefix Manager${NC} v${VERSION}
+${BOLD}24HG Forge Wine/Proton Prefix Manager${NC} v${VERSION}
 
 ${BOLD}USAGE:${NC}
     $PROGRAM_NAME <command> [options]
@@ -1457,7 +1457,7 @@ ${BOLD}PATHS:${NC}
     Flatpak:  $STEAM_FLATPAK_DIR
     Native:   $STEAM_NATIVE_DIR
 
-${DIM}Part of HubOS — https://24hgaming.com${NC}
+${DIM}Part of 24HG Forge — https://24hgaming.com${NC}
 EOF
 }
 
@@ -1469,7 +1469,7 @@ generate_completions() {
     local prev="${2:-}"
 
     case "$prev" in
-        hubos-prefix|"$PROGRAM_NAME")
+        forge-prefix|"$PROGRAM_NAME")
             echo "list info health install-deps backup restore cleanup reset --gui --help --version"
             ;;
         info|health|backup|restore|reset|install-deps)

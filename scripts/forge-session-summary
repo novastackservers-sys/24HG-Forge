@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HubOS Session Summary — Post-game stats, restoration, and session tracking.
+24HG Forge Session Summary — Post-game stats, restoration, and session tracking.
 
 Shows a beautiful session summary notification when you close a game. Parses
 MangoHud CSV logs for FPS/frametime/temperature stats, restores desktop state,
@@ -13,7 +13,7 @@ Commands:
   stats              Aggregate statistics (playtime, trends, best sessions)
   help               Show this help text
 
-Data: ~/.local/share/hubos/sessions/<timestamp>_<appid>.json
+Data: ~/.local/share/forge/sessions/<timestamp>_<appid>.json
 """
 
 import csv
@@ -33,12 +33,12 @@ from pathlib import Path
 
 # ── Configuration ──
 
-DATA_DIR = os.path.expanduser("~/.local/share/hubos")
+DATA_DIR = os.path.expanduser("~/.local/share/forge")
 SESSION_DIR = os.path.join(DATA_DIR, "sessions")
 STATE_DIR = os.path.join(DATA_DIR, "session-state")
 GAME_TIMER_FILE = os.path.join(DATA_DIR, "game-timer.json")
-HUB_TOKEN_FILE = os.path.expanduser("~/.config/hubos/hub-token")
-HUB_API_URL = "https://api.24hgaming.com/api/hubos/session"
+HUB_TOKEN_FILE = os.path.expanduser("~/.config/forge/hub-token")
+HUB_API_URL = "https://api.24hgaming.com/api/forge/session"
 STEAM_APPS_COMMON = os.path.expanduser("~/.local/share/Steam/steamapps/common")
 STEAM_APP_INFO = os.path.expanduser("~/.local/share/Steam/appcache/appinfo.vdf")
 
@@ -176,7 +176,7 @@ def hub_sync(session_data: dict):
 def send_notification(summary: str, body: str = "", actions: list = None,
                       icon: str = "input-gaming", urgency: str = "normal"):
     """Send desktop notification via notify-send."""
-    cmd = ["notify-send", "--app-name=HubOS", f"--icon={icon}",
+    cmd = ["notify-send", "--app-name=24HG Forge", f"--icon={icon}",
            f"--urgency={urgency}"]
     if actions:
         for action in actions:
@@ -604,7 +604,7 @@ def render_terminal_summary(session: dict) -> str:
         content.append(f"  {C.RED}{C.BOLD}Game exited abnormally.{C.RESET}")
         if appid:
             content.append(
-                f"  Run: {C.CYAN}hubos-crash-fix diagnose {appid}{C.RESET}"
+                f"  Run: {C.CYAN}forge-crash-fix diagnose {appid}{C.RESET}"
             )
 
     if optimizations:
@@ -667,7 +667,7 @@ def render_notification_line(session: dict) -> tuple:
     if not clean:
         summary = f"{game} crashed after {duration}"
         appid = session.get("appid", "")
-        body = f"Run: hubos-crash-fix diagnose {appid}" if appid else "Check logs for details"
+        body = f"Run: forge-crash-fix diagnose {appid}" if appid else "Check logs for details"
         return summary, body
 
     parts = [duration]
@@ -724,7 +724,7 @@ def cmd_show(args: list):
     """Show session summary for a just-ended game."""
     appid = args[0] if args else os.environ.get("SteamAppId", "")
     if not appid:
-        print(f"{C.RED}Error:{C.RESET} No appid provided. Usage: hubos-session-summary show <appid>")
+        print(f"{C.RED}Error:{C.RESET} No appid provided. Usage: forge-session-summary show <appid>")
         sys.exit(1)
 
     game_name = get_game_name(appid)
@@ -789,7 +789,7 @@ def cmd_show(args: list):
             summary, body,
             icon="dialog-error",
             urgency="critical",
-            actions=[f"diagnose=Run hubos-crash-fix diagnose {appid}"],
+            actions=[f"diagnose=Run forge-crash-fix diagnose {appid}"],
         )
 
     # Sync to hub
@@ -1065,13 +1065,13 @@ def cmd_stats(_args: list):
 def cmd_help(_args: list):
     """Show help text."""
     print(f"""
-  {C.CYAN}{C.BOLD}hubos-session-summary{C.RESET} -- Post-game stats, restoration, and session tracking
+  {C.CYAN}{C.BOLD}forge-session-summary{C.RESET} -- Post-game stats, restoration, and session tracking
 
   {C.BOLD}Usage:{C.RESET}
-    hubos-session-summary show <appid>       Show session summary (called on game exit)
-    hubos-session-summary last               Show the last session summary
-    hubos-session-summary history [options]   Show session history table
-    hubos-session-summary stats              Show aggregate statistics
+    forge-session-summary show <appid>       Show session summary (called on game exit)
+    forge-session-summary last               Show the last session summary
+    forge-session-summary history [options]   Show session history table
+    forge-session-summary stats              Show aggregate statistics
 
   {C.BOLD}History options:{C.RESET}
     --game <name>     Filter by game name (case-insensitive partial match)
@@ -1086,9 +1086,9 @@ def cmd_help(_args: list):
     SteamAppId             Steam application ID (fallback for appid)
 
   {C.BOLD}Data:{C.RESET}
-    Sessions:   ~/.local/share/hubos/sessions/
-    State:      ~/.local/share/hubos/session-state/
-    Hub token:  ~/.config/hubos/hub-token
+    Sessions:   ~/.local/share/forge/sessions/
+    State:      ~/.local/share/forge/session-state/
+    Hub token:  ~/.config/forge/hub-token
 
   {C.BOLD}Integration:{C.RESET}
     This tool is called automatically by the smart-launch daemon when a game
@@ -1121,7 +1121,7 @@ def main():
     fn = commands.get(command)
     if not fn:
         print(f"{C.RED}Unknown command:{C.RESET} {command}")
-        print(f"Run {C.CYAN}hubos-session-summary help{C.RESET} for usage.")
+        print(f"Run {C.CYAN}forge-session-summary help{C.RESET} for usage.")
         sys.exit(1)
 
     ensure_dirs()

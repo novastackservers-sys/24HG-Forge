@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HubOS Achievements — OS-level gamification that rewards exploration and engagement.
+24HG Forge Achievements — OS-level gamification that rewards exploration and engagement.
 
 Tracks milestones, unlocks achievements, awards points, and syncs with the 24HG Hub.
 Designed to run periodically via systemd timer and on-demand by the user.
@@ -13,7 +13,7 @@ Commands:
   reset              Reset all achievement progress (with confirmation)
   help               Show this help text
 
-Data: ~/.local/share/hubos/achievements.json
+Data: ~/.local/share/forge/achievements.json
 """
 
 import json
@@ -29,11 +29,11 @@ from pathlib import Path
 
 # ── Configuration ──
 
-DATA_DIR = os.path.expanduser("~/.local/share/hubos")
+DATA_DIR = os.path.expanduser("~/.local/share/forge")
 DATA_FILE = os.path.join(DATA_DIR, "achievements.json")
 GAME_TIMER_FILE = os.path.join(DATA_DIR, "game-timer.json")
 BENCHMARK_FILE = os.path.join(DATA_DIR, "benchmark.json")
-HUB_TOKEN_FILE = os.path.expanduser("~/.config/hubos/hub-token")
+HUB_TOKEN_FILE = os.path.expanduser("~/.config/forge/hub-token")
 HUB_API_URL = "https://api.24hgaming.com/activity/achievements"
 
 # ── Colors ──
@@ -95,21 +95,21 @@ ACHIEVEMENTS = [
     ("social_butterfly","Social Butterfly","Have 5+ friends online at once",                   10,  "community", "🦋"),
     ("server_hopper",  "Server Hopper",    "Connect to 5 different 24HG servers",              10,  "community", "🌐"),
     ("clip_artist",    "Clip Artist",      "Save 10 replay clips",                             10,  "community", "🎬"),
-    ("streamer",       "Streamer",         "Start a stream with hubos-stream",                 15,  "community", "📡"),
+    ("streamer",       "Streamer",         "Start a stream with forge-stream",                 15,  "community", "📡"),
     ("sharer",         "Sharer",           "Share a clip or screenshot to the Hub",            10,  "community", "📤"),
     ("team_player",    "Team Player",      "Join a Hub group or clan",                         10,  "community", "🤝"),
 
     # Tools & Mastery
-    ("benchmarker",    "Benchmarker",      "Run hubos-benchmark",                               5,  "tools", "📊"),
-    ("diagnosed",      "Diagnosed",        "Run hubos-diag",                                    5,  "tools", "🔍"),
+    ("benchmarker",    "Benchmarker",      "Run forge-benchmark",                               5,  "tools", "📊"),
+    ("diagnosed",      "Diagnosed",        "Run forge-diag",                                    5,  "tools", "🔍"),
     ("proton_master",  "Proton Master",    "Have 3+ Proton-GE versions installed",             10,  "tools", "🧪"),
-    ("shader_chef",    "Shader Chef",      "Optimize shader cache with hubos-shader-cache",    10,  "tools", "🍳"),
+    ("shader_chef",    "Shader Chef",      "Optimize shader cache with forge-shader-cache",    10,  "tools", "🍳"),
     ("backup_hero",    "Backup Hero",      "Create a game save backup",                        10,  "tools", "💾"),
     ("speed_demon",    "Speed Demon",      "Reach FPS > 144 (MangoHud logs)",                  15,  "tools", "⚡"),
     ("customizer",     "Customizer",       "Change performance profile",                       10,  "tools", "🎛️"),
-    ("explorer",       "Explorer",         "Use 10 different hubos tools",                      5,  "tools", "🧭"),
-    ("net_watcher",    "Net Watcher",      "Run hubos-netguard to check connection quality",    5,  "tools", "📶"),
-    ("audio_tweaker",  "Audio Tweaker",    "Switch audio profiles with hubos-audio",            5,  "tools", "🔊"),
+    ("explorer",       "Explorer",         "Use 10 different forge tools",                      5,  "tools", "🧭"),
+    ("net_watcher",    "Net Watcher",      "Run forge-netguard to check connection quality",    5,  "tools", "📶"),
+    ("audio_tweaker",  "Audio Tweaker",    "Switch audio profiles with forge-audio",            5,  "tools", "🔊"),
 
     # Streaks
     ("week_streak",    "Week Warrior",     "Game every day for 7 days",                        20,  "streaks", "🔥"),
@@ -117,8 +117,8 @@ ACHIEVEMENTS = [
     ("quarter_streak", "Unstoppable",      "Game every day for 90 days",                       50,  "streaks", "💎"),
 
     # Special
-    ("veteran",        "Veteran",          "Use HubOS for 30+ days",                           25,  "special", "🎖️"),
-    ("old_guard",      "Old Guard",        "Use HubOS for 365+ days",                          50,  "special", "🏛️"),
+    ("veteran",        "Veteran",          "Use 24HG Forge for 30+ days",                           25,  "special", "🎖️"),
+    ("old_guard",      "Old Guard",        "Use 24HG Forge for 365+ days",                          50,  "special", "🏛️"),
     ("completionist",  "Completionist",    "Unlock all other achievements",                    50,  "special", "🏆"),
 ]
 
@@ -204,7 +204,7 @@ def unlock(data, achievement_id, quiet=False):
             [
                 "notify-send",
                 "--icon=trophy-gold",
-                "--app-name=HubOS Achievements",
+                "--app-name=24HG Forge Achievements",
                 "--urgency=normal",
                 f"{icon} Achievement Unlocked!",
                 f"{name} — {desc} (+{pts} pts)",
@@ -231,7 +231,7 @@ def sync_to_hub(achievement_id, points, timestamp):
             "achievement": achievement_id,
             "points": points,
             "unlocked_at": timestamp,
-            "client": "hubos",
+            "client": "forge",
         }).encode()
         req = urllib.request.Request(
             HUB_API_URL,
@@ -257,13 +257,13 @@ def check_all(data):
     today_str = date.today().isoformat()
 
     # -- First Boot: check if first-boot wizard stamp exists --
-    if os.path.exists(os.path.expanduser("~/.config/hubos/first-boot-done")):
+    if os.path.exists(os.path.expanduser("~/.config/forge/first-boot-done")):
         if unlock(data, "first_boot"):
             newly_unlocked += 1
 
     # -- Identity: custom wallpaper (not the default) --
     wallpaper_paths = [
-        os.path.expanduser("~/.config/hubos/wallpaper-changed"),
+        os.path.expanduser("~/.config/forge/wallpaper-changed"),
         os.path.expanduser("~/.config/plasma-org.kde.plasma.desktop-appletsrc"),
     ]
     for wp in wallpaper_paths:
@@ -339,7 +339,7 @@ def check_all(data):
     # -- Controller Kid: check for gamepad devices --
     try:
         js_devices = glob.glob("/dev/input/js*")
-        gamepad_marker = os.path.expanduser("~/.local/share/hubos/gamepad-seen")
+        gamepad_marker = os.path.expanduser("~/.local/share/forge/gamepad-seen")
         if js_devices or os.path.exists(gamepad_marker):
             if unlock(data, "controller_kid"):
                 newly_unlocked += 1
@@ -347,7 +347,7 @@ def check_all(data):
         pass
 
     # -- Configurator: game profile exists --
-    profiles_dir = os.path.expanduser("~/.config/hubos/game-profiles")
+    profiles_dir = os.path.expanduser("~/.config/forge/game-profiles")
     if os.path.isdir(profiles_dir):
         profiles = [f for f in os.listdir(profiles_dir) if f.endswith(".json")]
         if profiles:
@@ -361,7 +361,7 @@ def check_all(data):
 
     # -- Diagnosed --
     diag_file = os.path.join(DATA_DIR, "diag-report.json")
-    diag_marker = os.path.expanduser("~/.local/share/hubos/diag-ran")
+    diag_marker = os.path.expanduser("~/.local/share/forge/diag-ran")
     if os.path.exists(diag_file) or os.path.exists(diag_marker):
         if unlock(data, "diagnosed"):
             newly_unlocked += 1
@@ -382,14 +382,14 @@ def check_all(data):
             newly_unlocked += 1
 
     # -- Shader Chef --
-    shader_marker = os.path.expanduser("~/.local/share/hubos/shader-optimized")
+    shader_marker = os.path.expanduser("~/.local/share/forge/shader-optimized")
     if os.path.exists(shader_marker):
         if unlock(data, "shader_chef"):
             newly_unlocked += 1
 
     # -- Backup Hero --
-    backup_dir = os.path.expanduser("~/.local/share/hubos/backups")
-    backup_marker = os.path.expanduser("~/.local/share/hubos/backup-created")
+    backup_dir = os.path.expanduser("~/.local/share/forge/backups")
+    backup_marker = os.path.expanduser("~/.local/share/forge/backup-created")
     if os.path.exists(backup_marker) or (os.path.isdir(backup_dir) and os.listdir(backup_dir)):
         if unlock(data, "backup_hero"):
             newly_unlocked += 1
@@ -418,7 +418,7 @@ def check_all(data):
             break
 
     # -- Customizer: performance profile changed from default --
-    perf_file = os.path.expanduser("~/.config/hubos/performance-profile")
+    perf_file = os.path.expanduser("~/.config/forge/performance-profile")
     if os.path.exists(perf_file):
         try:
             profile = Path(perf_file).read_text().strip()
@@ -428,8 +428,8 @@ def check_all(data):
         except OSError:
             pass
 
-    # -- Explorer: 10 different hubos tools used --
-    tools_marker_dir = os.path.expanduser("~/.local/share/hubos/tools-used")
+    # -- Explorer: 10 different forge tools used --
+    tools_marker_dir = os.path.expanduser("~/.local/share/forge/tools-used")
     if os.path.isdir(tools_marker_dir):
         tools_seen = set(os.listdir(tools_marker_dir))
         data["tools_used"] = list(set(data.get("tools_used", [])) | tools_seen)
@@ -437,18 +437,18 @@ def check_all(data):
     tool_markers = {
         "benchmark": BENCHMARK_FILE,
         "diag": os.path.join(DATA_DIR, "diag-ran"),
-        "replay": os.path.expanduser("~/.local/share/hubos/replay-used"),
-        "stream": os.path.expanduser("~/.local/share/hubos/stream-used"),
-        "backup": os.path.expanduser("~/.local/share/hubos/backup-created"),
-        "shader-cache": os.path.expanduser("~/.local/share/hubos/shader-optimized"),
+        "replay": os.path.expanduser("~/.local/share/forge/replay-used"),
+        "stream": os.path.expanduser("~/.local/share/forge/stream-used"),
+        "backup": os.path.expanduser("~/.local/share/forge/backup-created"),
+        "shader-cache": os.path.expanduser("~/.local/share/forge/shader-optimized"),
         "performance": perf_file,
         "game-timer": GAME_TIMER_FILE,
-        "netguard": os.path.expanduser("~/.local/share/hubos/netguard-ran"),
-        "audio": os.path.expanduser("~/.local/share/hubos/audio-switched"),
-        "controller": os.path.expanduser("~/.local/share/hubos/gamepad-seen"),
-        "screenshot": os.path.expanduser("~/.local/share/hubos/screenshot-taken"),
-        "proton-fix": os.path.expanduser("~/.local/share/hubos/proton-fix-ran"),
-        "proton-updater": os.path.expanduser("~/.local/share/hubos/proton-updated"),
+        "netguard": os.path.expanduser("~/.local/share/forge/netguard-ran"),
+        "audio": os.path.expanduser("~/.local/share/forge/audio-switched"),
+        "controller": os.path.expanduser("~/.local/share/forge/gamepad-seen"),
+        "screenshot": os.path.expanduser("~/.local/share/forge/screenshot-taken"),
+        "proton-fix": os.path.expanduser("~/.local/share/forge/proton-fix-ran"),
+        "proton-updater": os.path.expanduser("~/.local/share/forge/proton-updated"),
     }
     tools_found = set(data.get("tools_used", []))
     for tool_name, marker in tool_markers.items():
@@ -460,13 +460,13 @@ def check_all(data):
             newly_unlocked += 1
 
     # -- Net Watcher --
-    netguard_marker = os.path.expanduser("~/.local/share/hubos/netguard-ran")
+    netguard_marker = os.path.expanduser("~/.local/share/forge/netguard-ran")
     if os.path.exists(netguard_marker):
         if unlock(data, "net_watcher"):
             newly_unlocked += 1
 
     # -- Audio Tweaker --
-    audio_marker = os.path.expanduser("~/.local/share/hubos/audio-switched")
+    audio_marker = os.path.expanduser("~/.local/share/forge/audio-switched")
     if os.path.exists(audio_marker):
         if unlock(data, "audio_tweaker"):
             newly_unlocked += 1
@@ -480,31 +480,31 @@ def check_all(data):
                 newly_unlocked += 1
 
     # -- Streamer --
-    stream_marker = os.path.expanduser("~/.local/share/hubos/stream-used")
+    stream_marker = os.path.expanduser("~/.local/share/forge/stream-used")
     if os.path.exists(stream_marker):
         if unlock(data, "streamer"):
             newly_unlocked += 1
 
     # -- Sharer --
-    share_marker = os.path.expanduser("~/.local/share/hubos/hub-shared")
+    share_marker = os.path.expanduser("~/.local/share/forge/hub-shared")
     if os.path.exists(share_marker):
         if unlock(data, "sharer"):
             newly_unlocked += 1
 
     # -- Team Player --
-    team_marker = os.path.expanduser("~/.local/share/hubos/hub-group-joined")
+    team_marker = os.path.expanduser("~/.local/share/forge/hub-group-joined")
     if os.path.exists(team_marker):
         if unlock(data, "team_player"):
             newly_unlocked += 1
 
     # -- Social Butterfly --
-    social_marker = os.path.expanduser("~/.local/share/hubos/social-butterfly")
+    social_marker = os.path.expanduser("~/.local/share/forge/social-butterfly")
     if os.path.exists(social_marker):
         if unlock(data, "social_butterfly"):
             newly_unlocked += 1
 
     # -- Server Hopper --
-    servers_file = os.path.expanduser("~/.local/share/hubos/servers-visited.json")
+    servers_file = os.path.expanduser("~/.local/share/forge/servers-visited.json")
     if os.path.exists(servers_file):
         try:
             with open(servers_file, "r") as f:
@@ -697,7 +697,7 @@ def cmd_status(data):
     try:
         first_seen = datetime.fromisoformat(data["first_seen"]).date()
         days = (date.today() - first_seen).days
-        print(f"  {C.BOLD}HubOS User:{C.RESET}    {days} day{'s' if days != 1 else ''}")
+        print(f"  {C.BOLD}24HG Forge User:{C.RESET}    {days} day{'s' if days != 1 else ''}")
     except (ValueError, KeyError):
         pass
     print()
@@ -723,7 +723,7 @@ def cmd_status(data):
     elif "completionist" not in unlocked:
         print(f"  {C.GOLD}{C.BOLD}Almost there! Just the Completionist trophy left!{C.RESET}")
     else:
-        print(f"  {C.GOLD}{C.BOLD}🏆 ALL ACHIEVEMENTS UNLOCKED! You are a HubOS legend! 🏆{C.RESET}")
+        print(f"  {C.GOLD}{C.BOLD}🏆 ALL ACHIEVEMENTS UNLOCKED! You are a 24HG Forge legend! 🏆{C.RESET}")
     print()
 
 
@@ -744,7 +744,7 @@ def cmd_unlock(data, achievement_id):
     """Manually unlock a specific achievement."""
     if achievement_id not in ACHIEVEMENT_MAP:
         print(f"  {C.RED}Unknown achievement: {achievement_id}{C.RESET}")
-        print(f"  {C.DIM}Use 'hubos-achievements list' to see all IDs.{C.RESET}")
+        print(f"  {C.DIM}Use 'forge-achievements list' to see all IDs.{C.RESET}")
         return
 
     if achievement_id in data.get("unlocked", {}):
@@ -785,7 +785,7 @@ def cmd_reset(data):
 def cmd_help():
     """Show help text."""
     print()
-    print(f"  {C.BOLD}HubOS Achievements{C.RESET} — Unlock rewards as you explore HubOS")
+    print(f"  {C.BOLD}24HG Forge Achievements{C.RESET} — Unlock rewards as you explore 24HG Forge")
     print()
     print(f"  {C.BOLD}Commands:{C.RESET}")
     print(f"    {C.CYAN}check{C.RESET}            Scan system and unlock earned achievements")
@@ -820,7 +820,7 @@ def main():
         cmd_status(data)
     elif cmd == "unlock":
         if len(sys.argv) < 3:
-            print(f"  {C.RED}Usage: hubos-achievements unlock <achievement_id>{C.RESET}")
+            print(f"  {C.RED}Usage: forge-achievements unlock <achievement_id>{C.RESET}")
             sys.exit(1)
         cmd_unlock(data, sys.argv[2])
     elif cmd == "reset":

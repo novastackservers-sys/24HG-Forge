@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# HubOS Game Setup — One-command setup for popular games on Linux
+# 24HG Forge Game Setup — One-command setup for popular games on Linux
 # Ensures the right Proton version, dependencies, and configs are in place
 # so games launch correctly the first time.
 #
-# Usage: hubos-game-setup <game>
+# Usage: forge-game-setup <game>
 #   gtav              — GTA V setup (Proton-GE, Social Club fix, d3dcompiler)
 #   hogwarts          — Hogwarts Legacy (Proton-GE, NVAPI, shader warmup tip)
 #   starfield         — Starfield (Proton-GE, NVAPI, ini tweaks)
@@ -13,13 +13,13 @@
 #   list              — Show all supported games
 #   check <game>      — Check if a game is ready to play
 #
-# Part of HubOS — The 24 Hour Gaming Operating System
+# Part of 24HG Forge — The 24 Hour Gaming Operating System
 # https://24hgaming.com
 
 set -euo pipefail
 
 readonly VERSION="1.0.0"
-readonly PROG_NAME="hubos-game-setup"
+readonly PROG_NAME="forge-game-setup"
 
 # Colors
 RED='\033[0;31m'
@@ -43,7 +43,7 @@ step()  { echo -e "  ${BOLD}→${NC} $1"; }
 
 header() {
     echo ""
-    echo -e "${BOLD}━━━ HubOS Game Setup: $1 ━━━${NC}"
+    echo -e "${BOLD}━━━ 24HG Forge Game Setup: $1 ━━━${NC}"
     echo ""
 }
 
@@ -81,7 +81,7 @@ check_proton_ge() {
         return 0
     fi
     warn "Proton-GE not installed"
-    step "Install with: hubos-proton-updater update"
+    step "Install with: forge-proton-updater update"
     step "Or: flatpak install com.github.Matoking.protontricks && protontricks --install-ge-proton"
     return 1
 }
@@ -290,7 +290,7 @@ setup_forza() {
             ok "Controller detected ($js_count device(s))"
             if (( js_count > 1 )); then
                 warn "Multiple controllers — Forza may pick the wrong one"
-                info "Use 'hubos-controller' to set the primary device"
+                info "Use 'forge-controller' to set the primary device"
             fi
         else
             info "No controller detected — keyboard/mouse works fine"
@@ -375,7 +375,7 @@ setup_minecraft() {
         fi
     else
         fail "Java not found"
-        info "HubOS includes Java 21 — if missing, run: sudo rpm-ostree install java-21-openjdk"
+        info "24HG Forge includes Java 21 — if missing, run: sudo rpm-ostree install java-21-openjdk"
     fi
 
     step "Checking Minecraft launcher..."
@@ -513,7 +513,7 @@ check_game() {
             ;;
         *)
             fail "Unknown game: $game"
-            echo "  Run: hubos-game-setup list"
+            echo "  Run: forge-game-setup list"
             return 1
             ;;
     esac
@@ -522,7 +522,7 @@ check_game() {
     if $all_ok; then
         echo -e "  ${GREEN}${BOLD}Ready to play!${NC}"
     else
-        echo -e "  ${YELLOW}${BOLD}Some issues found — run 'hubos-game-setup $game' to fix${NC}"
+        echo -e "  ${YELLOW}${BOLD}Some issues found — run 'forge-game-setup $game' to fix${NC}"
     fi
 }
 
@@ -532,21 +532,21 @@ list_games() {
     header "Supported Games"
     echo -e "  ${BOLD}Game                     Command                  Status${NC}"
     echo -e "  ${DIM}─────────────────────────────────────────────────────────────${NC}"
-    echo -e "  GTA V                  hubos-game-setup gtav     ${GREEN}Works (Proton-GE)${NC}"
-    echo -e "  Hogwarts Legacy        hubos-game-setup hogwarts ${GREEN}Works (Proton-GE)${NC}"
-    echo -e "  Starfield              hubos-game-setup starfield${GREEN} Works (Proton-GE)${NC}"
-    echo -e "  Forza Horizon 5        hubos-game-setup forza    ${GREEN}Works (Proton-GE)${NC}"
-    echo -e "  Warframe               hubos-game-setup warframe ${GREEN}Works (Proton-GE)${NC}"
-    echo -e "  Minecraft (Java)       hubos-game-setup minecraft${GREEN} Native Linux${NC}"
+    echo -e "  GTA V                  forge-game-setup gtav     ${GREEN}Works (Proton-GE)${NC}"
+    echo -e "  Hogwarts Legacy        forge-game-setup hogwarts ${GREEN}Works (Proton-GE)${NC}"
+    echo -e "  Starfield              forge-game-setup starfield${GREEN} Works (Proton-GE)${NC}"
+    echo -e "  Forza Horizon 5        forge-game-setup forza    ${GREEN}Works (Proton-GE)${NC}"
+    echo -e "  Warframe               forge-game-setup warframe ${GREEN}Works (Proton-GE)${NC}"
+    echo -e "  Minecraft (Java)       forge-game-setup minecraft${GREEN} Native Linux${NC}"
     echo ""
-    info "All games use auto-optimization via hubos-smart-launch daemon"
-    info "Run 'hubos-game-setup check <game>' to verify readiness"
+    info "All games use auto-optimization via forge-smart-launch daemon"
+    info "Run 'forge-game-setup check <game>' to verify readiness"
 }
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 
 show_help() {
-    echo "HubOS Game Setup v${VERSION}"
+    echo "24HG Forge Game Setup v${VERSION}"
     echo ""
     echo "Usage: $PROG_NAME <command> [game]"
     echo ""

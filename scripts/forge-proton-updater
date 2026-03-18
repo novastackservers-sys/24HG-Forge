@@ -1,15 +1,15 @@
 #!/bin/bash
 # =============================================================================
-# HubOS Proton-GE Updater — Automatically keep Proton-GE up to date
+# 24HG Forge Proton-GE Updater — Automatically keep Proton-GE up to date
 # Manages GloriousEggroll's Proton-GE custom builds for Steam on Linux.
-# Usage: hubos-proton-updater {check|update|list|set-default|cleanup|auto} [options]
+# Usage: forge-proton-updater {check|update|list|set-default|cleanup|auto} [options]
 # =============================================================================
 
 set -euo pipefail
 
 VERSION="1.0.0"
 GITHUB_API="https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest"
-CACHE_DIR="${HOME}/.cache/hubos"
+CACHE_DIR="${HOME}/.cache/forge"
 CACHE_FILE="${CACHE_DIR}/proton-ge-latest.json"
 CACHE_MAX_AGE=3600  # seconds before cache is considered stale
 KEEP_VERSIONS=2     # number of old versions to keep during cleanup
@@ -47,7 +47,7 @@ notify() {
     local title="$1"
     local body="${2:-}"
     if command -v notify-send &>/dev/null; then
-        notify-send --app-name="HubOS Proton Updater" --icon=steam "$title" "$body" 2>/dev/null || true
+        notify-send --app-name="24HG Forge Proton Updater" --icon=steam "$title" "$body" 2>/dev/null || true
     fi
 }
 
@@ -385,7 +385,7 @@ cmd_update() {
     if [[ -n "$avail_bytes" ]] && (( avail_bytes < needed )); then
         log_error "Insufficient disk space."
         log_error "Need approximately $(human_size $needed), available: $(human_size "$avail_bytes")"
-        log_error "Run 'hubos-proton-updater cleanup' to free space."
+        log_error "Run 'forge-proton-updater cleanup' to free space."
         return 1
     fi
 
@@ -485,7 +485,7 @@ cmd_set_default() {
     local version="${1:-}"
 
     if [[ -z "$version" ]]; then
-        log_error "Usage: hubos-proton-updater set-default <version>"
+        log_error "Usage: forge-proton-updater set-default <version>"
         echo ""
         echo "Available Proton-GE versions:"
         get_installed_ge_versions | while read -r v; do echo "  $v"; done
@@ -611,10 +611,10 @@ cmd_auto() {
 
 cmd_help() {
     cat <<HELP
-${BOLD}hubos-proton-updater${NC} v${VERSION} — Proton-GE version manager for HubOS
+${BOLD}forge-proton-updater${NC} v${VERSION} — Proton-GE version manager for 24HG Forge
 
 ${BOLD}USAGE${NC}
-    hubos-proton-updater <command> [options]
+    forge-proton-updater <command> [options]
 
 ${BOLD}COMMANDS${NC}
     ${CYAN}check${NC}                   Check for new Proton-GE releases
@@ -633,11 +633,11 @@ ${BOLD}ENVIRONMENT${NC}
     GITHUB_TOKEN            GitHub personal access token (avoids API rate limits)
 
 ${BOLD}EXAMPLES${NC}
-    hubos-proton-updater check
-    hubos-proton-updater update
-    hubos-proton-updater list
-    hubos-proton-updater cleanup 3
-    hubos-proton-updater set-default GE-Proton9-20
+    forge-proton-updater check
+    forge-proton-updater update
+    forge-proton-updater list
+    forge-proton-updater cleanup 3
+    forge-proton-updater set-default GE-Proton9-20
 
 ${BOLD}SYSTEMD TIMER${NC}
     To run automatically, create a user timer:
@@ -647,7 +647,7 @@ ${BOLD}SYSTEMD TIMER${NC}
         Description=Update Proton-GE
         [Service]
         Type=oneshot
-        ExecStart=/usr/bin/hubos-proton-updater auto
+        ExecStart=/usr/bin/forge-proton-updater auto
 
     ~/.config/systemd/user/proton-ge-update.timer:
         [Unit]
@@ -661,7 +661,7 @@ ${BOLD}SYSTEMD TIMER${NC}
     Enable with: systemctl --user enable --now proton-ge-update.timer
 
 ${BOLD}FILES${NC}
-    ~/.cache/hubos/proton-ge-latest.json    Cached release info from GitHub
+    ~/.cache/forge/proton-ge-latest.json    Cached release info from GitHub
 
 HELP
 }
@@ -725,7 +725,7 @@ main() {
             cmd_help
             ;;
         version|--version|-v)
-            echo "hubos-proton-updater v${VERSION}"
+            echo "forge-proton-updater v${VERSION}"
             ;;
         *)
             log_error "Unknown command: ${command}"

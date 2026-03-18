@@ -1,8 +1,8 @@
 #!/bin/bash
-# HubOS Night Light — Blue light filter for late-night gaming
+# 24HG Forge Night Light — Blue light filter for late-night gaming
 # Wraps KDE's built-in Night Color with easy toggle + custom presets.
 #
-# Usage: hubos-nightlight [on|off|toggle|status|temp <kelvin>]
+# Usage: forge-nightlight [on|off|toggle|status|temp <kelvin>]
 
 set -euo pipefail
 
@@ -90,7 +90,7 @@ case "$ACTION" in
             fi
         else
             # No easy way to check state on X11, just toggle via temp file
-            STATE_FILE="${XDG_RUNTIME_DIR:-/tmp}/hubos-nightlight-state"
+            STATE_FILE="${XDG_RUNTIME_DIR:-/tmp}/forge-nightlight-state"
             if [ -f "$STATE_FILE" ]; then
                 rm "$STATE_FILE"
                 "$0" off
@@ -120,8 +120,8 @@ case "$ACTION" in
         fi
         ;;
     *)
-        echo "HubOS Night Light — Blue light filter"
-        echo "Usage: hubos-nightlight [on|off|toggle|status|temp <kelvin>]"
+        echo "24HG Forge Night Light — Blue light filter"
+        echo "Usage: forge-nightlight [on|off|toggle|status|temp <kelvin>]"
         echo ""
         echo "  on [temp]   — Enable (default: 4500K warm)"
         echo "  off         — Disable"

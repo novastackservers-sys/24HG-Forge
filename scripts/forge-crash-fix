@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# HubOS Game Crash Diagnosis & Auto-Fix Tool
+# 24HG Forge Game Crash Diagnosis & Auto-Fix Tool
 # Analyzes Steam/Proton crash logs, system journals, and common failure modes.
 # Supports both Flatpak and native Steam installations on Bazzite/Fedora Atomic.
 #
-# Usage: hubos-crash-fix <command> [game] [options]
+# Usage: forge-crash-fix <command> [game] [options]
 #   diagnose <appid|name>  — Analyze why a game crashed
 #   fix <appid|name>       — Auto-fix common crash issues
 #   log <appid|name>       — Show recent crash logs, formatted and filtered
@@ -21,7 +21,7 @@ set -euo pipefail
 # ─── Constants & Globals ─────────────────────────────────────────────────────
 
 readonly VERSION="2.0.0"
-readonly PROG_NAME="hubos-crash-fix"
+readonly PROG_NAME="forge-crash-fix"
 
 STEAM_FLATPAK="${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam"
 STEAM_NATIVE="${HOME}/.local/share/Steam"
@@ -715,17 +715,17 @@ describe_cause() {
 suggest_for_cause() {
     case "$1" in
         oom)
-            echo -e "    ${DIM}-> Run: hubos-crash-fix fix <game>  (will enable zram, set max_map_count)${NC}"
+            echo -e "    ${DIM}-> Run: forge-crash-fix fix <game>  (will enable zram, set max_map_count)${NC}"
             echo -e "    ${DIM}-> Consider closing background apps or adding swap${NC}"
             ;;
         nvidia_crash)
             echo -e "    ${DIM}-> Check driver: nvidia-smi${NC}"
-            echo -e "    ${DIM}-> Run: hubos-crash-fix fix <game>  (will check and suggest driver update)${NC}"
+            echo -e "    ${DIM}-> Run: forge-crash-fix fix <game>  (will check and suggest driver update)${NC}"
             echo -e "    ${DIM}-> Try rolling back the NVIDIA driver if recently updated${NC}"
             ;;
         gpu_hang)
             echo -e "    ${DIM}-> Check: vulkaninfo --summary${NC}"
-            echo -e "    ${DIM}-> Try clearing shader cache: hubos-crash-fix fix <game>${NC}"
+            echo -e "    ${DIM}-> Try clearing shader cache: forge-crash-fix fix <game>${NC}"
             echo -e "    ${DIM}-> AMD users: try RADV_PERFTEST=gpl or different mesa version${NC}"
             ;;
         vulkan_device_lost)
@@ -734,22 +734,22 @@ suggest_for_cause() {
             ;;
         proton_crash)
             echo -e "    ${DIM}-> Try a different Proton version (GE-Proton or official)${NC}"
-            echo -e "    ${DIM}-> Run: hubos-crash-fix fix <game>  (can reset prefix)${NC}"
+            echo -e "    ${DIM}-> Run: forge-crash-fix fix <game>  (can reset prefix)${NC}"
             ;;
         prefix_corruption)
-            echo -e "    ${DIM}-> Run: hubos-crash-fix fix <game>  (will backup and delete prefix)${NC}"
+            echo -e "    ${DIM}-> Run: forge-crash-fix fix <game>  (will backup and delete prefix)${NC}"
             echo -e "    ${DIM}-> Steam will recreate the prefix on next launch${NC}"
             ;;
         missing_libs)
-            echo -e "    ${DIM}-> Run: hubos-crash-fix fix <game>  (will install via protontricks)${NC}"
+            echo -e "    ${DIM}-> Run: forge-crash-fix fix <game>  (will install via protontricks)${NC}"
             echo -e "    ${DIM}-> Manual: protontricks <appid> vcredist2019 dotnet48 d3dx9${NC}"
             ;;
         shader_issue)
-            echo -e "    ${DIM}-> Run: hubos-crash-fix fix <game>  (will clear shader cache)${NC}"
+            echo -e "    ${DIM}-> Run: forge-crash-fix fix <game>  (will clear shader cache)${NC}"
             echo -e "    ${DIM}-> Steam will recompile shaders on next launch${NC}"
             ;;
         disk_full)
-            echo -e "    ${DIM}-> Run: hubos-crash-fix fix <game>  (will clean caches and old prefixes)${NC}"
+            echo -e "    ${DIM}-> Run: forge-crash-fix fix <game>  (will clean caches and old prefixes)${NC}"
             echo -e "    ${DIM}-> Remove unused games or move to another drive${NC}"
             ;;
         hardware_issue)
@@ -838,7 +838,7 @@ cmd_fix() {
                 fi
                 # Ensure d3dcompiler_47 is present
                 if ! find "$prefix_dir/pfx/drive_c/windows/system32" -name "d3dcompiler_47.dll" -print -quit 2>/dev/null | grep -q .; then
-                    log_info "d3dcompiler_47 missing — run: hubos-proton-fix install-dll $appid d3dcompiler_47"
+                    log_info "d3dcompiler_47 missing — run: forge-proton-fix install-dll $appid d3dcompiler_47"
                 fi
             fi
             ;;
@@ -900,7 +900,7 @@ cmd_fix() {
                     js_count=$(ls /dev/input/js* 2>/dev/null | wc -l)
                     if (( js_count > 1 )); then
                         log_warn "Multiple joystick devices detected ($js_count) — Forza may pick the wrong one"
-                        log_info "Use 'hubos-controller' to configure the correct device"
+                        log_info "Use 'forge-controller' to configure the correct device"
                     fi
                 fi
             fi
@@ -989,8 +989,8 @@ fix_max_map_count() {
                 log_fix "Set vm.max_map_count=1048576 (session)"
                 # Persist
                 if [[ -d /etc/sysctl.d ]]; then
-                    echo "vm.max_map_count=1048576" | sudo tee /etc/sysctl.d/99-hubos-games.conf &>/dev/null
-                    log_fix "Persisted vm.max_map_count in /etc/sysctl.d/99-hubos-games.conf"
+                    echo "vm.max_map_count=1048576" | sudo tee /etc/sysctl.d/99-forge-games.conf &>/dev/null
+                    log_fix "Persisted vm.max_map_count in /etc/sysctl.d/99-forge-games.conf"
                 fi
                 return 0
             else
@@ -1192,7 +1192,7 @@ fix_prefix() {
     log_warn "Game saves stored in the prefix WILL BE LOST (check Steam Cloud first)."
 
     if confirm_action "Backup and delete prefix for ${game_name}? (${pfx_size} MB)"; then
-        local backup_dir="${HOME}/.local/share/hubos/crash-fix/backups"
+        local backup_dir="${HOME}/.local/share/forge/crash-fix/backups"
         mkdir -p "$backup_dir"
         local backup_name="prefix_${appid}_$(date +%Y%m%d_%H%M%S).tar.zst"
         local backup_path="${backup_dir}/${backup_name}"
@@ -1482,12 +1482,12 @@ cmd_log() {
 cmd_report() {
     header "Generating Full Crash Report"
 
-    local report_dir="${HOME}/.local/share/hubos/crash-fix/reports"
+    local report_dir="${HOME}/.local/share/forge/crash-fix/reports"
     mkdir -p "$report_dir"
     local report_file="${report_dir}/crash-report_$(date +%Y%m%d_%H%M%S).txt"
 
     {
-        echo "===== HubOS Crash Report ====="
+        echo "===== 24HG Forge Crash Report ====="
         echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
         echo "Hostname:  $(hostname)"
         echo ""
@@ -1620,7 +1620,7 @@ cmd_watch() {
                     echo -e "  ${DIM}Dump: ${dump}${NC}"
                     echo -e "  ${DIM}Time: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
 
-                    notify_user "Game Crash Detected" "${crash_name} has crashed. Run: hubos-crash-fix diagnose ${crash_appid}"
+                    notify_user "Game Crash Detected" "${crash_name} has crashed. Run: forge-crash-fix diagnose ${crash_appid}"
 
                     # Auto-diagnose
                     echo ""
@@ -1674,7 +1674,7 @@ cmd_watch() {
 
 usage() {
     cat <<HELPTEXT
-${BOLD}HubOS Game Crash Diagnosis & Auto-Fix Tool${NC}  v${VERSION}
+${BOLD}24HG Forge Game Crash Diagnosis & Auto-Fix Tool${NC}  v${VERSION}
 
 ${BOLD}USAGE:${NC}
     $PROG_NAME <command> [game] [options]
@@ -1751,7 +1751,7 @@ main() {
 
     # GUI mode: if no command given, show picker
     if $GUI_MODE && [[ -z "$cmd" ]] && command -v zenity &>/dev/null; then
-        cmd=$(gui_select "HubOS Crash Fix" "diagnose" "fix" "log" "report" "watch") || exit 0
+        cmd=$(gui_select "24HG Forge Crash Fix" "diagnose" "fix" "log" "report" "watch") || exit 0
     fi
 
     # Detect Steam directory

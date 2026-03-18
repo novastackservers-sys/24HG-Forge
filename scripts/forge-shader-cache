@@ -1,9 +1,9 @@
 #!/bin/bash
-# HubOS Shader Cache Manager
+# 24HG Forge Shader Cache Manager
 # Manages shader caches to eliminate first-launch stuttering.
 # Supports Steam (Flatpak and native), DXVK, Mesa, NVIDIA, and AMD caches.
 #
-# Usage: hubos-shader-cache [status|clean|size|prebuild|export|import|optimize]
+# Usage: forge-shader-cache [status|clean|size|prebuild|export|import|optimize]
 
 set -euo pipefail
 
@@ -147,7 +147,7 @@ dir_size_bytes() {
 # ─── Commands ───────────────────────────────────────────────────────────────
 
 cmd_status() {
-    echo "=== HubOS Shader Cache Status ==="
+    echo "=== 24HG Forge Shader Cache Status ==="
     echo ""
 
     local steam_dir
@@ -233,7 +233,7 @@ cmd_status() {
 }
 
 cmd_size() {
-    echo "=== HubOS Shader Cache Disk Usage ==="
+    echo "=== 24HG Forge Shader Cache Disk Usage ==="
     echo ""
 
     local total=0
@@ -272,7 +272,7 @@ cmd_size() {
 cmd_clean() {
     local target="${2:-}"
     if [ -z "$target" ]; then
-        echo "Usage: hubos-shader-cache clean <appid|all>"
+        echo "Usage: forge-shader-cache clean <appid|all>"
         return 1
     fi
 
@@ -387,14 +387,14 @@ cmd_clean() {
 
     # Desktop notification
     if command -v notify-send &>/dev/null; then
-        notify-send "HubOS Shader Cache" "Cleaned $(human_size "$total_bytes") of shader cache data." -i dialog-information
+        notify-send "24HG Forge Shader Cache" "Cleaned $(human_size "$total_bytes") of shader cache data." -i dialog-information
     fi
 }
 
 cmd_prebuild() {
     local appid="${2:-}"
     if [ -z "$appid" ] || ! [[ "$appid" =~ ^[0-9]+$ ]]; then
-        echo "Usage: hubos-shader-cache prebuild <appid>"
+        echo "Usage: forge-shader-cache prebuild <appid>"
         return 1
     fi
 
@@ -448,14 +448,14 @@ cmd_prebuild() {
     echo "Game launched (PID $!). Close it when shader compilation is done."
 
     if command -v notify-send &>/dev/null; then
-        notify-send "HubOS Shader Cache" "Pre-building shaders for $name. Close the game when ready." -i dialog-information
+        notify-send "24HG Forge Shader Cache" "Pre-building shaders for $name. Close the game when ready." -i dialog-information
     fi
 }
 
 cmd_export() {
     local appid="${2:-}"
     if [ -z "$appid" ] || ! [[ "$appid" =~ ^[0-9]+$ ]]; then
-        echo "Usage: hubos-shader-cache export <appid>"
+        echo "Usage: forge-shader-cache export <appid>"
         return 1
     fi
 
@@ -487,7 +487,7 @@ cmd_export() {
         return 1
     fi
 
-    local export_dir="$HOME/.local/share/hubos/shader-exports"
+    local export_dir="$HOME/.local/share/forge/shader-exports"
     mkdir -p "$export_dir"
     local tarball="$export_dir/shader-cache_${appid}_$(date +%Y%m%d_%H%M%S).tar.gz"
 
@@ -497,7 +497,7 @@ cmd_export() {
     local manifest
     manifest=$(mktemp)
     {
-        echo "# HubOS Shader Cache Export"
+        echo "# 24HG Forge Shader Cache Export"
         echo "appid=$appid"
         echo "name=$name"
         echo "date=$(date -Iseconds)"
@@ -518,18 +518,18 @@ cmd_export() {
 
     echo "Exported to: $tarball ($tarsize)"
     echo ""
-    echo "Share this file with other HubOS users. They can import it with:"
-    echo "  hubos-shader-cache import $tarball"
+    echo "Share this file with other 24HG Forge users. They can import it with:"
+    echo "  forge-shader-cache import $tarball"
 
     if command -v notify-send &>/dev/null; then
-        notify-send "HubOS Shader Cache" "Exported shader cache for $name ($tarsize)" -i dialog-information
+        notify-send "24HG Forge Shader Cache" "Exported shader cache for $name ($tarsize)" -i dialog-information
     fi
 }
 
 cmd_import() {
     local file="${2:-}"
     if [ -z "$file" ] || [ ! -f "$file" ]; then
-        echo "Usage: hubos-shader-cache import <file>"
+        echo "Usage: forge-shader-cache import <file>"
         [ -n "$file" ] && echo "Error: File not found: $file"
         return 1
     fi
@@ -647,23 +647,23 @@ cmd_import() {
     echo "Import complete. $imported file(s) processed."
 
     if command -v notify-send &>/dev/null; then
-        notify-send "HubOS Shader Cache" "Imported $imported shader cache file(s)." -i dialog-information
+        notify-send "24HG Forge Shader Cache" "Imported $imported shader cache file(s)." -i dialog-information
     fi
 }
 
 cmd_optimize() {
-    echo "=== HubOS Shader Cache Optimization ==="
+    echo "=== 24HG Forge Shader Cache Optimization ==="
     echo ""
 
     local env_dir="$HOME/.config/environment.d"
-    local env_file="$env_dir/hubos-shader-cache.conf"
+    local env_file="$env_dir/forge-shader-cache.conf"
 
     mkdir -p "$env_dir"
 
     # Build environment config
     cat > "$env_file" << 'ENVEOF'
-# HubOS Shader Cache Optimization
-# Written by hubos-shader-cache optimize
+# 24HG Forge Shader Cache Optimization
+# Written by forge-shader-cache optimize
 
 # Mesa: 10GB shader cache limit (default is 1GB)
 MESA_SHADER_CACHE_MAX_SIZE=10G
@@ -712,17 +712,17 @@ ENVEOF
     cmd_size
 
     if command -v notify-send &>/dev/null; then
-        notify-send "HubOS Shader Cache" "Shader cache optimized. Settings will persist after reboot." -i dialog-information
+        notify-send "24HG Forge Shader Cache" "Shader cache optimized. Settings will persist after reboot." -i dialog-information
     fi
 }
 
 cmd_help() {
     cat << 'EOF'
-HubOS Shader Cache Manager
+24HG Forge Shader Cache Manager
 Manage shader caches to eliminate first-launch stuttering.
 
 Usage:
-  hubos-shader-cache <command> [arguments]
+  forge-shader-cache <command> [arguments]
 
 Commands:
   status             Show shader cache status, per-game breakdown, DXVK files
@@ -735,13 +735,13 @@ Commands:
   help               Show this help message
 
 Examples:
-  hubos-shader-cache status
-  hubos-shader-cache clean 252490        # Clean Rust shader cache
-  hubos-shader-cache clean all           # Clean all shader caches
-  hubos-shader-cache prebuild 252490     # Pre-build shaders for Rust
-  hubos-shader-cache export 252490       # Export Rust shader cache
-  hubos-shader-cache import shader-cache_252490_20260316.tar.gz
-  hubos-shader-cache optimize            # Apply optimal settings
+  forge-shader-cache status
+  forge-shader-cache clean 252490        # Clean Rust shader cache
+  forge-shader-cache clean all           # Clean all shader caches
+  forge-shader-cache prebuild 252490     # Pre-build shaders for Rust
+  forge-shader-cache export 252490       # Export Rust shader cache
+  forge-shader-cache import shader-cache_252490_20260316.tar.gz
+  forge-shader-cache optimize            # Apply optimal settings
 
 Cache Locations Managed:
   - Steam shader cache    (~/.var/app/.../shadercache/ or ~/.local/share/Steam/...)

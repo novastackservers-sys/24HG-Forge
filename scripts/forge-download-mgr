@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# HubOS Download Manager — Intelligent bandwidth and download scheduling for gaming
+# 24HG Forge Download Manager — Intelligent bandwidth and download scheduling for gaming
 #
 # Automatically pauses downloads when gaming, resumes when you stop.
 # Manages Steam, Flatpak, rpm-ostree, and browser downloads with
@@ -11,12 +11,12 @@ set -euo pipefail
 # ==============================================================================
 
 readonly VERSION="1.0.0"
-readonly APP_NAME="hubos-download-mgr"
-readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hubos"
+readonly APP_NAME="forge-download-mgr"
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge"
 readonly CONFIG_FILE="$CONFIG_DIR/download-mgr.json"
-readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/hubos"
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/forge"
 readonly STATE_FILE="$STATE_DIR/download-mgr.state"
-readonly LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/hubos/logs"
+readonly LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/forge/logs"
 readonly LOG_FILE="$LOG_DIR/download-mgr.log"
 readonly SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 
@@ -87,7 +87,7 @@ notify() {
     local summary="$1"
     local body="${2:-}"
     if command -v notify-send &>/dev/null; then
-        notify-send -a "HubOS Download Manager" "$summary" "$body" -i "network-transmit" 2>/dev/null || true
+        notify-send -a "24HG Forge Download Manager" "$summary" "$body" -i "network-transmit" 2>/dev/null || true
     fi
 }
 
@@ -497,7 +497,7 @@ tc_teardown() {
 # ==============================================================================
 
 cmd_status() {
-    header "HubOS Download Manager — Status"
+    header "24HG Forge Download Manager — Status"
     echo ""
 
     # Gaming mode
@@ -729,9 +729,9 @@ generate_systemd_timer() {
     local description="$4"
 
     # Service file
-    cat > "$SYSTEMD_USER_DIR/hubos-dlmgr-${name}.service" <<EOF
+    cat > "$SYSTEMD_USER_DIR/forge-dlmgr-${name}.service" <<EOF
 [Unit]
-Description=HubOS Download Manager — $description
+Description=24HG Forge Download Manager — $description
 
 [Service]
 Type=oneshot
@@ -739,9 +739,9 @@ ExecStart=$exec_cmd
 EOF
 
     # Timer file
-    cat > "$SYSTEMD_USER_DIR/hubos-dlmgr-${name}.timer" <<EOF
+    cat > "$SYSTEMD_USER_DIR/forge-dlmgr-${name}.timer" <<EOF
 [Unit]
-Description=HubOS Download Manager — $description Timer
+Description=24HG Forge Download Manager — $description Timer
 
 [Timer]
 OnCalendar=$on_calendar
@@ -752,17 +752,17 @@ WantedBy=timers.target
 EOF
 
     systemctl --user daemon-reload 2>/dev/null || true
-    systemctl --user enable --now "hubos-dlmgr-${name}.timer" 2>/dev/null || true
+    systemctl --user enable --now "forge-dlmgr-${name}.timer" 2>/dev/null || true
 }
 
 remove_systemd_timers() {
-    for timer in "$SYSTEMD_USER_DIR"/hubos-dlmgr-*.timer; do
+    for timer in "$SYSTEMD_USER_DIR"/forge-dlmgr-*.timer; do
         [[ -f "$timer" ]] || continue
         local unit
         unit="$(basename "$timer")"
         systemctl --user disable --now "$unit" 2>/dev/null || true
     done
-    rm -f "$SYSTEMD_USER_DIR"/hubos-dlmgr-*.timer "$SYSTEMD_USER_DIR"/hubos-dlmgr-*.service
+    rm -f "$SYSTEMD_USER_DIR"/forge-dlmgr-*.timer "$SYSTEMD_USER_DIR"/forge-dlmgr-*.service
     systemctl --user daemon-reload 2>/dev/null || true
 }
 
@@ -865,10 +865,10 @@ cmd_schedule() {
 
             # Show active timers
             local timers
-            timers="$(systemctl --user list-timers 'hubos-dlmgr-*' --no-pager 2>/dev/null)" || timers=""
-            if [[ -n "$timers" ]] && echo "$timers" | grep -q "hubos-dlmgr"; then
+            timers="$(systemctl --user list-timers 'forge-dlmgr-*' --no-pager 2>/dev/null)" || timers=""
+            if [[ -n "$timers" ]] && echo "$timers" | grep -q "forge-dlmgr"; then
                 echo -e "  ${BOLD}Active timers:${RESET}"
-                echo "$timers" | grep "hubos-dlmgr" | while read -r line; do
+                echo "$timers" | grep "forge-dlmgr" | while read -r line; do
                     echo -e "    ${DIM}$line${RESET}"
                 done
                 echo ""
@@ -1238,7 +1238,7 @@ cmd_settings() {
 # ==============================================================================
 
 cmd_help() {
-    echo -e "${BOLD}${CYAN}HubOS Download Manager${RESET} v${VERSION}"
+    echo -e "${BOLD}${CYAN}24HG Forge Download Manager${RESET} v${VERSION}"
     echo -e "${DIM}Intelligent bandwidth and download scheduling for gaming${RESET}"
     echo ""
     echo -e "${BOLD}Usage:${RESET} $APP_NAME <command> [options]"

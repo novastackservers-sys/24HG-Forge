@@ -1,5 +1,5 @@
 #!/bin/bash
-# HubOS Neofetch — Custom system info display with 24HG branding
+# 24HG Forge Neofetch — Custom system info display with 24HG branding
 # Shown on terminal launch (optional via .bashrc)
 
 # Colors
@@ -12,7 +12,7 @@ C5='\033[0;90m'    # Dark gray
 CB='\033[1;34m'    # Bold blue for logo
 
 # Gather system info
-OS=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo "HubOS")
+OS=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo "24HG Forge")
 KERNEL=$(uname -r)
 UPTIME=$(uptime -p 2>/dev/null | sed 's/up //')
 SHELL_NAME=$(basename "$SHELL")

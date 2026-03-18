@@ -1,5 +1,5 @@
 #!/bin/bash
-# HubOS Discord Flatpak Fix
+# 24HG Forge Discord Flatpak Fix
 # Bridges Discord Rich Presence IPC between Flatpak sandboxes.
 # Problem: Steam Flatpak can't talk to Discord Flatpak because each
 # has its own /tmp, so the discord-ipc-0 socket is invisible.
@@ -25,7 +25,7 @@ SYSTEM_TMP="/tmp"
 APP_TMP="$XDG/app/$DISCORD_FLATPAK"
 
 setup_bridge() {
-    echo "HubOS Discord Rich Presence Bridge"
+    echo "24HG Forge Discord Rich Presence Bridge"
     echo ""
 
     # Method 1: XDG_RUNTIME_DIR bridge (works for most setups)
@@ -120,7 +120,7 @@ case "${1:-setup}" in
         done
         ;;
     *)
-        echo "HubOS Discord Rich Presence Fix"
-        echo "Usage: hubos-discord-fix [setup|monitor|status]"
+        echo "24HG Forge Discord Rich Presence Fix"
+        echo "Usage: forge-discord-fix [setup|monitor|status]"
         ;;
 esac

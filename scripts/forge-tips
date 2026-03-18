@@ -1,7 +1,7 @@
 #!/bin/bash
-# HubOS Gaming Tips — Rotating tips for gamers, power users, and 24HG community.
+# 24HG Forge Gaming Tips — Rotating tips for gamers, power users, and 24HG community.
 #
-# Usage: hubos-tips [show|daily|all|notify|motd]
+# Usage: forge-tips [show|daily|all|notify|motd]
 #   show   (default)  Display a random tip with nice formatting
 #   daily             Show the deterministic tip of the day
 #   all               List all tips numbered
@@ -26,47 +26,47 @@ RESET='\033[0m'
 # ── Tips Database ──
 
 TIPS=(
-  # HubOS specific
+  # 24HG Forge specific
   "Press F12 to toggle MangoHud — see FPS, GPU temp, and frame timing at a glance."
-  "Use 'hubos-performance gaming' to switch to max FPS mode. Your GPU will thank you later."
-  "hubos-performance balanced is great for everyday use — saves power and keeps fans quiet."
-  "hubos-replay auto-saves the last 30 seconds of gameplay. Press F9 to save a clip."
-  "Run 'hubos-diag' to get a full system health check — catches driver issues before they bite."
-  "hubos-proton-fix --check can diagnose why a game won't launch. Try it before googling."
-  "hubos-benchmark quick gives you a gaming readiness score in under a minute."
-  "Use hubos-shader-cache to pre-compile shaders — no more stuttering in the first 5 minutes."
-  "hubos-backup saves your game saves and configs. Set it and forget it."
-  "hubos-controller auto-detects gamepads. Plug in and play — no config needed."
-  "hubos-game-profiles let you save per-game settings. Different games, different configs."
-  "hubos-audio game switches to the low-latency audio profile for gaming."
-  "hubos-stream can set up OBS with one command. Start streaming in seconds."
-  "hubos-screenshot saves to ~/Pictures/Screenshots with a timestamp. Clean and organized."
-  "hubos-proton-updater keeps Proton-GE up to date automatically. Set it once."
+  "Use 'forge-performance gaming' to switch to max FPS mode. Your GPU will thank you later."
+  "forge-performance balanced is great for everyday use — saves power and keeps fans quiet."
+  "forge-replay auto-saves the last 30 seconds of gameplay. Press F9 to save a clip."
+  "Run 'forge-diag' to get a full system health check — catches driver issues before they bite."
+  "forge-proton-fix --check can diagnose why a game won't launch. Try it before googling."
+  "forge-benchmark quick gives you a gaming readiness score in under a minute."
+  "Use forge-shader-cache to pre-compile shaders — no more stuttering in the first 5 minutes."
+  "forge-backup saves your game saves and configs. Set it and forget it."
+  "forge-controller auto-detects gamepads. Plug in and play — no config needed."
+  "forge-game-profiles let you save per-game settings. Different games, different configs."
+  "forge-audio game switches to the low-latency audio profile for gaming."
+  "forge-stream can set up OBS with one command. Start streaming in seconds."
+  "forge-screenshot saves to ~/Pictures/Screenshots with a timestamp. Clean and organized."
+  "forge-proton-updater keeps Proton-GE up to date automatically. Set it once."
   "The Hub Bridge syncs your activity and achievements to hub.24hgaming.com."
 
   # Linux gaming fundamentals
   "Use gamemode to auto-optimize CPU governor and GPU clocks while gaming. It's free performance."
-  "Proton-GE often fixes games that regular Proton can't. Install it with hubos-proton-updater."
+  "Proton-GE often fixes games that regular Proton can't. Install it with forge-proton-updater."
   "Steam's Shader Pre-Caching (Settings > Shader Pre-Caching) reduces in-game stutters."
-  "AMD users: Mesa's ACO shader compiler is faster than LLVM. It's the default on HubOS."
+  "AMD users: Mesa's ACO shader compiler is faster than LLVM. It's the default on 24HG Forge."
   "NVIDIA users: Make sure you're on the latest proprietary drivers. 'nvidia-smi' shows your version."
   "Vulkan games generally run better than OpenGL under Proton. Check ProtonDB for tips."
   "Enable Feral GameMode in Steam launch options: 'gamemoderun %command%' for auto-optimization."
   "Lutris is great for non-Steam games. It handles Wine prefixes so you don't have to."
   "Check ProtonDB.com before buying a game — community reports show how well it runs on Linux."
-  "Flatpak Steam can have permission issues. HubOS uses the native package for best compatibility."
+  "Flatpak Steam can have permission issues. 24HG Forge uses the native package for best compatibility."
   "The 'mangohud' overlay works with any Vulkan or OpenGL game, not just Steam."
 
   # Performance tips
   "Close browsers before gaming — Chrome alone can eat 2GB+ of VRAM on integrated GPUs."
   "Enable FSR in Proton for free FPS: Set WINE_FULLSCREEN_FSR=1 in game launch options."
-  "Reduce desktop compositor overhead: HubOS auto-disables compositing in fullscreen games."
+  "Reduce desktop compositor overhead: 24HG Forge auto-disables compositing in fullscreen games."
   "Use 'htop' or 'btop' to find background processes hogging CPU. Kill what you don't need."
-  "Swap can cause stutter. HubOS uses zram for faster swap that doesn't touch your disk."
+  "Swap can cause stutter. 24HG Forge uses zram for faster swap that doesn't touch your disk."
   "If a game stutters, check if shader compilation is running. First launch is always the worst."
   "Lower shadow quality first — it's usually the biggest FPS drain with the least visual difference."
   "DXVK async can eliminate shader compilation stutter: DXVK_ASYNC=1 in launch options."
-  "Wayland gives better input latency than X11 for most setups. HubOS defaults to Wayland."
+  "Wayland gives better input latency than X11 for most setups. 24HG Forge defaults to Wayland."
   "V-Sync adds input lag. Use frame limiters (MangoHud or in-game) instead for smoother play."
 
   # 24HG community
@@ -74,10 +74,10 @@ TIPS=(
   "Check the tournament schedule at hub.24hgaming.com — prizes every month."
   "24HG runs 85+ game servers across Rust, CS2, TF2, CS 1.6, and more. All community-funded."
   "Your Hub profile tracks playtime, achievements, and server stats across all 24HG services."
-  "Found a bug? Report it on the Hub. Community feedback shapes every HubOS update."
+  "Found a bug? Report it on the Hub. Community feedback shapes every 24HG Forge update."
   "The 24HG Discord at discord.gg/ymfEjH6EJN has channels for every game we host."
   "Clip something cool? Share it on the Hub — best clips get featured weekly."
-  "HubOS is built by gamers, for gamers. No telemetry, no ads, no nonsense."
+  "24HG Forge is built by gamers, for gamers. No telemetry, no ads, no nonsense."
 
   # Keyboard shortcuts
   "F9 saves a replay clip of the last 30 seconds. Works globally."
@@ -88,14 +88,14 @@ TIPS=(
   "Meta+L locks the screen. Good habit when you step away."
 
   # Tool tips
-  "Run 'hubos-server-status' to see which 24HG game servers are online and player counts."
-  "hubos-netguard monitors your network for packet loss and latency spikes during gaming."
-  "hubos-discord-fix patches Discord screen sharing on Wayland. No more black screens."
-  "Use 'hubos-input calibrate' to test input latency — helps dial in your mouse settings."
-  "hubos-nightlight adjusts color temperature on a schedule. Your eyes will thank you at 2 AM."
-  "hubos-neofetch shows your system specs in style. Great for screenshots."
-  "'flatpak update' keeps your games and apps current. HubOS runs it weekly automatically."
-  "Need help? 'hubos-tips all' lists every tip. There's always something new to learn."
+  "Run 'forge-server-status' to see which 24HG game servers are online and player counts."
+  "forge-netguard monitors your network for packet loss and latency spikes during gaming."
+  "forge-discord-fix patches Discord screen sharing on Wayland. No more black screens."
+  "Use 'forge-input calibrate' to test input latency — helps dial in your mouse settings."
+  "forge-nightlight adjusts color temperature on a schedule. Your eyes will thank you at 2 AM."
+  "forge-neofetch shows your system specs in style. Great for screenshots."
+  "'flatpak update' keeps your games and apps current. 24HG Forge runs it weekly automatically."
+  "Need help? 'forge-tips all' lists every tip. There's always something new to learn."
 )
 
 TIP_COUNT=${#TIPS[@]}
@@ -151,7 +151,7 @@ show_tip() {
     local tip="${TIPS[$idx]}"
     echo ""
     draw_box "Gaming Tip" "$tip"
-    echo -e "  ${DIM}Tip $((idx + 1))/${TIP_COUNT} — Run 'hubos-tips' again for another${RESET}"
+    echo -e "  ${DIM}Tip $((idx + 1))/${TIP_COUNT} — Run 'forge-tips' again for another${RESET}"
     echo ""
 }
 
@@ -170,7 +170,7 @@ show_daily() {
 
 show_all() {
     echo ""
-    echo -e "${BOLD}${CYAN}  All HubOS Tips (${TIP_COUNT} total)${RESET}"
+    echo -e "${BOLD}${CYAN}  All 24HG Forge Tips (${TIP_COUNT} total)${RESET}"
     echo -e "${CYAN}  $(printf '%0.s─' $(seq 1 40))${RESET}"
     echo ""
     for i in "${!TIPS[@]}"; do
@@ -187,7 +187,7 @@ send_notify() {
     if command -v notify-send &>/dev/null; then
         notify-send \
             --icon=input-gaming \
-            --app-name="HubOS Tips" \
+            --app-name="24HG Forge Tips" \
             --urgency=low \
             "Gaming Tip" \
             "$tip"
@@ -206,7 +206,7 @@ show_motd() {
 
     # Plain text output suitable for /etc/motd or login shell
     echo ""
-    echo "  ┌─ HubOS Tip of the Day ─────────────────────────────────────────┐"
+    echo "  ┌─ 24HG Forge Tip of the Day ─────────────────────────────────────────┐"
 
     local inner=62
     while IFS= read -r line; do
@@ -217,7 +217,7 @@ show_motd() {
     done <<< "$(wrap_text "$tip" "$inner")"
 
     echo "  └──────────────────────────────────────────────────────────────────┘"
-    echo "  Tip $((idx + 1))/${TIP_COUNT} — hubos-tips all to see more"
+    echo "  Tip $((idx + 1))/${TIP_COUNT} — forge-tips all to see more"
     echo ""
 }
 
@@ -230,7 +230,7 @@ case "$ACTION" in
     notify)  send_notify ;;
     motd)    show_motd   ;;
     -h|--help|help)
-        echo "Usage: hubos-tips [show|daily|all|notify|motd]"
+        echo "Usage: forge-tips [show|daily|all|notify|motd]"
         echo ""
         echo "Commands:"
         echo "  show    (default) Display a random gaming tip"
@@ -241,7 +241,7 @@ case "$ACTION" in
         ;;
     *)
         echo "Unknown command: $ACTION"
-        echo "Run 'hubos-tips help' for usage."
+        echo "Run 'forge-tips help' for usage."
         exit 1
         ;;
 esac

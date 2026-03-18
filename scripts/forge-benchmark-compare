@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# HubOS Benchmark Comparison Tool
+# 24HG Forge Benchmark Comparison Tool
 # Compare gaming performance across runs, hardware, and platforms.
 # Generate shareable benchmark cards to show Linux gaming performance.
 #
-# Usage: hubos-benchmark-compare <command> [options]
+# Usage: forge-benchmark-compare <command> [options]
 # Commands: quick, run, compare, history, share
 #
-# Part of HubOS — os.24hgaming.com
+# Part of 24HG Forge — os.24hgaming.com
 
 set -euo pipefail
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 VERSION="1.0.0"
-APP_NAME="hubos-benchmark-compare"
-DATA_DIR="${HOME}/.local/share/hubos/benchmarks"
+APP_NAME="forge-benchmark-compare"
+DATA_DIR="${HOME}/.local/share/forge/benchmarks"
 HISTORY_FILE="${DATA_DIR}/history.json"
 MANGOHUD_DIR="${DATA_DIR}/mangohud_logs"
 SHARE_DIR="${DATA_DIR}/cards"
@@ -279,8 +279,8 @@ detect_kernel() {
 }
 
 detect_distro() {
-    if [[ -f /etc/hubos-release ]]; then
-        cat /etc/hubos-release 2>/dev/null | head -1
+    if [[ -f /etc/forge-release ]]; then
+        cat /etc/forge-release 2>/dev/null | head -1
     elif [[ -f /etc/os-release ]]; then
         source /etc/os-release 2>/dev/null
         echo "${PRETTY_NAME:-Unknown}"
@@ -395,7 +395,7 @@ json_get_benchmarks() {
 # ── Quick Benchmark ───────────────────────────────────────────────────────────
 
 cmd_quick() {
-    header "HubOS Quick Benchmark"
+    header "24HG Forge Quick Benchmark"
     echo -e "  ${DIM}System performance snapshot — no game required${RESET}"
     echo -e "  ${DIM}Duration: ~${QUICK_DURATION}s per graphics test${RESET}"
 
@@ -573,7 +573,7 @@ cmd_quick() {
     local total_score=$(( (gpu_score * 40 + cpu_score * 40 + ram_score * 20) / 100 ))
     (( total_score > 100 )) && total_score=100
 
-    subheader "HubOS Gaming Score"
+    subheader "24HG Forge Gaming Score"
     echo ""
     echo -e "  GPU:  $(bar_graph $gpu_score 100 25)  ${BOLD}${gpu_score}/100${RESET}"
     echo -e "  CPU:  $(bar_graph $cpu_score 100 25)  ${BOLD}${cpu_score}/100${RESET}"
@@ -586,7 +586,7 @@ cmd_quick() {
     fi
 
     echo -e "  ${BOLD}${score_color}╔══════════════════════════════════╗${RESET}"
-    echo -e "  ${BOLD}${score_color}║   HubOS Gaming Score: ${total_score}/100     ║${RESET}"
+    echo -e "  ${BOLD}${score_color}║   24HG Forge Gaming Score: ${total_score}/100     ║${RESET}"
     echo -e "  ${BOLD}${score_color}╚══════════════════════════════════╝${RESET}"
 
     # ── Windows Comparison ──
@@ -634,7 +634,7 @@ QJSON
     json_append_benchmark "$result_json"
     echo ""
     success "Results saved to ${HISTORY_FILE}"
-    info "Run 'hubos-benchmark-compare share' to generate a shareable card."
+    info "Run 'forge-benchmark-compare share' to generate a shareable card."
 }
 
 # ── MangoHud CSV Parsing ──────────────────────────────────────────────────────
@@ -771,7 +771,7 @@ cmd_run() {
     if [[ -z "$game" ]]; then
         header "Game Benchmark"
         echo ""
-        info "Usage: hubos-benchmark-compare run <game>"
+        info "Usage: forge-benchmark-compare run <game>"
         echo ""
         info "Supported games with built-in benchmarks:"
         echo "  cs2         — Counter-Strike 2"
@@ -781,8 +781,8 @@ cmd_run() {
         echo "  sottr       — Shadow of the Tomb Raider"
         echo ""
         info "Or specify any game — MangoHud will capture FPS:"
-        echo "  hubos-benchmark-compare run <steam-app-id>"
-        echo "  hubos-benchmark-compare run <game-name>"
+        echo "  forge-benchmark-compare run <steam-app-id>"
+        echo "  forge-benchmark-compare run <game-name>"
         echo ""
 
         local installed
@@ -924,7 +924,7 @@ cmd_run() {
     else
         echo ""
         info "Once you've finished benchmarking, parse the log with:"
-        echo "  hubos-benchmark-compare parse ${mangohud_log}"
+        echo "  forge-benchmark-compare parse ${mangohud_log}"
     fi
 }
 
@@ -960,7 +960,7 @@ display_benchmark_results() {
             echo ""
             subheader "Windows Comparison (${matched})"
             echo -e "  Windows typical:  ${BOLD}${ref_fps} FPS${RESET}"
-            echo -e "  Your HubOS score: ${BOLD}$(fps_color "$avg_fps")${RESET}"
+            echo -e "  Your 24HG Forge score: ${BOLD}$(fps_color "$avg_fps")${RESET}"
             echo -e "  Difference:       ${BOLD}$(percent_diff "$avg_fps" "$ref_fps")${RESET}"
 
             local diff=$(( avg_fps - ref_fps ))
@@ -970,7 +970,7 @@ display_benchmark_results() {
                 info "Within 10% of Windows — excellent Linux compatibility!"
             else
                 warn "Below Windows reference — check drivers and game settings."
-                info "Run 'hubos-performance tune' for optimization tips."
+                info "Run 'forge-performance tune' for optimization tips."
             fi
         fi
     fi
@@ -1010,7 +1010,7 @@ BJSON
 cmd_parse() {
     local log_file="${1:-}"
     if [[ -z "$log_file" || ! -f "$log_file" ]]; then
-        error "Usage: hubos-benchmark-compare parse <mangohud-csv-file>"
+        error "Usage: forge-benchmark-compare parse <mangohud-csv-file>"
         return 1
     fi
 
@@ -1027,8 +1027,8 @@ cmd_compare() {
 
     if [[ ! -f "$HISTORY_FILE" ]]; then
         warn "No benchmark data found. Run some benchmarks first:"
-        echo "  hubos-benchmark-compare quick"
-        echo "  hubos-benchmark-compare run cs2"
+        echo "  forge-benchmark-compare quick"
+        echo "  forge-benchmark-compare run cs2"
         return 0
     fi
 
@@ -1045,7 +1045,7 @@ cmd_compare() {
 
     if (( bench_count == 0 )); then
         warn "No benchmarks recorded yet."
-        info "Run: hubos-benchmark-compare quick"
+        info "Run: forge-benchmark-compare quick"
         return 0
     fi
 
@@ -1161,7 +1161,7 @@ cmd_compare() {
                 local latest_fps
                 latest_fps=$(echo "$filtered" | jq -r '.[-1].results.avg_fps // 0')
                 latest_fps=${latest_fps%%.*}
-                echo -e "  Your HubOS result:             ${BOLD}$(fps_color "$latest_fps")${RESET}"
+                echo -e "  Your 24HG Forge result:             ${BOLD}$(fps_color "$latest_fps")${RESET}"
                 echo -e "  Performance ratio:             ${BOLD}$(percent_diff "$latest_fps" "$ref_fps")${RESET}"
             fi
         fi
@@ -1175,7 +1175,7 @@ cmd_history() {
 
     if [[ ! -f "$HISTORY_FILE" ]]; then
         warn "No benchmark history found."
-        info "Run: hubos-benchmark-compare quick"
+        info "Run: forge-benchmark-compare quick"
         return 0
     fi
 
@@ -1268,7 +1268,7 @@ cmd_history() {
     fi
 
     echo ""
-    info "Tip: Run 'hubos-benchmark-compare compare <game>' for detailed analysis."
+    info "Tip: Run 'forge-benchmark-compare compare <game>' for detailed analysis."
 }
 
 # ── Share ─────────────────────────────────────────────────────────────────────
@@ -1327,7 +1327,7 @@ generate_share_image() {
 
     # Title
     draw_cmds+=("-font" "DejaVu-Sans-Bold" "-pointsize" "28" "-fill" "$title_color")
-    draw_cmds+=("-gravity" "NorthWest" "-annotate" "+30+30" "HubOS Gaming Benchmark")
+    draw_cmds+=("-gravity" "NorthWest" "-annotate" "+30+30" "24HG Forge Gaming Benchmark")
 
     # Subtitle
     draw_cmds+=("-font" "DejaVu-Sans" "-pointsize" "14" "-fill" "$accent")
@@ -1348,7 +1348,7 @@ generate_share_image() {
 
     # Gaming Score
     draw_cmds+=("-font" "DejaVu-Sans-Bold" "-pointsize" "22" "-fill" "$score_color")
-    draw_cmds+=("-annotate" "+30+235" "HubOS Gaming Score: ${score}/100")
+    draw_cmds+=("-annotate" "+30+235" "24HG Forge Gaming Score: ${score}/100")
 
     # Game benchmarks
     local y=275
@@ -1367,7 +1367,7 @@ generate_share_image() {
 
     # Footer
     draw_cmds+=("-font" "DejaVu-Sans" "-pointsize" "13" "-fill" "#888899")
-    draw_cmds+=("-gravity" "SouthWest" "-annotate" "+30+20" "Powered by HubOS  -  os.24hgaming.com")
+    draw_cmds+=("-gravity" "SouthWest" "-annotate" "+30+20" "Powered by 24HG Forge  -  os.24hgaming.com")
     draw_cmds+=("-gravity" "SouthEast" "-annotate" "+30+20" "24 Hour Gaming Community")
 
     # Generate
@@ -1390,14 +1390,14 @@ generate_share_text() {
 
     local text=""
     text+="╔══════════════════════════════════════════════════╗\n"
-    text+="║          HubOS Gaming Benchmark Card            ║\n"
+    text+="║          24HG Forge Gaming Benchmark Card            ║\n"
     text+="╠══════════════════════════════════════════════════╣\n"
     text+="║ GPU:    ${gpu}\n"
     text+="║ CPU:    ${cpu}\n"
     text+="║ RAM:    ${ram}  |  Kernel: ${kernel}\n"
     text+="║ Driver: ${driver}\n"
     text+="╠══════════════════════════════════════════════════╣\n"
-    text+="║ HubOS Gaming Score: ${score}/100\n"
+    text+="║ 24HG Forge Gaming Score: ${score}/100\n"
     text+="╠══════════════════════════════════════════════════╣\n"
 
     # Game results
@@ -1420,7 +1420,7 @@ generate_share_text() {
     fi
 
     text+="╠══════════════════════════════════════════════════╣\n"
-    text+="║ Powered by HubOS — os.24hgaming.com             ║\n"
+    text+="║ Powered by 24HG Forge — os.24hgaming.com             ║\n"
     text+="║ 24 Hour Gaming Community                        ║\n"
     text+="╚══════════════════════════════════════════════════╝\n"
 
@@ -1432,7 +1432,7 @@ cmd_share() {
 
     header "Shareable Benchmark Card"
 
-    local card_file="${SHARE_DIR}/hubos-benchmark-$(date +%Y%m%d_%H%M%S)"
+    local card_file="${SHARE_DIR}/forge-benchmark-$(date +%Y%m%d_%H%M%S)"
 
     # Generate text version
     subheader "Text Card (for Discord/Forums)"
@@ -1469,8 +1469,8 @@ cmd_share() {
     echo "  1. Copy text card to clipboard:"
     echo "     cat ${text_file} | xclip -selection clipboard"
     echo ""
-    echo "  2. Upload to HubOS profile (requires hub account):"
-    echo "     hubos-benchmark-compare upload"
+    echo "  2. Upload to 24HG Forge profile (requires hub account):"
+    echo "     forge-benchmark-compare upload"
     echo ""
     echo "  3. Share image on Discord/social media:"
     echo "     ${img_file}"
@@ -1485,17 +1485,17 @@ cmd_upload() {
     fi
 
     # Check for auth token
-    local token_file="${HOME}/.config/hubos/hub-token"
+    local token_file="${HOME}/.config/forge/hub-token"
     if [[ ! -f "$token_file" ]]; then
-        warn "Not logged in to HubOS Hub."
-        info "Login with: hubos-hub-bridge login"
+        warn "Not logged in to 24HG Forge Hub."
+        info "Login with: forge-hub-bridge login"
         return 1
     fi
 
     local token
     token=$(cat "$token_file")
 
-    info "Uploading benchmark data to HubOS Hub..."
+    info "Uploading benchmark data to 24HG Forge Hub..."
 
     local response
     response=$(curl -sf -X POST "${HUB_API}/benchmarks/upload" \
@@ -1506,7 +1506,7 @@ cmd_upload() {
         return 1
     }
 
-    success "Benchmark data uploaded to your HubOS Hub profile!"
+    success "Benchmark data uploaded to your 24HG Forge Hub profile!"
     info "View at: ${HUBOS_URL}/profile/benchmarks"
 }
 
@@ -1521,7 +1521,7 @@ cmd_gui() {
 
     local choice
     choice=$(zenity --list \
-        --title="HubOS Benchmark Compare" \
+        --title="24HG Forge Benchmark Compare" \
         --text="Select a benchmark action:" \
         --column="Action" --column="Description" \
         --width=500 --height=400 \
@@ -1566,10 +1566,10 @@ cmd_gui() {
 # ── Help ──────────────────────────────────────────────────────────────────────
 
 cmd_help() {
-    echo -e "${BOLD}${CYAN}HubOS Benchmark Comparison Tool${RESET} v${VERSION}"
+    echo -e "${BOLD}${CYAN}24HG Forge Benchmark Comparison Tool${RESET} v${VERSION}"
     echo ""
     echo -e "${BOLD}USAGE:${RESET}"
-    echo "  hubos-benchmark-compare <command> [options]"
+    echo "  forge-benchmark-compare <command> [options]"
     echo ""
     echo -e "${BOLD}COMMANDS:${RESET}"
     echo -e "  ${GREEN}quick${RESET}            Quick system performance snapshot (no game needed)"
@@ -1578,7 +1578,7 @@ cmd_help() {
     echo -e "  ${GREEN}history${RESET}          Show benchmark timeline with trend detection"
     echo -e "  ${GREEN}share${RESET}            Generate a shareable benchmark card (PNG + text)"
     echo -e "  ${GREEN}parse${RESET} <file>     Parse an existing MangoHud CSV log"
-    echo -e "  ${GREEN}upload${RESET}           Upload results to HubOS Hub profile"
+    echo -e "  ${GREEN}upload${RESET}           Upload results to 24HG Forge Hub profile"
     echo ""
     echo -e "${BOLD}OPTIONS:${RESET}"
     echo -e "  --gui            Launch with zenity GUI"
@@ -1586,14 +1586,14 @@ cmd_help() {
     echo -e "  --version, -v    Show version"
     echo ""
     echo -e "${BOLD}EXAMPLES:${RESET}"
-    echo "  hubos-benchmark-compare quick              # Quick system score"
-    echo "  hubos-benchmark-compare run cs2             # Benchmark CS2"
-    echo "  hubos-benchmark-compare run 252490          # Benchmark by Steam app ID"
-    echo "  hubos-benchmark-compare compare             # Compare all results"
-    echo "  hubos-benchmark-compare compare cs2         # CS2 results over time"
-    echo "  hubos-benchmark-compare history             # Performance timeline"
-    echo "  hubos-benchmark-compare share               # Generate shareable card"
-    echo "  hubos-benchmark-compare --gui               # GUI mode"
+    echo "  forge-benchmark-compare quick              # Quick system score"
+    echo "  forge-benchmark-compare run cs2             # Benchmark CS2"
+    echo "  forge-benchmark-compare run 252490          # Benchmark by Steam app ID"
+    echo "  forge-benchmark-compare compare             # Compare all results"
+    echo "  forge-benchmark-compare compare cs2         # CS2 results over time"
+    echo "  forge-benchmark-compare history             # Performance timeline"
+    echo "  forge-benchmark-compare share               # Generate shareable card"
+    echo "  forge-benchmark-compare --gui               # GUI mode"
     echo ""
     echo -e "${BOLD}SUPPORTED GAMES:${RESET}"
     echo "  cs2, rust, tf2, cyberpunk2077, sottr (Shadow of the Tomb Raider)"
@@ -1608,7 +1608,7 @@ cmd_help() {
     echo "  Optional: mangohud (game FPS), jq (history/compare), sysbench (CPU bench)"
     echo "            ImageMagick (share cards), zenity (GUI), glxgears/vkcube (GPU test)"
     echo ""
-    echo -e "${DIM}Part of HubOS — os.24hgaming.com${RESET}"
+    echo -e "${DIM}Part of 24HG Forge — os.24hgaming.com${RESET}"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────

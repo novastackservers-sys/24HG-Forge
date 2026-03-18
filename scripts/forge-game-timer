@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HubOS Game Timer — Track playtime across all game launchers.
+24HG Forge Game Timer — Track playtime across all game launchers.
 
 Monitors Steam, Lutris/Wine, Heroic, native Linux games, and GameMode sessions.
 Stores per-session data and provides statistics, reports, and hub sync.
@@ -15,7 +15,7 @@ Commands:
   daemon             Auto-detect game sessions by polling /proc
   help               Show this help text
 
-Data: ~/.local/share/hubos/game-timer.json
+Data: ~/.local/share/forge/game-timer.json
 """
 
 import json
@@ -32,9 +32,9 @@ from pathlib import Path
 
 # ── Configuration ──
 
-DATA_DIR = os.path.expanduser("~/.local/share/hubos")
+DATA_DIR = os.path.expanduser("~/.local/share/forge")
 DATA_FILE = os.path.join(DATA_DIR, "game-timer.json")
-HUB_TOKEN_FILE = os.path.expanduser("~/.config/hubos/hub-token")
+HUB_TOKEN_FILE = os.path.expanduser("~/.config/forge/hub-token")
 HUB_API_URL = "https://api.24hgaming.com/activity/playtime"
 STEAM_LIBRARY_PATHS = [
     os.path.expanduser("~/.steam/steam/steamapps/libraryfolders.vdf"),
@@ -254,7 +254,7 @@ def notify(title, body):
     """Send a desktop notification (best effort)."""
     try:
         subprocess.Popen(
-            ["notify-send", "-a", "HubOS Game Timer", "-i", "applications-games", title, body],
+            ["notify-send", "-a", "24HG Forge Game Timer", "-i", "applications-games", title, body],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except (FileNotFoundError, OSError):
@@ -280,7 +280,7 @@ def sync_to_hub(game_name, duration_secs, start_time, end_time):
         "duration": int(duration_secs),
         "start": start_time,
         "end": end_time,
-        "source": "hubos-game-timer",
+        "source": "forge-game-timer",
     }).encode("utf-8")
 
     req = urllib.request.Request(
@@ -556,7 +556,7 @@ def cmd_export():
 
 def cmd_daemon():
     """Run as a daemon, auto-detecting game sessions by polling /proc."""
-    print("hubos-game-timer daemon started (Ctrl+C to stop)")
+    print("forge-game-timer daemon started (Ctrl+C to stop)")
     print(f"Polling /proc every {POLL_INTERVAL}s for game processes...")
 
     # Track which daemon-started games we're monitoring
@@ -622,17 +622,17 @@ def cmd_daemon():
 # ── Help ──
 
 HELP_TEXT = """\
-hubos-game-timer — Track playtime across all game launchers
+forge-game-timer — Track playtime across all game launchers
 
 Usage:
-  hubos-game-timer start <game>       Start tracking a game session manually
-  hubos-game-timer stop [game]        Stop tracking (most recent if no game)
-  hubos-game-timer status             Show active sessions with elapsed time
-  hubos-game-timer stats [game]       Playtime stats (top 10 if no game)
-  hubos-game-timer report [period]    Report: weekly (default), monthly, all-time
-  hubos-game-timer export             Export all data as JSON to stdout
-  hubos-game-timer daemon             Auto-detect sessions (poll /proc every 30s)
-  hubos-game-timer help               Show this help text
+  forge-game-timer start <game>       Start tracking a game session manually
+  forge-game-timer stop [game]        Stop tracking (most recent if no game)
+  forge-game-timer status             Show active sessions with elapsed time
+  forge-game-timer stats [game]       Playtime stats (top 10 if no game)
+  forge-game-timer report [period]    Report: weekly (default), monthly, all-time
+  forge-game-timer export             Export all data as JSON to stdout
+  forge-game-timer daemon             Auto-detect sessions (poll /proc every 30s)
+  forge-game-timer help               Show this help text
 
 Daemon mode detects:
   - Steam games (via AppID in process environment/cmdline)
@@ -640,10 +640,10 @@ Daemon mode detects:
   - Heroic launcher games (via ~/Games/Heroic paths)
   - GameMode activation (as a general gaming signal)
 
-Data stored in: ~/.local/share/hubos/game-timer.json
+Data stored in: ~/.local/share/forge/game-timer.json
 
 Hub integration:
-  If ~/.config/hubos/hub-token exists, sessions are synced to the
+  If ~/.config/forge/hub-token exists, sessions are synced to the
   24HG Hub API at https://api.24hgaming.com/activity/playtime.
   This is fire-and-forget; failures are silently ignored.
 
@@ -662,7 +662,7 @@ def main():
 
     if cmd == "start":
         if len(sys.argv) < 3:
-            print("Usage: hubos-game-timer start <game>")
+            print("Usage: forge-game-timer start <game>")
             sys.exit(1)
         game = " ".join(sys.argv[2:])
         start_session(game, source="manual")
@@ -690,7 +690,7 @@ def main():
 
     else:
         print(f"Unknown command: {cmd}")
-        print("Run 'hubos-game-timer help' for usage.")
+        print("Run 'forge-game-timer help' for usage.")
         sys.exit(1)
 
 

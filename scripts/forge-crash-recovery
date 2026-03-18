@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# HubOS Post-Crash Recovery — Automatic desktop restoration after game crashes
+# 24HG Forge Post-Crash Recovery — Automatic desktop restoration after game crashes
 # Detects abnormal game exits and restores compositor, resolution, audio,
 # input, performance profile, and desktop state to pre-game settings.
 #
-# Usage: hubos-crash-recovery <command> [options]
+# Usage: forge-crash-recovery <command> [options]
 #   recover              — Immediately restore desktop to healthy state
 #   watch                — Background daemon monitoring for game crashes
 #   status               — Show recovery status and desktop health
@@ -22,9 +22,9 @@ set -euo pipefail
 # ─── Constants & Globals ─────────────────────────────────────────────────────
 
 readonly VERSION="1.0.0"
-readonly PROG_NAME="hubos-crash-recovery"
+readonly PROG_NAME="forge-crash-recovery"
 
-readonly CACHE_DIR="${HOME}/.cache/hubos"
+readonly CACHE_DIR="${HOME}/.cache/forge"
 readonly STATE_FILE="${CACHE_DIR}/pre-game-display.json"
 readonly WATCH_PID_FILE="${CACHE_DIR}/crash-recovery-watch.pid"
 readonly WATCH_LOG="${CACHE_DIR}/crash-recovery.log"
@@ -117,11 +117,11 @@ notify() {
     local title="$1"
     local body="${2:-}"
     local icon="${3:-dialog-information}"
-    notify-send -a "HubOS" -i "$icon" "$title" "$body" 2>/dev/null || true
+    notify-send -a "24HG Forge" -i "$icon" "$title" "$body" 2>/dev/null || true
 }
 
 show_help() {
-    echo -e "${BOLD}HubOS Post-Crash Recovery${NC} v${VERSION}"
+    echo -e "${BOLD}24HG Forge Post-Crash Recovery${NC} v${VERSION}"
     echo ""
     echo "Automatically restores your desktop after a game crash."
     echo ""
@@ -523,8 +523,8 @@ recover_input() {
     local recovered=false
 
     # Restore mouse to desktop profile (adaptive acceleration)
-    if command -v hubos-input &>/dev/null || [[ -x /usr/bin/hubos-input ]]; then
-        /usr/bin/hubos-input desktop 2>/dev/null || hubos-input desktop 2>/dev/null || true
+    if command -v forge-input &>/dev/null || [[ -x /usr/bin/forge-input ]]; then
+        /usr/bin/forge-input desktop 2>/dev/null || forge-input desktop 2>/dev/null || true
         recovered=true
         log_debug "Restored input to desktop profile"
     else
@@ -591,8 +591,8 @@ recover_performance() {
     fi
 
     if [[ "$current_profile" != "$saved_profile" ]]; then
-        if command -v hubos-performance &>/dev/null || [[ -x /usr/bin/hubos-performance ]]; then
-            /usr/bin/hubos-performance "$saved_profile" 2>/dev/null || hubos-performance "$saved_profile" 2>/dev/null || true
+        if command -v forge-performance &>/dev/null || [[ -x /usr/bin/forge-performance ]]; then
+            /usr/bin/forge-performance "$saved_profile" 2>/dev/null || forge-performance "$saved_profile" 2>/dev/null || true
         else
             # Fallback: use powerprofilesctl directly
             if command -v powerprofilesctl &>/dev/null; then
@@ -692,7 +692,7 @@ run_recovery() {
     local start_time
     start_time=$(date +%s%N)
 
-    echo -e "${BOLD}HubOS Crash Recovery${NC} v${VERSION}"
+    echo -e "${BOLD}24HG Forge Crash Recovery${NC} v${VERSION}"
     echo ""
 
     detect_session
@@ -732,7 +732,7 @@ run_recovery() {
     if [[ ${#STEPS_FAILED[@]} -eq 0 ]]; then
         notify "Desktop Recovered" "${#STEPS_OK[@]} items restored in ${elapsed_ms}ms" "dialog-positive"
     else
-        notify "Desktop Partially Recovered" "${#STEPS_FAILED[@]} items failed — run hubos-crash-fix for diagnosis" "dialog-warning"
+        notify "Desktop Partially Recovered" "${#STEPS_FAILED[@]} items failed — run forge-crash-fix for diagnosis" "dialog-warning"
     fi
 
     return 0
@@ -774,7 +774,7 @@ with open(history_file, 'w') as f:
 # ─── Watch Daemon ────────────────────────────────────────────────────────────
 
 cmd_watch() {
-    echo -e "${BOLD}HubOS Crash Recovery Watcher${NC} v${VERSION}"
+    echo -e "${BOLD}24HG Forge Crash Recovery Watcher${NC} v${VERSION}"
     echo ""
 
     detect_session
@@ -890,8 +890,8 @@ cmd_watch() {
                     run_recovery 2>&1 | tee -a "$WATCH_LOG"
 
                     # Trigger session summary for clean exit
-                    if command -v hubos-session-summary &>/dev/null || [[ -x /usr/bin/hubos-session-summary ]]; then
-                        /usr/bin/hubos-session-summary 2>/dev/null || hubos-session-summary 2>/dev/null || true
+                    if command -v forge-session-summary &>/dev/null || [[ -x /usr/bin/forge-session-summary ]]; then
+                        /usr/bin/forge-session-summary 2>/dev/null || forge-session-summary 2>/dev/null || true
                     fi
                 fi
             fi
@@ -939,7 +939,7 @@ check_gpu_hang() {
             STEPS_SKIPPED=()
             STEPS_FAILED=()
             run_recovery 2>&1 | tee -a "$WATCH_LOG"
-            notify "GPU Hang Recovered" "Desktop restored after GPU reset. Run hubos-crash-fix for details." "dialog-warning"
+            notify "GPU Hang Recovered" "Desktop restored after GPU reset. Run forge-crash-fix for details." "dialog-warning"
         fi
     fi
 }
@@ -947,7 +947,7 @@ check_gpu_hang() {
 # ─── Status Command ──────────────────────────────────────────────────────────
 
 cmd_status() {
-    echo -e "${BOLD}HubOS Crash Recovery Status${NC} v${VERSION}"
+    echo -e "${BOLD}24HG Forge Crash Recovery Status${NC} v${VERSION}"
     echo ""
 
     detect_session
@@ -1079,7 +1079,7 @@ else:
 # ─── Test Command ────────────────────────────────────────────────────────────
 
 cmd_test() {
-    echo -e "${BOLD}HubOS Crash Recovery — Test Mode${NC}"
+    echo -e "${BOLD}24HG Forge Crash Recovery — Test Mode${NC}"
     echo ""
     echo "This will simulate a crash and test recovery."
     echo "Your desktop may flicker briefly."
