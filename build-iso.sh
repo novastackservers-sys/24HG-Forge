@@ -2,13 +2,12 @@
 set -euo pipefail
 
 # HubOS ISO Builder
-# Builds the OCI image, flattens it for fast install, creates a bootable ISO
+# Builds the OCI image then creates a bootable ISO via build-container-installer
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_NAME="hubos"
 IMAGE_TAG="${1:-latest}"
 IMAGE_REF="localhost/${IMAGE_NAME}:${IMAGE_TAG}"
-FLAT_REF="localhost/${IMAGE_NAME}-flat:${IMAGE_TAG}"
 ISO_DIR="${SCRIPT_DIR}/iso-output"
 VARIANT="${2:-desktop}"  # desktop or nvidia
 
@@ -29,9 +28,14 @@ echo "  Base: ${BASE_IMAGE}"
 echo "  Tag: ${IMAGE_TAG}"
 echo "══════════════════════════════════════════"
 
-# Step 1: Build OCI image
+# Step 1: Stage build files
 echo ""
-echo "▶ Step 1/4: Building OCI container image..."
+echo "▶ Step 1/3: Staging build files..."
+"${SCRIPT_DIR}/stage-build.sh"
+
+# Step 2: Build OCI image
+echo ""
+echo "▶ Step 2/3: Building OCI container image..."
 podman build \
     --tag "${IMAGE_REF}" \
     --build-arg BASE_IMAGE="${BASE_IMAGE}" \
@@ -42,27 +46,14 @@ podman build \
 echo "✓ Image built: ${IMAGE_REF}"
 echo "  Size: $(podman image inspect "${IMAGE_REF}" --format '{{.Size}}' | numfmt --to=iec 2>/dev/null || echo 'unknown')"
 
-# Step 2: Flatten image to single layer (dramatically speeds up Anaconda install)
-echo ""
-echo "▶ Step 2/4: Flattening image to single layer (speeds up install)..."
-CONTAINER_ID=$(podman create "${IMAGE_REF}" /bin/bash)
-podman export "${CONTAINER_ID}" | podman import - "${FLAT_REF}"
-podman rm "${CONTAINER_ID}" >/dev/null
-
-# Copy labels and config from original image
-echo "FROM ${FLAT_REF}" > /tmp/hubos-flatten.Dockerfile
-echo 'LABEL org.opencontainers.image.title="HubOS"' >> /tmp/hubos-flatten.Dockerfile
-echo 'LABEL org.opencontainers.image.description="24HG Gaming Distribution"' >> /tmp/hubos-flatten.Dockerfile
-echo 'CMD ["/bin/bash"]' >> /tmp/hubos-flatten.Dockerfile
-podman build --tag "${FLAT_REF}" -f /tmp/hubos-flatten.Dockerfile /tmp/
-rm -f /tmp/hubos-flatten.Dockerfile
-
-LAYERS=$(podman inspect "${FLAT_REF}" --format '{{len .RootFS.Layers}}' 2>/dev/null || echo "?")
-echo "✓ Flattened: ${LAYERS} layer(s) (was 90+)"
+# NOTE: Do NOT flatten the image (podman export/import).
+# OSTree native container images require their commit metadata and layer
+# structure intact. Flattening destroys the ostree data and causes
+# "ostree container image deploy" to fail with exit code 1 during install.
 
 # Step 3: Create ISO using Universal Blue's ISO builder
 echo ""
-echo "▶ Step 3/4: Creating bootable ISO..."
+echo "▶ Step 3/3: Creating bootable ISO..."
 mkdir -p "${ISO_DIR}"
 
 podman run --rm --privileged \
@@ -70,7 +61,7 @@ podman run --rm --privileged \
     --volume /var/lib/containers/storage:/var/lib/containers/storage \
     ghcr.io/jasonn3/build-container-installer:latest \
     IMAGE_REPO="localhost" \
-    IMAGE_NAME="${IMAGE_NAME}-flat" \
+    IMAGE_NAME="${IMAGE_NAME}" \
     IMAGE_TAG="${IMAGE_TAG}" \
     VARIANT="Kinoite" \
     ISO_NAME="hubos-${VARIANT}-${IMAGE_TAG}.iso" \
@@ -78,9 +69,9 @@ podman run --rm --privileged \
 
 echo "✓ ISO created"
 
-# Step 4: Generate checksums
+# Generate checksums
 echo ""
-echo "▶ Step 4/4: Generating checksums..."
+echo "▶ Generating checksums..."
 cd "${ISO_DIR}"
 ISO_FILE="hubos-${VARIANT}-${IMAGE_TAG}.iso"
 if [ -f "${ISO_FILE}" ]; then
@@ -92,13 +83,8 @@ if [ -f "${ISO_FILE}" ]; then
     echo "  ISO: ${ISO_DIR}/${ISO_FILE}"
     echo "  Size: $(du -h "${ISO_FILE}" | cut -f1)"
     echo "  SHA256: ${ISO_DIR}/${ISO_FILE}.sha256"
-    echo ""
-    echo "  Flattened image = faster install (~5 min vs 30+ min)"
     echo "══════════════════════════════════════════"
 else
     echo "✗ ISO file not found. Check build logs."
     exit 1
 fi
-
-# Cleanup flattened image
-podman rmi "${FLAT_REF}" 2>/dev/null || true
