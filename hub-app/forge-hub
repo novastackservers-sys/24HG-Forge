@@ -1,11 +1,11 @@
 #!/bin/bash
-# HubOS Hub Launcher — Branded Chromium kiosk pointing at hub.24hgaming.com
+# 24HG Forge Hub Launcher — Branded Chromium kiosk pointing at hub.24hgaming.com
 # Features: offline detection, Gamescope awareness, Wayland-native
 
 HUB_URL="https://hub.24hgaming.com"
-OFFLINE_PAGE="file:///usr/share/hubos/offline.html"
+OFFLINE_PAGE="file:///usr/share/forge/offline.html"
 APP_NAME="24HG Hub"
-USER_DATA_DIR="${HOME}/.config/hubos-hub"
+USER_DATA_DIR="${HOME}/.config/forge-hub"
 
 # Ensure data directory exists
 mkdir -p "${USER_DATA_DIR}"
@@ -36,7 +36,7 @@ fi
 CHROME_FLAGS=(
     "--app=${TARGET_URL}"
     "--user-data-dir=${USER_DATA_DIR}"
-    "--class=hubos-hub"
+    "--class=forge-hub"
     "--no-first-run"
     "--no-default-browser-check"
     "--disable-translate"

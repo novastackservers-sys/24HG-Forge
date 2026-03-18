@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HubOS System Tray — Live server status, quick-connect, gaming tools
+24HG Forge System Tray — Live server status, quick-connect, gaming tools
 Lightweight system tray daemon for the 24HG gaming ecosystem.
 Uses libappindicator3 (KDE/GNOME compatible via StatusNotifierItem)
 """
@@ -32,11 +32,11 @@ except (ImportError, ValueError):
         sys.exit(0)
 
 
-SERVERS_JSON = "/usr/share/hubos/servers.json"
-STATUS_CACHE = os.path.expanduser("~/.cache/hubos/server-status.json")
-HUB_STATE = os.path.expanduser("~/.cache/hubos/hub-state.json")
+SERVERS_JSON = "/usr/share/forge/servers.json"
+STATUS_CACHE = os.path.expanduser("~/.cache/forge/server-status.json")
+HUB_STATE = os.path.expanduser("~/.cache/forge/hub-state.json")
 HUB_URL = "https://hub.24hgaming.com"
-ICON_NAME = "hubos-logo"
+ICON_NAME = "forge-logo"
 REFRESH_INTERVAL = 30_000  # ms — refresh menu labels every 30s
 
 
@@ -50,7 +50,7 @@ def load_servers():
 
 
 def load_status():
-    """Load cached server status from hubos-server-status daemon."""
+    """Load cached server status from forge-server-status daemon."""
     try:
         with open(STATUS_CACHE) as f:
             return json.load(f)
@@ -90,7 +90,7 @@ def connect_server(widget, ip, port):
 
 
 def open_hub(widget=None):
-    subprocess.Popen(["/usr/bin/hubos-hub"])
+    subprocess.Popen(["/usr/bin/forge-hub"])
 
 
 def open_discord(widget=None):
@@ -98,42 +98,42 @@ def open_discord(widget=None):
 
 
 def open_diag(widget=None):
-    subprocess.Popen(["konsole", "-e", "hubos-diag"])
+    subprocess.Popen(["konsole", "-e", "forge-diag"])
 
 
 def open_proton_fix(widget=None):
-    subprocess.Popen(["konsole", "-e", "hubos-proton-fix", "--check"])
+    subprocess.Popen(["konsole", "-e", "forge-proton-fix", "--check"])
 
 
 def switch_profile(widget, profile):
-    subprocess.Popen(["/usr/bin/hubos-performance", profile])
+    subprocess.Popen(["/usr/bin/forge-performance", profile])
 
 
 def toggle_netguard(widget, action):
-    subprocess.Popen(["/usr/bin/hubos-netguard", action])
+    subprocess.Popen(["/usr/bin/forge-netguard", action])
 
 
 def toggle_replay(widget, action):
-    subprocess.Popen(["/usr/bin/hubos-replay", action])
+    subprocess.Popen(["/usr/bin/forge-replay", action])
 
 
 def save_replay(widget):
-    subprocess.Popen(["/usr/bin/hubos-replay", "save"])
+    subprocess.Popen(["/usr/bin/forge-replay", "save"])
 
 
 def switch_audio(widget, device):
-    subprocess.Popen(["/usr/bin/hubos-audio", "switch", device])
+    subprocess.Popen(["/usr/bin/forge-audio", "switch", device])
 
 
 def toggle_noise_cancel(widget):
-    subprocess.Popen(["konsole", "-e", "hubos-audio", "noise-cancel"])
+    subprocess.Popen(["konsole", "-e", "forge-audio", "noise-cancel"])
 
 
 def open_server_status(widget=None):
-    subprocess.Popen(["konsole", "-e", "hubos-server-status", "--once"])
+    subprocess.Popen(["konsole", "-e", "forge-server-status", "--once"])
 
 
-class HubOSTray:
+class 24HG ForgeTray:
     def __init__(self):
         self.menu = None
         self.indicator = None
@@ -306,7 +306,7 @@ class HubOSTray:
         for action, desc in [("gaming", "Low Latency Mode"),
                              ("desktop", "Balanced Mode")]:
             a_item = Gtk.MenuItem(label=desc)
-            a_item.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-audio", a]))
+            a_item.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/forge-audio", a]))
             audio_menu.append(a_item)
         nc_item = Gtk.MenuItem(label="Toggle Noise Cancel")
         nc_item.connect("activate", toggle_noise_cancel)
@@ -324,7 +324,7 @@ class HubOSTray:
         night_menu = Gtk.Menu()
         for action, desc in [("on", "Enable (Warm)"), ("off", "Disable"), ("on 3000", "Very Warm (Late Night)")]:
             ni = Gtk.MenuItem(label=desc)
-            ni.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-nightlight"] + a.split()))
+            ni.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/forge-nightlight"] + a.split()))
             night_menu.append(ni)
         night_item.set_submenu(night_menu)
         tools_menu.append(night_item)
@@ -334,7 +334,7 @@ class HubOSTray:
         ss_menu = Gtk.Menu()
         for action, desc in [("full", "Full Screen (Print)"), ("area", "Select Area (Shift+Print)"), ("window", "Active Window")]:
             si = Gtk.MenuItem(label=desc)
-            si.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-screenshot", a]))
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/forge-screenshot", a]))
             ss_menu.append(si)
         ss_item.set_submenu(ss_menu)
         tools_menu.append(ss_item)
@@ -344,7 +344,7 @@ class HubOSTray:
         gp_menu = Gtk.Menu()
         for action, desc in [("list", "List Profiles"), ("create", "Create New Profile")]:
             gi = Gtk.MenuItem(label=desc)
-            gi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-game-profiles", a]))
+            gi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-game-profiles", a]))
             gp_menu.append(gi)
         gp_item.set_submenu(gp_menu)
         tools_menu.append(gp_item)
@@ -354,7 +354,7 @@ class HubOSTray:
         ctrl_menu = Gtk.Menu()
         for action, desc in [("list", "Detect Controllers"), ("status", "Controller Status"), ("fix", "Fix Common Issues")]:
             ci = Gtk.MenuItem(label=desc)
-            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-controller", a]))
+            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-controller", a]))
             ctrl_menu.append(ci)
         ctrl_item.set_submenu(ctrl_menu)
         tools_menu.append(ctrl_item)
@@ -364,7 +364,7 @@ class HubOSTray:
         strm_menu = Gtk.Menu()
         for action, desc in [("setup", "Setup Streaming"), ("start", "Start Stream"), ("stop", "Stop Stream"), ("status", "Stream Status")]:
             si = Gtk.MenuItem(label=desc)
-            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-stream", a]))
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-stream", a]))
             strm_menu.append(si)
         strm_item.set_submenu(strm_menu)
         tools_menu.append(strm_item)
@@ -374,7 +374,7 @@ class HubOSTray:
         shader_menu = Gtk.Menu()
         for action, desc in [("status", "Cache Status"), ("optimize", "Optimize Settings"), ("size", "Disk Usage")]:
             shi = Gtk.MenuItem(label=desc)
-            shi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-shader-cache", a]))
+            shi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-shader-cache", a]))
             shader_menu.append(shi)
         shader_item.set_submenu(shader_menu)
         tools_menu.append(shader_item)
@@ -384,7 +384,7 @@ class HubOSTray:
         compat_menu = Gtk.Menu()
         for action, desc in [("scan", "Scan Library"), ("check", "Check a Game"), ("report", "Full Report")]:
             ci = Gtk.MenuItem(label=desc)
-            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-compat", a]))
+            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-compat", a]))
             compat_menu.append(ci)
         compat_item.set_submenu(compat_menu)
         tools_menu.append(compat_item)
@@ -394,7 +394,7 @@ class HubOSTray:
         crash_menu = Gtk.Menu()
         for action, desc in [("diagnose", "Diagnose Last Crash"), ("report", "Generate Report"), ("watch", "Watch for Crashes")]:
             cri = Gtk.MenuItem(label=desc)
-            cri.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-crash-fix", a]))
+            cri.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-crash-fix", a]))
             crash_menu.append(cri)
         crash_item.set_submenu(crash_menu)
         tools_menu.append(crash_item)
@@ -404,7 +404,7 @@ class HubOSTray:
         disp_menu = Gtk.Menu()
         for action, desc in [("status", "Display Status"), ("profiles", "Manage Profiles"), ("--gui", "Display Settings")]:
             di = Gtk.MenuItem(label=desc)
-            di.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-display", a]))
+            di.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-display", a]))
             disp_menu.append(di)
         disp_item.set_submenu(disp_menu)
         tools_menu.append(disp_item)
@@ -414,7 +414,7 @@ class HubOSTray:
         dscr_menu = Gtk.Menu()
         for action, desc in [("setup", "Setup (One-Time)"), ("start", "Start Sharing"), ("stop", "Stop Sharing"), ("fix", "Fix Issues")]:
             dsi = Gtk.MenuItem(label=desc)
-            dsi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-discord-screen", a]))
+            dsi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-discord-screen", a]))
             dscr_menu.append(dsi)
         dscr_item.set_submenu(dscr_menu)
         tools_menu.append(dscr_item)
@@ -424,7 +424,7 @@ class HubOSTray:
         pfx_menu = Gtk.Menu()
         for action, desc in [("list", "List All Prefixes"), ("cleanup", "Cleanup Orphans"), ("health", "Health Check")]:
             pi = Gtk.MenuItem(label=desc)
-            pi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-prefix", a]))
+            pi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-prefix", a]))
             pfx_menu.append(pi)
         pfx_item.set_submenu(pfx_menu)
         tools_menu.append(pfx_item)
@@ -434,7 +434,7 @@ class HubOSTray:
         dboot_menu = Gtk.Menu()
         for action, desc in [("status", "Boot Status"), ("quick-reboot windows", "Reboot to Windows"), ("time-fix", "Fix Clock Sync")]:
             dbi = Gtk.MenuItem(label=desc)
-            dbi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-dualboot"] + a.split()))
+            dbi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-dualboot"] + a.split()))
             dboot_menu.append(dbi)
         dboot_item.set_submenu(dboot_menu)
         tools_menu.append(dboot_item)
@@ -444,7 +444,7 @@ class HubOSTray:
         therm_menu = Gtk.Menu()
         for action, desc in [("status", "Temperature Status"), ("monitor", "Live Monitor"), ("fan status", "Fan Status")]:
             ti = Gtk.MenuItem(label=desc)
-            ti.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-thermal"] + a.split()))
+            ti.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-thermal"] + a.split()))
             therm_menu.append(ti)
         therm_item.set_submenu(therm_menu)
         tools_menu.append(therm_item)
@@ -454,7 +454,7 @@ class HubOSTray:
         dl_menu = Gtk.Menu()
         for action, desc in [("status", "Download Status"), ("pause", "Pause All"), ("resume", "Resume All"), ("gaming-mode on", "Gaming Mode")]:
             di = Gtk.MenuItem(label=desc)
-            di.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-download-mgr"] + a.split()))
+            di.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-download-mgr"] + a.split()))
             dl_menu.append(di)
         dl_item.set_submenu(dl_menu)
         tools_menu.append(dl_item)
@@ -464,7 +464,7 @@ class HubOSTray:
         hdr_menu = Gtk.Menu()
         for action, desc in [("status", "HDR Status"), ("toggle on", "Enable HDR"), ("toggle off", "Disable HDR"), ("setup", "HDR Setup Wizard")]:
             hi = Gtk.MenuItem(label=desc)
-            hi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-hdr"] + a.split()))
+            hi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-hdr"] + a.split()))
             hdr_menu.append(hi)
         hdr_item.set_submenu(hdr_menu)
         tools_menu.append(hdr_item)
@@ -474,7 +474,7 @@ class HubOSTray:
         mod_menu = Gtk.Menu()
         for action, desc in [("status", "Modding Status"), ("install-vortex", "Install Vortex"), ("install-mo2", "Install Mod Organizer 2")]:
             mi = Gtk.MenuItem(label=desc)
-            mi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-mod-manager", a]))
+            mi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-mod-manager", a]))
             mod_menu.append(mi)
         mod_item.set_submenu(mod_menu)
         tools_menu.append(mod_item)
@@ -487,7 +487,7 @@ class HubOSTray:
                 nv_menu = Gtk.Menu()
                 for action, desc in [("status", "NVIDIA Status"), ("fix", "Auto-Fix All"), ("flicker-fix", "Fix Flickering")]:
                     ni = Gtk.MenuItem(label=desc)
-                    ni.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-nvidia-wayland", a]))
+                    ni.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-nvidia-wayland", a]))
                     nv_menu.append(ni)
                 nv_item.set_submenu(nv_menu)
                 tools_menu.append(nv_item)
@@ -499,7 +499,7 @@ class HubOSTray:
 
         # ── Game Library ──
         games_item = Gtk.MenuItem(label="My Games")
-        games_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-games", "list"]))
+        games_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "forge-games", "list"]))
         menu.append(games_item)
 
         # ── Game Setup ──
@@ -508,7 +508,7 @@ class HubOSTray:
         for game, label in [("gtav", "GTA V"), ("hogwarts", "Hogwarts Legacy"), ("starfield", "Starfield"),
                             ("forza", "Forza Horizon 5"), ("warframe", "Warframe"), ("minecraft", "Minecraft")]:
             gi = Gtk.MenuItem(label=label)
-            gi.connect("activate", lambda w, g=game: subprocess.Popen(["konsole", "-e", "hubos-game-setup", g]))
+            gi.connect("activate", lambda w, g=game: subprocess.Popen(["konsole", "-e", "forge-game-setup", g]))
             setup_menu.append(gi)
         setup_item.set_submenu(setup_menu)
         menu.append(setup_item)
@@ -518,14 +518,14 @@ class HubOSTray:
         saves_menu = Gtk.Menu()
         for action, desc in [("list", "Find All Saves"), ("backup", "Backup All Saves"), ("restore", "Restore Saves")]:
             si = Gtk.MenuItem(label=desc)
-            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-save-manager", a]))
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-save-manager", a]))
             saves_menu.append(si)
         saves_item.set_submenu(saves_menu)
         menu.append(saves_item)
 
         # ── Anti-Cheat Tracker ──
         ac_item = Gtk.MenuItem(label="Anti-Cheat Status")
-        ac_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-anticheat-tracker", "scan"]))
+        ac_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "forge-anticheat-tracker", "scan"]))
         menu.append(ac_item)
 
         menu.append(Gtk.SeparatorMenuItem())
@@ -536,35 +536,35 @@ class HubOSTray:
         menu.append(diag)
 
         bench = Gtk.MenuItem(label="Benchmark")
-        bench.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-benchmark", "full"]))
+        bench.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "forge-benchmark", "full"]))
         menu.append(bench)
 
         playtime = Gtk.MenuItem(label="Playtime Stats")
-        playtime.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-game-timer", "stats"]))
+        playtime.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "forge-game-timer", "stats"]))
         menu.append(playtime)
 
         proton_upd = Gtk.MenuItem(label="Update Proton-GE")
-        proton_upd.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-proton-updater", "update"]))
+        proton_upd.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "forge-proton-updater", "update"]))
         menu.append(proton_upd)
 
         backup = Gtk.MenuItem(label="Backup Game Saves")
-        backup.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-backup", "create"]))
+        backup.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "forge-backup", "create"]))
         menu.append(backup)
 
         migrate = Gtk.MenuItem(label="Migrate from Windows")
-        migrate.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-migrate", "scan"]))
+        migrate.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "forge-migrate", "scan"]))
         menu.append(migrate)
 
         bench_cmp = Gtk.MenuItem(label="Benchmark vs Windows")
-        bench_cmp.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-benchmark-compare", "quick"]))
+        bench_cmp.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "forge-benchmark-compare", "quick"]))
         menu.append(bench_cmp)
 
         # ── Perks ──
-        perks_item = Gtk.MenuItem(label="HubOS Perks")
+        perks_item = Gtk.MenuItem(label="24HG Forge Perks")
         perks_menu = Gtk.Menu()
         for action, desc in [("status", "View My Perks"), ("claim", "Claim Welcome Package"), ("referral show", "Referral Code"), ("rewards show", "Earn More VIP")]:
             pi = Gtk.MenuItem(label=desc)
-            pi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-perks"] + a.split()))
+            pi.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-perks"] + a.split()))
             perks_menu.append(pi)
         perks_item.set_submenu(perks_menu)
         menu.append(perks_item)
@@ -574,7 +574,7 @@ class HubOSTray:
         creator_menu = Gtk.Menu()
         for action, desc in [("setup", "Setup OBS Profile"), ("scenes", "Generate Stream Scenes"), ("overlay", "Generate Overlays"), ("clip last 30", "Save Last 30s Clip")]:
             ci = Gtk.MenuItem(label=desc)
-            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-creator-kit"] + a.split()))
+            ci.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-creator-kit"] + a.split()))
             creator_menu.append(ci)
         creator_item.set_submenu(creator_menu)
         menu.append(creator_item)
@@ -589,11 +589,11 @@ class HubOSTray:
             hub_status.set_sensitive(False)
             hub_acct_menu.append(hub_status)
             hub_logout = Gtk.MenuItem(label="Logout")
-            hub_logout.connect("activate", lambda w: subprocess.Popen(["/usr/bin/hubos-hub-bridge", "logout"]))
+            hub_logout.connect("activate", lambda w: subprocess.Popen(["/usr/bin/forge-hub-bridge", "logout"]))
             hub_acct_menu.append(hub_logout)
         else:
             hub_login = Gtk.MenuItem(label="Login to 24HG Hub")
-            hub_login.connect("activate", lambda w: subprocess.Popen(["/usr/bin/hubos-hub-bridge", "login"]))
+            hub_login.connect("activate", lambda w: subprocess.Popen(["/usr/bin/forge-hub-bridge", "login"]))
             hub_acct_menu.append(hub_login)
         hub_acct.set_submenu(hub_acct_menu)
         menu.append(hub_acct)
@@ -603,23 +603,23 @@ class HubOSTray:
         personal_menu = Gtk.Menu()
 
         ach_item = Gtk.MenuItem(label="Achievements")
-        ach_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "hubos-achievements", "list"]))
+        ach_item.connect("activate", lambda w: subprocess.Popen(["konsole", "-e", "forge-achievements", "list"]))
         personal_menu.append(ach_item)
 
         wp_item = Gtk.MenuItem(label="Wallpaper")
         wp_menu = Gtk.Menu()
         for action, desc in [("random", "Random Wallpaper"), ("rotate", "Time-Based Rotation"), ("list", "Browse Wallpapers")]:
             wi = Gtk.MenuItem(label=desc)
-            wi.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-wallpaper", a]))
+            wi.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/forge-wallpaper", a]))
             wp_menu.append(wi)
         wp_item.set_submenu(wp_menu)
         personal_menu.append(wp_item)
 
         snd_item = Gtk.MenuItem(label="Sounds")
         snd_menu = Gtk.Menu()
-        for action, desc in [("enable", "Enable HubOS Sounds"), ("disable", "Use Default Sounds"), ("test", "Test All Sounds")]:
+        for action, desc in [("enable", "Enable 24HG Forge Sounds"), ("disable", "Use Default Sounds"), ("test", "Test All Sounds")]:
             si = Gtk.MenuItem(label=desc)
-            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "hubos-sounds", a]))
+            si.connect("activate", lambda w, a=action: subprocess.Popen(["konsole", "-e", "forge-sounds", a]))
             snd_menu.append(si)
         snd_item.set_submenu(snd_menu)
         personal_menu.append(snd_item)
@@ -628,7 +628,7 @@ class HubOSTray:
         notif_menu = Gtk.Menu()
         for action, desc in [("gaming", "Gaming (Compact, Top-Right)"), ("desktop", "Desktop (Default)"), ("minimal", "Minimal (Quiet)")]:
             ni = Gtk.MenuItem(label=desc)
-            ni.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/hubos-notify-style", a]))
+            ni.connect("activate", lambda w, a=action: subprocess.Popen(["/usr/bin/forge-notify-style", a]))
             notif_menu.append(ni)
         notif_item.set_submenu(notif_menu)
         personal_menu.append(notif_item)
@@ -659,7 +659,7 @@ class HubOSTray:
     def setup_indicator(self):
         if AppIndicator3:
             self.indicator = AppIndicator3.Indicator.new(
-                "hubos-tray",
+                "forge-tray",
                 ICON_NAME,
                 AppIndicator3.IndicatorCategory.APPLICATION_STATUS
             )
@@ -676,7 +676,7 @@ class HubOSTray:
 
 
 def main():
-    tray = HubOSTray()
+    tray = 24HG ForgeTray()
     Gtk.main()
 
 

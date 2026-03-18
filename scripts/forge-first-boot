@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HubOS First-Boot Wizard — Full GTK4 setup experience
+24HG Forge First-Boot Wizard — Full GTK4 setup experience
 Steps:
   1. Welcome + language
   2. GPU detection & driver status
@@ -17,8 +17,8 @@ import sys
 import json
 import shutil
 
-MARKER = os.path.expanduser("~/.config/hubos/.wizard-done")
-CONFIG_DIR = os.path.expanduser("~/.config/hubos")
+MARKER = os.path.expanduser("~/.config/forge/.wizard-done")
+CONFIG_DIR = os.path.expanduser("~/.config/forge")
 HUB_URL = "https://hub.24hgaming.com"
 
 
@@ -80,11 +80,11 @@ def zenity(args):
 
 def step_welcome():
     zenity([
-        "--info", "--title=Welcome to HubOS",
+        "--info", "--title=Welcome to 24HG Forge",
         "--width=550", "--height=350",
         "--ok-label=Let's Go!",
         "--text="
-        "<big><b>Welcome to HubOS</b></big>\n\n"
+        "<big><b>Welcome to 24HG Forge</b></big>\n\n"
         "24 Hour Gaming's custom Linux distribution.\n\n"
         "This wizard will:\n\n"
         "  <b>1.</b>  Detect your hardware\n"
@@ -156,9 +156,9 @@ def step_account():
     ])
     if rc == 0:
         # Launch hub bridge login (zenity dialog for credentials)
-        subprocess.run(["/usr/bin/hubos-hub-bridge", "login"], timeout=120)
+        subprocess.run(["/usr/bin/forge-hub-bridge", "login"], timeout=120)
         # Also open the hub in browser
-        subprocess.Popen(["/usr/bin/hubos-hub"])
+        subprocess.Popen(["/usr/bin/forge-hub"])
         return True
     return False
 
@@ -195,7 +195,7 @@ def step_performance():
         "--width=500", "--height=300",
         "--radiolist",
         "--text=<big><b>Default Performance Profile</b></big>\n\n"
-               "Switch anytime with: <tt>hubos-performance [mode]</tt>",
+               "Switch anytime with: <tt>forge-performance [mode]</tt>",
         "--column=Select", "--column=Profile", "--column=Description",
         "FALSE", "gaming", "Maximum performance (higher power, fan noise)",
         "TRUE", "balanced", "Smart auto-switching (recommended)",
@@ -212,14 +212,14 @@ def step_deploy(prefs):
     if prefs.get("mangohud"):
         env_dir = os.path.expanduser("~/.config/environment.d")
         os.makedirs(env_dir, exist_ok=True)
-        with open(os.path.join(env_dir, "hubos-mangohud.conf"), "w") as f:
+        with open(os.path.join(env_dir, "forge-mangohud.conf"), "w") as f:
             f.write("MANGOHUD=1\n")
 
     # Compositor preference
     if prefs.get("compositor_off"):
         env_dir = os.path.expanduser("~/.config/environment.d")
         os.makedirs(env_dir, exist_ok=True)
-        with open(os.path.join(env_dir, "hubos-compositor.conf"), "w") as f:
+        with open(os.path.join(env_dir, "forge-compositor.conf"), "w") as f:
             f.write("# KWin will suspend compositing for fullscreen games\n")
             f.write("KWIN_EXPLICIT_SYNC=0\n")
 
@@ -235,12 +235,12 @@ def step_deploy(prefs):
                 break
             import time
             time.sleep(10)
-        subprocess.run(["/usr/lib/hubos/configure-steam-servers.sh"],
+        subprocess.run(["/usr/lib/forge/configure-steam-servers.sh"],
                        capture_output=True, timeout=60)
 
     # Game configs
     if prefs.get("game_configs") and shutil.which("bash"):
-        subprocess.run(["/usr/lib/hubos/hubos-game-configs.sh"],
+        subprocess.run(["/usr/lib/forge/forge-game-configs.sh"],
                        capture_output=True, timeout=30)
 
 
@@ -264,8 +264,8 @@ def step_summary(gpus, prefs, profile):
         "<b>Quick Reference:</b>\n"
         "  <tt>F12</tt> — Toggle performance overlay\n"
         "  <tt>Super</tt> — App launcher\n"
-        "  <tt>hubos-performance</tt> — Switch power profile\n"
-        "  <tt>hubos-diag</tt> — System diagnostics\n"
+        "  <tt>forge-performance</tt> — Switch power profile\n"
+        "  <tt>forge-diag</tt> — System diagnostics\n"
         "  System tray — Quick connect to servers\n\n"
         "<i>Welcome to 24 Hour Gaming!</i>"
     ])
@@ -290,7 +290,7 @@ def main():
     step_deploy(prefs)
 
     # Apply performance profile
-    subprocess.run(["/usr/bin/hubos-performance", profile],
+    subprocess.run(["/usr/bin/forge-performance", profile],
                    capture_output=True, timeout=10)
 
     # Save config

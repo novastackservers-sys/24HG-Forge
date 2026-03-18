@@ -1,5 +1,5 @@
 #!/bin/bash
-# HubOS Gamescope Session — Console-like experience
+# 24HG Forge Gamescope Session — Console-like experience
 # Launches Gamescope compositor with the 24HG Hub app
 
 # ── Resolution detection (Wayland-first, X11 fallback, sysfs last) ──
@@ -67,4 +67,4 @@ export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0
 export DXVK_FRAME_RATE=0
 
 # Launch Gamescope with Hub app
-exec gamescope "${GAMESCOPE_FLAGS[@]}" -- /usr/bin/hubos-hub
+exec gamescope "${GAMESCOPE_FLAGS[@]}" -- /usr/bin/forge-hub
