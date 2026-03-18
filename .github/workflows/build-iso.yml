@@ -78,6 +78,16 @@ jobs:
           retention-days: 30
           compression-level: 0
 
+      - name: Split ISO into chunks
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          cd ${{ steps.build-iso.outputs.iso_path }}
+          ISO_FILE="forge-${{ matrix.variant }}-${{ steps.version.outputs.tag }}.iso"
+          echo "Splitting $ISO_FILE into 1900MB chunks..."
+          split -b 1900m "$ISO_FILE" "${ISO_FILE}.part-"
+          echo "Chunks created:"
+          ls -lh "${ISO_FILE}.part-"*
+
       - name: Create/Update Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -89,15 +99,24 @@ jobs:
             Custom gaming Linux distribution built on Bazzite (Fedora Atomic).
 
             ### Downloads
-            - **Desktop** (AMD/Intel GPU) — `forge-desktop-${{ github.ref_name }}.iso`
-            - **NVIDIA** (GTX 900+) — `forge-nvidia-${{ github.ref_name }}.iso`
+            ISOs are split into <2GB chunks for GitHub Releases compatibility.
 
-            ### Verify
+            - **Desktop** (AMD/Intel GPU) — `forge-desktop-${{ github.ref_name }}.iso.part-*`
+            - **NVIDIA** (GTX 900+) — `forge-nvidia-${{ github.ref_name }}.iso.part-*`
+
+            ### Reassemble & Verify
+            Download all `.part-*` files for your variant, then run:
             ```bash
+            cat forge-desktop-${{ github.ref_name }}.iso.part-* > forge-desktop-${{ github.ref_name }}.iso
+            sha256sum -c SHA256SUMS
+            ```
+            For NVIDIA:
+            ```bash
+            cat forge-nvidia-${{ github.ref_name }}.iso.part-* > forge-nvidia-${{ github.ref_name }}.iso
             sha256sum -c SHA256SUMS
             ```
 
             See [Changelog](https://os.24hgaming.com/roadmap.html) for details.
           files: |
-            ${{ steps.build-iso.outputs.iso_path }}/*.iso
+            ${{ steps.build-iso.outputs.iso_path }}/*.iso.part-*
             ${{ steps.build-iso.outputs.iso_path }}/SHA256SUMS
