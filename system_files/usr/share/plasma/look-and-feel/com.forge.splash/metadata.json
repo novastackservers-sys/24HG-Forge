@@ -2,11 +2,12 @@
     "KPlugin": {
         "Id": "com.forge.splash",
         "Name": "24HG Forge",
-        "Description": "24 Hour Gaming boot splash",
+        "Description": "24 Hour Gaming desktop theme with custom splash screen",
         "Authors": [{"Name": "24 Hour Gaming"}],
         "Category": "Plasma Look And Feel",
         "License": "MIT",
         "Version": "1.0"
     },
+    "KPackageStructure": "Plasma/LookAndFeel",
     "X-Plasma-MainScript": "contents/splash/Splash.qml"
 }
