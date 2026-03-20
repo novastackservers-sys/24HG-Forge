@@ -77,10 +77,6 @@ jobs:
           - variant: nvidia
             base_image: ghcr.io/ublue-os/bazzite-nvidia
             containerfile: Containerfile.nvidia
-        # Filter matrix when manual dispatch selects a single variant
-        exclude:
-          - variant: ${{ github.event.inputs.variant == 'nvidia' && 'amd' || 'NONE' }}
-          - variant: ${{ github.event.inputs.variant == 'amd' && 'nvidia' || 'NONE' }}
 
     steps:
       - name: Maximize build space
