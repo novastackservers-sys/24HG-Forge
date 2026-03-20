@@ -9,7 +9,7 @@ import QtQuick.Window 2.15
 
 Rectangle {
     id: root
-    color: "#0a0a14"
+    color: "#040910"
     anchors.fill: parent
 
     property int stage: 0
@@ -25,7 +25,7 @@ Rectangle {
     Rectangle {
         anchors.fill: parent
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "#0a0a14" }
+            GradientStop { position: 0.0; color: "#040910" }
             GradientStop { position: 0.4; color: "#0d0d1a" }
             GradientStop { position: 1.0; color: "#060610" }
         }

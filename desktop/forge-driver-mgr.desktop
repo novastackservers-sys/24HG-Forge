@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Forge Driver Manager
+Comment=GPU driver management
+Exec=/usr/bin/forge-driver-mgr
+Icon=forge-logo
+Terminal=true
+Type=Application
+Categories=System;
+Keywords=driver;gpu;nvidia;amd;mesa;

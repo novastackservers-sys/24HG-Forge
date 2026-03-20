@@ -1,0 +1,1090 @@
+#!/bin/bash
+# 24HG Forge Go Live — One-command streaming tool
+# Stream to Twitch, YouTube, or custom RTMP endpoints with
+# GPU-accelerated encoding, chat integration, and stream management.
+#
+# Usage: forge-go-live <command> [args]
+#   twitch [key]    — Go live on Twitch
+#   youtube [key]   — Go live on YouTube
+#   custom <url>    — Stream to custom RTMP endpoint
+#   stop            — Stop streaming
+#   status          — Show stream status
+#   chat            — Show Twitch chat in terminal
+#   title <text>    — Update stream title (Twitch)
+#   game <name>     — Update stream game/category (Twitch)
+#   config          — Configure stream settings
+#   setup           — First-time setup wizard
+#   alerts on|off   — Toggle stream alert notifications
+#   overlay         — Launch stream overlay
+
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge"
+CONFIG_FILE="$CONFIG_DIR/streaming.json"
+PID_FILE="/tmp/forge-stream.pid"
+LOG_FILE="/tmp/forge-stream.log"
+STATS_FILE="/tmp/forge-stream-stats"
+CHAT_PID_FILE="/tmp/forge-chat.pid"
+OVERLAY_PID_FILE="/tmp/forge-overlay.pid"
+
+TWITCH_IRC="irc.chat.twitch.tv"
+TWITCH_IRC_PORT=6697
+TWITCH_API="https://api.twitch.tv/helix"
+
+# --- Utility Functions ---
+
+ensure_config_dir() {
+    mkdir -p "$CONFIG_DIR"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" <<'DEFAULTCFG'
+{
+    "platform": "twitch",
+    "quality_preset": "1080p60",
+    "encoder": "auto",
+    "include_mic": true,
+    "include_webcam": false,
+    "webcam_device": "/dev/video0",
+    "webcam_position": "bottom-right",
+    "webcam_size": "320x240",
+    "alerts_enabled": true,
+    "twitch_channel": "",
+    "twitch_oauth_token": "",
+    "twitch_client_id": "",
+    "youtube_stream_key_enc": "",
+    "twitch_stream_key_enc": "",
+    "audio_bitrate": "160k",
+    "custom_rtmp_url": ""
+}
+DEFAULTCFG
+    fi
+}
+
+cfg_get() {
+    local key="$1"
+    python3 -c "
+import json, sys
+try:
+    with open('$CONFIG_FILE') as f:
+        d = json.load(f)
+    print(d.get('$key', ''))
+except: pass
+" 2>/dev/null
+}
+
+cfg_set() {
+    local key="$1" value="$2"
+    python3 -c "
+import json
+with open('$CONFIG_FILE', 'r') as f:
+    d = json.load(f)
+d['$key'] = '$value'
+with open('$CONFIG_FILE', 'w') as f:
+    json.dump(d, f, indent=4)
+" 2>/dev/null
+}
+
+cfg_set_bool() {
+    local key="$1" value="$2"
+    python3 -c "
+import json
+with open('$CONFIG_FILE', 'r') as f:
+    d = json.load(f)
+d['$key'] = $value
+with open('$CONFIG_FILE', 'w') as f:
+    json.dump(d, f, indent=4)
+" 2>/dev/null
+}
+
+encrypt_key() {
+    echo "$1" | openssl enc -aes-256-cbc -a -salt -pbkdf2 \
+        -pass "pass:$(hostname)-forge-stream" 2>/dev/null
+}
+
+decrypt_key() {
+    echo "$1" | openssl enc -aes-256-cbc -d -a -pbkdf2 \
+        -pass "pass:$(hostname)-forge-stream" 2>/dev/null
+}
+
+notify() {
+    local title="$1" body="${2:-}"
+    notify-send -a "24HG Forge" -i "video-display" "$title" "$body" 2>/dev/null || true
+}
+
+log() {
+    echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+die() {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+require_cmd() {
+    for cmd in "$@"; do
+        command -v "$cmd" >/dev/null 2>&1 || die "'$cmd' not found. Install it first."
+    done
+}
+
+is_streaming() {
+    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
+
+# --- Encoder Detection ---
+
+detect_gpu_encoder() {
+    local configured
+    configured=$(cfg_get encoder)
+    if [ "$configured" != "auto" ] && [ -n "$configured" ]; then
+        echo "$configured"
+        return
+    fi
+
+    # NVIDIA
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc; then
+            echo "nvenc"
+            return
+        fi
+    fi
+
+    # AMD
+    if [ -d /sys/class/drm ] && ls /sys/class/drm/card*/device/vendor 2>/dev/null | \
+       xargs grep -l "0x1002" &>/dev/null; then
+        if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_amf; then
+            echo "amf"
+            return
+        fi
+    fi
+
+    # Intel (VA-API)
+    if [ -e /dev/dri/renderD128 ]; then
+        if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_vaapi; then
+            echo "vaapi"
+            return
+        fi
+    fi
+
+    echo "software"
+}
+
+get_encoder_flags() {
+    local encoder="$1"
+    case "$encoder" in
+        nvenc)
+            echo "-c:v h264_nvenc -preset p4 -tune ll -rc cbr -rc-lookahead 0 -zerolatency 1"
+            ;;
+        amf)
+            echo "-c:v h264_amf -quality speed -rc cbr"
+            ;;
+        vaapi)
+            echo "-vaapi_device /dev/dri/renderD128 -c:v h264_vaapi"
+            ;;
+        software)
+            echo "-c:v libx264 -preset veryfast -tune zerolatency"
+            ;;
+        *)
+            echo "-c:v libx264 -preset veryfast -tune zerolatency"
+            ;;
+    esac
+}
+
+# --- Quality Presets ---
+
+get_quality_params() {
+    local preset="${1:-1080p60}"
+    case "$preset" in
+        1080p60)
+            echo "-s 1920x1080 -r 60 -b:v 6000k -maxrate 6000k -bufsize 12000k"
+            ;;
+        720p60)
+            echo "-s 1280x720 -r 60 -b:v 4500k -maxrate 4500k -bufsize 9000k"
+            ;;
+        720p30)
+            echo "-s 1280x720 -r 30 -b:v 2500k -maxrate 2500k -bufsize 5000k"
+            ;;
+        480p30)
+            echo "-s 854x480 -r 30 -b:v 1500k -maxrate 1500k -bufsize 3000k"
+            ;;
+        *)
+            echo "-s 1920x1080 -r 60 -b:v 6000k -maxrate 6000k -bufsize 12000k"
+            ;;
+    esac
+}
+
+# --- Screen Capture Detection ---
+
+get_capture_input() {
+    # PipeWire (Wayland preferred)
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        if command -v pw-record &>/dev/null; then
+            echo "pipewire"
+            return
+        fi
+        if command -v wf-recorder &>/dev/null; then
+            echo "wf-recorder"
+            return
+        fi
+    fi
+
+    # X11 fallback
+    if [ -n "${DISPLAY:-}" ]; then
+        echo "x11grab"
+        return
+    fi
+
+    die "No display server detected. Cannot capture screen."
+}
+
+build_capture_args() {
+    local method="$1"
+    local screen_res
+    screen_res=$(xdpyinfo 2>/dev/null | grep dimensions | awk '{print $2}' || echo "1920x1080")
+
+    case "$method" in
+        pipewire)
+            # Use PipeWire screen capture portal
+            echo "-f lavfi -i \"pipewiresrc ! videoconvert\""
+            ;;
+        wf-recorder)
+            # wf-recorder outputs to pipe, we read from it
+            echo "-f rawvideo -pix_fmt bgr0 -s $screen_res -r 60 -i pipe:0"
+            ;;
+        x11grab)
+            echo "-f x11grab -framerate 60 -video_size $screen_res -i ${DISPLAY:-:0}"
+            ;;
+    esac
+}
+
+# --- Auto Game Detection ---
+
+detect_current_game() {
+    local game=""
+
+    # Check for common game processes
+    local -A game_map=(
+        ["RustClient"]="Rust"
+        ["csgo_linux64"]="Counter-Strike 2"
+        ["cs2"]="Counter-Strike 2"
+        ["hl2_linux"]="Source Engine Game"
+        ["dota2"]="Dota 2"
+        ["factorio"]="Factorio"
+        ["valheim"]="Valheim"
+        ["Minecraft"]="Minecraft"
+        ["java"]="Minecraft"
+        ["terraria"]="Terraria"
+        ["EscapeFromTar"]="Escape from Tarkov"
+        ["GarrysMod"]="Garry's Mod"
+        ["tf_linux64"]="Team Fortress 2"
+        ["insurgency_linux"]="Insurgency"
+    )
+
+    for proc in "${!game_map[@]}"; do
+        if pgrep -x "$proc" &>/dev/null || pgrep -f "$proc" &>/dev/null; then
+            game="${game_map[$proc]}"
+            break
+        fi
+    done
+
+    # Try to get game from Steam if running
+    if [ -z "$game" ] && pgrep -x steam &>/dev/null; then
+        local steam_log="$HOME/.local/share/Steam/logs/content_log.txt"
+        if [ -f "$steam_log" ]; then
+            game=$(tail -20 "$steam_log" 2>/dev/null | grep -oP 'AppID \d+ : \K[^"]+' | tail -1 || true)
+        fi
+    fi
+
+    # Fallback to active window title
+    if [ -z "$game" ]; then
+        if command -v xdotool &>/dev/null; then
+            game=$(xdotool getactivewindow getwindowname 2>/dev/null || true)
+        fi
+    fi
+
+    echo "${game:-Desktop}"
+}
+
+# --- Stream Key Management ---
+
+get_stream_key() {
+    local platform="$1" provided_key="${2:-}"
+
+    if [ -n "$provided_key" ]; then
+        # Save the key encrypted
+        local enc_key
+        enc_key=$(encrypt_key "$provided_key")
+        cfg_set "${platform}_stream_key_enc" "$enc_key"
+        echo "$provided_key"
+        return
+    fi
+
+    # Try to load saved key
+    local enc_key
+    enc_key=$(cfg_get "${platform}_stream_key_enc")
+    if [ -n "$enc_key" ]; then
+        local dec_key
+        dec_key=$(decrypt_key "$enc_key") && echo "$dec_key" && return
+    fi
+
+    # Prompt user
+    echo -n "Enter $platform stream key: " >&2
+    read -rs key
+    echo "" >&2
+    if [ -z "$key" ]; then
+        die "No stream key provided."
+    fi
+
+    local enc
+    enc=$(encrypt_key "$key")
+    cfg_set "${platform}_stream_key_enc" "$enc"
+    echo "$key"
+}
+
+# --- RTMP URL Builders ---
+
+get_rtmp_url() {
+    local platform="$1" key="$2"
+    case "$platform" in
+        twitch)
+            echo "rtmp://live.twitch.tv/app/$key"
+            ;;
+        youtube)
+            echo "rtmp://a.rtmp.youtube.com/live2/$key"
+            ;;
+        custom)
+            echo "$key"
+            ;;
+        *)
+            die "Unknown platform: $platform"
+            ;;
+    esac
+}
+
+# --- Start Streaming ---
+
+start_stream() {
+    local platform="$1" key="$2"
+
+    if is_streaming; then
+        die "Already streaming (PID $(cat "$PID_FILE")). Run 'forge-go-live stop' first."
+    fi
+
+    require_cmd ffmpeg
+
+    local rtmp_url
+    rtmp_url=$(get_rtmp_url "$platform" "$key")
+
+    local encoder quality capture_method
+    encoder=$(detect_gpu_encoder)
+    quality=$(cfg_get quality_preset)
+    [ -z "$quality" ] && quality="1080p60"
+    capture_method=$(get_capture_input)
+
+    local encoder_flags quality_params audio_args
+    encoder_flags=$(get_encoder_flags "$encoder")
+    quality_params=$(get_quality_params "$quality")
+    log "Starting stream to $platform"
+    log "Encoder: $encoder | Quality: $quality | Capture: $capture_method"
+
+    local screen_res
+    screen_res=$(xdpyinfo 2>/dev/null | grep dimensions | awk '{print $2}' || echo "1920x1080")
+
+    # Resolve audio sources
+    local include_mic audio_bitrate desktop_source mic_source
+    include_mic=$(cfg_get include_mic)
+    audio_bitrate=$(cfg_get audio_bitrate)
+    [ -z "$audio_bitrate" ] && audio_bitrate="160k"
+    desktop_source=$(pactl get-default-sink 2>/dev/null).monitor
+    [ "$desktop_source" = ".monitor" ] && \
+        desktop_source=$(pactl list short sources 2>/dev/null | grep monitor | head -1 | awk '{print $2}')
+    mic_source=$(pactl get-default-source 2>/dev/null)
+
+    # Common output flags
+    local out_flags="$encoder_flags $quality_params -c:a aac -b:a $audio_bitrate -ar 44100"
+    out_flags+=" -pix_fmt yuv420p -g 120 -keyint_min 60 -f flv \"$rtmp_url\""
+
+    # Build ffmpeg command based on capture method
+    local ffmpeg_cmd=""
+    local prefix=""
+    case "$capture_method" in
+        x11grab)
+            ffmpeg_cmd="ffmpeg -loglevel warning -stats"
+            ffmpeg_cmd+=" -f x11grab -framerate 60 -video_size $screen_res -i ${DISPLAY:-:0}"
+            ;;
+        pipewire)
+            ffmpeg_cmd="ffmpeg -loglevel warning -stats -f lavfi -i \"desktop\""
+            ;;
+        wf-recorder)
+            prefix="wf-recorder --muxer=rawvideo -t --file=- 2>/dev/null | "
+            ffmpeg_cmd="ffmpeg -loglevel warning -stats"
+            ffmpeg_cmd+=" -f rawvideo -pix_fmt bgr0 -s $screen_res -r 60 -i pipe:0"
+            ;;
+    esac
+
+    # Add audio (desktop + optional mic mix)
+    if [ "$include_mic" = "true" ] && [ -n "$mic_source" ] && [ "$mic_source" != "unknown" ]; then
+        ffmpeg_cmd+=" -f pulse -i \"$desktop_source\" -f pulse -i \"$mic_source\""
+        ffmpeg_cmd+=" -filter_complex \"[1:a]volume=1.0[mic];[2:a]volume=1.0[desk];[desk][mic]amix=inputs=2:duration=longest[aout]\""
+        ffmpeg_cmd+=" -map 0:v -map \"[aout]\""
+    else
+        ffmpeg_cmd+=" -f pulse -i \"$desktop_source\" -map 0:v -map 1:a"
+    fi
+
+    # Add webcam overlay if enabled
+    local include_webcam
+    include_webcam=$(cfg_get include_webcam)
+    if [ "$include_webcam" = "true" ]; then
+        local cam_device cam_size
+        cam_device=$(cfg_get webcam_device); [ -z "$cam_device" ] && cam_device="/dev/video0"
+        cam_size=$(cfg_get webcam_size); [ -z "$cam_size" ] && cam_size="320x240"
+        [ -e "$cam_device" ] && ffmpeg_cmd+=" -f v4l2 -video_size $cam_size -i $cam_device"
+    fi
+
+    ffmpeg_cmd+=" $out_flags"
+    ffmpeg_cmd="${prefix}${ffmpeg_cmd}"
+
+    # Record start time
+    date +%s > "$STATS_FILE"
+    echo "$platform" >> "$STATS_FILE"
+    echo "$quality" >> "$STATS_FILE"
+    echo "$encoder" >> "$STATS_FILE"
+
+    # Launch ffmpeg in background
+    log "Command: $ffmpeg_cmd"
+    eval "$ffmpeg_cmd" >> "$LOG_FILE" 2>&1 &
+    local stream_pid=$!
+    echo "$stream_pid" > "$PID_FILE"
+
+    # Verify it started
+    sleep 2
+    if ! kill -0 "$stream_pid" 2>/dev/null; then
+        rm -f "$PID_FILE" "$STATS_FILE"
+        echo ""
+        echo "Stream failed to start. Check log: $LOG_FILE"
+        tail -5 "$LOG_FILE"
+        exit 1
+    fi
+
+    local game
+    game=$(detect_current_game)
+
+    echo ""
+    echo "  ================================================"
+    echo "  24HG Forge — LIVE on ${platform^^}"
+    echo "  ================================================"
+    echo "  Encoder:  $encoder"
+    echo "  Quality:  $quality"
+    echo "  Capture:  $capture_method"
+    echo "  Game:     $game"
+    echo "  PID:      $stream_pid"
+    echo "  ================================================"
+    echo ""
+    echo "  Commands:"
+    echo "    forge-go-live status   — Stream stats"
+    echo "    forge-go-live stop     — End stream"
+    echo "    forge-go-live chat     — View Twitch chat"
+    echo ""
+
+    notify "24HG Forge — LIVE" "Streaming to ${platform^^} | $quality | $encoder"
+
+    # Auto-detect and set game title on Twitch
+    if [ "$platform" = "twitch" ] && [ "$game" != "Desktop" ]; then
+        local oauth client_id
+        oauth=$(cfg_get twitch_oauth_token)
+        client_id=$(cfg_get twitch_client_id)
+        if [ -n "$oauth" ] && [ -n "$client_id" ]; then
+            update_twitch_game "$game" &>/dev/null &
+            log "Auto-set Twitch game: $game"
+        fi
+    fi
+}
+
+# --- Stop Streaming ---
+
+stop_stream() {
+    if ! is_streaming; then
+        echo "Not currently streaming."
+        return 0
+    fi
+
+    local pid
+    pid=$(cat "$PID_FILE")
+    log "Stopping stream (PID $pid)"
+
+    # Graceful shutdown
+    kill -SIGINT "$pid" 2>/dev/null || true
+    sleep 2
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -SIGKILL "$pid" 2>/dev/null || true
+    fi
+
+    # Kill any wf-recorder too
+    pkill -f "wf-recorder.*forge" 2>/dev/null || true
+
+    # Calculate duration
+    if [ -f "$STATS_FILE" ]; then
+        local start_time platform
+        start_time=$(head -1 "$STATS_FILE")
+        platform=$(sed -n '2p' "$STATS_FILE")
+        local duration=$(( $(date +%s) - start_time ))
+        local hours=$(( duration / 3600 ))
+        local minutes=$(( (duration % 3600) / 60 ))
+        local seconds=$(( duration % 60 ))
+
+        echo ""
+        echo "  Stream ended."
+        echo "  Platform: ${platform^^}"
+        echo "  Duration: ${hours}h ${minutes}m ${seconds}s"
+        echo ""
+
+        notify "Stream Ended" "Duration: ${hours}h ${minutes}m ${seconds}s"
+    fi
+
+    rm -f "$PID_FILE" "$STATS_FILE"
+
+    # Stop chat if running
+    if [ -f "$CHAT_PID_FILE" ]; then
+        kill "$(cat "$CHAT_PID_FILE")" 2>/dev/null || true
+        rm -f "$CHAT_PID_FILE"
+    fi
+}
+
+# --- Stream Status ---
+
+show_status() {
+    if ! is_streaming; then
+        echo "Not currently streaming."
+        return 0
+    fi
+
+    local pid
+    pid=$(cat "$PID_FILE")
+
+    local start_time platform quality encoder
+    start_time=$(head -1 "$STATS_FILE" 2>/dev/null || echo "0")
+    platform=$(sed -n '2p' "$STATS_FILE" 2>/dev/null || echo "unknown")
+    quality=$(sed -n '3p' "$STATS_FILE" 2>/dev/null || echo "unknown")
+    encoder=$(sed -n '4p' "$STATS_FILE" 2>/dev/null || echo "unknown")
+
+    local duration=$(( $(date +%s) - start_time ))
+    local hours=$(( duration / 3600 ))
+    local minutes=$(( (duration % 3600) / 60 ))
+    local seconds=$(( duration % 60 ))
+
+    # Parse ffmpeg stats from log
+    local fps bitrate dropped speed
+    fps=$(tail -5 "$LOG_FILE" 2>/dev/null | grep -oP 'fps=\s*\K[0-9.]+' | tail -1 || echo "?")
+    bitrate=$(tail -5 "$LOG_FILE" 2>/dev/null | grep -oP 'bitrate=\s*\K[0-9.]+kbits/s' | tail -1 || echo "?")
+    dropped=$(tail -5 "$LOG_FILE" 2>/dev/null | grep -oP 'drop=\s*\K[0-9]+' | tail -1 || echo "0")
+    speed=$(tail -5 "$LOG_FILE" 2>/dev/null | grep -oP 'speed=\s*\K[0-9.]+x' | tail -1 || echo "?")
+
+    # CPU/memory of ffmpeg process
+    local cpu mem
+    cpu=$(ps -p "$pid" -o %cpu= 2>/dev/null | xargs || echo "?")
+    mem=$(ps -p "$pid" -o rss= 2>/dev/null | awk '{printf "%.0f", $1/1024}' || echo "?")
+
+    local game
+    game=$(detect_current_game)
+
+    echo ""
+    echo "  ============================================"
+    echo "  24HG Forge — Stream Status"
+    echo "  ============================================"
+    echo "  Status:     LIVE"
+    echo "  Platform:   ${platform^^}"
+    echo "  Uptime:     ${hours}h ${minutes}m ${seconds}s"
+    echo "  Quality:    $quality"
+    echo "  Encoder:    $encoder"
+    echo "  FPS:        $fps"
+    echo "  Bitrate:    $bitrate"
+    echo "  Dropped:    $dropped frames"
+    echo "  Speed:      $speed"
+    echo "  CPU:        ${cpu}%"
+    echo "  Memory:     ${mem} MB"
+    echo "  Game:       $game"
+    echo "  PID:        $pid"
+    echo "  ============================================"
+    echo ""
+}
+
+# --- Twitch Chat ---
+
+show_chat() {
+    local oauth channel
+
+    channel=$(cfg_get twitch_channel)
+    oauth=$(cfg_get twitch_oauth_token)
+
+    if [ -z "$channel" ]; then
+        echo -n "Twitch channel name: "
+        read -r channel
+        cfg_set twitch_channel "$channel"
+    fi
+
+    if [ -z "$oauth" ]; then
+        echo -n "Twitch OAuth token (get from https://twitchapps.com/tmi/): "
+        read -rs oauth
+        echo ""
+        cfg_set twitch_oauth_token "$oauth"
+    fi
+
+    # Kill existing chat connection
+    if [ -f "$CHAT_PID_FILE" ]; then
+        kill "$(cat "$CHAT_PID_FILE")" 2>/dev/null || true
+    fi
+
+    require_cmd openssl
+
+    echo ""
+    echo "  Connecting to #${channel} chat..."
+    echo "  (Press Ctrl+C to disconnect)"
+    echo "  ────────────────────────────────────"
+    echo ""
+
+    # IRC via TLS using openssl s_client
+    {
+        echo "PASS oauth:${oauth}"
+        echo "NICK ${channel}"
+        echo "JOIN #${channel}"
+        echo "CAP REQ :twitch.tv/tags twitch.tv/commands"
+        # Keep connection alive
+        while true; do
+            sleep 30
+            echo "PING :tmi.twitch.tv"
+        done
+    } | openssl s_client -connect "${TWITCH_IRC}:${TWITCH_IRC_PORT}" -quiet 2>/dev/null | \
+    while IFS= read -r line; do
+        # Respond to PING
+        if [[ "$line" == PING* ]]; then
+            continue
+        fi
+
+        # Parse PRIVMSG
+        if [[ "$line" == *"PRIVMSG"* ]]; then
+            local user msg
+            user=$(echo "$line" | grep -oP '(?<=display-name=)[^;]+' || \
+                   echo "$line" | grep -oP ':([^!]+)!' | head -1 | tr -d ':!')
+            msg=$(echo "$line" | sed 's/.*PRIVMSG [^ ]* ://')
+
+            # Color based on message type
+            if [[ "$msg" == *"!forge"* ]] || [[ "$msg" == *"!24hg"* ]]; then
+                echo -e "  \033[1;33m${user}\033[0m: \033[1;36m${msg}\033[0m"
+            else
+                echo -e "  \033[1;35m${user}\033[0m: ${msg}"
+            fi
+        fi
+
+        # Show subscription events
+        if [[ "$line" == *"USERNOTICE"* ]]; then
+            local sys_msg
+            sys_msg=$(echo "$line" | grep -oP '(?<=system-msg=)[^;]+' | sed 's/\\s/ /g')
+            if [ -n "$sys_msg" ]; then
+                echo -e "  \033[1;32m*** $sys_msg ***\033[0m"
+                local alerts_on
+                alerts_on=$(cfg_get alerts_enabled)
+                if [ "$alerts_on" = "true" ]; then
+                    notify "Twitch Alert" "$sys_msg"
+                fi
+            fi
+        fi
+    done &
+
+    local chat_pid=$!
+    echo "$chat_pid" > "$CHAT_PID_FILE"
+    wait "$chat_pid" 2>/dev/null || true
+    rm -f "$CHAT_PID_FILE"
+}
+
+# --- Twitch API: Update Title ---
+
+update_twitch_title() {
+    local title="$1"
+    local oauth client_id channel
+
+    oauth=$(cfg_get twitch_oauth_token)
+    client_id=$(cfg_get twitch_client_id)
+    channel=$(cfg_get twitch_channel)
+
+    if [ -z "$oauth" ] || [ -z "$client_id" ]; then
+        die "Twitch API not configured. Run 'forge-go-live setup' first."
+    fi
+
+    # Get broadcaster ID
+    local user_data broadcaster_id
+    user_data=$(curl -s -H "Authorization: Bearer $oauth" \
+        -H "Client-Id: $client_id" \
+        "${TWITCH_API}/users?login=$channel")
+    broadcaster_id=$(echo "$user_data" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d['data'][0]['id'])" 2>/dev/null)
+
+    if [ -z "$broadcaster_id" ]; then
+        die "Could not resolve broadcaster ID for '$channel'."
+    fi
+
+    # Update title
+    local response
+    response=$(curl -s -w "\n%{http_code}" -X PATCH "${TWITCH_API}/channels?broadcaster_id=$broadcaster_id" \
+        -H "Authorization: Bearer $oauth" \
+        -H "Client-Id: $client_id" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\": \"$title\"}")
+
+    local http_code
+    http_code=$(echo "$response" | tail -1)
+
+    if [ "$http_code" = "204" ]; then
+        echo "Stream title updated: $title"
+        notify "Title Updated" "$title"
+    else
+        echo "Failed to update title (HTTP $http_code)"
+        echo "$response" | head -1
+    fi
+}
+
+# --- Twitch API: Update Game ---
+
+update_twitch_game() {
+    local game_name="$1"
+    local oauth client_id channel
+
+    oauth=$(cfg_get twitch_oauth_token)
+    client_id=$(cfg_get twitch_client_id)
+    channel=$(cfg_get twitch_channel)
+
+    if [ -z "$oauth" ] || [ -z "$client_id" ]; then
+        die "Twitch API not configured. Run 'forge-go-live setup' first."
+    fi
+
+    # Get broadcaster ID
+    local broadcaster_id
+    broadcaster_id=$(curl -s -H "Authorization: Bearer $oauth" \
+        -H "Client-Id: $client_id" \
+        "${TWITCH_API}/users?login=$channel" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d['data'][0]['id'])" 2>/dev/null)
+
+    # Search for game
+    local game_id
+    game_id=$(curl -s -H "Authorization: Bearer $oauth" \
+        -H "Client-Id: $client_id" \
+        "${TWITCH_API}/games?name=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$game_name'))")" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+if d.get('data'):
+    print(d['data'][0]['id'])
+else:
+    print('')" 2>/dev/null)
+
+    if [ -z "$game_id" ]; then
+        # Try search endpoint
+        game_id=$(curl -s -H "Authorization: Bearer $oauth" \
+            -H "Client-Id: $client_id" \
+            "${TWITCH_API}/search/categories?query=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$game_name'))")" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+if d.get('data'):
+    print(d['data'][0]['id'])
+else:
+    print('')" 2>/dev/null)
+    fi
+
+    if [ -z "$game_id" ]; then
+        die "Could not find game: $game_name"
+    fi
+
+    local response http_code
+    response=$(curl -s -w "\n%{http_code}" -X PATCH "${TWITCH_API}/channels?broadcaster_id=$broadcaster_id" \
+        -H "Authorization: Bearer $oauth" \
+        -H "Client-Id: $client_id" \
+        -H "Content-Type: application/json" \
+        -d "{\"game_id\": \"$game_id\"}")
+
+    http_code=$(echo "$response" | tail -1)
+
+    if [ "$http_code" = "204" ]; then
+        echo "Stream game updated: $game_name"
+        notify "Game Updated" "$game_name"
+    else
+        echo "Failed to update game (HTTP $http_code)"
+    fi
+}
+
+# --- Configure ---
+
+configure() {
+    cat <<EOF
+
+  24HG Forge — Stream Configuration
+  Current: $(cfg_get quality_preset) | $(cfg_get encoder) | mic:$(cfg_get include_mic) | cam:$(cfg_get include_webcam) | $(cfg_get audio_bitrate)
+
+  Quality: 1) 1080p60  2) 720p60  3) 720p30  4) 480p30
+EOF
+    echo -n "  Select [1-4, Enter=keep]: "; read -r choice
+    case "$choice" in
+        1) cfg_set quality_preset "1080p60" ;; 2) cfg_set quality_preset "720p60" ;;
+        3) cfg_set quality_preset "720p30" ;; 4) cfg_set quality_preset "480p30" ;;
+    esac
+
+    echo "  Encoder (detected: $(detect_gpu_encoder)):"
+    echo "    1) Auto  2) NVIDIA  3) AMD  4) Intel  5) Software"
+    echo -n "  Select [1-5, Enter=keep]: "; read -r choice
+    case "$choice" in
+        1) cfg_set encoder "auto" ;; 2) cfg_set encoder "nvenc" ;; 3) cfg_set encoder "amf" ;;
+        4) cfg_set encoder "vaapi" ;; 5) cfg_set encoder "software" ;;
+    esac
+
+    echo -n "  Include microphone? [Y/n]: "; read -r choice
+    case "$choice" in [nN]*) cfg_set_bool include_mic "false" ;; *) cfg_set_bool include_mic "true" ;; esac
+
+    echo -n "  Include webcam? [y/N]: "; read -r choice
+    case "$choice" in
+        [yY]*)
+            cfg_set_bool include_webcam "true"
+            echo -n "  Webcam device [/dev/video0]: "; read -r dev
+            [ -n "$dev" ] && cfg_set webcam_device "$dev"
+            echo "    1) Bottom-right  2) Bottom-left  3) Top-right  4) Top-left"
+            echo -n "  Position: "; read -r pos
+            case "$pos" in
+                1) cfg_set webcam_position "bottom-right" ;; 2) cfg_set webcam_position "bottom-left" ;;
+                3) cfg_set webcam_position "top-right" ;; 4) cfg_set webcam_position "top-left" ;;
+            esac
+            echo -n "  Size [320x240]: "; read -r size
+            [ -n "$size" ] && cfg_set webcam_size "$size"
+            ;;
+        *) cfg_set_bool include_webcam "false" ;;
+    esac
+
+    echo "  Audio: 1) 128k  2) 160k  3) 192k  4) 256k  5) 320k"
+    echo -n "  Select [1-5, Enter=keep]: "; read -r choice
+    case "$choice" in
+        1) cfg_set audio_bitrate "128k" ;; 2) cfg_set audio_bitrate "160k" ;; 3) cfg_set audio_bitrate "192k" ;;
+        4) cfg_set audio_bitrate "256k" ;; 5) cfg_set audio_bitrate "320k" ;;
+    esac
+
+    echo "  Saved to: $CONFIG_FILE"
+}
+
+# --- Setup Wizard ---
+
+setup_wizard() {
+    echo ""
+    echo "  24HG Forge — Streaming Setup Wizard"
+    echo "  ════════════════════════════════════"
+
+    # Check dependencies
+    echo "  Checking dependencies..."
+    local missing=()
+    for cmd in ffmpeg pactl python3 openssl curl; do
+        if command -v "$cmd" &>/dev/null; then echo "    [OK] $cmd"
+        else echo "    [!!] $cmd — NOT FOUND"; missing+=("$cmd"); fi
+    done
+    for cmd in xdpyinfo xdotool wf-recorder pw-record notify-send; do
+        if command -v "$cmd" &>/dev/null; then echo "    [OK] $cmd (optional)"
+        else echo "    [--] $cmd (optional)"; fi
+    done
+    [ ${#missing[@]} -gt 0 ] && echo "  Missing required: ${missing[*]}"
+
+    # Detect hardware
+    local encoder; encoder=$(detect_gpu_encoder)
+    echo "  GPU encoder: $encoder"
+    cfg_set encoder "auto"
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then echo "  Display: Wayland"
+    elif [ -n "${DISPLAY:-}" ]; then echo "  Display: X11"
+    else echo "  Display: none (headless?)"; fi
+
+    # Platform
+    echo "  Platform: 1) Twitch  2) YouTube  3) Custom RTMP"
+    echo -n "  Select [1-3]: "; read -r plat_choice
+    case "$plat_choice" in
+        1) cfg_set platform "twitch" ;; 2) cfg_set platform "youtube" ;;
+        3) cfg_set platform "custom" ;; *) cfg_set platform "twitch" ;;
+    esac
+    local platform; platform=$(cfg_get platform)
+
+    # Platform-specific credentials
+    case "$platform" in
+        twitch)
+            echo -n "  Channel name: "; read -r channel
+            cfg_set twitch_channel "$channel"
+            echo -n "  Stream key: "; read -rs key; echo ""
+            if [ -n "$key" ]; then cfg_set twitch_stream_key_enc "$(encrypt_key "$key")"; echo "    Saved."; fi
+            echo "  For chat/title: create app at dev.twitch.tv, get token at twitchapps.com/tmi/"
+            echo -n "  Client ID (Enter=skip): "; read -r client_id
+            [ -n "$client_id" ] && cfg_set twitch_client_id "$client_id"
+            echo -n "  OAuth token (Enter=skip): "; read -rs oauth; echo ""
+            [ -n "$oauth" ] && cfg_set twitch_oauth_token "$oauth"
+            ;;
+        youtube)
+            echo -n "  Stream key: "; read -rs key; echo ""
+            if [ -n "$key" ]; then cfg_set youtube_stream_key_enc "$(encrypt_key "$key")"; echo "    Saved."; fi
+            ;;
+        custom)
+            echo -n "  RTMP URL: "; read -r url; cfg_set custom_rtmp_url "$url"
+            ;;
+    esac
+
+    # Quality
+    echo "  Quality: 1) 1080p60  2) 720p60  3) 720p30  4) 480p30"
+    echo -n "  Select [1-4]: "; read -r q_choice
+    case "$q_choice" in
+        1) cfg_set quality_preset "1080p60" ;; 3) cfg_set quality_preset "720p30" ;;
+        4) cfg_set quality_preset "480p30" ;; *) cfg_set quality_preset "720p60" ;;
+    esac
+
+    # Test stream
+    echo -n "  Run 10-second test? [y/N]: "; read -r test_choice
+    if [[ "$test_choice" =~ ^[yY] ]]; then
+        local test_key; test_key=$(get_stream_key "$platform" 2>/dev/null || echo "")
+        if [ -n "$test_key" ]; then
+            local screen_res; screen_res=$(xdpyinfo 2>/dev/null | grep dimensions | awk '{print $2}' || echo "1920x1080")
+            timeout 12 ffmpeg -loglevel error \
+                -f x11grab -framerate 30 -video_size "$screen_res" -i "${DISPLAY:-:0}" \
+                -t 10 -c:v libx264 -preset ultrafast -b:v 2500k \
+                -f flv "$(get_rtmp_url "$platform" "$test_key")" 2>&1 \
+                && echo "    Test: SUCCESS" || echo "    Test: FAILED"
+        else echo "    Skipped (no key)."; fi
+    fi
+
+    cat <<EOF
+
+  Setup complete! Config: $CONFIG_FILE
+  Quick start: forge-go-live twitch | config | chat
+EOF
+}
+
+# --- Alerts Toggle ---
+
+toggle_alerts() {
+    local state="${1:-}"
+    case "$state" in
+        on)
+            cfg_set_bool alerts_enabled "true"
+            echo "Stream alerts: ON"
+            notify "Alerts Enabled" "You will receive stream notifications."
+            ;;
+        off)
+            cfg_set_bool alerts_enabled "false"
+            echo "Stream alerts: OFF"
+            ;;
+        *)
+            local current
+            current=$(cfg_get alerts_enabled)
+            echo "Stream alerts are currently: $([ "$current" = "true" ] && echo "ON" || echo "OFF")"
+            echo "Usage: forge-go-live alerts on|off"
+            ;;
+    esac
+}
+
+# --- Overlay ---
+
+launch_overlay() {
+    local include_webcam cam_device cam_size cam_pos
+    include_webcam=$(cfg_get include_webcam)
+    cam_device=$(cfg_get webcam_device); [ -z "$cam_device" ] && cam_device="/dev/video0"
+    cam_size=$(cfg_get webcam_size); [ -z "$cam_size" ] && cam_size="320x240"
+    cam_pos=$(cfg_get webcam_position); [ -z "$cam_pos" ] && cam_pos="bottom-right"
+
+    is_streaming || { echo "Not streaming. Start first with: forge-go-live twitch"; return 1; }
+
+    cat <<EOF
+
+  24HG Forge — Stream Overlay
+  Webcam: $([ "$include_webcam" = "true" ] && echo "ON ($cam_device)" || echo "OFF") | Pos: $cam_pos | Size: $cam_size
+
+  1) Toggle webcam   2) Change position   3) Change size   4) Back
+EOF
+    echo -n "  Select: "
+    read -r choice
+    case "$choice" in
+        1)
+            if [ "$include_webcam" = "true" ]; then
+                cfg_set_bool include_webcam "false"; echo "  Webcam disabled."
+            else
+                cfg_set_bool include_webcam "true"; echo "  Webcam enabled."
+            fi
+            echo "  Restart stream to apply." ;;
+        2)
+            echo "    1) Bottom-right  2) Bottom-left  3) Top-right  4) Top-left"
+            echo -n "    Select: "; read -r pos
+            case "$pos" in
+                1) cfg_set webcam_position "bottom-right" ;; 2) cfg_set webcam_position "bottom-left" ;;
+                3) cfg_set webcam_position "top-right" ;; 4) cfg_set webcam_position "top-left" ;;
+            esac
+            echo "  Updated. Restart stream to apply." ;;
+        3)
+            echo -n "    Size (WxH): "; read -r size
+            [ -n "$size" ] && cfg_set webcam_size "$size"
+            echo "  Updated. Restart stream to apply." ;;
+        4) return 0 ;;
+    esac
+}
+
+# --- Usage ---
+
+usage() {
+    echo ""
+    echo "  24HG Forge Go Live — Streaming Tool"
+    echo "  ════════════════════════════════════"
+    echo ""
+    echo "  Usage: forge-go-live <command> [args]"
+    echo ""
+    echo "  Streaming:"
+    echo "    twitch [key]       Go live on Twitch"
+    echo "    youtube [key]      Go live on YouTube"
+    echo "    custom <rtmp-url>  Stream to custom RTMP endpoint"
+    echo "    stop               Stop streaming"
+    echo "    status             Show stream status (uptime, bitrate, fps)"
+    echo ""
+    echo "  Twitch Integration:"
+    echo "    chat               Show Twitch chat in terminal"
+    echo "    title <text>       Update stream title"
+    echo "    game <name>        Update stream game/category"
+    echo ""
+    echo "  Configuration:"
+    echo "    config             Configure stream settings"
+    echo "    setup              First-time setup wizard"
+    echo "    alerts on|off      Toggle stream alert notifications"
+    echo "    overlay            Launch stream overlay settings"
+    echo ""
+    echo "  Quality Presets:"
+    echo "    1080p60  6000 kbps  (best quality, needs fast upload)"
+    echo "    720p60   4500 kbps  (recommended for most streamers)"
+    echo "    720p30   2500 kbps  (low bandwidth)"
+    echo "    480p30   1500 kbps  (minimum viable)"
+    echo ""
+    echo "  GPU Encoders (auto-detected):"
+    echo "    NVIDIA   h264_nvenc   (lowest CPU usage)"
+    echo "    AMD      h264_amf     (good performance)"
+    echo "    Intel    h264_vaapi   (integrated GPU)"
+    echo "    Software libx264      (fallback, high CPU)"
+    echo ""
+    echo "  Config: $CONFIG_FILE"
+    echo ""
+}
+
+# --- Main ---
+
+ensure_config_dir
+
+ACTION="${1:-}"
+shift || true
+
+case "$ACTION" in
+    twitch)    start_stream "twitch" "$(get_stream_key "twitch" "${1:-}")" ;;
+    youtube)   start_stream "youtube" "$(get_stream_key "youtube" "${1:-}")" ;;
+    custom)    [ -z "${1:-}" ] && die "Usage: forge-go-live custom <rtmp-url>"; start_stream "custom" "$1" ;;
+    stop)      stop_stream ;;
+    status)    show_status ;;
+    chat)      show_chat ;;
+    title)     [ -z "${1:-}" ] && die "Usage: forge-go-live title <text>"; update_twitch_title "$*" ;;
+    game)      [ -z "${1:-}" ] && die "Usage: forge-go-live game <name>"; update_twitch_game "$*" ;;
+    config)    configure ;;
+    setup)     setup_wizard ;;
+    alerts)    toggle_alerts "${1:-}" ;;
+    overlay)   launch_overlay ;;
+    help|--help|-h|"") usage ;;
+    *)         echo "Unknown command: $ACTION"; usage; exit 1 ;;
+esac

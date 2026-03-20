@@ -58,6 +58,7 @@ ${C2}    ■${C0} Voice: LiveKit  ${C2}■${C0} discord.gg/ymfEjH6EJN     ${C1}D
                                                     ${C1}Display${C0}   ${C3}${RES}${C0}
 
     ${C5}────────────────────────────────────────────────────────────────────${C0}
-    ${C1}[F12]${C0} Toggle MangoHud  ${C1}[Super]${C0} App Launcher  ${C1}[Tray]${C0} Quick Connect
+    ${C1}[F12]${C0} MangoHud  ${C1}[F9]${C0} Save Clip  ${C1}[Super]${C0} Launcher  ${C1}[Tray]${C0} Quick Connect
+    ${C5}Try:${C0} ${C2}radio${C0} ${C5}|${C0} ${C2}lan${C0} ${C5}|${C0} ${C2}clip${C0} ${C5}|${C0} ${C2}rig-score${C0} ${C5}|${C0} ${C2}invite${C0} ${C5}|${C0} ${C2}hw-tune${C0} ${C5}|${C0} ${C2}tournament${C0}
 ${C0}
 EOF

@@ -27,8 +27,8 @@ from typing import Optional
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
-DATA_DIR = Path(os.environ.get("HUBOS_AC_DATA", Path.home() / ".local/share/forge/anticheat"))
-CACHE_DIR = Path(os.environ.get("HUBOS_AC_CACHE", Path.home() / ".cache/forge/anticheat"))
+DATA_DIR = Path(os.environ.get("FORGE_AC_DATA", Path.home() / ".local/share/forge/anticheat"))
+CACHE_DIR = Path(os.environ.get("FORGE_AC_CACHE", Path.home() / ".cache/forge/anticheat"))
 LAST_SCAN_FILE = DATA_DIR / "last-scan.json"
 HISTORY_FILE = DATA_DIR / "history.json"
 TRACKING_FILE = DATA_DIR / "tracking.json"

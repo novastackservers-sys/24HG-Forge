@@ -1,0 +1,21 @@
+# 24HG Forge — Cloudflare R2 rclone configuration
+# Copy this file to rclone.conf and fill in your credentials.
+#
+# To get these values:
+#   1. Log in to Cloudflare Dashboard
+#   2. Go to R2 Object Storage > Manage R2 API Tokens
+#   3. Create a new API token with read/write access
+#   4. Copy the Access Key ID, Secret Access Key, and Account ID
+#
+# Bucket setup:
+#   - Create a bucket named "forge-iso" in R2
+#   - Optionally connect a custom domain (cdn.24hgaming.com)
+
+[r2forge]
+type = s3
+provider = Cloudflare
+access_key_id = YOUR_R2_ACCESS_KEY_ID
+secret_access_key = YOUR_R2_SECRET_ACCESS_KEY
+endpoint = https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+acl = private
+no_check_bucket = true

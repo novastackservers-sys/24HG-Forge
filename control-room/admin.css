@@ -1,13 +1,13 @@
 /* 24HG Forge Control Room — Dashboard Styles */
-/* Inherits CSS vars from landing page style.css */
+/* Uses 24HG brand colors (synced with landing page style.css) */
 
 :root {
-    --bg: #0a0a14;
-    --bg-card: #0e0e1c;
-    --bg-elevated: #12122a;
-    --accent: #58a6ff;
-    --accent-hover: #79baff;
-    --accent-dim: #58a6ff20;
+    --bg: #040910;
+    --bg-card: #0a1018;
+    --bg-elevated: #0e1622;
+    --accent: #00e5ff;
+    --accent-hover: #33ecff;
+    --accent-dim: #00e5ff20;
     --text: #c8c8dc;
     --text-dim: #606080;
     --text-bright: #ffffff;

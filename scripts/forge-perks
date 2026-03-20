@@ -46,7 +46,7 @@ CACHE_DIR = os.path.expanduser("~/.cache/forge")
 PERKS_FILE = os.path.join(CONFIG_DIR, "perks.json")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "hub-token")
 STATE_FILE = os.path.join(CACHE_DIR, "hub-state.json")
-HUBOS_VERSION_FILE = "/etc/forge-release"
+FORGE_VERSION_FILE = "/etc/forge-release"
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -204,9 +204,9 @@ def save_perks(data):
 
 def get_forge_version():
     """Read 24HG Forge version from release file."""
-    if os.path.exists(HUBOS_VERSION_FILE):
+    if os.path.exists(FORGE_VERSION_FILE):
         try:
-            with open(HUBOS_VERSION_FILE) as f:
+            with open(FORGE_VERSION_FILE) as f:
                 for line in f:
                     if line.startswith("VERSION="):
                         return line.split("=", 1)[1].strip().strip('"')
@@ -470,7 +470,7 @@ def cmd_claim():
     print(f"  {GREEN}{BOLD}  Welcome to the 24HG Forge family!{RESET}")
     print(f"  {GREEN}{BOLD}{'=' * 56}{RESET}\n")
 
-    draw_box("YOUR HUBOS PERKS", [
+    draw_box("YOUR FORGE PERKS", [
         f"{GREEN}+{RESET} {BOLD}30-day VIP trial{RESET} on ALL 24HG game servers",
         f"  {DIM}Expires: {vip_exp}{RESET}",
         "",
@@ -605,7 +605,7 @@ def cmd_status():
         )
         zenity_info("24HG Forge Perks Status", plain)
     else:
-        draw_box("HUBOS PERKS STATUS", lines)
+        draw_box("FORGE PERKS STATUS", lines)
 
 
 # ═══════════════════════════════════════════
@@ -686,7 +686,7 @@ def cmd_badge():
                 sys.argv = [sys.argv[0], "badge", "preview"]
                 cmd_badge()
         else:
-            draw_box("HUBOS BADGE", lines)
+            draw_box("FORGE BADGE", lines)
 
 
 # ═══════════════════════════════════════════

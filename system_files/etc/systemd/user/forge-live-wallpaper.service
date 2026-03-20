@@ -1,0 +1,12 @@
+[Unit]
+Description=24HG Forge Live Wallpaper Daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/forge-live-wallpaper start --foreground
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

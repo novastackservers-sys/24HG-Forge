@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Forge Dual GPU
+Comment=Hybrid GPU switching
+Exec=/usr/bin/forge-dual-gpu
+Icon=forge-logo
+Terminal=true
+Type=Application
+Categories=System;HardwareSettings;
+Keywords=gpu;hybrid;nvidia;optimus;prime;switch;

@@ -30,7 +30,7 @@ fi
 detect_gpu_encoder() {
     if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null; then
         echo "h264_nvenc"
-    elif [ -d /sys/class/drm/card0/device ] && grep -qi amd /sys/class/drm/card0/device/vendor 2>/dev/null; then
+    elif [ -d /sys/class/drm/card0/device ] && grep -qi '0x1002' /sys/class/drm/card0/device/vendor 2>/dev/null; then
         echo "h264_vaapi"
     else
         echo "h264_vaapi"  # Intel / generic

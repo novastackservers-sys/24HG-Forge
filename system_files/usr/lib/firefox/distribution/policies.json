@@ -1,0 +1,78 @@
+{
+  "policies": {
+    "Homepage": {
+      "URL": "https://hub.24hgaming.com",
+      "Locked": false,
+      "StartPage": "homepage"
+    },
+    "NewTabPage": true,
+    "OverrideFirstRunPage": "https://hub.24hgaming.com/welcome",
+    "OverridePostUpdatePage": "",
+    "DisplayBookmarksToolbar": "always",
+    "NoDefaultBookmarks": true,
+    "ManagedBookmarks": [
+      {
+        "toplevel_name": "24HG"
+      },
+      {
+        "url": "https://hub.24hgaming.com",
+        "name": "24HG Hub"
+      },
+      {
+        "url": "https://hub.24hgaming.com/servers",
+        "name": "Game Servers"
+      },
+      {
+        "url": "https://hub.24hgaming.com/forums",
+        "name": "Forums"
+      },
+      {
+        "url": "https://hub.24hgaming.com/tournaments",
+        "name": "Tournaments"
+      },
+      {
+        "url": "https://hub.24hgaming.com/leaderboards",
+        "name": "Leaderboards"
+      },
+      {
+        "url": "https://discord.gg/ymfEjH6EJN",
+        "name": "Discord"
+      },
+      {
+        "url": "https://24hgaming.com/os",
+        "name": "24HG Forge"
+      }
+    ],
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DisablePocket": true,
+    "DisableFirefoxAccounts": false,
+    "DontCheckDefaultBrowser": true,
+    "UserMessaging": {
+      "WhatsNew": false,
+      "ExtensionRecommendations": false,
+      "FeatureRecommendations": false,
+      "UrlbarInterventions": false,
+      "SkipOnboarding": true,
+      "MoreFromMozilla": false
+    },
+    "Preferences": {
+      "browser.newtabpage.activity-stream.showSponsored": {
+        "Value": false,
+        "Status": "locked"
+      },
+      "browser.newtabpage.activity-stream.showSponsoredTopSites": {
+        "Value": false,
+        "Status": "locked"
+      },
+      "browser.newtabpage.activity-stream.feeds.topsites": {
+        "Value": true,
+        "Status": "default"
+      },
+      "browser.urlbar.suggest.quicksuggest.sponsored": {
+        "Value": false,
+        "Status": "locked"
+      }
+    }
+  }
+}

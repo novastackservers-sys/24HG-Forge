@@ -53,6 +53,7 @@
             <li><a href="#roadmap" data-page="roadmap"><span class="icon">&#9776;</span> <span>Roadmap</span></a></li>
             <li><a href="#analytics" data-page="analytics"><span class="icon">&#9670;</span> <span>Analytics</span></a></li>
             <li><a href="#announcements" data-page="announcements"><span class="icon">&#9993;</span> <span>Announcements</span></a></li>
+            <li><a href="#vpn" data-page="vpn"><span class="icon">&#9737;</span> <span>VPN</span></a></li>
             <li><a href="#activity" data-page="activity"><span class="icon">&#9202;</span> <span>Activity</span></a></li>
         </ul>
         <div class="sidebar-links">
@@ -266,6 +267,31 @@
             <div id="announcements-list"></div>
         </div>
 
+        <!-- ── VPN ── -->
+        <div id="page-vpn" class="page-section">
+            <div class="page-header flex-between">
+                <div>
+                    <h1>Discovery VPN</h1>
+                    <p>Manage WireGuard peers on the 24HG virtual LAN</p>
+                </div>
+                <div style="display:flex; gap:0.5rem;">
+                    <button class="btn btn-primary btn-small" onclick="showAddPeerModal()">+ Add Peer</button>
+                    <button class="btn btn-secondary btn-small" onclick="loadVpn()">Refresh</button>
+                </div>
+            </div>
+            <div class="stats-grid" id="vpn-stats">
+                <div class="stat-card"><div class="stat-value" id="vpn-total">—</div><div class="stat-label">Total Peers</div></div>
+                <div class="stat-card"><div class="stat-value" id="vpn-online">—</div><div class="stat-label">Online Now</div></div>
+                <div class="stat-card"><div class="stat-value" id="vpn-status">—</div><div class="stat-label">WireGuard</div></div>
+            </div>
+            <div class="table-wrapper">
+                <table class="data-table">
+                    <thead><tr><th>Username</th><th>VPN IP</th><th>Status</th><th>Last Handshake</th><th>Actions</th></tr></thead>
+                    <tbody id="vpn-peers-list"></tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- ── ACTIVITY ── -->
         <div id="page-activity" class="page-section">
             <div class="page-header flex-between">
@@ -436,6 +462,7 @@ function navigateTo(page, updateHash = true) {
         roadmap: loadRoadmap,
         analytics: loadAnalytics,
         announcements: loadAnnouncements,
+        vpn: loadVpn,
         activity: loadActivity,
     };
     if (loaders[page]) loaders[page]();
@@ -1109,6 +1136,82 @@ async function deleteAnnouncementEntry(id) {
 // ── Modal ──
 function closeModal() {
     document.getElementById('modal-overlay').style.display = 'none';
+}
+
+// ── VPN Management ──
+async function loadVpn() {
+    try {
+        const [healthRes, statusRes] = await Promise.all([
+            apiFetch('/vpn/health'),
+            apiFetch('/vpn/status'),
+        ]);
+        const health = await healthRes.json();
+        const status = await statusRes.json();
+
+        document.getElementById('vpn-total').textContent = status.total_peers ?? '—';
+        document.getElementById('vpn-online').textContent = status.online ?? '—';
+        document.getElementById('vpn-status').textContent = health.wireguard === 'up' ? '● Up' : '● Down';
+        document.getElementById('vpn-status').style.color = health.wireguard === 'up' ? 'var(--green)' : 'var(--red)';
+
+        const tbody = document.getElementById('vpn-peers-list');
+        if (!status.peers || status.peers.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-dim)">No VPN peers registered</td></tr>';
+            return;
+        }
+        tbody.innerHTML = status.peers.map(p => `
+            <tr>
+                <td><strong>${escapeHTML(p.username)}</strong></td>
+                <td><code>${escapeHTML(p.ip)}</code></td>
+                <td>${p.online ? '<span style="color:var(--green)">● Online</span>' : '<span style="color:var(--text-dim)">○ Offline</span>'}</td>
+                <td style="color:var(--text-dim)">${p.last_handshake ? new Date(p.last_handshake).toLocaleString() : 'Never'}</td>
+                <td><button class="btn btn-danger btn-small" onclick="removePeer('${escapeHTML(p.username)}')">Remove</button></td>
+            </tr>
+        `).join('');
+    } catch (e) {
+        toast('Failed to load VPN data: ' + e.message, 'error');
+    }
+}
+
+async function removePeer(username) {
+    if (!confirm(`Remove VPN peer "${username}"? They will need to rejoin.`)) return;
+    try {
+        const res = await apiFetch(`/vpn/remove`, { method: 'POST', body: { username } });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Failed'); }
+        toast(`Peer "${username}" removed`, 'success');
+        loadVpn();
+    } catch (e) {
+        toast('Failed to remove peer: ' + e.message, 'error');
+    }
+}
+
+function showAddPeerModal() {
+    document.getElementById('modal-content').innerHTML = `
+        <h2>Add VPN Peer</h2>
+        <form onsubmit="addPeer(event)">
+            <label>Username<input type="text" id="vpn-add-username" required placeholder="Hub username"></label>
+            <div style="margin-top:1rem;display:flex;gap:0.5rem;justify-content:flex-end;">
+                <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Add Peer</button>
+            </div>
+        </form>
+    `;
+    document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+async function addPeer(e) {
+    e.preventDefault();
+    const username = document.getElementById('vpn-add-username').value.trim();
+    if (!username) return;
+    try {
+        const res = await apiFetch('/vpn/add', { method: 'POST', body: { username } });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed');
+        closeModal();
+        toast(`Peer "${username}" added — IP: ${data.assigned_ip}`, 'success');
+        loadVpn();
+    } catch (e) {
+        toast('Failed to add peer: ' + e.message, 'error');
+    }
 }
 
 // ── Util ──

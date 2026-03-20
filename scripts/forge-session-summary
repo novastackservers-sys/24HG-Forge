@@ -487,7 +487,7 @@ def detect_session_info(appid: str) -> dict:
     if not info["start"]:
         info["end"] = datetime.now().isoformat(timespec="seconds")
         # Check environment for timing hints
-        env_start = os.environ.get("HUBOS_GAME_START")
+        env_start = os.environ.get("FORGE_GAME_START")
         if env_start:
             try:
                 start_ts = float(env_start)
@@ -503,7 +503,7 @@ def detect_session_info(appid: str) -> dict:
         info["duration_seconds"] = 0
 
     # Check exit status from environment (set by smart-launch wrapper)
-    exit_env = os.environ.get("HUBOS_GAME_EXIT_CODE")
+    exit_env = os.environ.get("FORGE_GAME_EXIT_CODE")
     if exit_env:
         try:
             code = int(exit_env)
@@ -1081,8 +1081,8 @@ def cmd_help(_args: list):
 
   {C.BOLD}Environment variables:{C.RESET}
     MANGOHUD_LOG_FILE      Path to MangoHud CSV log for current session
-    HUBOS_GAME_START       Unix timestamp when game was launched
-    HUBOS_GAME_EXIT_CODE   Exit code of the game process
+    FORGE_GAME_START       Unix timestamp when game was launched
+    FORGE_GAME_EXIT_CODE   Exit code of the game process
     SteamAppId             Steam application ID (fallback for appid)
 
   {C.BOLD}Data:{C.RESET}

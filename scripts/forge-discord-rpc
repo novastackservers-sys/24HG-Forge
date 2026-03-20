@@ -1,0 +1,716 @@
+#!/usr/bin/env python3
+"""
+24HG Forge Discord Rich Presence — Show your gaming activity in Discord.
+
+Connects to Discord's local IPC socket to display current game, playtime,
+rig score, achievements, and voice status as Rich Presence on your profile.
+
+Commands:
+  start / (no args)   Start the Rich Presence daemon
+  stop                Stop the daemon
+  status              Show current presence status
+  set <key> <value>   Manually set a presence field
+  game <name>         Manually set current game
+  clear               Clear presence
+
+Config: ~/.config/forge/discord-rpc.json
+"""
+
+import json, os, re, signal, socket, struct, sys, time, uuid
+from datetime import datetime
+from pathlib import Path
+
+# ── Paths ──
+CONFIG_DIR = os.path.expanduser("~/.config/forge")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "discord-rpc.json")
+DATA_DIR = os.path.expanduser("~/.local/share/forge")
+PID_FILE = os.path.join(DATA_DIR, "discord-rpc.pid")
+STATE_FILE = os.path.join(DATA_DIR, "discord-rpc-state.json")
+GAME_TIMER_FILE = os.path.join(DATA_DIR, "game-timer.json")
+RIG_SCORE_FILE = os.path.join(CONFIG_DIR, "rig-score.json")
+ACHIEVEMENTS_FILE = os.path.join(CONFIG_DIR, "achievements.json")
+VOICE_ROOM_FILE = "/tmp/forge-voice/room"
+VOICE_PARTICIPANTS_FILE = "/tmp/forge-voice/participants"
+STEAM_LIBRARY_PATHS = [
+    os.path.expanduser("~/.steam/steam/steamapps/libraryfolders.vdf"),
+    os.path.expanduser("~/.local/share/Steam/steamapps/libraryfolders.vdf"),
+]
+HUB_JOIN_URL = "https://hub.24hgaming.com/join"
+UPDATE_INTERVAL = 15
+RECONNECT_INTERVAL = 30
+OP_HANDSHAKE, OP_FRAME, OP_CLOSE, OP_PING, OP_PONG = 0, 1, 2, 3, 4
+
+DEFAULT_CONFIG = {
+    "enabled": True, "application_id": "1234567890123456789",
+    "show_game": True, "show_playtime": True, "show_rig_score": True,
+    "show_achievements": True, "show_party": True, "custom_status": "",
+    "idle_text": "Browsing 24HG Forge", "large_image_key": "forge_logo",
+    "small_image_gaming": "status_gaming", "small_image_idle": "status_idle",
+    "small_image_voice": "status_voice",
+}
+
+KNOWN_NATIVE_GAMES = {
+    "supertuxkart": "SuperTuxKart", "xonotic": "Xonotic",
+    "openarena": "OpenArena", "minetest": "Minetest", "veloren": "Veloren",
+    "0ad": "0 A.D.", "wesnoth": "Battle for Wesnoth",
+    "endless-sky": "Endless Sky", "factorio": "Factorio",
+    "openttd": "OpenTTD", "retroarch": "RetroArch",
+    "dolphin-emu": "Dolphin Emulator", "pcsx2": "PCSX2", "rpcs3": "RPCS3",
+    "yuzu": "Yuzu", "cemu": "Cemu", "desmume": "DeSmuME", "mgba": "mGBA",
+    "ppsspp": "PPSSPP", "mednafen": "Mednafen",
+}
+
+running = True
+
+def handle_signal(sig, frame):
+    global running
+    running = False
+
+signal.signal(signal.SIGINT, handle_signal)
+signal.signal(signal.SIGTERM, handle_signal)
+
+# ── Logging ──
+def log(msg, level="INFO"):
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [{level}] {msg}", file=sys.stderr)
+
+def info(msg):  log(msg, "INFO")
+def warn(msg):  log(msg, "WARN")
+def error(msg): log(msg, "ERROR")
+
+# ── Configuration ──
+def _read_json(path, default=None):
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return default
+
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+def load_config():
+    saved = _read_json(CONFIG_FILE)
+    if saved:
+        merged = dict(DEFAULT_CONFIG)
+        merged.update(saved)
+        return merged
+    save_config(DEFAULT_CONFIG)
+    return dict(DEFAULT_CONFIG)
+
+def save_config(config):
+    _write_json(CONFIG_FILE, config)
+
+def load_state():
+    return _read_json(STATE_FILE) or {
+        "connected": False, "current_game": None, "session_start": None,
+        "manual_game": None, "custom_fields": {}, "last_update": None,
+    }
+
+def save_state(state):
+    _write_json(STATE_FILE, state)
+
+
+# ── Discord IPC Transport ──
+
+class DiscordIPC:
+    """Low-level Discord IPC socket connection using JSON-RPC over Unix socket."""
+
+    def __init__(self):
+        self.sock = None
+        self.connected = False
+
+    def _find_socket_path(self):
+        """Locate the Discord IPC socket across native, Snap, and Flatpak installs."""
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        tmpdir = os.environ.get("TMPDIR", "/tmp")
+        search_dirs = []
+        if runtime:
+            search_dirs.append(runtime)
+        search_dirs.append(tmpdir)
+        search_dirs.extend([
+            os.path.expanduser("~/snap/discord/common"),
+            os.path.expanduser("~/snap/discord-canary/common"),
+            os.path.join(runtime or tmpdir, "app/com.discordapp.Discord"),
+        ])
+        for base in search_dirs:
+            for i in range(10):
+                path = os.path.join(base, f"discord-ipc-{i}")
+                if os.path.exists(path):
+                    return path
+        return None
+
+    def connect(self, application_id):
+        """Open IPC socket and perform IDENTIFY handshake."""
+        path = self._find_socket_path()
+        if not path:
+            raise ConnectionError("Discord IPC socket not found")
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(10)
+        try:
+            self.sock.connect(path)
+        except (socket.error, OSError) as exc:
+            self.sock = None
+            raise ConnectionError(f"Cannot connect to Discord: {exc}")
+        self._send(OP_HANDSHAKE, json.dumps({"v": 1, "client_id": str(application_id)}))
+        op, data = self._recv()
+        if op != OP_FRAME:
+            self.close()
+            raise ConnectionError(f"Unexpected handshake opcode: {op}")
+        resp = json.loads(data)
+        if resp.get("evt") == "ERROR":
+            self.close()
+            raise ConnectionError(f"Discord rejected: {resp.get('data', {}).get('message')}")
+        self.connected = True
+        info(f"Connected to Discord IPC at {path}")
+        return resp
+
+    def _send(self, opcode, payload):
+        if not self.sock:
+            raise ConnectionError("Not connected")
+        data = payload.encode("utf-8")
+        self.sock.sendall(struct.pack("<II", opcode, len(data)) + data)
+
+    def _recv(self):
+        if not self.sock:
+            raise ConnectionError("Not connected")
+        header = self._recv_exact(8)
+        opcode, length = struct.unpack("<II", header)
+        return opcode, self._recv_exact(length).decode("utf-8")
+
+    def _recv_exact(self, n):
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("Discord IPC socket closed")
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _rpc(self, cmd, args):
+        payload = json.dumps({"cmd": cmd, "args": args, "nonce": str(uuid.uuid4())})
+        self._send(OP_FRAME, payload)
+        try:
+            _, data = self._recv()
+            resp = json.loads(data)
+            if resp.get("evt") == "ERROR":
+                warn(f"{cmd} error: {resp.get('data', {}).get('message')}")
+                return False
+        except (socket.timeout, ConnectionError):
+            pass
+        return True
+
+    def set_activity(self, activity):
+        return self._rpc("SET_ACTIVITY", {"pid": os.getpid(), "activity": activity})
+
+    def clear_activity(self):
+        return self._rpc("SET_ACTIVITY", {"pid": os.getpid(), "activity": None})
+
+    def close(self):
+        if self.sock:
+            try: self._send(OP_CLOSE, "{}")
+            except (OSError, ConnectionError): pass
+            try: self.sock.close()
+            except OSError: pass
+            self.sock = None
+        self.connected = False
+
+    def ping(self):
+        try:
+            self._send(OP_PING, json.dumps({"nonce": str(uuid.uuid4())}))
+            op, _ = self._recv()
+            return op == OP_PONG
+        except (socket.timeout, ConnectionError, OSError):
+            return False
+
+# ── Data Readers ──
+
+def read_game_timer():
+    data = _read_json(GAME_TIMER_FILE)
+    return data.get("active", []) if data else []
+
+def read_rig_score():
+    data = _read_json(RIG_SCORE_FILE)
+    return (data.get("total_score") or data.get("score")) if data else None
+
+def read_achievement_count():
+    data = _read_json(ACHIEVEMENTS_FILE)
+    if not data:
+        return 0
+    unlocked = data.get("unlocked", {})
+    return len(unlocked) if isinstance(unlocked, dict) else 0
+
+def read_voice_state():
+    room, party_size = None, 0
+    if os.path.exists(VOICE_ROOM_FILE):
+        try:
+            with open(VOICE_ROOM_FILE, "r") as f:
+                room = f.read().strip()
+        except IOError:
+            pass
+    if room and os.path.exists(VOICE_PARTICIPANTS_FILE):
+        try:
+            with open(VOICE_PARTICIPANTS_FILE, "r") as f:
+                party_size = sum(1 for l in f if l.strip())
+        except IOError:
+            pass
+    return room, max(party_size, 1) if room else 0
+
+
+# ── Game Detection ──
+
+def _steam_library_paths():
+    paths = []
+    for vdf in STEAM_LIBRARY_PATHS:
+        if not os.path.exists(vdf): continue
+        try:
+            with open(vdf, "r") as f: text = f.read()
+            for m in re.finditer(r'"path"\s+"([^"]+)"', text):
+                d = os.path.join(m.group(1), "steamapps")
+                if os.path.isdir(d): paths.append(d)
+        except IOError: continue
+    return paths
+
+def _steam_app_map():
+    app_map = {}
+    for steamapps in _steam_library_paths():
+        try:
+            for e in os.listdir(steamapps):
+                if e.startswith("appmanifest_") and e.endswith(".acf"):
+                    try:
+                        with open(os.path.join(steamapps, e)) as f: text = f.read()
+                        aid = re.search(r'"appid"\s+"(\d+)"', text)
+                        nm = re.search(r'"name"\s+"([^"]+)"', text)
+                        if aid and nm: app_map[aid.group(1)] = nm.group(1)
+                    except IOError: continue
+        except OSError: continue
+    return app_map
+
+def detect_current_game():
+    """Auto-detect running game. Returns (game_id, game_name) or (None, None).
+    Checks forge-game-timer first, then scans /proc for Steam/Wine/native games."""
+    active = read_game_timer()
+    if active:
+        s = max(active, key=lambda s: s.get("start", ""))
+        gid = s.get("id", s.get("game", "unknown"))
+        return gid, s.get("game") or s.get("name") or gid
+    steam_map = None
+    try:
+        for p in Path("/proc").iterdir():
+            if not p.name.isdigit(): continue
+            try:
+                args = (p / "cmdline").read_bytes().decode("utf-8", "replace").replace("\x00", " ").lower()
+                try:
+                    env = (p / "environ").read_bytes().decode("utf-8", "replace")
+                    for em in re.finditer(r"SteamAppId=(\d+)", env):
+                        if em.group(1) != "0":
+                            if steam_map is None: steam_map = _steam_app_map()
+                            return f"steam:{em.group(1)}", steam_map.get(em.group(1), f"Steam App {em.group(1)}")
+                except (PermissionError, OSError): pass
+                exe = ""
+                try: exe = os.readlink(p / "exe")
+                except (OSError, PermissionError): pass
+                if exe and any(exe.endswith(w) for w in ("/wine", "/wine64", "/wine-preloader")):
+                    m = re.search(r"[\\/]([^\\/]+)\.exe", args)
+                    if m: return f"wine:{m.group(1)}", m.group(1).replace("_", " ").title()
+                bn = os.path.basename(exe).lower() if exe else ""
+                if bn in KNOWN_NATIVE_GAMES:
+                    return f"native:{bn}", KNOWN_NATIVE_GAMES[bn]
+            except (PermissionError, OSError, IOError): continue
+    except OSError: pass
+    return None, None
+
+def get_session_duration(game_id):
+    """Get session duration in seconds for a game from forge-game-timer."""
+    for s in read_game_timer():
+        sid = s.get("id", s.get("game", ""))
+        if sid == game_id or s.get("game") == game_id:
+            try:
+                return (datetime.now() - datetime.fromisoformat(s["start"])).total_seconds()
+            except (ValueError, TypeError, KeyError):
+                pass
+    return None
+
+def format_duration(seconds):
+    if seconds is None or seconds < 0:
+        return None
+    s = int(seconds)
+    h, m = s // 3600, (s % 3600) // 60
+    if h > 0: return f"{h}h {m:02d}m"
+    if m > 0: return f"{m}m"
+    return "just started"
+
+def format_number(n):
+    return f"{int(n):,}" if n else "0"
+
+
+# ── Activity Builder ──
+
+def build_activity(config, state):
+    """Build a Discord Rich Presence activity payload."""
+    game_id, game_name = None, None
+    if config.get("show_game", True):
+        detected_id, detected_name = detect_current_game()
+        if state.get("manual_game"):
+            game_name = state["manual_game"]
+            game_id = f"manual:{game_name}"
+        elif detected_id:
+            game_id, game_name = detected_id, detected_name
+
+    activity = {}
+    custom = config.get("custom_status", "")
+    if custom:        activity["details"] = custom
+    elif game_name:   activity["details"] = f"Playing {game_name}"
+    else:             activity["details"] = config.get("idle_text", "Browsing 24HG Forge")
+
+    # State line: playtime, rig score, achievements
+    parts = []
+    if game_id and config.get("show_playtime", True):
+        dur = get_session_duration(game_id)
+        if dur is not None:
+            fmt = format_duration(dur)
+            if fmt:
+                parts.append(f"Playing for {fmt}")
+    if config.get("show_rig_score", True):
+        score = read_rig_score()
+        if score:
+            parts.append(f"Rig Score: {format_number(score)}")
+    if config.get("show_achievements", True):
+        count = read_achievement_count()
+        if count > 0:
+            parts.append(f"{count} achievements")
+    # Custom field overrides
+    for key, val in state.get("custom_fields", {}).items():
+        if key == "details":   activity["details"] = val
+        elif key == "state":   parts.insert(0, val)
+    if parts:
+        activity["state"] = " | ".join(parts)
+
+    # Timestamps for elapsed-time display
+    if game_id:
+        dur = get_session_duration(game_id)
+        if dur is not None:
+            activity["timestamps"] = {"start": int(time.time() - dur)}
+    elif state.get("session_start"):
+        activity["timestamps"] = {"start": int(state["session_start"])}
+
+    # Assets: large image (game icon or forge logo), small image (status)
+    large_key = config.get("large_image_key", "forge_logo")
+    large_text = "24HG Forge"
+    if game_name:
+        large_key = re.sub(r"[^a-z0-9_]", "_", game_name.lower())[:32]
+        large_text = game_name
+    voice_room, party_size = read_voice_state()
+    if voice_room:
+        small_key, small_text = config.get("small_image_voice", "status_voice"), f"In voice: {voice_room}"
+    elif game_name:
+        small_key, small_text = config.get("small_image_gaming", "status_gaming"), "Gaming"
+    else:
+        small_key, small_text = config.get("small_image_idle", "status_idle"), "Idle"
+    activity["assets"] = {
+        "large_image": large_key, "large_text": large_text,
+        "small_image": small_key, "small_text": small_text,
+    }
+    # Party info from voice room
+    if voice_room and config.get("show_party", True):
+        activity["party"] = {"id": f"forge-voice-{voice_room}", "size": [party_size, 16]}
+    activity["buttons"] = [{"label": "Join 24HG", "url": HUB_JOIN_URL}]
+    return activity
+
+# ── PID Management ──
+
+def write_pid():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+def read_pid():
+    if not os.path.exists(PID_FILE):
+        return None
+    try:
+        with open(PID_FILE, "r") as f:
+            return int(f.read().strip())
+    except (ValueError, IOError):
+        return None
+
+def is_daemon_running():
+    pid = read_pid()
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+def remove_pid():
+    try: os.unlink(PID_FILE)
+    except OSError: pass
+
+
+# ── Daemon Loop ──
+
+def daemon_loop():
+    """Main loop: connect to Discord IPC, poll games, update presence every 15s."""
+    config = load_config()
+    if not config.get("enabled", True):
+        info("Discord RPC disabled in config. Exiting.")
+        return
+    if is_daemon_running():
+        print(f"Daemon already running (PID {read_pid()}).", file=sys.stderr)
+        sys.exit(1)
+    write_pid()
+    info("Starting 24HG Forge Discord Rich Presence daemon")
+    state = load_state()
+    state["session_start"] = int(time.time())
+    state["connected"] = False
+    ipc, last_game = DiscordIPC(), None
+    try:
+        while running:
+            config = load_config()
+            if not config.get("enabled", True):
+                if ipc.connected:
+                    ipc.clear_activity(); ipc.close()
+                    state["connected"] = False; save_state(state)
+                time.sleep(RECONNECT_INTERVAL); continue
+            app_id = config.get("application_id", DEFAULT_CONFIG["application_id"])
+            if not ipc.connected:
+                try:
+                    ipc.connect(app_id)
+                    state["connected"] = True; save_state(state)
+                except ConnectionError:
+                    state["connected"] = False; save_state(state)
+                    time.sleep(RECONNECT_INTERVAL); continue
+            if not ipc.ping():
+                warn("Discord connection lost, reconnecting...")
+                ipc.close(); state["connected"] = False; save_state(state)
+                continue
+            _, detected_name = detect_current_game()
+            current_game = state.get("manual_game") or detected_name
+            if current_game != last_game:
+                if current_game:     info(f"Game detected: {current_game}")
+                elif last_game:      info(f"Game ended: {last_game}")
+                last_game = current_game
+            state["current_game"] = detected_name
+            state["last_update"] = datetime.now().isoformat()
+            try:
+                ipc.set_activity(build_activity(config, state))
+            except ConnectionError:
+                warn("Failed to send activity, will reconnect")
+                ipc.close(); state["connected"] = False
+            save_state(state)
+            for _ in range(UPDATE_INTERVAL):
+                if not running: break
+                time.sleep(1)
+    except Exception as exc:
+        error(f"Daemon crashed: {exc}")
+    finally:
+        info("Shutting down Discord RPC daemon")
+        if ipc.connected:
+            try: ipc.clear_activity(); ipc.close()
+            except (ConnectionError, OSError): pass
+        state["connected"] = False; state["current_game"] = None
+        save_state(state); remove_pid()
+
+
+# ── CLI Commands ──
+
+def cmd_start():
+    """Fork to background and run the presence daemon."""
+    if is_daemon_running():
+        print(f"Discord RPC daemon already running (PID {read_pid()}).")
+        sys.exit(1)
+    config = load_config()
+    if config.get("application_id") == DEFAULT_CONFIG["application_id"]:
+        print("Note: Using placeholder Application ID.")
+        print(f"Configure your Discord app ID in {CONFIG_FILE}")
+        print("Create one at https://discord.com/developers/applications\n")
+    pid = os.fork()
+    if pid > 0:
+        time.sleep(0.5)
+        print(f"Discord RPC daemon started (PID {pid}).")
+        return
+    # Child: detach and redirect I/O to log file
+    os.setsid()
+    os.makedirs(DATA_DIR, exist_ok=True)
+    log_fd = os.open(os.path.join(DATA_DIR, "discord-rpc.log"),
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    os.dup2(log_fd, 1); os.dup2(log_fd, 2); os.close(log_fd)
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(devnull, 0); os.close(devnull)
+    daemon_loop()
+    sys.exit(0)
+
+def cmd_stop():
+    """Stop the running daemon with graceful shutdown."""
+    pid = read_pid()
+    if pid is None or not is_daemon_running():
+        print("Discord RPC daemon is not running."); remove_pid(); return
+    print(f"Stopping Discord RPC daemon (PID {pid})...")
+    try: os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError: print("Already exited."); remove_pid(); return
+    for _ in range(50):
+        try: os.kill(pid, 0); time.sleep(0.1)
+        except ProcessLookupError: break
+    try:
+        os.kill(pid, 0)
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    remove_pid()
+    print("Discord RPC daemon stopped.")
+
+
+def cmd_status():
+    """Display current daemon and presence status."""
+    state, config = load_state(), load_config()
+    daemon_up, pid = is_daemon_running(), read_pid()
+    connected = state.get("connected", False) and daemon_up
+    app_id = config.get("application_id", "not set")
+    placeholder = " (placeholder)" if app_id == DEFAULT_CONFIG["application_id"] else ""
+    print("24HG Forge Discord Rich Presence")
+    print("=" * 40)
+    print(f"\n  Daemon:       {'running (PID ' + str(pid) + ')' if daemon_up else 'not running'}")
+    print(f"  Discord:      {'connected' if connected else 'disconnected'}")
+    print(f"  App ID:       {app_id}{placeholder}")
+    print(f"  Enabled:      {'yes' if config.get('enabled') else 'no'}\n")
+    print("  Current Presence:")
+    game = state.get("manual_game") or state.get("current_game")
+    if game:
+        print(f"    Game:       {game}")
+        dur = get_session_duration(f"manual:{game}") if state.get("manual_game") else None
+        if dur is None and state.get("current_game"):
+            did, _ = detect_current_game()
+            if did: dur = get_session_duration(did)
+        if dur is not None:
+            print(f"    Playtime:   {format_duration(dur)}")
+    else:
+        print("    Game:       none detected")
+    score = read_rig_score()
+    if score:              print(f"    Rig Score:  {format_number(score)}")
+    ach = read_achievement_count()
+    if ach > 0:            print(f"    Achievements: {ach}")
+    vroom, vsize = read_voice_state()
+    if vroom:              print(f"    Voice:      {vroom} ({vsize} members)")
+    last = state.get("last_update")
+    if last: print(f"\n  Last update:  {last}")
+    print("\n  Display options:")
+    for key in ("show_game", "show_playtime", "show_rig_score", "show_achievements", "show_party"):
+        print(f"    {key.replace('show_', '').replace('_', ' ').title():16s} {'on' if config.get(key, True) else 'off'}")
+
+
+def cmd_set(key, value):
+    """Set a config option or custom presence field."""
+    state, config = load_state(), load_config()
+    config_keys = {
+        "enabled", "show_game", "show_playtime", "show_rig_score",
+        "show_achievements", "show_party", "application_id",
+        "custom_status", "idle_text", "large_image_key",
+        "small_image_gaming", "small_image_idle", "small_image_voice",
+    }
+    if key in config_keys:
+        if value.lower() in ("true", "yes", "on", "1"):      config[key] = True
+        elif value.lower() in ("false", "no", "off", "0"):    config[key] = False
+        else:                                                  config[key] = value
+        save_config(config)
+        print(f"Config '{key}' set to: {config[key]}")
+    else:
+        state.setdefault("custom_fields", {})[key] = value
+        save_state(state)
+        print(f"Custom field '{key}' set to: {value}")
+    _signal_daemon()
+
+def cmd_game(name):
+    """Manually override the displayed game."""
+    state = load_state()
+    state["manual_game"] = name
+    save_state(state)
+    print(f"Manual game set to: {name} (overrides auto-detect until cleared)")
+    _signal_daemon()
+
+def cmd_clear():
+    """Clear manual overrides and custom fields."""
+    state = load_state()
+    state["manual_game"] = None
+    state["custom_fields"] = {}
+    save_state(state)
+    _signal_daemon()
+    print("Presence cleared." + (" Auto-detection will resume." if is_daemon_running() else ""))
+
+def _signal_daemon():
+    """Send SIGUSR1 to wake the daemon for an immediate update."""
+    pid = read_pid()
+    if pid and is_daemon_running():
+        try: os.kill(pid, signal.SIGUSR1)
+        except (ProcessLookupError, PermissionError): pass
+
+def cmd_help():
+    print("""24HG Forge Discord Rich Presence
+
+Usage: forge-discord-rpc <command> [args]
+
+Commands:
+  start           Start the Rich Presence daemon (background)
+  stop            Stop the daemon
+  status          Show current presence status
+  set <k> <v>     Set a config option or custom field
+  game <name>     Manually set current game (overrides auto-detect)
+  clear           Clear manual overrides and custom fields
+  help            Show this help text
+
+Config options (use 'set' to change):
+  enabled             Enable/disable presence (true/false)
+  application_id      Discord application ID
+  show_game           Show current game (true/false)
+  show_playtime       Show session playtime (true/false)
+  show_rig_score      Show rig score badge (true/false)
+  show_achievements   Show achievement count (true/false)
+  show_party          Show voice room party (true/false)
+  custom_status       Custom status text (empty to disable)
+  idle_text           Text shown when no game detected
+
+Config file: ~/.config/forge/discord-rpc.json
+Log file:    ~/.local/share/forge/discord-rpc.log
+
+Discord Application Setup:
+  1. Go to https://discord.com/developers/applications
+  2. Create a new application named "24HG Forge"
+  3. Copy the Application ID
+  4. Run: forge-discord-rpc set application_id <YOUR_ID>
+  5. Upload Rich Presence assets (forge_logo, status_gaming, etc.)
+  6. Start the daemon: forge-discord-rpc start
+""")
+
+
+# SIGUSR1 handler — interrupts sleep for immediate update
+signal.signal(signal.SIGUSR1, lambda s, f: None)
+
+# ── Entry Point ──
+
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args else "start"
+    if cmd == "start":       cmd_start()
+    elif cmd == "stop":      cmd_stop()
+    elif cmd == "status":    cmd_status()
+    elif cmd == "set":
+        if len(args) < 3:
+            print("Usage: forge-discord-rpc set <key> <value>", file=sys.stderr); sys.exit(1)
+        cmd_set(args[1], " ".join(args[2:]))
+    elif cmd == "game":
+        if len(args) < 2:
+            print("Usage: forge-discord-rpc game <name>", file=sys.stderr); sys.exit(1)
+        cmd_game(" ".join(args[1:]))
+    elif cmd == "clear":     cmd_clear()
+    elif cmd in ("help", "--help", "-h"): cmd_help()
+    else:
+        print(f"Unknown command: {cmd}", file=sys.stderr); sys.exit(1)
+
+if __name__ == "__main__":
+    main()

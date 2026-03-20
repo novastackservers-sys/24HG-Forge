@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Forge LAN Mode
+Comment=LAN party discovery and play
+Exec=/usr/bin/forge-lan-mode
+Icon=forge-logo
+Terminal=true
+Type=Application
+Categories=Game;Network;
+Keywords=lan;party;multiplayer;discovery;local;

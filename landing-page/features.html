@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Features — 24HG Forge</title>
+    <meta name="description" content="See what 24HG Forge looks like — terminal demos, desktop mockups, and 150+ built-in gaming tools.">
+    <meta property="og:image" content="https://os.24hgaming.com/og-image.png">
+    <link rel="icon" href="favicon.ico" type="image/x-icon">
+    <link rel="stylesheet" href="style.css">
+    <script async src="https://analytics.24hgaming.com/track" data-website-id="a052da7e-3afe-40b1-9354-071901dd26e4"></script>
+<style>
+/* ── Features page styles ── */
+.feat-hero{text-align:center;padding:5rem 2rem 3rem;position:relative}
+.feat-hero h1{font-size:clamp(2rem,4vw,3rem);font-weight:800;color:var(--text-bright);margin-bottom:.5rem}
+.feat-hero h1 span{color:var(--accent)}
+.feat-hero p{font-size:1.1rem;color:var(--text);max-width:520px;margin:0 auto}
+
+/* Terminal window */
+.term{background:#080c14;border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.term-bar{display:flex;align-items:center;gap:6px;padding:.55rem .8rem;background:var(--bg-elevated);border-bottom:1px solid var(--border)}
+.term-title{margin-left:.5rem;font-size:.7rem;color:var(--text-dim)}
+.term pre{margin:0;padding:1rem 1.25rem;font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;line-height:1.55;overflow-x:auto;color:#c8c8dc}
+.term .cy{color:#00e5ff}
+.term .gr{color:#50c878}
+.term .wh{color:#fff}
+.term .yl{color:#febc2e}
+.term .rd{color:#ff5555}
+
+/* Section labels */
+.slabel{text-align:center;margin-bottom:2rem}
+.slabel h2{font-size:1.6rem;font-weight:700;color:var(--text-bright);margin-bottom:.35rem}
+.slabel p{font-size:.95rem;color:var(--text);max-width:520px;margin:0 auto}
+
+/* Mini terminal grid */
+.term-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.25rem;max-width:1100px;margin:0 auto}
+.term-grid .term pre{font-size:.62rem;padding:.75rem 1rem;min-height:170px}
+.term-cmd{padding:.4rem 1rem .2rem;font-size:.65rem;color:var(--accent);font-family:'JetBrains Mono',monospace;font-weight:700}
+
+/* Desktop mockup */
+.desktop-mock{background:linear-gradient(135deg,#040910 0%,#0a1828 40%,#061220 100%);border:1px solid var(--border);border-radius:12px;overflow:hidden;position:relative;min-height:340px;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.desk-conky{position:absolute;top:12px;right:14px;background:rgba(0,0,0,.55);border:1px solid #ffffff10;border-radius:8px;padding:.6rem .8rem;font-family:monospace;font-size:.55rem;line-height:1.7;color:#c8c8dc;min-width:140px}
+.desk-conky .cy{color:#00e5ff}
+.desk-panel{position:absolute;bottom:0;left:0;right:0;height:38px;background:#0a0e18ee;border-top:1px solid #1a1a2e;display:flex;align-items:center;padding:0 .6rem;gap:.5rem}
+.desk-panel-logo{width:26px;height:26px;border-radius:6px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:.45rem;font-weight:900;color:#000;cursor:default}
+.desk-icon{width:26px;height:26px;border-radius:6px;background:#ffffff10;display:flex;align-items:center;justify-content:center;font-size:.7rem}
+.desk-tray{margin-left:auto;display:flex;align-items:center;gap:.6rem;font-size:.55rem;color:var(--text-dim)}
+
+/* Login mockup */
+.login-mock{background:linear-gradient(160deg,#040910 0%,#081420 50%,#040910 100%);border:1px solid var(--border);border-radius:12px;overflow:hidden;position:relative;min-height:320px;display:flex;align-items:center;justify-content:center;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.login-card{background:#0a1220dd;border:1px solid #1a1a2e;border-radius:14px;padding:2rem 2.5rem;text-align:center;width:260px;backdrop-filter:blur(8px)}
+.login-logo{font-size:1.4rem;font-weight:900;color:var(--accent);margin-bottom:.2rem}
+.login-title{font-size:.85rem;color:var(--text);margin-bottom:1.2rem}
+.login-field{display:block;width:100%;padding:.45rem .6rem;margin-bottom:.6rem;background:#06091080;border:1px solid #1a1a2e;border-radius:6px;color:var(--text-dim);font-size:.7rem;font-family:inherit;outline:none;box-sizing:border-box}
+.login-btn{display:block;width:100%;padding:.5rem;background:var(--accent);color:#000;border:none;border-radius:6px;font-weight:700;font-size:.75rem;cursor:default;margin-top:.3rem}
+.login-clock{position:absolute;top:12px;right:16px;font-size:.75rem;color:var(--text-dim)}
+.login-footer{position:absolute;bottom:10px;left:0;right:0;text-align:center;font-size:.55rem;color:var(--text-dim)}
+
+/* Boot timeline */
+.boot-flow{display:flex;align-items:center;justify-content:center;gap:.5rem;flex-wrap:wrap;padding:1rem 0}
+.boot-step{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;width:150px;padding:.8rem;text-align:center;transition:border-color .2s}
+.boot-step:hover{border-color:#00e5ff40}
+.boot-thumb{height:60px;border-radius:6px;margin-bottom:.5rem;display:flex;align-items:center;justify-content:center;font-size:.55rem;color:var(--text-dim);overflow:hidden}
+.boot-step h4{font-size:.75rem;color:var(--text-bright);margin-bottom:.15rem}
+.boot-step p{font-size:.55rem;color:var(--text-dim)}
+.boot-arrow{color:var(--accent);font-size:1.2rem;font-weight:700}
+
+/* Highlights grid */
+.hl-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.25rem;max-width:900px;margin:0 auto}
+.hl-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;transition:border-color .2s}
+.hl-card:hover{border-color:#00e5ff30}
+.hl-card .icon{font-size:1.6rem;margin-bottom:.6rem}
+.hl-card h3{font-size:.95rem;color:var(--text-bright);margin-bottom:.25rem}
+.hl-card p{font-size:.82rem;color:var(--text)}
+
+/* CTA */
+.feat-cta{text-align:center;padding:4rem 2rem;border-top:1px solid var(--border)}
+.feat-cta h2{font-size:1.6rem;color:var(--text-bright);margin-bottom:1.25rem}
+.feat-cta .cta-group{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap}
+
+/* Progress bars in term */
+.bar-fill{color:#00e5ff}
+.bar-empty{color:#1a1a2e}
+
+@media(max-width:900px){
+.term-grid{grid-template-columns:1fr 1fr}
+.hl-grid{grid-template-columns:1fr 1fr}
+.boot-flow{flex-direction:column}
+.boot-arrow{transform:rotate(90deg)}
+}
+@media(max-width:600px){
+.term-grid{grid-template-columns:1fr}
+.hl-grid{grid-template-columns:1fr}
+.desktop-mock{min-height:260px}
+.login-mock{min-height:260px}
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+    <a href="index.html" class="nav-logo">24HG Forge</a>
+    <div class="nav-links">
+        <a href="features.html" class="active">Features</a>
+        <a href="download.html">Download</a>
+        <a href="install.html">Install</a>
+        <a href="compatibility.html">Compatibility</a>
+        <a href="roadmap.html">Roadmap</a>
+        <a href="faq.html">FAQ</a>
+        <a href="status.html">Status</a>
+        <a href="https://hub.24hgaming.com" class="btn-nav">Open Hub</a>
+    </div>
+</nav>
+
+<!-- ── HERO ── -->
+<section class="feat-hero">
+    <div class="hero-glow"></div>
+    <h1>See What's <span>Inside</span></h1>
+    <p>150+ tools. Every pixel branded. Here's what your desktop looks like.</p>
+</section>
+
+<!-- ── NEOFETCH ── -->
+<section class="section">
+    <div class="slabel">
+        <h2>forge-neofetch</h2>
+        <p>System info, Forge style. One command to flex your rig.</p>
+    </div>
+    <div class="term" style="max-width:620px;margin:0 auto">
+        <div class="term-bar"><span class="dot-red"></span><span class="dot-yellow"></span><span class="dot-green"></span><span class="term-title">Terminal &mdash; forge-neofetch</span></div>
+        <pre>
+<span class="cy">    ██████╗ ██╗  ██╗██╗  ██╗ ██████╗</span>
+<span class="cy">    ╚════██╗██║  ██║██║  ██║██╔════╝</span>
+<span class="cy">     █████╔╝███████║███████║██║  ███╗</span>
+<span class="cy">    ██╔═══╝ ██╔══██║██╔══██║██║   ██║</span>
+<span class="cy">    ███████╗██║  ██║██║  ██║╚██████╔╝</span>
+<span class="cy">    ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝</span>
+<span class="cy">           F O R G E</span>
+
+    <span class="cy">OS</span>        <span class="wh">→ 24HG Forge v2.5 (Fedora Atomic)</span>
+    <span class="cy">Kernel</span>    <span class="wh">→ 6.12.8</span>
+    <span class="cy">Desktop</span>   <span class="wh">→ KDE Plasma 6.2</span>
+    <span class="cy">GPU</span>       <span class="wh">→ NVIDIA RTX 4070 Ti</span>
+    <span class="cy">CPU</span>       <span class="wh">→ AMD Ryzen 7 7800X3D</span>
+    <span class="cy">RAM</span>       <span class="wh">→ 8.2 GiB / 32.0 GiB</span>
+    <span class="cy">Disk</span>      <span class="wh">→ 234 GiB / 1.0 TiB</span>
+    <span class="cy">Uptime</span>    <span class="wh">→ 3 hours, 42 mins</span></pre>
+    </div>
+</section>
+
+<!-- ── DESKTOP MOCKUP ── -->
+<section class="section">
+    <div class="slabel">
+        <h2>Full KDE Plasma Desktop</h2>
+        <p>Dark theme with cyan accents. Forge logo in the start menu. Custom wallpaper, icons, sounds.</p>
+    </div>
+    <div class="desktop-mock" style="max-width:800px;margin:0 auto">
+        <div class="desk-conky">
+            <div><span class="cy">CPU</span> Ryzen 7 7800X3D</div>
+            <div>&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9601;&#9601;&#9601; <span class="cy">42%</span> &middot; 58&deg;C</div>
+            <div style="margin-top:.3rem"><span class="cy">GPU</span> RTX 4070 Ti</div>
+            <div>&#9608;&#9608;&#9608;&#9608;&#9601;&#9601;&#9601;&#9601;&#9601;&#9601; <span class="cy">28%</span> &middot; 51&deg;C</div>
+            <div style="margin-top:.3rem"><span class="cy">RAM</span> 8.2 / 32.0 GiB</div>
+            <div>&#9608;&#9608;&#9608;&#9601;&#9601;&#9601;&#9601;&#9601;&#9601;&#9601; <span class="cy">26%</span></div>
+            <div style="margin-top:.3rem;font-size:.5rem;color:var(--text-dim)">&#9650; 12 MB/s &nbsp; &#9660; 340 KB/s</div>
+        </div>
+        <div class="desk-panel">
+            <div class="desk-panel-logo">24HG</div>
+            <div class="desk-icon">&#128193;</div>
+            <div class="desk-icon">&#127760;</div>
+            <div class="desk-icon" style="background:#1b2838;color:#66c0f4;font-size:.5rem;font-weight:700">&#9678;</div>
+            <div class="desk-tray">
+                <span>&#128266;</span>
+                <span>&#128246;</span>
+                <span style="color:var(--text)">14:37</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ── LOGIN MOCKUP ── -->
+<section class="section">
+    <div class="slabel">
+        <h2>Branded Login Screen</h2>
+        <p>Custom SDDM theme. You see 24HG before you even log in.</p>
+    </div>
+    <div class="login-mock" style="max-width:700px;margin:0 auto">
+        <div class="login-clock">14:37</div>
+        <div class="login-card">
+            <div class="login-logo">24HG</div>
+            <div class="login-title">24HG Forge</div>
+            <input class="login-field" value="gamer" readonly>
+            <input class="login-field" type="password" value="password" readonly>
+            <button class="login-btn">Login</button>
+        </div>
+        <div class="login-footer">24HG Forge &mdash; 24hgaming.com</div>
+    </div>
+</section>
+
+<!-- ── TERMINAL COMMANDS GRID ── -->
+<section class="section">
+    <div class="slabel">
+        <h2>Built-In Commands</h2>
+        <p>Every tool is one command away. No installs, no config files.</p>
+    </div>
+    <div class="term-grid" style="padding:0 2rem">
+
+        <div class="term">
+            <div class="term-bar"><span class="dot-red"></span><span class="dot-yellow"></span><span class="dot-green"></span></div>
+            <div class="term-cmd">$ forge-game-ready</div>
+            <pre><span class="yl">&#9889;</span> <span class="wh">Game Ready &mdash; Optimizing Cyberpunk 2077</span>
+  <span class="gr">&#10003;</span> Proton: GE-Proton9-20 selected
+  <span class="gr">&#10003;</span> Launch args: -vulkan configured
+  <span class="gr">&#10003;</span> Shader cache: 2,847 shaders pre-built
+  <span class="gr">&#10003;</span> Performance profile: Ultra applied
+  <span class="gr">&#10003;</span> Controller: Xbox mapped
+  <span class="cy">Ready to play!</span></pre>
+        </div>
+
+        <div class="term">
+            <div class="term-bar"><span class="dot-red"></span><span class="dot-yellow"></span><span class="dot-green"></span></div>
+            <div class="term-cmd">$ forge-vpn</div>
+            <pre><span class="yl">&#128274;</span> <span class="wh">Discovery VPN &mdash; Connected</span>
+  Interface: wg0  <span class="gr">[Active]</span>
+  VPN IP: 10.24.0.47
+  Peers online: <span class="cy">23</span>
+  Nearby gamers:
+    <span class="cy">&#8594;</span> alex (10.24.0.12)    <span class="gr">Playing: CS2</span>
+    <span class="cy">&#8594;</span> sarah (10.24.0.31)   <span class="gr">Playing: Rust</span>
+    <span class="cy">&#8594;</span> mike (10.24.0.8)     <span class="wh">Idle &mdash; looking for group</span>
+  Traffic: peer-to-peer (zero extra latency)
+  <span class="gr">One-click join from Hub or CLI</span></pre>
+        </div>
+
+        <div class="term">
+            <div class="term-bar"><span class="dot-red"></span><span class="dot-yellow"></span><span class="dot-green"></span></div>
+            <div class="term-cmd">$ forge-lan-mode</div>
+            <pre><span class="yl">&#127918;</span> <span class="wh">LAN Party Mode &mdash; Active</span>
+  Found 3 Forge gamers on network:
+    <span class="cy">&#8594;</span> alex-pc    <span class="gr">Playing: CS2</span>
+    <span class="cy">&#8594;</span> sarah-rig  <span class="gr">Playing: Rust</span>
+    <span class="cy">&#8594;</span> mike-deck  <span class="wh">Idle</span>
+  Chat: <span class="cy">/say hello</span> | Vote: <span class="cy">/vote cs2</span></pre>
+        </div>
+
+        <div class="term">
+            <div class="term-bar"><span class="dot-red"></span><span class="dot-yellow"></span><span class="dot-green"></span></div>
+            <div class="term-cmd">$ forge-peripherals</div>
+            <pre><span class="yl">&#128433;</span> <span class="wh">Peripherals Manager</span>
+  Razer DeathAdder V3  <span class="gr">[Connected]</span>
+    DPI: 1600 <span class="cy">&#8594;</span> Set to 800
+    RGB: Breathing cyan (<span class="cy">#00e5ff</span>)
+    Polling: 1000 Hz
+  Corsair K70  <span class="gr">[Connected]</span>
+    RGB: Static cyan (<span class="cy">#00e5ff</span>)</pre>
+        </div>
+
+        <div class="term">
+            <div class="term-bar"><span class="dot-red"></span><span class="dot-yellow"></span><span class="dot-green"></span></div>
+            <div class="term-cmd">$ forge-rig-score</div>
+            <pre><span class="yl">&#127942;</span> <span class="wh">Rig Score: 8,742</span>
+  CPU:  <span class="cy">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span><span class="rd">&#9601;&#9601;</span>  87%
+  GPU:  <span class="cy">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span><span class="rd">&#9601;</span>  92%
+  RAM:  <span class="cy">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span><span class="rd">&#9601;&#9601;&#9601;&#9601;</span>  71%
+  Disk: <span class="cy">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span><span class="rd">&#9601;&#9601;&#9601;&#9601;&#9601;&#9601;</span>  58%
+  Rank: <span class="gr">Top 15% of Forge users</span></pre>
+        </div>
+
+        <div class="term">
+            <div class="term-bar"><span class="dot-red"></span><span class="dot-yellow"></span><span class="dot-green"></span></div>
+            <div class="term-cmd">$ forge-audio-router</div>
+            <pre><span class="yl">&#128266;</span> <span class="wh">Audio Router &mdash; Active</span>
+  Game (CS2)     <span class="cy">&#8594;</span> Headphones  <span class="gr">[100%]</span>
+  Discord        <span class="cy">&#8594;</span> Headphones  <span class="gr">[80%]</span>
+  Music (Radio)  <span class="cy">&#8594;</span> Speakers    <span class="yl">[40%]</span>
+  Notifications  <span class="cy">&#8594;</span> Headphones  <span class="yl">[30%]</span></pre>
+        </div>
+
+        <div class="term">
+            <div class="term-bar"><span class="dot-red"></span><span class="dot-yellow"></span><span class="dot-green"></span></div>
+            <div class="term-cmd">$ forge-smart-updates</div>
+            <pre><span class="yl">&#128274;</span> <span class="wh">Smart Updates</span>
+  Status: <span class="yl">Deferred (gaming detected)</span>
+  Pending: 3 updates (124 MB)
+  Will apply: After gaming session ends
+  Last snapshot: 2 hours ago
+  Rollback: <span class="gr">Ready (one command)</span></pre>
+        </div>
+
+    </div>
+</section>
+
+<!-- ── BOOT SEQUENCE ── -->
+<section class="section">
+    <div class="slabel">
+        <h2>Branded From Power On</h2>
+        <p>Every step of the boot chain carries the 24HG identity.</p>
+    </div>
+    <div class="boot-flow">
+        <div class="boot-step">
+            <div class="boot-thumb" style="background:#000">
+                <div style="color:var(--accent);font-size:1rem;font-weight:900">24HG</div>
+            </div>
+            <h4>GRUB</h4>
+            <p>Custom bootloader splash</p>
+        </div>
+        <span class="boot-arrow">&#8594;</span>
+        <div class="boot-step">
+            <div class="boot-thumb" style="background:linear-gradient(135deg,#040910,#0a1828)">
+                <div style="color:var(--accent);font-size:.65rem;animation:pulse 2s infinite">&#9679; &#9679; &#9679;</div>
+            </div>
+            <h4>Plymouth</h4>
+            <p>Animated loading splash</p>
+        </div>
+        <span class="boot-arrow">&#8594;</span>
+        <div class="boot-step">
+            <div class="boot-thumb" style="background:#081420;display:flex;flex-direction:column;gap:3px">
+                <div style="color:var(--accent);font-weight:900;font-size:.5rem">24HG</div>
+                <div style="background:#1a1a2e;height:6px;width:50px;border-radius:3px"></div>
+                <div style="background:#1a1a2e;height:6px;width:50px;border-radius:3px"></div>
+            </div>
+            <h4>SDDM</h4>
+            <p>Branded login screen</p>
+        </div>
+        <span class="boot-arrow">&#8594;</span>
+        <div class="boot-step">
+            <div class="boot-thumb" style="background:linear-gradient(135deg,#040910,#0e1622)">
+                <div style="color:var(--accent);font-size:.6rem">&#9881; Loading Plasma...</div>
+            </div>
+            <h4>Splash</h4>
+            <p>Plasma splash screen</p>
+        </div>
+        <span class="boot-arrow">&#8594;</span>
+        <div class="boot-step">
+            <div class="boot-thumb" style="background:linear-gradient(135deg,#040910,#0a1828);position:relative">
+                <div style="position:absolute;bottom:0;left:0;right:0;height:10px;background:#0a0e18;border-top:1px solid #1a1a2e;display:flex;align-items:center;padding:0 4px">
+                    <div style="width:8px;height:8px;border-radius:2px;background:var(--accent);font-size:3px"></div>
+                </div>
+            </div>
+            <h4>Desktop</h4>
+            <p>Ready to game</p>
+        </div>
+    </div>
+</section>
+
+<!-- ── FEATURE HIGHLIGHTS ── -->
+<section class="section">
+    <div class="slabel">
+        <h2>Everything You Need</h2>
+        <p>No extra software. No config files. Just play.</p>
+    </div>
+    <div class="hl-grid">
+        <div class="hl-card"><div class="icon">&#127918;</div><h3>Game Ready Auto-Optimizer</h3><p>Proton, shaders, launch args, and perf profiles — all automatic per game.</p></div>
+        <div class="hl-card"><div class="icon">&#128421;</div><h3>Desktop + Game Mode</h3><p>Full KDE Plasma desktop or console-like Game Mode. Switch anytime.</p></div>
+        <div class="hl-card"><div class="icon">&#127881;</div><h3>LAN Party Mode</h3><p>Discover nearby gamers, vote on games, share files, start playing.</p></div>
+        <div class="hl-card"><div class="icon">&#128295;</div><h3>150+ Built-In Tools</h3><p>Audio routing, RGB control, mod manager, replay, benchmarks, and more.</p></div>
+        <div class="hl-card"><div class="icon">&#128274;</div><h3>Unbreakable OS</h3><p>Immutable base with atomic updates. One-command rollback if anything breaks.</p></div>
+        <div class="hl-card"><div class="icon">&#128250;</div><h3>Stream &amp; Record</h3><p>OBS pre-configured. Instant Replay captures the last 30 seconds.</p></div>
+        <div class="hl-card"><div class="icon">&#128433;</div><h3>Hardware Control</h3><p>Mouse DPI, keyboard RGB, fan curves, overclocking — no extra software.</p></div>
+        <div class="hl-card"><div class="icon">&#128101;</div><h3>Built-In Community</h3><p>24HG Hub desktop app with servers, chat, voice, clips, and leaderboards.</p></div>
+        <div class="hl-card"><div class="icon">&#129504;</div><h3>Smart Updates</h3><p>Updates wait until you stop gaming. Snapshots before every change.</p></div>
+    </div>
+</section>
+
+<!-- ── CTA ── -->
+<section class="feat-cta">
+    <h2>Ready to try it?</h2>
+    <div class="cta-group">
+        <a href="download.html" class="btn btn-primary btn-lg">Download 24HG Forge</a>
+        <a href="https://hub.24hgaming.com" class="btn btn-secondary btn-lg">Explore the Hub</a>
+    </div>
+</section>
+
+<!-- ── FOOTER ── -->
+<footer>
+    <div class="footer-grid">
+        <div class="footer-col">
+            <h4>24HG Forge</h4>
+            <a href="download.html">Download</a>
+            <a href="install.html">Install Guide</a>
+            <a href="roadmap.html">Roadmap</a>
+            <a href="faq.html">FAQ</a>
+        <a href="status.html">Status</a>
+        </div>
+        <div class="footer-col">
+            <h4>Community</h4>
+            <a href="https://hub.24hgaming.com">24HG Hub</a>
+            <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+            <a href="https://24hgaming.com">24hgaming.com</a>
+        </div>
+        <div class="footer-col">
+            <h4>Built on</h4>
+            <a href="https://bazzite.gg">Bazzite</a>
+            <a href="https://universal-blue.org">Universal Blue</a>
+            <a href="https://fedoraproject.org">Fedora</a>
+        </div>
+    </div>
+    <div class="footer-bottom">
+        <p>Made by <a href="https://24hgaming.com">24 Hour Gaming</a> &middot; MIT License</p>
+    </div>
+</footer>
+
+<style>@keyframes pulse{0%,100%{opacity:.3}50%{opacity:1}}</style>
+<script>fetch("/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.pathname,referer:document.referrer})}).catch(()=>{})</script>
+</body>
+</html>

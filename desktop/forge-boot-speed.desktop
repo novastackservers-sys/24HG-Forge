@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Forge Boot Speed
+Comment=Boot time optimization
+Exec=/usr/bin/forge-boot-speed
+Icon=forge-logo
+Terminal=true
+Type=Application
+Categories=System;
+Keywords=boot;speed;startup;optimize;systemd;

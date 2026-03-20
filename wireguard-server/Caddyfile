@@ -1,0 +1,21 @@
+# 24HG Discovery VPN — Caddy reverse proxy config
+#
+# NOTE: If Coolify already manages the reverse proxy on this host (49.12.36.159),
+# you do NOT need to run a separate Caddy instance. Instead, add vpn.24hgaming.com
+# as a proxy host in Coolify pointing to localhost:3860.
+#
+# This file is provided for standalone deployments or reference.
+
+vpn.24hgaming.com {
+    reverse_proxy localhost:3860
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+    }
+
+    log {
+        output file /var/log/caddy/vpn-api.log
+    }
+}

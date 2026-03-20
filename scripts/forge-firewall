@@ -1,0 +1,993 @@
+#!/usr/bin/env bash
+# ============================================================================
+# forge-firewall — 24HG Forge Firewall Management
+# Gaming-optimized firewall using firewalld
+# ============================================================================
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+readonly VERSION="1.0.0"
+readonly SCRIPT_NAME="forge-firewall"
+readonly ZONE_NAME="forge-gaming"
+readonly ZONE_FILE="/etc/firewalld/zones/${ZONE_NAME}.xml"
+readonly LOG_DIR="/var/log/forge"
+readonly LOG_FILE="${LOG_DIR}/firewall.log"
+readonly DROP_LOG="/var/log/forge/dropped.log"
+readonly MAX_DROP_LOG=100
+readonly SSH_RATE_LIMIT=5
+readonly LOCK_FILE="/tmp/forge-firewall.lock"
+
+# Colors
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly CYAN='\033[0;36m'
+readonly BOLD='\033[1m'
+readonly DIM='\033[2m'
+readonly NC='\033[0m'
+
+# ---------------------------------------------------------------------------
+# Port Definitions
+# ---------------------------------------------------------------------------
+# Steam client
+STEAM_TCP_PORTS="27015-27050"
+STEAM_UDP_PORTS="27015-27050"
+
+# Source engine
+SOURCE_UDP_PORTS="27000-27030"
+
+# Rust game + RCON
+RUST_TCP_PORTS="28015-28016"
+RUST_UDP_PORTS="28015-28016"
+
+# Sunshine (remote play)
+SUNSHINE_TCP_PORTS="47984-47990 48010"
+SUNSHINE_UDP_PORTS="47998-48000"
+
+# WireGuard VPN
+WIREGUARD_UDP_PORTS="51820"
+
+# mDNS / LAN discovery
+MDNS_UDP_PORTS="5353"
+LAN_DISCOVERY_UDP_PORTS="24240"
+
+# Voice chat
+VOICE_UDP_PORTS="24250-24251"
+
+# ---------------------------------------------------------------------------
+# Utility Functions
+# ---------------------------------------------------------------------------
+log() {
+    local level="$1"
+    shift
+    local timestamp
+    timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "${timestamp} [${level}] $*" >> "${LOG_FILE}" 2>/dev/null || true
+}
+
+info()    { echo -e "${GREEN}[+]${NC} $*"; log "INFO" "$*"; }
+warn()    { echo -e "${YELLOW}[!]${NC} $*"; log "WARN" "$*"; }
+error()   { echo -e "${RED}[x]${NC} $*" >&2; log "ERROR" "$*"; }
+header()  { echo -e "\n${BOLD}${CYAN}=== $* ===${NC}\n"; }
+detail()  { echo -e "    ${DIM}$*${NC}"; }
+
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        error "This script must be run as root (or with sudo)."
+        echo -e "    Try: ${CYAN}sudo forge-firewall $*${NC}"
+        exit 1
+    fi
+}
+
+check_firewalld() {
+    if ! command -v firewall-cmd &>/dev/null; then
+        error "firewalld is not installed."
+        echo -e "    Install with: ${CYAN}sudo dnf install firewalld${NC}"
+        exit 1
+    fi
+    if ! systemctl is-active --quiet firewalld; then
+        warn "firewalld is not running. Starting it..."
+        systemctl start firewalld
+        systemctl enable firewalld
+        info "firewalld started and enabled."
+    fi
+}
+
+acquire_lock() {
+    if [[ -f "$LOCK_FILE" ]]; then
+        local pid
+        pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            error "Another instance is running (PID: ${pid})."
+            exit 1
+        fi
+        rm -f "$LOCK_FILE"
+    fi
+    echo $$ > "$LOCK_FILE"
+    trap 'rm -f "$LOCK_FILE"' EXIT
+}
+
+ensure_log_dir() {
+    mkdir -p "$LOG_DIR"
+    chmod 750 "$LOG_DIR"
+}
+
+confirm() {
+    local prompt="${1:-Continue?}"
+    echo -en "${YELLOW}${prompt} [y/N]: ${NC}"
+    read -r answer
+    [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+# ---------------------------------------------------------------------------
+# Zone XML Generation
+# ---------------------------------------------------------------------------
+generate_zone_xml() {
+    cat <<'ZONE_XML'
+<?xml version="1.0" encoding="utf-8"?>
+<zone target="DROP">
+  <short>Forge Gaming</short>
+  <description>
+    24HG Forge gaming-optimized firewall zone. Allows game traffic
+    (Steam, Source, Rust, Sunshine) while blocking everything else.
+    Dropped packets are logged for diagnostics.
+  </description>
+
+  <!-- SSH (rate-limited via rich rules) -->
+  <service name="ssh"/>
+
+  <!-- DHCP client -->
+  <service name="dhcpv6-client"/>
+
+  <!-- Steam client ports -->
+  <port protocol="tcp" port="27015-27050"/>
+  <port protocol="udp" port="27015-27050"/>
+
+  <!-- Source engine -->
+  <port protocol="udp" port="27000-27030"/>
+
+  <!-- Rust game + RCON -->
+  <port protocol="tcp" port="28015-28016"/>
+  <port protocol="udp" port="28015-28016"/>
+
+  <!-- Sunshine remote play -->
+  <port protocol="tcp" port="47984-47990"/>
+  <port protocol="tcp" port="48010"/>
+  <port protocol="udp" port="47998-48000"/>
+
+  <!-- WireGuard VPN -->
+  <port protocol="udp" port="51820"/>
+
+  <!-- mDNS -->
+  <port protocol="udp" port="5353"/>
+
+  <!-- LAN discovery -->
+  <port protocol="udp" port="24240"/>
+
+  <!-- Voice chat -->
+  <port protocol="udp" port="24250-24251"/>
+
+  <!-- Rate limit SSH: 5 connections per minute -->
+  <rule family="ipv4">
+    <source address="0.0.0.0/0"/>
+    <service name="ssh"/>
+    <accept>
+      <limit value="5/m"/>
+    </accept>
+  </rule>
+  <rule family="ipv6">
+    <source address="::/0"/>
+    <service name="ssh"/>
+    <accept>
+      <limit value="5/m"/>
+    </accept>
+  </rule>
+
+  <!-- Log dropped packets -->
+  <rule>
+    <log prefix="FORGE-DROP: " level="info">
+      <limit value="10/m"/>
+    </log>
+    <drop/>
+  </rule>
+</zone>
+ZONE_XML
+}
+
+# ---------------------------------------------------------------------------
+# install_zone — Install the forge-gaming zone file
+# ---------------------------------------------------------------------------
+install_zone() {
+    local zone_dir="/etc/firewalld/zones"
+    mkdir -p "$zone_dir"
+
+    info "Installing ${ZONE_NAME} zone..."
+    generate_zone_xml > "${ZONE_FILE}"
+    chmod 644 "${ZONE_FILE}"
+    info "Zone file written to ${ZONE_FILE}"
+}
+
+# ---------------------------------------------------------------------------
+# Command: setup
+# ---------------------------------------------------------------------------
+cmd_setup() {
+    header "Forge Firewall Setup"
+    check_root
+    check_firewalld
+    acquire_lock
+    ensure_log_dir
+
+    info "Setting up gaming-optimized firewall profile..."
+    echo ""
+
+    # Step 1: Install zone
+    info "Step 1/6: Installing forge-gaming zone..."
+    install_zone
+
+    # Step 2: Reload firewalld to pick up new zone
+    info "Step 2/6: Reloading firewalld..."
+    firewall-cmd --reload
+    sleep 1
+
+    # Step 3: Verify zone loaded
+    if firewall-cmd --get-zones | grep -q "$ZONE_NAME"; then
+        info "Step 3/6: Zone '${ZONE_NAME}' loaded successfully."
+    else
+        error "Failed to load zone '${ZONE_NAME}'. Check ${ZONE_FILE}"
+        exit 1
+    fi
+
+    # Step 4: Get default interface
+    local default_iface
+    default_iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    if [[ -z "$default_iface" ]]; then
+        warn "Could not detect default network interface."
+        warn "You may need to manually assign the zone to your interface."
+    else
+        info "Step 4/6: Assigning zone to interface '${default_iface}'..."
+        firewall-cmd --permanent --zone="$ZONE_NAME" --change-interface="$default_iface" 2>/dev/null || true
+    fi
+
+    # Step 5: Set as default zone
+    info "Step 5/6: Setting ${ZONE_NAME} as default zone..."
+    firewall-cmd --set-default-zone="$ZONE_NAME" 2>/dev/null || {
+        warn "Could not set default zone. You may need to do this manually."
+    }
+
+    # Step 6: Configure kernel-level protections via sysctl
+    info "Step 6/6: Verifying kernel security parameters..."
+    local sysctl_file="/etc/sysctl.d/99-forge-security.conf"
+    if [[ -f "$sysctl_file" ]]; then
+        info "Kernel security config found at ${sysctl_file}"
+        sysctl --system >/dev/null 2>&1 || true
+    else
+        warn "Kernel security config not found at ${sysctl_file}"
+        detail "Install the 24HG Forge sysctl config for full hardening."
+    fi
+
+    # Final reload
+    firewall-cmd --reload
+    echo ""
+    info "Firewall setup complete!"
+    echo ""
+    echo -e "  ${GREEN}Zone:${NC}      ${ZONE_NAME}"
+    echo -e "  ${GREEN}Default:${NC}   $(firewall-cmd --get-default-zone 2>/dev/null)"
+    echo -e "  ${GREEN}Interface:${NC} ${default_iface:-unknown}"
+    echo ""
+    echo -e "  Run ${CYAN}forge-firewall status${NC} to verify."
+    echo -e "  Run ${CYAN}forge-firewall gaming on${NC} to ensure gaming mode is active."
+
+    log "INFO" "Setup completed successfully"
+}
+
+# ---------------------------------------------------------------------------
+# Command: status
+# ---------------------------------------------------------------------------
+cmd_status() {
+    header "Forge Firewall Status"
+    check_firewalld
+
+    # Firewalld state
+    local state
+    state=$(firewall-cmd --state 2>/dev/null || echo "not running")
+    if [[ "$state" == "running" ]]; then
+        echo -e "  ${GREEN}Firewalld:${NC}      running"
+    else
+        echo -e "  ${RED}Firewalld:${NC}      ${state}"
+        return 1
+    fi
+
+    # Default zone
+    local default_zone
+    default_zone=$(firewall-cmd --get-default-zone 2>/dev/null)
+    if [[ "$default_zone" == "$ZONE_NAME" ]]; then
+        echo -e "  ${GREEN}Default Zone:${NC}   ${default_zone}"
+    else
+        echo -e "  ${YELLOW}Default Zone:${NC}   ${default_zone} (expected: ${ZONE_NAME})"
+    fi
+
+    # Active zones
+    echo -e "\n  ${BOLD}Active Zones:${NC}"
+    firewall-cmd --get-active-zones 2>/dev/null | while IFS= read -r line; do
+        echo -e "    ${line}"
+    done
+
+    # Gaming mode check
+    echo ""
+    if firewall-cmd --zone="$ZONE_NAME" --query-port=27015/tcp 2>/dev/null; then
+        echo -e "  ${GREEN}Gaming Mode:${NC}    ON"
+    else
+        echo -e "  ${YELLOW}Gaming Mode:${NC}    OFF (game ports closed)"
+    fi
+
+    # Open ports
+    echo -e "\n  ${BOLD}Open Ports (${ZONE_NAME}):${NC}"
+    local ports
+    ports=$(firewall-cmd --zone="$ZONE_NAME" --list-ports 2>/dev/null || echo "none")
+    if [[ "$ports" == "none" ]] || [[ -z "$ports" ]]; then
+        echo -e "    ${DIM}(no ports open)${NC}"
+    else
+        local count=0
+        for port in $ports; do
+            echo -e "    ${GREEN}+${NC} ${port}"
+            ((count++))
+        done
+        echo -e "    ${DIM}(${count} port ranges open)${NC}"
+    fi
+
+    # Services
+    echo -e "\n  ${BOLD}Allowed Services:${NC}"
+    local services
+    services=$(firewall-cmd --zone="$ZONE_NAME" --list-services 2>/dev/null || echo "none")
+    for svc in $services; do
+        echo -e "    ${GREEN}+${NC} ${svc}"
+    done
+
+    # Rich rules
+    echo -e "\n  ${BOLD}Rich Rules:${NC}"
+    local rules
+    rules=$(firewall-cmd --zone="$ZONE_NAME" --list-rich-rules 2>/dev/null || echo "")
+    if [[ -z "$rules" ]]; then
+        echo -e "    ${DIM}(none)${NC}"
+    else
+        echo "$rules" | while IFS= read -r rule; do
+            echo -e "    ${BLUE}>${NC} ${rule}"
+        done
+    fi
+
+    # Interfaces
+    echo -e "\n  ${BOLD}Interfaces:${NC}"
+    local interfaces
+    interfaces=$(firewall-cmd --zone="$ZONE_NAME" --list-interfaces 2>/dev/null || echo "")
+    if [[ -z "$interfaces" ]]; then
+        echo -e "    ${DIM}(none assigned)${NC}"
+    else
+        for iface in $interfaces; do
+            echo -e "    ${GREEN}+${NC} ${iface}"
+        done
+    fi
+
+    # Connection stats
+    echo -e "\n  ${BOLD}Connection Stats:${NC}"
+    if command -v ss &>/dev/null; then
+        local established listening
+        established=$(ss -tun state established 2>/dev/null | tail -n +2 | wc -l)
+        listening=$(ss -tln 2>/dev/null | tail -n +2 | wc -l)
+        echo -e "    Established: ${established}"
+        echo -e "    Listening:   ${listening}"
+    else
+        echo -e "    ${DIM}(ss not available)${NC}"
+    fi
+
+    # Recent drops
+    echo -e "\n  ${BOLD}Recent Drops (last 5):${NC}"
+    if journalctl -k --no-pager -n 50 2>/dev/null | grep -q "FORGE-DROP"; then
+        journalctl -k --no-pager -n 50 2>/dev/null | grep "FORGE-DROP" | tail -5 | while IFS= read -r line; do
+            echo -e "    ${RED}x${NC} ${line}"
+        done
+    else
+        echo -e "    ${DIM}(no recent drops logged)${NC}"
+    fi
+
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Command: gaming on/off
+# ---------------------------------------------------------------------------
+cmd_gaming() {
+    local mode="${1:-}"
+    check_root
+    check_firewalld
+    acquire_lock
+
+    case "$mode" in
+        on)
+            header "Gaming Mode: ON"
+            info "Opening game ports..."
+
+            # Add all gaming ports permanently
+            local added=0
+
+            # Steam
+            for port in $STEAM_TCP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/tcp" 2>/dev/null && ((added++)) || true
+            done
+            for port in $STEAM_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/udp" 2>/dev/null && ((added++)) || true
+            done
+
+            # Source engine
+            for port in $SOURCE_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/udp" 2>/dev/null && ((added++)) || true
+            done
+
+            # Rust
+            for port in $RUST_TCP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/tcp" 2>/dev/null && ((added++)) || true
+            done
+            for port in $RUST_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/udp" 2>/dev/null && ((added++)) || true
+            done
+
+            # Sunshine
+            for port in $SUNSHINE_TCP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/tcp" 2>/dev/null && ((added++)) || true
+            done
+            for port in $SUNSHINE_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/udp" 2>/dev/null && ((added++)) || true
+            done
+
+            # WireGuard
+            for port in $WIREGUARD_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/udp" 2>/dev/null && ((added++)) || true
+            done
+
+            # mDNS
+            for port in $MDNS_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/udp" 2>/dev/null && ((added++)) || true
+            done
+
+            # LAN discovery
+            for port in $LAN_DISCOVERY_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/udp" 2>/dev/null && ((added++)) || true
+            done
+
+            # Voice
+            for port in $VOICE_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --add-port="${port}/udp" 2>/dev/null && ((added++)) || true
+            done
+
+            firewall-cmd --reload
+            info "Gaming mode enabled. ${added} port rules applied."
+            log "INFO" "Gaming mode enabled"
+            ;;
+
+        off)
+            header "Gaming Mode: OFF"
+            info "Closing game ports (keeping SSH and essential services)..."
+
+            # Remove all gaming-specific ports
+            local removed=0
+
+            # Steam
+            for port in $STEAM_TCP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/tcp" 2>/dev/null && ((removed++)) || true
+            done
+            for port in $STEAM_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/udp" 2>/dev/null && ((removed++)) || true
+            done
+
+            # Source engine
+            for port in $SOURCE_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/udp" 2>/dev/null && ((removed++)) || true
+            done
+
+            # Rust
+            for port in $RUST_TCP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/tcp" 2>/dev/null && ((removed++)) || true
+            done
+            for port in $RUST_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/udp" 2>/dev/null && ((removed++)) || true
+            done
+
+            # Sunshine
+            for port in $SUNSHINE_TCP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/tcp" 2>/dev/null && ((removed++)) || true
+            done
+            for port in $SUNSHINE_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/udp" 2>/dev/null && ((removed++)) || true
+            done
+
+            # WireGuard
+            for port in $WIREGUARD_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/udp" 2>/dev/null && ((removed++)) || true
+            done
+
+            # mDNS
+            for port in $MDNS_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/udp" 2>/dev/null && ((removed++)) || true
+            done
+
+            # LAN discovery
+            for port in $LAN_DISCOVERY_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/udp" 2>/dev/null && ((removed++)) || true
+            done
+
+            # Voice
+            for port in $VOICE_UDP_PORTS; do
+                firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="${port}/udp" 2>/dev/null && ((removed++)) || true
+            done
+
+            firewall-cmd --reload
+            info "Gaming mode disabled. ${removed} port rules removed."
+            info "SSH and DHCP remain accessible."
+            log "INFO" "Gaming mode disabled"
+            ;;
+
+        *)
+            error "Usage: forge-firewall gaming <on|off>"
+            exit 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Command: strict
+# ---------------------------------------------------------------------------
+cmd_strict() {
+    header "Strict Lockdown Mode"
+    check_root
+    check_firewalld
+    acquire_lock
+
+    warn "This will close ALL ports except SSH."
+    echo -e "  Only SSH (rate-limited) will remain accessible."
+    echo -e "  Gaming, Sunshine, WireGuard — all will be blocked."
+    echo ""
+
+    if ! confirm "Enable strict lockdown?"; then
+        info "Aborted."
+        return 0
+    fi
+
+    info "Entering strict lockdown..."
+
+    # Remove all ports
+    local all_ports
+    all_ports=$(firewall-cmd --permanent --zone="$ZONE_NAME" --list-ports 2>/dev/null || echo "")
+    for port in $all_ports; do
+        firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="$port" 2>/dev/null || true
+    done
+
+    # Remove all services except ssh
+    local all_services
+    all_services=$(firewall-cmd --permanent --zone="$ZONE_NAME" --list-services 2>/dev/null || echo "")
+    for svc in $all_services; do
+        if [[ "$svc" != "ssh" ]]; then
+            firewall-cmd --permanent --zone="$ZONE_NAME" --remove-service="$svc" 2>/dev/null || true
+        fi
+    done
+
+    # Ensure SSH remains
+    firewall-cmd --permanent --zone="$ZONE_NAME" --add-service=ssh 2>/dev/null || true
+
+    firewall-cmd --reload
+
+    info "Strict lockdown active."
+    info "Only SSH (rate-limited to ${SSH_RATE_LIMIT}/min) is allowed."
+    echo ""
+    echo -e "  To restore gaming access: ${CYAN}forge-firewall gaming on${NC}"
+    echo -e "  To fully reset:           ${CYAN}forge-firewall reset${NC}"
+
+    log "INFO" "Strict lockdown enabled"
+}
+
+# ---------------------------------------------------------------------------
+# Command: reset
+# ---------------------------------------------------------------------------
+cmd_reset() {
+    header "Reset to Default Gaming Profile"
+    check_root
+    check_firewalld
+    acquire_lock
+
+    info "This will reset the firewall to the default forge-gaming profile."
+    echo ""
+
+    if ! confirm "Reset firewall to defaults?"; then
+        info "Aborted."
+        return 0
+    fi
+
+    info "Resetting firewall..."
+
+    # Reinstall zone file
+    install_zone
+
+    # Reload
+    firewall-cmd --reload
+    sleep 1
+
+    # Set as default
+    firewall-cmd --set-default-zone="$ZONE_NAME" 2>/dev/null || true
+
+    # Reassign default interface
+    local default_iface
+    default_iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    if [[ -n "$default_iface" ]]; then
+        firewall-cmd --permanent --zone="$ZONE_NAME" --change-interface="$default_iface" 2>/dev/null || true
+    fi
+
+    firewall-cmd --reload
+
+    info "Firewall reset to default gaming profile."
+    echo -e "  Run ${CYAN}forge-firewall status${NC} to verify."
+
+    log "INFO" "Firewall reset to defaults"
+}
+
+# ---------------------------------------------------------------------------
+# Command: allow
+# ---------------------------------------------------------------------------
+cmd_allow() {
+    local portspec="${1:-}"
+    check_root
+    check_firewalld
+
+    if [[ -z "$portspec" ]]; then
+        error "Usage: forge-firewall allow <port/protocol>"
+        echo -e "  Examples:"
+        echo -e "    forge-firewall allow 8080/tcp"
+        echo -e "    forge-firewall allow 9000-9010/udp"
+        exit 1
+    fi
+
+    # Validate format
+    if ! echo "$portspec" | grep -qE '^[0-9]+(-[0-9]+)?/(tcp|udp)$'; then
+        error "Invalid port format: ${portspec}"
+        echo -e "  Expected format: ${CYAN}<port>/tcp${NC} or ${CYAN}<port-range>/udp${NC}"
+        exit 1
+    fi
+
+    local port proto
+    port="${portspec%/*}"
+    proto="${portspec#*/}"
+
+    # Validate port range
+    local start_port end_port
+    if [[ "$port" == *-* ]]; then
+        start_port="${port%-*}"
+        end_port="${port#*-}"
+    else
+        start_port="$port"
+        end_port="$port"
+    fi
+
+    if [[ "$start_port" -lt 1 ]] || [[ "$end_port" -gt 65535 ]]; then
+        error "Port out of range (1-65535): ${port}"
+        exit 1
+    fi
+
+    if [[ "$start_port" -gt "$end_port" ]]; then
+        error "Invalid port range: start (${start_port}) > end (${end_port})"
+        exit 1
+    fi
+
+    info "Allowing ${portspec} (runtime only — not persistent)..."
+    if firewall-cmd --zone="$ZONE_NAME" --add-port="$portspec" 2>/dev/null; then
+        info "Port ${portspec} is now open."
+        echo -e "  ${DIM}This is temporary and will reset on reload/reboot.${NC}"
+        echo -e "  ${DIM}To make permanent, edit the zone XML or run setup again.${NC}"
+        log "INFO" "Temporarily allowed port: ${portspec}"
+    else
+        error "Failed to open port ${portspec}."
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Command: block
+# ---------------------------------------------------------------------------
+cmd_block() {
+    local portspec="${1:-}"
+    check_root
+    check_firewalld
+
+    if [[ -z "$portspec" ]]; then
+        error "Usage: forge-firewall block <port/protocol>"
+        echo -e "  Examples:"
+        echo -e "    forge-firewall block 8080/tcp"
+        echo -e "    forge-firewall block 9000-9010/udp"
+        exit 1
+    fi
+
+    # Validate format
+    if ! echo "$portspec" | grep -qE '^[0-9]+(-[0-9]+)?/(tcp|udp)$'; then
+        error "Invalid port format: ${portspec}"
+        echo -e "  Expected format: ${CYAN}<port>/tcp${NC} or ${CYAN}<port-range>/udp${NC}"
+        exit 1
+    fi
+
+    info "Blocking ${portspec}..."
+
+    # Try runtime removal
+    local removed=false
+    if firewall-cmd --zone="$ZONE_NAME" --remove-port="$portspec" 2>/dev/null; then
+        removed=true
+    fi
+
+    # Also try permanent removal
+    if firewall-cmd --permanent --zone="$ZONE_NAME" --remove-port="$portspec" 2>/dev/null; then
+        removed=true
+        firewall-cmd --reload 2>/dev/null || true
+    fi
+
+    if $removed; then
+        info "Port ${portspec} is now blocked."
+        log "INFO" "Blocked port: ${portspec}"
+    else
+        warn "Port ${portspec} was not in the allow list (may already be blocked)."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Command: log
+# ---------------------------------------------------------------------------
+cmd_log() {
+    header "Firewall Drop Log"
+
+    local count="${1:-${MAX_DROP_LOG}}"
+
+    echo -e "  ${BOLD}Last ${count} dropped connections:${NC}\n"
+
+    local found=false
+    if journalctl -k --no-pager -n 500 2>/dev/null | grep "FORGE-DROP" | tail -"$count" | while IFS= read -r line; do
+        found=true
+        # Parse the log entry
+        local timestamp src dst proto dpt
+        timestamp=$(echo "$line" | awk '{print $1, $2, $3}')
+        src=$(echo "$line" | grep -oP 'SRC=\K[^ ]+' || echo "?")
+        dst=$(echo "$line" | grep -oP 'DST=\K[^ ]+' || echo "?")
+        proto=$(echo "$line" | grep -oP 'PROTO=\K[^ ]+' || echo "?")
+        dpt=$(echo "$line" | grep -oP 'DPT=\K[^ ]+' || echo "?")
+
+        echo -e "  ${RED}x${NC} ${DIM}${timestamp}${NC}"
+        echo -e "    ${src} -> ${dst}:${dpt} (${proto})"
+        echo ""
+    done; then
+        : # entries found
+    fi
+
+    if ! journalctl -k --no-pager -n 500 2>/dev/null | grep -q "FORGE-DROP"; then
+        echo -e "  ${DIM}No dropped packets logged yet.${NC}"
+        echo -e "  ${DIM}This is normal if the firewall was just set up.${NC}"
+    fi
+
+    echo ""
+    echo -e "  ${DIM}Showing kernel journal entries with 'FORGE-DROP' prefix.${NC}"
+    echo -e "  ${DIM}Dropped packet logging is rate-limited to 10/min to prevent log spam.${NC}"
+}
+
+# ---------------------------------------------------------------------------
+# Command: ports — Quick port reference
+# ---------------------------------------------------------------------------
+cmd_ports() {
+    header "Gaming Port Reference"
+
+    echo -e "  ${BOLD}Service              Protocol   Ports${NC}"
+    echo -e "  ${DIM}---------------------------------------------------${NC}"
+    echo -e "  Steam Client         TCP+UDP    27015-27050"
+    echo -e "  Source Engine         UDP        27000-27030"
+    echo -e "  Rust Game+RCON       TCP+UDP    28015-28016"
+    echo -e "  Sunshine (TCP)       TCP        47984-47990, 48010"
+    echo -e "  Sunshine (UDP)       UDP        47998-48000"
+    echo -e "  WireGuard            UDP        51820"
+    echo -e "  mDNS                 UDP        5353"
+    echo -e "  LAN Discovery        UDP        24240"
+    echo -e "  Voice Chat           UDP        24250-24251"
+    echo -e "  SSH                  TCP        22 (rate-limited)"
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Command: watch — Live monitor of firewall events
+# ---------------------------------------------------------------------------
+cmd_watch() {
+    header "Live Firewall Monitor"
+    info "Watching for dropped packets... (Ctrl+C to stop)"
+    echo ""
+
+    journalctl -kf --no-pager 2>/dev/null | while IFS= read -r line; do
+        if echo "$line" | grep -q "FORGE-DROP"; then
+            local src dst proto dpt spt
+            src=$(echo "$line" | grep -oP 'SRC=\K[^ ]+' || echo "?")
+            dst=$(echo "$line" | grep -oP 'DST=\K[^ ]+' || echo "?")
+            proto=$(echo "$line" | grep -oP 'PROTO=\K[^ ]+' || echo "?")
+            dpt=$(echo "$line" | grep -oP 'DPT=\K[^ ]+' || echo "?")
+            spt=$(echo "$line" | grep -oP 'SPT=\K[^ ]+' || echo "?")
+
+            echo -e "${RED}BLOCKED${NC} ${src}:${spt} -> ${dst}:${dpt} (${proto}) $(date '+%H:%M:%S')"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Command: test — Run a connectivity self-test
+# ---------------------------------------------------------------------------
+cmd_test() {
+    header "Firewall Connectivity Test"
+    check_firewalld
+
+    local pass=0
+    local fail=0
+
+    echo -e "  ${BOLD}Testing firewall configuration...${NC}\n"
+
+    # Test 1: firewalld running
+    if systemctl is-active --quiet firewalld; then
+        echo -e "  ${GREEN}PASS${NC}  firewalld is running"
+        ((pass++))
+    else
+        echo -e "  ${RED}FAIL${NC}  firewalld is not running"
+        ((fail++))
+    fi
+
+    # Test 2: forge-gaming zone exists
+    if firewall-cmd --get-zones 2>/dev/null | grep -q "$ZONE_NAME"; then
+        echo -e "  ${GREEN}PASS${NC}  ${ZONE_NAME} zone exists"
+        ((pass++))
+    else
+        echo -e "  ${RED}FAIL${NC}  ${ZONE_NAME} zone not found"
+        ((fail++))
+    fi
+
+    # Test 3: Default zone
+    local dz
+    dz=$(firewall-cmd --get-default-zone 2>/dev/null)
+    if [[ "$dz" == "$ZONE_NAME" ]]; then
+        echo -e "  ${GREEN}PASS${NC}  Default zone is ${ZONE_NAME}"
+        ((pass++))
+    else
+        echo -e "  ${YELLOW}WARN${NC}  Default zone is '${dz}' (expected ${ZONE_NAME})"
+        ((fail++))
+    fi
+
+    # Test 4: SSH allowed
+    if firewall-cmd --zone="$ZONE_NAME" --query-service=ssh 2>/dev/null; then
+        echo -e "  ${GREEN}PASS${NC}  SSH service is allowed"
+        ((pass++))
+    else
+        echo -e "  ${RED}FAIL${NC}  SSH service not allowed (lockout risk!)"
+        ((fail++))
+    fi
+
+    # Test 5: Interface assigned
+    local ifaces
+    ifaces=$(firewall-cmd --zone="$ZONE_NAME" --list-interfaces 2>/dev/null || echo "")
+    if [[ -n "$ifaces" ]]; then
+        echo -e "  ${GREEN}PASS${NC}  Interface(s) assigned: ${ifaces}"
+        ((pass++))
+    else
+        echo -e "  ${YELLOW}WARN${NC}  No interfaces assigned to ${ZONE_NAME}"
+        ((fail++))
+    fi
+
+    # Test 6: DNS resolution
+    if host google.com &>/dev/null || nslookup google.com &>/dev/null 2>&1; then
+        echo -e "  ${GREEN}PASS${NC}  DNS resolution working"
+        ((pass++))
+    else
+        echo -e "  ${YELLOW}WARN${NC}  DNS resolution may be impaired"
+        ((fail++))
+    fi
+
+    # Test 7: Outbound connectivity
+    if curl -s --max-time 5 -o /dev/null -w "%{http_code}" "https://store.steampowered.com" | grep -q "200\|301\|302"; then
+        echo -e "  ${GREEN}PASS${NC}  Outbound HTTPS working (Steam reachable)"
+        ((pass++))
+    else
+        echo -e "  ${YELLOW}WARN${NC}  Could not reach Steam store (may be temporary)"
+        ((fail++))
+    fi
+
+    # Test 8: Kernel security params
+    local syncookies
+    syncookies=$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null || echo "?")
+    if [[ "$syncookies" == "1" ]]; then
+        echo -e "  ${GREEN}PASS${NC}  SYN cookies enabled"
+        ((pass++))
+    else
+        echo -e "  ${YELLOW}WARN${NC}  SYN cookies not enabled (value: ${syncookies})"
+        ((fail++))
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Results:${NC} ${GREEN}${pass} passed${NC}, ${RED}${fail} issues${NC}"
+    echo ""
+
+    if [[ $fail -eq 0 ]]; then
+        echo -e "  ${GREEN}All checks passed!${NC}"
+    else
+        echo -e "  ${YELLOW}Some issues detected. Run 'forge-firewall setup' to fix.${NC}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Usage / Help
+# ---------------------------------------------------------------------------
+usage() {
+    cat <<HELP
+${BOLD}forge-firewall${NC} — 24HG Forge Firewall Manager v${VERSION}
+
+${BOLD}Usage:${NC}
+  forge-firewall <command> [args]
+
+${BOLD}Commands:${NC}
+  ${GREEN}setup${NC}              Initialize the gaming-optimized firewall profile
+  ${GREEN}status${NC}             Show current firewall state, open ports, active zones
+  ${GREEN}gaming on|off${NC}      Toggle gaming mode (opens/closes game ports)
+  ${GREEN}strict${NC}             Lock down everything except SSH
+  ${GREEN}reset${NC}              Reset to default gaming profile
+  ${GREEN}allow${NC} <port/proto> Temporarily allow a port (e.g., 8080/tcp)
+  ${GREEN}block${NC} <port/proto> Block a port (e.g., 8080/tcp)
+  ${GREEN}log${NC} [count]        Show recent blocked connections (default: 100)
+  ${GREEN}ports${NC}              Show gaming port reference table
+  ${GREEN}watch${NC}              Live monitor of blocked connections
+  ${GREEN}test${NC}               Run connectivity self-test
+
+${BOLD}Examples:${NC}
+  sudo forge-firewall setup          # First-time setup
+  sudo forge-firewall gaming on      # Open all game ports
+  sudo forge-firewall allow 8080/tcp # Temporarily allow port 8080
+  forge-firewall status              # Check current state
+  forge-firewall log 20              # Last 20 dropped connections
+
+${BOLD}Gaming Ports Included:${NC}
+  Steam (27015-27050), Source (27000-27030), Rust (28015-28016),
+  Sunshine (47984-47990, 48010, 47998-48000), WireGuard (51820),
+  mDNS (5353), LAN Discovery (24240), Voice (24250-24251)
+
+${BOLD}Notes:${NC}
+  - The 'allow' command is temporary (survives until reload/reboot)
+  - The 'block' command is permanent (persists across reboots)
+  - SSH is always rate-limited to ${SSH_RATE_LIMIT} connections/minute
+  - Dropped packets are logged with 'FORGE-DROP' prefix (10/min limit)
+  - Zone file: ${ZONE_FILE}
+  - Log file:  ${LOG_FILE}
+HELP
+}
+
+# ---------------------------------------------------------------------------
+# Main Entry Point
+# ---------------------------------------------------------------------------
+main() {
+    local command="${1:-help}"
+    shift || true
+
+    case "$command" in
+        setup)          cmd_setup "$@" ;;
+        status)         cmd_status "$@" ;;
+        gaming)         cmd_gaming "$@" ;;
+        strict)         cmd_strict "$@" ;;
+        reset)          cmd_reset "$@" ;;
+        allow)          cmd_allow "$@" ;;
+        block)          cmd_block "$@" ;;
+        log)            cmd_log "$@" ;;
+        ports)          cmd_ports "$@" ;;
+        watch)          cmd_watch "$@" ;;
+        test)           cmd_test "$@" ;;
+        help|--help|-h) usage ;;
+        version|--version|-v) echo "forge-firewall v${VERSION}" ;;
+        *)
+            error "Unknown command: ${command}"
+            echo -e "  Run ${CYAN}forge-firewall help${NC} for usage."
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

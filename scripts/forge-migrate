@@ -10,9 +10,9 @@ set -euo pipefail
 
 VERSION="1.0.0"
 PROGRAM_NAME="forge-migrate"
-HUBOS_DATA_DIR="${HOME}/.local/share/forge"
-MIGRATE_DIR="${HUBOS_DATA_DIR}/migrate"
-BACKUP_DIR="${HUBOS_DATA_DIR}/migrate-backups"
+FORGE_DATA_DIR="${HOME}/.local/share/forge"
+MIGRATE_DIR="${FORGE_DATA_DIR}/migrate"
+BACKUP_DIR="${FORGE_DATA_DIR}/migrate-backups"
 SCAN_CACHE="${MIGRATE_DIR}/last-scan.json"
 IMPORT_LOG="${MIGRATE_DIR}/import-history.log"
 GUI_MODE=false

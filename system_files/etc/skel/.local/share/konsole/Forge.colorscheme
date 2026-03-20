@@ -4,10 +4,10 @@ Opacity=1
 Wallpaper=
 
 [Background]
-Color=10,10,20
+Color=4,9,16
 
 [BackgroundFaint]
-Color=10,10,20
+Color=4,9,16
 
 [BackgroundIntense]
 Color=16,16,30
@@ -22,11 +22,11 @@ Color=128,128,176
 Color=240,240,255
 
 [Color0]
-Color=10,10,20
+Color=4,9,16
 Bold=false
 
 [Color0Faint]
-Color=10,10,20
+Color=4,9,16
 
 [Color0Intense]
 Color=40,40,60

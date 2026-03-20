@@ -1,0 +1,12 @@
+[Unit]
+Description=24HG Forge Smart Updates — Gaming-aware update daemon
+After=graphical-session.target network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/forge-smart-updates daemon
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target

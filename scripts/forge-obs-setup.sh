@@ -137,7 +137,7 @@ Profile=high
 Tune=zerolatency
 
 [AdvOut.Recording]
-RecFilePath=/home/
+RecFilePath=\$HOME/Videos/
 RecFormat2=mkv
 RecEncoder=obs_x264
 RecMuxerCustom=

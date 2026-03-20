@@ -1,0 +1,1118 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Forge Split-Screen — Couch co-op / split-screen gaming tool
+# Launches multiple game instances in tiled Gamescope sessions with
+# per-player controller assignment, audio routing, and profile management.
+#
+# Usage: forge-splitscreen <command> [args...]
+
+FORGE_VERSION="1.0"
+CONFIG_DIR="${HOME}/.config/forge/splitscreen"
+PROFILES_DIR="${CONFIG_DIR}/profiles"
+SESSION_DIR="/tmp/forge-splitscreen"
+SESSION_FILE="${SESSION_DIR}/session.json"
+PID_DIR="${SESSION_DIR}/pids"
+LOG_DIR="${SESSION_DIR}/logs"
+
+mkdir -p "$CONFIG_DIR" "$PROFILES_DIR" "$SESSION_DIR" "$PID_DIR" "$LOG_DIR"
+
+# ── Colors ──────────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+info()  { echo -e "${GREEN}[+]${RESET} $*"; }
+warn()  { echo -e "${YELLOW}[!]${RESET} $*"; }
+err()   { echo -e "${RED}[-]${RESET} $*"; }
+head_() { echo -e "\n${BOLD}${CYAN}=== $* ===${RESET}\n"; }
+die()   { err "$*"; exit 1; }
+
+# ── Known Games Database ────────────────────────────────────────────────────
+# Format: name|steam_appid|max_players|layout|notes
+
+declare -A GAME_DB
+GAME_DB=(
+    ["rocketleague"]="Rocket League|252950|4|quadrant|Works great. Use Big Picture split-screen."
+    ["gangbeasts"]="Gang Beasts|285900|4|quadrant|Each instance needs separate Steam prefix."
+    ["overcooked"]="Overcooked! 2|728880|4|quadrant|Best in local co-op mode."
+    ["cuphead"]="Cuphead|268910|2|side-by-side|Two player only. Needs shared keyboard+controller or 2 controllers."
+    ["humanfallflat"]="Human: Fall Flat|477160|2|side-by-side|LAN lobby for multi-instance."
+    ["stardewvalley"]="Stardew Valley|413150|4|quadrant|Use split-screen mod or multi-instance LAN."
+    ["enterthegungeon"]="Enter the Gungeon|311690|2|side-by-side|Native co-op. One instance, two controllers."
+    ["movingout"]="Moving Out|996770|4|quadrant|Native local co-op."
+    ["unravel2"]="Unravel Two|1225570|2|side-by-side|Native co-op, two controllers."
+    ["speedrunners"]="SpeedRunners|207140|4|quadrant|Native local multiplayer."
+    ["towerfall"]="TowerFall Ascension|251470|4|quadrant|Excellent local multiplayer."
+    ["broforce"]="Broforce|274190|4|quadrant|Native local co-op."
+    ["lethalleague"]="Lethal League Blaze|553310|4|quadrant|Native local multiplayer."
+    ["crawl"]="Crawl|293780|4|quadrant|Native 4-player local."
+    ["lovers"]="Lovers in a Dangerous Spacetime|252110|4|quadrant|Great couch co-op."
+    ["battleblock"]="BattleBlock Theater|238460|2|side-by-side|Two-player co-op."
+    ["duckgame"]="Duck Game|312530|4|quadrant|Native local multiplayer."
+    ["ultimate_chicken"]="Ultimate Chicken Horse|386940|4|quadrant|Native local multiplayer."
+    ["ahat"]="A Hat in Time|253230|2|side-by-side|Split-screen mod available."
+    ["boomerangfu"]="Boomerang Fu|965680|4|quadrant|Great party game, native local."
+)
+
+# ── Dependency Checks ───────────────────────────────────────────────────────
+
+check_deps() {
+    local missing=()
+    for cmd in gamescope jq pw-cli pw-link pw-metadata evtest; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        warn "Missing optional tools: ${missing[*]}"
+        warn "Install with: sudo dnf install ${missing[*]}"
+        if [[ " ${missing[*]} " == *" gamescope "* ]]; then
+            die "gamescope is required for split-screen. Cannot continue."
+        fi
+        if [[ " ${missing[*]} " == *" jq "* ]]; then
+            die "jq is required for session management. Cannot continue."
+        fi
+    fi
+}
+
+# ── Display Detection ───────────────────────────────────────────────────────
+
+get_display_resolution() {
+    local res
+    if command -v xdpyinfo &>/dev/null && [[ -n "${DISPLAY:-}" ]]; then
+        res=$(xdpyinfo 2>/dev/null | grep 'dimensions:' | awk '{print $2}')
+    elif command -v xrandr &>/dev/null && [[ -n "${DISPLAY:-}" ]]; then
+        res=$(xrandr 2>/dev/null | grep '\*' | head -1 | awk '{print $1}')
+    elif command -v wlr-randr &>/dev/null && [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+        res=$(wlr-randr 2>/dev/null | grep 'current' | head -1 | awk '{print $1}')
+    fi
+    echo "${res:-1920x1080}"
+}
+
+parse_resolution() {
+    local res="$1"
+    SCREEN_W="${res%%x*}"
+    SCREEN_H="${res##*x}"
+}
+
+# ── Layout Calculations ────────────────────────────────────────────────────
+
+# Compute per-player viewport geometry for a given layout and player count.
+# Prints: width height offset_x offset_y  (one line per player slot)
+compute_layout() {
+    local layout="$1" players="$2" sw="$3" sh="$4"
+    local pw ph
+
+    case "${layout}" in
+        side-by-side)
+            pw=$((sw / players))
+            ph=$sh
+            for ((i=0; i<players; i++)); do
+                echo "$pw $ph $((i * pw)) 0"
+            done
+            ;;
+        top-bottom)
+            pw=$sw
+            ph=$((sh / players))
+            for ((i=0; i<players; i++)); do
+                echo "$pw $ph 0 $((i * ph))"
+            done
+            ;;
+        quadrant)
+            if [[ $players -le 2 ]]; then
+                pw=$((sw / 2))
+                ph=$sh
+                for ((i=0; i<players; i++)); do
+                    echo "$pw $ph $((i * pw)) 0"
+                done
+            elif [[ $players -le 4 ]]; then
+                pw=$((sw / 2))
+                ph=$((sh / 2))
+                local positions=("0 0" "$pw 0" "0 $ph" "$pw $ph")
+                for ((i=0; i<players; i++)); do
+                    echo "$pw $ph ${positions[$i]}"
+                done
+            fi
+            ;;
+        vertical-thirds)
+            pw=$((sw / 3))
+            ph=$sh
+            for ((i=0; i<players && i<3; i++)); do
+                echo "$pw $ph $((i * pw)) 0"
+            done
+            ;;
+        *)
+            die "Unknown layout: ${layout}"
+            ;;
+    esac
+}
+
+# ── Controller Detection ───────────────────────────────────────────────────
+
+list_controllers() {
+    local count=0
+    if [[ -d /dev/input ]]; then
+        for evdev in /dev/input/event*; do
+            [[ -e "$evdev" ]] || continue
+            local name=""
+            local sysnum="${evdev#/dev/input/event}"
+            local sysname="/sys/class/input/event${sysnum}/device/name"
+            [[ -r "$sysname" ]] && name=$(cat "$sysname" 2>/dev/null || true)
+
+            # Filter for gamepad-like devices (joystick capability)
+            local caps_file="/sys/class/input/event${sysnum}/device/capabilities/abs"
+            [[ -r "$caps_file" ]] || continue
+            local abs_caps
+            abs_caps=$(cat "$caps_file" 2>/dev/null || echo "0")
+            # Joysticks generally have ABS_X/ABS_Y (bits 0-1) set
+            [[ "$abs_caps" == "0" ]] && continue
+
+            # Skip accelerometers and touchpads by name
+            case "${name,,}" in
+                *accelerometer*|*touchpad*|*trackpad*|*mouse*|*touch*) continue ;;
+            esac
+
+            echo "${evdev}|${name:-Unknown Controller}"
+            ((count++)) || true
+        done
+    fi
+
+    # Also check /dev/input/js* as fallback
+    if [[ $count -eq 0 ]]; then
+        for jsdev in /dev/input/js*; do
+            [[ -e "$jsdev" ]] || continue
+            local jsnum="${jsdev#/dev/input/js}"
+            local jsname="/sys/class/input/js${jsnum}/device/name"
+            local name=""
+            [[ -r "$jsname" ]] && name=$(cat "$jsname" 2>/dev/null || true)
+            echo "${jsdev}|${name:-Unknown Controller}"
+        done
+    fi
+}
+
+controller_type() {
+    local name="${1,,}"
+    case "$name" in
+        *xbox*|*microsoft*|*xinput*)   echo "xbox" ;;
+        *playstation*|*dualshock*|*dualsense*|*sony*) echo "playstation" ;;
+        *nintendo*|*switch*|*pro\ controller*) echo "nintendo" ;;
+        *8bitdo*)                      echo "8bitdo" ;;
+        *)                             echo "generic" ;;
+    esac
+}
+
+controller_icon() {
+    local type="$1"
+    case "$type" in
+        xbox)        echo "[Xbox]" ;;
+        playstation) echo "[PS]" ;;
+        nintendo)    echo "[Nintendo]" ;;
+        8bitdo)      echo "[8BitDo]" ;;
+        *)           echo "[Gamepad]" ;;
+    esac
+}
+
+vibrate_controller() {
+    local evdev="$1" duration="${2:-200}"
+    # Use fftest or evdev-joystick to send a short rumble
+    if command -v fftest &>/dev/null; then
+        timeout 1 fftest "$evdev" <<< "0" &>/dev/null || true
+    fi
+    # Fallback: write force-feedback event directly
+    if command -v python3 &>/dev/null; then
+        python3 -c "
+import struct, fcntl, os, time
+try:
+    fd = os.open('$evdev', os.O_RDWR)
+    # Upload rumble effect (strong magnitude, short duration)
+    effect = struct.pack('HhHHHHIHHHH', 0x50, -1, 0, 0, 0, 0, ${duration}, 0xFFFF, 0, 0, 0)
+    buf = bytearray(48)
+    buf[:len(effect)] = effect
+    fcntl.ioctl(fd, 0x40304580, buf)  # EVIOCSFF
+    eid = struct.unpack_from('h', buf, 2)[0]
+    ev = struct.pack('LLHHi', 0, 0, 0x15, eid, 1)  # EV_FF play
+    os.write(fd, ev)
+    time.sleep(${duration}/1000.0)
+    ev = struct.pack('LLHHi', 0, 0, 0x15, eid, 0)  # EV_FF stop
+    os.write(fd, ev)
+    os.close(fd)
+except: pass
+" &>/dev/null &
+    fi
+}
+
+# ── Audio Routing (PipeWire) ────────────────────────────────────────────────
+
+create_virtual_sink() {
+    local name="$1" desc="$2"
+    if ! command -v pw-cli &>/dev/null; then
+        warn "pw-cli not found; audio routing unavailable"
+        return 1
+    fi
+    # Create a virtual null sink via PipeWire
+    pw-cli create-node adapter "{ factory.name=support.null-audio-sink \
+        node.name=${name} media.class=Audio/Sink \
+        node.description=\"${desc}\" \
+        audio.position=[FL,FR] }" 2>/dev/null || true
+    info "Created virtual sink: ${desc}"
+}
+
+destroy_virtual_sink() {
+    local name="$1"
+    if command -v pw-cli &>/dev/null; then
+        local node_id
+        node_id=$(pw-cli ls Node 2>/dev/null | grep -B2 "node.name = \"${name}\"" \
+            | head -1 | awk '{print $2}' | tr -d ',')
+        if [[ -n "$node_id" ]]; then
+            pw-cli destroy "$node_id" 2>/dev/null || true
+        fi
+    fi
+}
+
+route_audio_to_sink() {
+    local pid="$1" sink_name="$2"
+    if ! command -v pw-link &>/dev/null; then return 1; fi
+    # Give the process a moment to register its audio streams
+    sleep 1
+    # Find the PipeWire node for this PID and link it to the target sink
+    local node
+    node=$(pw-cli ls Node 2>/dev/null | grep -B5 "application.process.id = \"${pid}\"" \
+        | head -1 | awk '{print $2}' | tr -d ',' || true)
+    if [[ -n "$node" ]]; then
+        pw-metadata "$node" target.node "$sink_name" 2>/dev/null || true
+    fi
+}
+
+# ── Session Management ──────────────────────────────────────────────────────
+
+is_session_active() {
+    [[ -f "$SESSION_FILE" ]] && return 0 || return 1
+}
+
+save_session() {
+    local game="$1" players="$2" layout="$3" audio="$4"
+    jq -n \
+        --arg game "$game" \
+        --arg players "$players" \
+        --arg layout "$layout" \
+        --arg audio "$audio" \
+        --arg started "$(date -Iseconds)" \
+        --arg pid "$$" \
+        '{game: $game, players: ($players|tonumber), layout: $layout,
+          audio: $audio, started: $started, manager_pid: ($pid|tonumber),
+          instances: []}' > "$SESSION_FILE"
+}
+
+add_instance_to_session() {
+    local slot="$1" pid="$2" evdev="$3" sink="$4"
+    if [[ -f "$SESSION_FILE" ]]; then
+        local tmp
+        tmp=$(mktemp)
+        jq --arg slot "$slot" --arg pid "$pid" --arg evdev "$evdev" --arg sink "$sink" \
+            '.instances += [{slot: ($slot|tonumber), pid: ($pid|tonumber),
+              controller: $evdev, audio_sink: $sink}]' "$SESSION_FILE" > "$tmp"
+        mv "$tmp" "$SESSION_FILE"
+    fi
+}
+
+# ── Proton / Wine Prefix Isolation ──────────────────────────────────────────
+
+prepare_prefix() {
+    local player="$1" game="$2"
+    local base_prefix="${HOME}/.local/share/Steam/steamapps/compatdata"
+    local split_prefix="${CONFIG_DIR}/prefixes/player${player}/${game}"
+
+    if [[ -d "${base_prefix}/${game}" && ! -d "${split_prefix}" ]]; then
+        mkdir -p "${split_prefix}"
+        # Symlink rather than copy to save space; each instance gets its own
+        # user-specific registry overrides via WINEPREFIX layering
+        ln -sf "${base_prefix}/${game}/pfx" "${split_prefix}/pfx" 2>/dev/null || true
+        info "Prepared prefix for player ${player} -> ${split_prefix}"
+    fi
+    echo "${split_prefix}"
+}
+
+# ── CPU Pinning ─────────────────────────────────────────────────────────────
+
+compute_cpu_affinity() {
+    local player="$1" total_players="$2"
+    local ncpu
+    ncpu=$(nproc 2>/dev/null || echo 4)
+    local per_player=$((ncpu / total_players))
+    [[ $per_player -lt 1 ]] && per_player=1
+    local start=$(( (player - 1) * per_player ))
+    local end=$(( start + per_player - 1 ))
+    [[ $end -ge $ncpu ]] && end=$((ncpu - 1))
+    echo "${start}-${end}"
+}
+
+# ── Game Launch ─────────────────────────────────────────────────────────────
+
+resolve_game() {
+    local query="${1,,}"
+    # Exact key match
+    if [[ -n "${GAME_DB[$query]+x}" ]]; then
+        echo "$query"
+        return
+    fi
+    # Fuzzy match by name
+    for key in "${!GAME_DB[@]}"; do
+        local entry="${GAME_DB[$key]}"
+        local name="${entry%%|*}"
+        if [[ "${name,,}" == *"${query}"* ]]; then
+            echo "$key"
+            return
+        fi
+    done
+    # Not in DB — return raw (user might provide a Steam AppID or custom path)
+    echo "$query"
+}
+
+get_game_field() {
+    local key="$1" field="$2"
+    local entry="${GAME_DB[$key]:-}"
+    [[ -z "$entry" ]] && return
+    local IFS='|'
+    local parts=($entry)
+    case "$field" in
+        name)       echo "${parts[0]}" ;;
+        appid)      echo "${parts[1]}" ;;
+        max)        echo "${parts[2]}" ;;
+        layout)     echo "${parts[3]}" ;;
+        notes)      echo "${parts[4]}" ;;
+    esac
+}
+
+launch_instance() {
+    local slot="$1" game_key="$2" appid="$3" \
+          iw="$4" ih="$5" ox="$6" oy="$7" \
+          evdev="$8" audio_sink="$9" layout="${10}"
+
+    local log_file="${LOG_DIR}/player${slot}.log"
+    local env_vars=()
+
+    # Controller isolation
+    if [[ -n "$evdev" && "$evdev" != "none" ]]; then
+        env_vars+=("SDL_JOYSTICK_DEVICE=${evdev}")
+        env_vars+=("SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT=$(basename "$evdev" | sed 's/event//')")
+    fi
+
+    # Audio sink
+    if [[ -n "$audio_sink" && "$audio_sink" != "shared" ]]; then
+        env_vars+=("PULSE_SINK=${audio_sink}")
+    fi
+
+    # CPU affinity
+    local affinity
+    affinity=$(compute_cpu_affinity "$slot" "${10:-2}")
+
+    # Gamescope command — nested compositor with the player's viewport
+    local gs_cmd=(
+        gamescope
+        -w "$iw" -h "$ih"          # internal resolution
+        -W "$iw" -H "$ih"          # output resolution
+        -x "$ox" -y "$oy"          # position on screen
+        --borderless
+        --force-grab-cursor
+        --backend wayland
+        --
+    )
+
+    # If it looks like a Steam AppID, launch via Steam
+    local game_cmd
+    if [[ "$appid" =~ ^[0-9]+$ ]]; then
+        game_cmd=("steam" "-applaunch" "$appid" "-silent")
+    elif [[ -x "$appid" ]]; then
+        game_cmd=("$appid")
+    else
+        game_cmd=("steam" "-applaunch" "$appid" "-silent")
+    fi
+
+    info "Player ${slot}: ${iw}x${ih} at +${ox}+${oy} | CPU ${affinity}"
+
+    (
+        export "${env_vars[@]}" 2>/dev/null || true
+        taskset -c "$affinity" "${gs_cmd[@]}" "${game_cmd[@]}" \
+            > "$log_file" 2>&1
+    ) &
+    local pid=$!
+    echo "$pid" > "${PID_DIR}/player${slot}.pid"
+
+    # Route audio if per-player mode
+    if [[ -n "$audio_sink" && "$audio_sink" != "shared" ]]; then
+        route_audio_to_sink "$pid" "$audio_sink" &
+    fi
+
+    add_instance_to_session "$slot" "$pid" "$evdev" "${audio_sink:-shared}"
+    info "Player ${slot} launched (PID ${pid})"
+}
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+cmd_setup() {
+    head_ "24HG Forge Split-Screen Setup Wizard"
+    check_deps
+
+    echo -e "${BOLD}This wizard will help you configure split-screen gaming.${RESET}\n"
+
+    # Step 1: Display
+    local res
+    res=$(get_display_resolution)
+    echo -e "Detected display resolution: ${GREEN}${res}${RESET}"
+    read -rp "Use this resolution? [Y/n] " use_res
+    if [[ "${use_res,,}" == "n" ]]; then
+        read -rp "Enter resolution (e.g. 2560x1440): " res
+    fi
+    parse_resolution "$res"
+
+    # Step 2: Controllers
+    echo ""
+    head_ "Controller Detection"
+    local controllers=()
+    while IFS='|' read -r dev name; do
+        controllers+=("${dev}|${name}")
+        local ctype
+        ctype=$(controller_type "$name")
+        echo -e "  $(controller_icon "$ctype") ${GREEN}${name}${RESET} -> ${DIM}${dev}${RESET}"
+    done < <(list_controllers)
+
+    if [[ ${#controllers[@]} -eq 0 ]]; then
+        warn "No controllers detected. Connect controllers and try again."
+        echo -e "  Tip: For wireless controllers, make sure Bluetooth is paired."
+        echo -e "  Tip: Check ${DIM}forge-controller list${RESET} for more details."
+    else
+        info "Found ${#controllers[@]} controller(s)"
+    fi
+
+    # Step 3: Layout
+    echo ""
+    head_ "Layout Preference"
+    echo -e "  ${CYAN}1${RESET}) Side-by-side (2 players)"
+    echo -e "  ${CYAN}2${RESET}) Top-bottom (2 players)"
+    echo -e "  ${CYAN}3${RESET}) Quadrant (2-4 players)"
+    echo -e "  ${CYAN}4${RESET}) Vertical thirds (3 players)"
+    read -rp "Default layout [1]: " layout_choice
+    local layout
+    case "${layout_choice:-1}" in
+        1) layout="side-by-side" ;;
+        2) layout="top-bottom" ;;
+        3) layout="quadrant" ;;
+        4) layout="vertical-thirds" ;;
+        *) layout="side-by-side" ;;
+    esac
+
+    # Step 4: Audio
+    echo ""
+    head_ "Audio Routing"
+    echo -e "  ${CYAN}1${RESET}) Shared — all players hear the same audio (default)"
+    echo -e "  ${CYAN}2${RESET}) Per-player — route audio to separate outputs/headphones"
+    read -rp "Audio mode [1]: " audio_choice
+    local audio_mode
+    case "${audio_choice:-1}" in
+        1) audio_mode="shared" ;;
+        2) audio_mode="per-player" ;;
+        *) audio_mode="shared" ;;
+    esac
+
+    # Save config
+    local config_file="${CONFIG_DIR}/defaults.json"
+    jq -n \
+        --arg resolution "$res" \
+        --arg layout "$layout" \
+        --arg audio "$audio_mode" \
+        --arg controllers "${#controllers[@]}" \
+        '{resolution: $resolution, default_layout: $layout,
+          audio_mode: $audio, detected_controllers: ($controllers|tonumber)}' \
+        > "$config_file"
+
+    echo ""
+    info "Configuration saved to ${config_file}"
+    info "You can now run: ${BOLD}forge-splitscreen start <game> [players]${RESET}"
+}
+
+cmd_start() {
+    local game_input="${1:-}"
+    local num_players="${2:-2}"
+
+    [[ -z "$game_input" ]] && die "Usage: forge-splitscreen start <game> [players]"
+    [[ "$num_players" -lt 2 || "$num_players" -gt 4 ]] && die "Player count must be 2-4"
+
+    if is_session_active; then
+        die "A split-screen session is already running. Use 'stop' first."
+    fi
+
+    check_deps
+
+    local game_key
+    game_key=$(resolve_game "$game_input")
+
+    local game_name="$game_input"
+    local appid="$game_input"
+    local max_players=4
+    local layout=""
+    local notes=""
+
+    # Look up in database
+    if [[ -n "${GAME_DB[$game_key]+x}" ]]; then
+        game_name=$(get_game_field "$game_key" "name")
+        appid=$(get_game_field "$game_key" "appid")
+        max_players=$(get_game_field "$game_key" "max")
+        layout=$(get_game_field "$game_key" "layout")
+        notes=$(get_game_field "$game_key" "notes")
+
+        if [[ "$num_players" -gt "$max_players" ]]; then
+            warn "${game_name} supports max ${max_players} players. Clamping."
+            num_players=$max_players
+        fi
+        if [[ -n "$notes" ]]; then
+            echo -e "${DIM}Note: ${notes}${RESET}"
+        fi
+    fi
+
+    # Load defaults or use sensible fallbacks
+    local res audio_mode
+    if [[ -f "${CONFIG_DIR}/defaults.json" ]]; then
+        res=$(jq -r '.resolution // "1920x1080"' "${CONFIG_DIR}/defaults.json")
+        audio_mode=$(jq -r '.audio_mode // "shared"' "${CONFIG_DIR}/defaults.json")
+        [[ -z "$layout" ]] && layout=$(jq -r '.default_layout // "side-by-side"' "${CONFIG_DIR}/defaults.json")
+    else
+        res=$(get_display_resolution)
+        audio_mode="shared"
+        [[ -z "$layout" ]] && layout="side-by-side"
+    fi
+
+    parse_resolution "$res"
+
+    head_ "Starting Split-Screen: ${game_name}"
+    echo -e "  Players:    ${GREEN}${num_players}${RESET}"
+    echo -e "  Layout:     ${GREEN}${layout}${RESET}"
+    echo -e "  Resolution: ${GREEN}${SCREEN_W}x${SCREEN_H}${RESET}"
+    echo -e "  Audio:      ${GREEN}${audio_mode}${RESET}"
+    echo ""
+
+    # Detect controllers and assign to players
+    local ctrl_list=()
+    while IFS='|' read -r dev name; do
+        ctrl_list+=("$dev")
+        local ctype
+        ctype=$(controller_type "$name")
+        info "Controller: $(controller_icon "$ctype") ${name} -> ${dev}"
+    done < <(list_controllers)
+
+    if [[ ${#ctrl_list[@]} -lt $num_players ]]; then
+        warn "Only ${#ctrl_list[@]} controller(s) detected for ${num_players} players."
+        warn "Some players may need keyboard/mouse or additional controllers."
+        # Pad with 'none' for missing controllers
+        while [[ ${#ctrl_list[@]} -lt $num_players ]]; do
+            ctrl_list+=("none")
+        done
+    fi
+
+    # Assign controllers to player slots
+    info "Assigning controllers to player slots..."
+    for ((i=0; i<num_players; i++)); do
+        local slot=$((i+1))
+        local ctrl="${ctrl_list[$i]}"
+        if [[ "$ctrl" != "none" ]]; then
+            echo -e "  Player ${slot} -> ${CYAN}${ctrl}${RESET}"
+            vibrate_controller "$ctrl" 300 2>/dev/null || true
+            sleep 0.3
+        else
+            echo -e "  Player ${slot} -> ${DIM}(no controller)${RESET}"
+        fi
+    done
+
+    # Create audio sinks if per-player mode
+    local sinks=()
+    if [[ "$audio_mode" == "per-player" ]]; then
+        info "Creating per-player audio sinks..."
+        for ((i=1; i<=num_players; i++)); do
+            local sink_name="forge_split_p${i}"
+            create_virtual_sink "$sink_name" "Player ${i} Audio"
+            sinks+=("$sink_name")
+        done
+    else
+        for ((i=1; i<=num_players; i++)); do
+            sinks+=("shared")
+        done
+    fi
+
+    # Save session
+    save_session "$game_name" "$num_players" "$layout" "$audio_mode"
+
+    # Compute layout and launch instances
+    local slot=0
+    while read -r pw ph pox poy; do
+        slot=$((slot + 1))
+        [[ $slot -gt $num_players ]] && break
+
+        local ctrl="${ctrl_list[$((slot-1))]}"
+        local sink="${sinks[$((slot-1))]}"
+
+        launch_instance "$slot" "$game_key" "$appid" \
+            "$pw" "$ph" "$pox" "$poy" \
+            "$ctrl" "$sink" "$num_players"
+
+        sleep 0.5  # Stagger launches slightly
+    done < <(compute_layout "$layout" "$num_players" "$SCREEN_W" "$SCREEN_H")
+
+    echo ""
+    info "Split-screen session started with ${num_players} players."
+    info "Use ${BOLD}forge-splitscreen stop${RESET} to end the session."
+    info "Use ${BOLD}forge-splitscreen status${RESET} to check on running instances."
+}
+
+cmd_stop() {
+    if ! is_session_active; then
+        warn "No active split-screen session."
+        return 0
+    fi
+
+    head_ "Stopping Split-Screen Session"
+
+    local game players audio_mode
+    game=$(jq -r '.game' "$SESSION_FILE")
+    players=$(jq -r '.players' "$SESSION_FILE")
+    audio_mode=$(jq -r '.audio' "$SESSION_FILE")
+
+    info "Stopping ${game} (${players} players)..."
+
+    # Kill all game instance PIDs
+    for pidfile in "${PID_DIR}"/player*.pid; do
+        [[ -f "$pidfile" ]] || continue
+        local pid
+        pid=$(cat "$pidfile")
+        local slot
+        slot=$(basename "$pidfile" .pid | sed 's/player//')
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            info "Stopped player ${slot} (PID ${pid})"
+        fi
+        rm -f "$pidfile"
+    done
+
+    # Also kill any stray gamescope instances we own
+    pkill -f "gamescope.*--borderless.*--force-grab-cursor" 2>/dev/null || true
+
+    # Clean up virtual audio sinks
+    if [[ "$audio_mode" == "per-player" ]]; then
+        info "Removing virtual audio sinks..."
+        for ((i=1; i<=players; i++)); do
+            destroy_virtual_sink "forge_split_p${i}"
+        done
+    fi
+
+    # Remove session state
+    rm -f "$SESSION_FILE"
+    rm -rf "${PID_DIR:?}"/*
+    rm -rf "${LOG_DIR:?}"/*
+
+    info "Split-screen session ended. Display restored to normal."
+}
+
+cmd_controllers() {
+    head_ "Connected Controllers"
+
+    local count=0
+    while IFS='|' read -r dev name; do
+        ((count++))
+        local ctype
+        ctype=$(controller_type "$name")
+        local icon
+        icon=$(controller_icon "$ctype")
+
+        echo -e "  ${BOLD}${count}.${RESET} ${icon} ${GREEN}${name}${RESET}"
+        echo -e "     Device: ${DIM}${dev}${RESET}"
+        echo -e "     Type:   ${ctype}"
+
+        # Check if assigned in current session
+        if is_session_active; then
+            local assigned
+            assigned=$(jq -r ".instances[] | select(.controller==\"${dev}\") | .slot" \
+                "$SESSION_FILE" 2>/dev/null || true)
+            if [[ -n "$assigned" ]]; then
+                echo -e "     Slot:   ${CYAN}Player ${assigned}${RESET}"
+            else
+                echo -e "     Slot:   ${DIM}unassigned${RESET}"
+            fi
+        fi
+        echo ""
+    done < <(list_controllers)
+
+    if [[ $count -eq 0 ]]; then
+        warn "No controllers detected."
+        echo -e "\n  Troubleshooting:"
+        echo -e "  - Plug in USB controllers or pair Bluetooth gamepads"
+        echo -e "  - Run ${DIM}forge-controller fix${RESET} for driver issues"
+        echo -e "  - Check ${DIM}ls /dev/input/event*${RESET} for raw devices"
+    else
+        info "Found ${count} controller(s)."
+    fi
+}
+
+cmd_assign() {
+    local controller="${1:-}"
+    local player="${2:-}"
+
+    [[ -z "$controller" || -z "$player" ]] && \
+        die "Usage: forge-splitscreen assign <controller-device> <player-slot>"
+    [[ "$player" -lt 1 || "$player" -gt 4 ]] && die "Player slot must be 1-4"
+
+    if ! is_session_active; then
+        die "No active session. Start one first with 'start'."
+    fi
+
+    # Verify controller exists
+    if [[ ! -e "$controller" ]]; then
+        die "Controller device not found: ${controller}"
+    fi
+
+    # Update session
+    local tmp
+    tmp=$(mktemp)
+    jq --arg slot "$player" --arg dev "$controller" \
+        '(.instances[] | select(.slot == ($slot|tonumber))).controller = $dev' \
+        "$SESSION_FILE" > "$tmp"
+    mv "$tmp" "$SESSION_FILE"
+
+    # Vibrate to confirm
+    vibrate_controller "$controller" 500 2>/dev/null || true
+
+    info "Assigned ${controller} to Player ${player}"
+    info "Note: The game instance may need restart for the change to take effect."
+}
+
+cmd_audio() {
+    local mode="${1:-}"
+    [[ -z "$mode" ]] && die "Usage: forge-splitscreen audio <shared|per-player>"
+
+    case "$mode" in
+        shared)
+            if is_session_active; then
+                local players
+                players=$(jq -r '.players' "$SESSION_FILE")
+                info "Switching to shared audio..."
+                for ((i=1; i<=players; i++)); do
+                    destroy_virtual_sink "forge_split_p${i}"
+                done
+                local tmp
+                tmp=$(mktemp)
+                jq '.audio = "shared"' "$SESSION_FILE" > "$tmp"
+                mv "$tmp" "$SESSION_FILE"
+            fi
+            info "Audio mode: shared (all players hear the same output)"
+            ;;
+        per-player)
+            if ! command -v pw-cli &>/dev/null; then
+                die "PipeWire tools required for per-player audio."
+            fi
+            if is_session_active; then
+                local players
+                players=$(jq -r '.players' "$SESSION_FILE")
+                info "Switching to per-player audio..."
+                for ((i=1; i<=players; i++)); do
+                    create_virtual_sink "forge_split_p${i}" "Player ${i} Audio"
+                done
+                local tmp
+                tmp=$(mktemp)
+                jq '.audio = "per-player"' "$SESSION_FILE" > "$tmp"
+                mv "$tmp" "$SESSION_FILE"
+            fi
+            info "Audio mode: per-player"
+            echo -e "\n  ${DIM}Connect separate headphones/outputs for each player."
+            echo -e "  Use your DE's sound settings to route each 'Player N Audio'"
+            echo -e "  sink to the desired physical output.${RESET}"
+            ;;
+        *)
+            die "Unknown audio mode: ${mode}. Use 'shared' or 'per-player'."
+            ;;
+    esac
+}
+
+cmd_test() {
+    head_ "Split-Screen Test Mode"
+    check_deps
+
+    local num_players="${1:-2}"
+    [[ "$num_players" -lt 2 || "$num_players" -gt 4 ]] && num_players=2
+
+    local res
+    res=$(get_display_resolution)
+    parse_resolution "$res"
+
+    local layout="quadrant"
+    [[ "$num_players" -eq 2 ]] && layout="side-by-side"
+
+    info "Testing ${num_players}-player ${layout} layout on ${res} display"
+    echo ""
+
+    local colors=("red" "blue" "green" "yellow")
+    local slot=0
+
+    while read -r pw ph pox poy; do
+        slot=$((slot + 1))
+        [[ $slot -gt $num_players ]] && break
+
+        local color="${colors[$((slot-1))]}"
+        echo -e "  Player ${slot}: ${BOLD}${pw}x${ph}${RESET} at +${pox}+${poy} ${DIM}(${color})${RESET}"
+
+        # Launch a simple colored window using Gamescope + a test pattern
+        if command -v gamescope &>/dev/null; then
+            (
+                # Use a simple weston-terminal or xterm as test payload
+                local test_cmd="bash -c 'echo Player_${slot}; read'"
+                if command -v xterm &>/dev/null; then
+                    test_cmd="xterm -bg ${color} -fg white -e 'echo Player ${slot} - Press Enter to close; read'"
+                fi
+                gamescope -w "$pw" -h "$ph" -W "$pw" -H "$ph" \
+                    -x "$pox" -y "$poy" --borderless -- \
+                    bash -c "echo 'Player ${slot} viewport active'; sleep 10" \
+                    > "${LOG_DIR}/test_p${slot}.log" 2>&1
+            ) &
+            echo "$!" > "${PID_DIR}/test_p${slot}.pid"
+        fi
+    done < <(compute_layout "$layout" "$num_players" "$SCREEN_W" "$SCREEN_H")
+
+    echo ""
+    info "Test viewports launched for 10 seconds."
+    info "Check that each player area is correctly positioned on screen."
+
+    sleep 10
+    # Clean up test instances
+    for pidfile in "${PID_DIR}"/test_p*.pid; do
+        [[ -f "$pidfile" ]] || continue
+        kill "$(cat "$pidfile")" 2>/dev/null || true
+        rm -f "$pidfile"
+    done
+    info "Test complete."
+}
+
+cmd_profiles() {
+    head_ "Saved Split-Screen Profiles"
+
+    local count=0
+    for profile in "${PROFILES_DIR}"/*.json; do
+        [[ -f "$profile" ]] || continue
+        ((count++))
+        local pname
+        pname=$(basename "$profile" .json)
+        local game players layout
+        game=$(jq -r '.game // "unknown"' "$profile")
+        players=$(jq -r '.players // "?"' "$profile")
+        layout=$(jq -r '.layout // "?"' "$profile")
+        local saved
+        saved=$(jq -r '.saved // "?"' "$profile")
+
+        echo -e "  ${BOLD}${pname}${RESET}"
+        echo -e "    Game:    ${GREEN}${game}${RESET}"
+        echo -e "    Players: ${players}  Layout: ${layout}"
+        echo -e "    Saved:   ${DIM}${saved}${RESET}"
+        echo ""
+    done
+
+    if [[ $count -eq 0 ]]; then
+        info "No saved profiles yet."
+        echo -e "\n  After a successful session, save it with:"
+        echo -e "  ${DIM}forge-splitscreen save-profile <name>${RESET}"
+    else
+        info "${count} profile(s) found."
+    fi
+}
+
+cmd_save_profile() {
+    local name="${1:-}"
+    [[ -z "$name" ]] && die "Usage: forge-splitscreen save-profile <name>"
+
+    if ! is_session_active; then
+        die "No active session to save."
+    fi
+
+    local profile_file="${PROFILES_DIR}/${name}.json"
+    jq --arg saved "$(date -Iseconds)" '. + {saved: $saved}' \
+        "$SESSION_FILE" > "$profile_file"
+
+    info "Profile saved: ${name}"
+    info "Load it later with: forge-splitscreen load-profile ${name}"
+}
+
+cmd_load_profile() {
+    local name="${1:-}"
+    [[ -z "$name" ]] && die "Usage: forge-splitscreen load-profile <name>"
+
+    local profile_file="${PROFILES_DIR}/${name}.json"
+    [[ -f "$profile_file" ]] || die "Profile not found: ${name}"
+
+    local game players
+    game=$(jq -r '.game' "$profile_file")
+    players=$(jq -r '.players' "$profile_file")
+
+    info "Loading profile: ${name}"
+    cmd_start "$game" "$players"
+}
+
+cmd_status() {
+    head_ "Split-Screen Session Status"
+
+    if ! is_session_active; then
+        echo -e "  ${DIM}No active split-screen session.${RESET}"
+        echo ""
+        echo -e "  Start one with: ${BOLD}forge-splitscreen start <game> [players]${RESET}"
+        echo -e "  Or run setup:   ${BOLD}forge-splitscreen setup${RESET}"
+        return 0
+    fi
+
+    local game players layout audio started
+    game=$(jq -r '.game' "$SESSION_FILE")
+    players=$(jq -r '.players' "$SESSION_FILE")
+    layout=$(jq -r '.layout' "$SESSION_FILE")
+    audio=$(jq -r '.audio' "$SESSION_FILE")
+    started=$(jq -r '.started' "$SESSION_FILE")
+
+    echo -e "  Game:       ${GREEN}${game}${RESET}"
+    echo -e "  Players:    ${GREEN}${players}${RESET}"
+    echo -e "  Layout:     ${CYAN}${layout}${RESET}"
+    echo -e "  Audio:      ${CYAN}${audio}${RESET}"
+    echo -e "  Started:    ${DIM}${started}${RESET}"
+    echo ""
+
+    # Instance status
+    local instances
+    instances=$(jq -r '.instances | length' "$SESSION_FILE")
+    for ((i=0; i<instances; i++)); do
+        local slot pid ctrl sink
+        slot=$(jq -r ".instances[$i].slot" "$SESSION_FILE")
+        pid=$(jq -r ".instances[$i].pid" "$SESSION_FILE")
+        ctrl=$(jq -r ".instances[$i].controller" "$SESSION_FILE")
+        sink=$(jq -r ".instances[$i].audio_sink" "$SESSION_FILE")
+
+        local status_str="${GREEN}running${RESET}"
+        if ! kill -0 "$pid" 2>/dev/null; then
+            status_str="${RED}stopped${RESET}"
+        fi
+
+        echo -e "  Player ${slot}:"
+        echo -e "    PID:        ${pid} (${status_str})"
+        echo -e "    Controller: ${ctrl}"
+        echo -e "    Audio:      ${sink}"
+    done
+
+    echo ""
+
+    # Resource usage summary
+    local total_cpu=0 total_mem=0
+    for pidfile in "${PID_DIR}"/player*.pid; do
+        [[ -f "$pidfile" ]] || continue
+        local pid
+        pid=$(cat "$pidfile")
+        if kill -0 "$pid" 2>/dev/null; then
+            local usage
+            usage=$(ps -p "$pid" -o %cpu=,%mem= 2>/dev/null || echo "0 0")
+            local cpu mem
+            cpu=$(echo "$usage" | awk '{print $1}')
+            mem=$(echo "$usage" | awk '{print $2}')
+            total_cpu=$(awk "BEGIN{print $total_cpu + $cpu}")
+            total_mem=$(awk "BEGIN{print $total_mem + $mem}")
+        fi
+    done
+    echo -e "  ${DIM}Total resource usage: CPU ${total_cpu}%  MEM ${total_mem}%${RESET}"
+}
+
+cmd_games() {
+    head_ "Known Split-Screen Compatible Games"
+    echo ""
+
+    local sorted_keys
+    sorted_keys=$(for k in "${!GAME_DB[@]}"; do echo "$k"; done | sort)
+
+    printf "  ${BOLD}%-28s %-8s %-4s %-15s${RESET}\n" "Game" "AppID" "Max" "Layout"
+    printf "  ${DIM}%-28s %-8s %-4s %-15s${RESET}\n" "----------------------------" "------" "---" "---------------"
+
+    for key in $sorted_keys; do
+        local name appid max layout notes
+        name=$(get_game_field "$key" "name")
+        appid=$(get_game_field "$key" "appid")
+        max=$(get_game_field "$key" "max")
+        layout=$(get_game_field "$key" "layout")
+        notes=$(get_game_field "$key" "notes")
+
+        printf "  %-28s %-8s %-4s %-15s\n" "$name" "$appid" "${max}P" "$layout"
+    done
+
+    echo ""
+    echo -e "  ${DIM}Games not in this list can still be launched by Steam AppID.${RESET}"
+    echo -e "  ${DIM}Example: forge-splitscreen start 252950 2${RESET}"
+    info "${#GAME_DB[@]} games in database."
+}
+
+cmd_help() {
+    echo -e "${BOLD}${CYAN}24HG Forge Split-Screen${RESET} v${FORGE_VERSION}"
+    echo -e "${DIM}Couch co-op and split-screen gaming on Linux${RESET}"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET} forge-splitscreen <command> [args...]"
+    echo ""
+    echo -e "${BOLD}Commands:${RESET}"
+    echo -e "  ${GREEN}setup${RESET}                          Interactive setup wizard"
+    echo -e "  ${GREEN}start${RESET} <game> [players]          Launch split-screen (2-4 players)"
+    echo -e "  ${GREEN}stop${RESET}                            Stop session, restore display"
+    echo -e "  ${GREEN}controllers${RESET}                     Show connected controllers"
+    echo -e "  ${GREEN}assign${RESET} <controller> <player>    Assign controller to player slot"
+    echo -e "  ${GREEN}audio${RESET} <shared|per-player>       Set audio routing mode"
+    echo -e "  ${GREEN}test${RESET} [players]                  Test with demo viewports"
+    echo -e "  ${GREEN}profiles${RESET}                        List saved configurations"
+    echo -e "  ${GREEN}save-profile${RESET} <name>             Save current session as profile"
+    echo -e "  ${GREEN}load-profile${RESET} <name>             Load and start a saved profile"
+    echo -e "  ${GREEN}games${RESET}                           List known compatible games"
+    echo -e "  ${GREEN}status${RESET}                          Show current session status"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo -e "  forge-splitscreen start rocketleague 4"
+    echo -e "  forge-splitscreen start cuphead 2"
+    echo -e "  forge-splitscreen start 252950 2      ${DIM}# by Steam AppID${RESET}"
+    echo -e "  forge-splitscreen audio per-player"
+    echo -e "  forge-splitscreen assign /dev/input/event5 2"
+    echo ""
+    echo -e "${BOLD}How it works:${RESET}"
+    echo -e "  Each player gets a Gamescope compositor instance positioned on a"
+    echo -e "  portion of your screen. Controllers are isolated per-instance via"
+    echo -e "  SDL environment variables. Audio can be shared or routed to separate"
+    echo -e "  PipeWire sinks for individual headphones."
+    echo ""
+    echo -e "${BOLD}Requirements:${RESET}"
+    echo -e "  gamescope, jq, PipeWire (for per-player audio), Steam"
+}
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+main() {
+    local command="${1:-help}"
+    shift || true
+
+    case "$command" in
+        setup)          cmd_setup "$@" ;;
+        start)          cmd_start "$@" ;;
+        stop)           cmd_stop "$@" ;;
+        controllers)    cmd_controllers "$@" ;;
+        assign)         cmd_assign "$@" ;;
+        audio)          cmd_audio "$@" ;;
+        test)           cmd_test "$@" ;;
+        profiles)       cmd_profiles "$@" ;;
+        save-profile)   cmd_save_profile "$@" ;;
+        load-profile)   cmd_load_profile "$@" ;;
+        games)          cmd_games "$@" ;;
+        status)         cmd_status "$@" ;;
+        help|--help|-h) cmd_help ;;
+        *)
+            err "Unknown command: ${command}"
+            echo "Run 'forge-splitscreen help' for usage."
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

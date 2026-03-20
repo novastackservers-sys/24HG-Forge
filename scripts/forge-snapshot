@@ -1,0 +1,891 @@
+#!/bin/bash
+# 24HG Forge Snapshot Manager — btrfs snapshots for gaming sessions
+# Protects against broken saves, bad mod installs, and Proton prefix corruption.
+# No other Linux gaming distro gives you instant rollback like this.
+#
+# Usage: forge-snapshot <command> [args]
+#   create [name]       Create a snapshot (auto-named with timestamp if omitted)
+#   list                List all snapshots with size and date
+#   restore <name|id>   Restore home directory from a snapshot
+#   delete <name|id>    Delete a snapshot
+#   auto on|off         Toggle auto-snapshots before gaming sessions
+#   diff <name|id>      Show what changed since a snapshot
+#   status              Show snapshot space usage and system deployment info
+#   clean [keep]        Clean old snapshots, keeping N most recent (default 5)
+#   daemon              Auto-create snapshots when games launch
+
+set -euo pipefail
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+
+SNAPSHOT_DIR="$HOME/.snapshots"
+CONFIG_DIR="$HOME/.config/forge"
+CONFIG_FILE="$CONFIG_DIR/snapshot.conf"
+LOCK_FILE="/tmp/forge-snapshot-${UID}.lock"
+LOG_FILE="$HOME/.local/share/forge/snapshot.log"
+DAEMON_PID_FILE="/tmp/forge-snapshot-daemon-${UID}.pid"
+POLL_INTERVAL=10
+MAX_AUTO_SNAPSHOTS=10
+DEFAULT_KEEP=5
+
+# ─── Colors ───────────────────────────────────────────────────────────────────
+
+if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    BOLD="\033[1m"
+    DIM="\033[2m"
+    RED="\033[31m"
+    GREEN="\033[32m"
+    YELLOW="\033[33m"
+    BLUE="\033[34m"
+    CYAN="\033[36m"
+    RESET="\033[0m"
+else
+    BOLD="" DIM="" RED="" GREEN="" YELLOW="" BLUE="" CYAN="" RESET=""
+fi
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+log() {
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    mkdir -p "$(dirname "$LOG_FILE")"
+    echo "$msg" >> "$LOG_FILE"
+}
+
+info()  { echo -e "${GREEN}>>>${RESET} $*"; }
+warn()  { echo -e "${YELLOW}>>>${RESET} $*"; }
+error() { echo -e "${RED}>>>${RESET} $*" >&2; }
+die()   { error "$*"; exit 1; }
+
+# Check that btrfs is available and home is on btrfs
+check_btrfs() {
+    if ! command -v btrfs &>/dev/null; then
+        die "btrfs-progs not installed. Install with: sudo dnf install btrfs-progs"
+    fi
+    local fstype
+    fstype=$(stat -f -c '%T' "$HOME" 2>/dev/null || echo "unknown")
+    if [[ "$fstype" != "btrfs" ]]; then
+        die "Home directory is not on a btrfs filesystem (detected: $fstype)."
+    fi
+}
+
+ensure_snapshot_dir() {
+    if [[ ! -d "$SNAPSHOT_DIR" ]]; then
+        mkdir -p "$SNAPSHOT_DIR"
+        info "Created snapshot directory: $SNAPSHOT_DIR"
+    fi
+}
+
+# Load config (auto-snapshot toggle, etc.)
+load_config() {
+    AUTO_SNAPSHOT="off"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+    fi
+}
+
+save_config() {
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_FILE" <<EOF
+# 24HG Forge Snapshot configuration
+AUTO_SNAPSHOT="${AUTO_SNAPSHOT}"
+EOF
+}
+
+# Get free space on the home filesystem in bytes
+get_free_bytes() {
+    df --output=avail -B1 "$HOME" | tail -1 | tr -d ' '
+}
+
+# Human-readable size
+human_size() {
+    numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || echo "${1}B"
+}
+
+# Check disk space — warn if below threshold
+check_disk_space() {
+    local free
+    free=$(get_free_bytes)
+    local free_gb=$(( free / 1073741824 ))
+    if (( free_gb < 10 )); then
+        warn "Low disk space: ${BOLD}${free_gb}GB${RESET} free. Snapshot may fail or fill disk."
+        echo -n "Continue? [y/N] "
+        read -r ans
+        [[ "$ans" =~ ^[Yy] ]] || exit 0
+    fi
+}
+
+# List snapshot names (sorted by creation time, newest first)
+list_snapshot_names() {
+    if [[ ! -d "$SNAPSHOT_DIR" ]]; then
+        return
+    fi
+    local snaps=()
+    for d in "$SNAPSHOT_DIR"/forge-*; do
+        [[ -d "$d" ]] || continue
+        snaps+=("$(basename "$d")")
+    done
+    # Sort by directory mtime, newest first
+    for s in "${snaps[@]+"${snaps[@]}"}"; do
+        echo "$s"
+    done | while read -r name; do
+        echo "$(stat -c '%Y' "$SNAPSHOT_DIR/$name") $name"
+    done | sort -rn | awk '{print $2}'
+}
+
+# Resolve a snapshot name or numeric ID to the full name
+resolve_snapshot() {
+    local input="$1"
+    # If it matches an existing snapshot directly
+    if [[ -d "$SNAPSHOT_DIR/forge-$input" ]]; then
+        echo "forge-$input"
+        return
+    fi
+    if [[ -d "$SNAPSHOT_DIR/$input" ]]; then
+        echo "$input"
+        return
+    fi
+    # Try numeric ID (1-based, newest first)
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        local snap
+        snap=$(list_snapshot_names | sed -n "${input}p")
+        if [[ -n "$snap" ]]; then
+            echo "$snap"
+            return
+        fi
+    fi
+    return 1
+}
+
+# Check if any game processes are running
+games_running() {
+    local game_patterns=(
+        # Steam/Proton
+        "reaper SteamLaunch"
+        "pressure-vessel"
+        "proton waitforexitandrun"
+        # Wine
+        "wine.*\\.exe"
+        "wineserver"
+        # Native games
+        "gamemoderun"
+        # Common game engines
+        "UnrealEngine"
+        "UE4-Linux"
+        "unity"
+    )
+    for pattern in "${game_patterns[@]}"; do
+        if pgrep -f "$pattern" &>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Detect which game is currently launching/running
+detect_game_name() {
+    # Try Steam first — look for the game directory name
+    local steam_cmd
+    steam_cmd=$(ps aux 2>/dev/null | grep -oP 'steamapps/common/\K[^/]+' | head -1 || true)
+    if [[ -n "$steam_cmd" ]]; then
+        echo "$steam_cmd" | tr ' ' '-' | tr '[:upper:]' '[:lower:]'
+        return
+    fi
+    # Try Wine exe name
+    local wine_exe
+    wine_exe=$(ps aux 2>/dev/null | grep -oP 'wine.*?(\w+)\.exe' | head -1 | grep -oP '\w+\.exe$' || true)
+    if [[ -n "$wine_exe" ]]; then
+        echo "${wine_exe%.exe}" | tr '[:upper:]' '[:lower:]'
+        return
+    fi
+    # Fallback
+    echo "unknown-game"
+}
+
+acquire_lock() {
+    if [[ -f "$LOCK_FILE" ]]; then
+        local pid
+        pid=$(cat "$LOCK_FILE" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            die "Another forge-snapshot operation is running (PID $pid). Remove $LOCK_FILE if stale."
+        fi
+        rm -f "$LOCK_FILE"
+    fi
+    echo $$ > "$LOCK_FILE"
+    trap 'rm -f "$LOCK_FILE"' EXIT
+}
+
+# ─── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_create() {
+    local name="${1:-}"
+    check_btrfs
+    ensure_snapshot_dir
+    acquire_lock
+
+    local timestamp
+    timestamp=$(date +%Y%m%d-%H%M%S)
+
+    if [[ -z "$name" ]]; then
+        name="$timestamp"
+    fi
+
+    local snap_name="forge-${name}"
+    local snap_path="$SNAPSHOT_DIR/$snap_name"
+
+    if [[ -d "$snap_path" ]]; then
+        die "Snapshot '$snap_name' already exists. Choose a different name."
+    fi
+
+    check_disk_space
+
+    local free
+    free=$(get_free_bytes)
+    info "Creating snapshot: ${BOLD}${snap_name}${RESET}"
+    echo -e "  ${DIM}Location:${RESET}   $snap_path"
+    echo -e "  ${DIM}Free space:${RESET} $(human_size "$free")"
+    echo ""
+
+    if btrfs subvolume snapshot "$HOME" "$snap_path" &>/dev/null; then
+        # Remove the nested .snapshots in the snapshot to avoid recursion
+        if [[ -d "$snap_path/.snapshots" ]]; then
+            # Can't delete btrfs subvolumes inside a snapshot, just note it
+            rm -rf "$snap_path/.snapshots" 2>/dev/null || true
+        fi
+        local snap_size
+        snap_size=$(du -sh "$snap_path" 2>/dev/null | cut -f1 || echo "unknown")
+        info "Snapshot created successfully."
+        echo -e "  ${DIM}Initial size:${RESET} $snap_size (grows as files diverge)"
+        log "Created snapshot: $snap_name"
+    else
+        # Fallback: if subvolume snapshot fails (e.g. cross-device), use rsync
+        warn "btrfs subvolume snapshot failed. Falling back to rsync copy..."
+        mkdir -p "$snap_path"
+        rsync -a --info=progress2 \
+            --exclude='.snapshots' \
+            --exclude='.cache' \
+            --exclude='.local/share/Trash' \
+            "$HOME/" "$snap_path/"
+        info "Snapshot created via rsync."
+        log "Created snapshot (rsync fallback): $snap_name"
+    fi
+}
+
+cmd_list() {
+    ensure_snapshot_dir
+
+    local snaps
+    snaps=$(list_snapshot_names)
+
+    if [[ -z "$snaps" ]]; then
+        info "No snapshots found."
+        echo "  Create one with: forge-snapshot create [name]"
+        return
+    fi
+
+    echo -e "${BOLD}24HG Forge Snapshots${RESET}"
+    echo -e "${DIM}─────────────────────────────────────────────────────────────────${RESET}"
+    printf "  ${BOLD}%-4s %-35s %-12s %s${RESET}\n" "ID" "NAME" "SIZE" "DATE"
+    echo -e "${DIM}─────────────────────────────────────────────────────────────────${RESET}"
+
+    local id=1
+    while read -r name; do
+        local path="$SNAPSHOT_DIR/$name"
+        local size
+        size=$(du -sh "$path" 2>/dev/null | cut -f1 || echo "?")
+        local date
+        date=$(stat -c '%y' "$path" 2>/dev/null | cut -d'.' -f1 || echo "?")
+
+        # Color auto-snapshots differently
+        local display_name="$name"
+        if [[ "$name" == forge-pre-* ]]; then
+            display_name="${CYAN}${name}${RESET}"
+        fi
+
+        printf "  %-4s %-35b %-12s %s\n" "$id" "$display_name" "$size" "$date"
+        id=$((id + 1))
+    done <<< "$snaps"
+
+    echo ""
+    local total_size
+    total_size=$(du -sh "$SNAPSHOT_DIR" 2>/dev/null | cut -f1 || echo "?")
+    echo -e "  ${DIM}Total snapshot space:${RESET} ${BOLD}$total_size${RESET}"
+    echo -e "  ${DIM}Snapshot directory:${RESET}   $SNAPSHOT_DIR"
+}
+
+cmd_restore() {
+    local input="${1:-}"
+    local system_restore=false
+
+    if [[ "$input" == "--system" ]]; then
+        cmd_restore_system
+        return
+    fi
+
+    [[ -z "$input" ]] && die "Usage: forge-snapshot restore <name|id>"
+
+    check_btrfs
+
+    # Safety: refuse to restore while games are running
+    if games_running; then
+        die "Cannot restore while games are running. Close all games first."
+    fi
+
+    local snap_name
+    snap_name=$(resolve_snapshot "$input") || die "Snapshot '$input' not found. Use 'forge-snapshot list' to see available snapshots."
+    local snap_path="$SNAPSHOT_DIR/$snap_name"
+
+    info "Preparing to restore from: ${BOLD}${snap_name}${RESET}"
+    echo ""
+
+    # Show what would change
+    echo -e "${BOLD}Files that will be modified:${RESET}"
+    local changed_count
+    changed_count=$(rsync -a --dry-run --itemize-changes \
+        --exclude='.snapshots' \
+        --exclude='.cache' \
+        --exclude='.local/share/Trash' \
+        --exclude='.config/forge/snapshot.conf' \
+        "$snap_path/" "$HOME/" 2>/dev/null | grep -c '^[<>ch]' || echo "0")
+
+    if (( changed_count == 0 )); then
+        info "No differences found. Home directory matches snapshot."
+        return
+    fi
+
+    # Show summary of changes
+    rsync -a --dry-run --itemize-changes \
+        --exclude='.snapshots' \
+        --exclude='.cache' \
+        --exclude='.local/share/Trash' \
+        --exclude='.config/forge/snapshot.conf' \
+        "$snap_path/" "$HOME/" 2>/dev/null | grep '^[<>ch]' | head -30 | while read -r line; do
+        echo -e "  ${DIM}$line${RESET}"
+    done
+
+    if (( changed_count > 30 )); then
+        echo -e "  ${DIM}... and $((changed_count - 30)) more files${RESET}"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Total files to restore:${RESET} $changed_count"
+    echo ""
+
+    # Confirmation
+    echo -e "${YELLOW}This will overwrite current files with the snapshot version.${RESET}"
+    echo -n "Proceed with restore? [y/N] "
+    read -r ans
+    [[ "$ans" =~ ^[Yy] ]] || { info "Restore cancelled."; return; }
+
+    # Create a safety snapshot before restoring
+    info "Creating safety snapshot before restore..."
+    local safety_name="pre-restore-$(date +%Y%m%d-%H%M%S)"
+    btrfs subvolume snapshot "$HOME" "$SNAPSHOT_DIR/forge-${safety_name}" &>/dev/null || true
+
+    # Perform the restore using rsync (safer than btrfs operations on home)
+    info "Restoring files from ${BOLD}${snap_name}${RESET}..."
+    rsync -a --info=progress2 \
+        --exclude='.snapshots' \
+        --exclude='.cache' \
+        --exclude='.local/share/Trash' \
+        --exclude='.config/forge/snapshot.conf' \
+        --delete \
+        "$snap_path/" "$HOME/"
+
+    info "Restore complete. Safety snapshot saved as: forge-${safety_name}"
+    log "Restored from snapshot: $snap_name (safety: forge-${safety_name})"
+}
+
+cmd_restore_system() {
+    if ! command -v rpm-ostree &>/dev/null; then
+        die "rpm-ostree not found. System-level rollback is only available on Atomic/OSTree systems."
+    fi
+
+    echo -e "${BOLD}rpm-ostree Deployments${RESET}"
+    echo -e "${DIM}─────────────────────────────────────────────────────────────────${RESET}"
+    rpm-ostree status
+    echo ""
+
+    echo -n "Roll back to the previous deployment? [y/N] "
+    read -r ans
+    if [[ "$ans" =~ ^[Yy] ]]; then
+        info "Initiating rpm-ostree rollback..."
+        sudo rpm-ostree rollback
+        warn "Reboot required to complete the rollback."
+        echo -n "Reboot now? [y/N] "
+        read -r reboot_ans
+        if [[ "$reboot_ans" =~ ^[Yy] ]]; then
+            sudo systemctl reboot
+        fi
+    else
+        info "System rollback cancelled."
+    fi
+}
+
+cmd_delete() {
+    local input="${1:-}"
+    [[ -z "$input" ]] && die "Usage: forge-snapshot delete <name|id>"
+
+    check_btrfs
+
+    local snap_name
+    snap_name=$(resolve_snapshot "$input") || die "Snapshot '$input' not found. Use 'forge-snapshot list' to see available snapshots."
+    local snap_path="$SNAPSHOT_DIR/$snap_name"
+
+    local size
+    size=$(du -sh "$snap_path" 2>/dev/null | cut -f1 || echo "unknown")
+
+    echo -e "Delete snapshot: ${BOLD}${snap_name}${RESET} (${size})"
+    echo -n "Are you sure? [y/N] "
+    read -r ans
+    [[ "$ans" =~ ^[Yy] ]] || { info "Delete cancelled."; return; }
+
+    # Try btrfs subvolume delete first, fall back to rm -rf
+    if btrfs subvolume delete "$snap_path" &>/dev/null; then
+        info "Snapshot deleted (btrfs subvolume)."
+    else
+        rm -rf "$snap_path"
+        info "Snapshot deleted."
+    fi
+    log "Deleted snapshot: $snap_name"
+}
+
+cmd_auto() {
+    local toggle="${1:-}"
+    load_config
+
+    case "$toggle" in
+        on)
+            AUTO_SNAPSHOT="on"
+            save_config
+            info "Auto-snapshots ${GREEN}enabled${RESET}."
+            echo "  Snapshots will be created automatically before game launches."
+            echo "  Run 'forge-snapshot daemon' to start the daemon."
+            ;;
+        off)
+            AUTO_SNAPSHOT="off"
+            save_config
+            info "Auto-snapshots ${RED}disabled${RESET}."
+            # Stop daemon if running
+            if [[ -f "$DAEMON_PID_FILE" ]]; then
+                local pid
+                pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || true)
+                if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                    kill "$pid" 2>/dev/null || true
+                    info "Stopped snapshot daemon (PID $pid)."
+                fi
+                rm -f "$DAEMON_PID_FILE"
+            fi
+            ;;
+        "")
+            echo -e "Auto-snapshot is currently: ${BOLD}${AUTO_SNAPSHOT}${RESET}"
+            echo ""
+            echo "Usage: forge-snapshot auto on|off"
+            ;;
+        *)
+            die "Usage: forge-snapshot auto on|off"
+            ;;
+    esac
+}
+
+cmd_diff() {
+    local input="${1:-}"
+    [[ -z "$input" ]] && die "Usage: forge-snapshot diff <name|id>"
+
+    local snap_name
+    snap_name=$(resolve_snapshot "$input") || die "Snapshot '$input' not found. Use 'forge-snapshot list' to see available snapshots."
+    local snap_path="$SNAPSHOT_DIR/$snap_name"
+
+    echo -e "${BOLD}Changes since snapshot: ${CYAN}${snap_name}${RESET}"
+    echo -e "${DIM}─────────────────────────────────────────────────────────────────${RESET}"
+
+    # Use rsync dry-run to detect differences
+    local diff_output
+    diff_output=$(rsync -a --dry-run --itemize-changes \
+        --exclude='.snapshots' \
+        --exclude='.cache' \
+        --exclude='.local/share/Trash' \
+        "$HOME/" "$snap_path/" 2>/dev/null || true)
+
+    if [[ -z "$diff_output" ]]; then
+        info "No changes detected since this snapshot."
+        return
+    fi
+
+    local new_files=0
+    local modified_files=0
+    local deleted_files=0
+
+    # Parse rsync itemize output
+    while IFS= read -r line; do
+        local flag="${line:0:1}"
+        local file="${line:12}"
+        case "$flag" in
+            '<'|'>')
+                # File transferred (modified)
+                modified_files=$((modified_files + 1))
+                if (( modified_files <= 40 )); then
+                    echo -e "  ${YELLOW}M${RESET} $file"
+                fi
+                ;;
+            'c')
+                # Created/changed
+                new_files=$((new_files + 1))
+                if (( new_files <= 20 )); then
+                    echo -e "  ${GREEN}+${RESET} $file"
+                fi
+                ;;
+            '*')
+                # Deleted in destination
+                deleted_files=$((deleted_files + 1))
+                if (( deleted_files <= 20 )); then
+                    echo -e "  ${RED}-${RESET} $file"
+                fi
+                ;;
+        esac
+    done <<< "$diff_output"
+
+    local total=$((new_files + modified_files + deleted_files))
+    if (( total > 80 )); then
+        echo -e "  ${DIM}... output truncated (showing 80 of $total changes)${RESET}"
+    fi
+
+    echo ""
+    echo -e "${DIM}─────────────────────────────────────────────────────────────────${RESET}"
+    echo -e "  ${GREEN}New:${RESET} $new_files  ${YELLOW}Modified:${RESET} $modified_files  ${RED}Deleted:${RESET} $deleted_files  ${BOLD}Total:${RESET} $total"
+
+    # Estimate size of changes
+    local changed_size
+    changed_size=$(rsync -a --dry-run --stats \
+        --exclude='.snapshots' \
+        --exclude='.cache' \
+        --exclude='.local/share/Trash' \
+        "$HOME/" "$snap_path/" 2>/dev/null | grep "Total transferred" | grep -oP '[\d,]+' | head -1 || echo "0")
+    if [[ -n "$changed_size" ]] && [[ "$changed_size" != "0" ]]; then
+        echo -e "  ${DIM}Approximate change size:${RESET} $(echo "$changed_size" | tr -d ','| numfmt --to=iec-i --suffix=B 2>/dev/null || echo "${changed_size} bytes")"
+    fi
+}
+
+cmd_status() {
+    echo -e "${BOLD}24HG Forge Snapshot Status${RESET}"
+    echo -e "${DIM}─────────────────────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    # Filesystem info
+    local fstype
+    fstype=$(stat -f -c '%T' "$HOME" 2>/dev/null || echo "unknown")
+    echo -e "  ${BOLD}Filesystem:${RESET}     $fstype"
+
+    if [[ "$fstype" == "btrfs" ]]; then
+        echo ""
+        echo -e "  ${BOLD}btrfs Space Usage:${RESET}"
+        if btrfs filesystem df "$HOME" &>/dev/null; then
+            btrfs filesystem df "$HOME" 2>/dev/null | while read -r line; do
+                echo "    $line"
+            done
+        fi
+        echo ""
+        echo -e "  ${BOLD}Device Usage:${RESET}"
+        btrfs filesystem usage "$HOME" 2>/dev/null | head -10 | while read -r line; do
+            echo "    $line"
+        done
+    fi
+
+    echo ""
+
+    # Free space
+    local free
+    free=$(get_free_bytes)
+    local total
+    total=$(df --output=size -B1 "$HOME" | tail -1 | tr -d ' ')
+    local used=$((total - free))
+    local pct=$((used * 100 / total))
+
+    echo -e "  ${BOLD}Disk:${RESET}           $(human_size "$used") / $(human_size "$total") (${pct}% used)"
+    echo -e "  ${BOLD}Free:${RESET}           $(human_size "$free")"
+
+    # Snapshot info
+    echo ""
+    local snap_count=0
+    local snap_size="0"
+    if [[ -d "$SNAPSHOT_DIR" ]]; then
+        snap_count=$(list_snapshot_names | wc -l || echo "0")
+        snap_size=$(du -sh "$SNAPSHOT_DIR" 2>/dev/null | cut -f1 || echo "0")
+    fi
+    echo -e "  ${BOLD}Snapshots:${RESET}      $snap_count (${snap_size})"
+    echo -e "  ${BOLD}Location:${RESET}       $SNAPSHOT_DIR"
+
+    # Auto-snapshot status
+    load_config
+    local auto_color="$RED"
+    [[ "$AUTO_SNAPSHOT" == "on" ]] && auto_color="$GREEN"
+    echo -e "  ${BOLD}Auto-snapshot:${RESET}  ${auto_color}${AUTO_SNAPSHOT}${RESET}"
+
+    # Daemon status
+    local daemon_status="${RED}stopped${RESET}"
+    if [[ -f "$DAEMON_PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            daemon_status="${GREEN}running${RESET} (PID $pid)"
+        else
+            rm -f "$DAEMON_PID_FILE"
+        fi
+    fi
+    echo -e "  ${BOLD}Daemon:${RESET}         $daemon_status"
+
+    # rpm-ostree info
+    echo ""
+    if command -v rpm-ostree &>/dev/null; then
+        echo -e "  ${BOLD}System (rpm-ostree):${RESET}"
+        local deploy_info
+        deploy_info=$(rpm-ostree status --booted 2>/dev/null | head -6 || echo "  unavailable")
+        echo "$deploy_info" | while read -r line; do
+            echo "    $line"
+        done
+        echo ""
+        echo "  Use 'forge-snapshot restore --system' for OS-level rollback."
+    else
+        echo -e "  ${DIM}rpm-ostree not available (not an Atomic/OSTree system)${RESET}"
+    fi
+}
+
+cmd_clean() {
+    local keep="${1:-$DEFAULT_KEEP}"
+
+    if ! [[ "$keep" =~ ^[0-9]+$ ]] || (( keep < 1 )); then
+        die "Invalid keep count. Usage: forge-snapshot clean [N]  (N >= 1)"
+    fi
+
+    local snaps
+    snaps=$(list_snapshot_names)
+    local total
+    total=$(echo "$snaps" | grep -c . || echo "0")
+
+    if (( total <= keep )); then
+        info "Only $total snapshot(s) exist. Nothing to clean (keeping $keep)."
+        return
+    fi
+
+    local to_delete=$((total - keep))
+    echo -e "${BOLD}Cleaning old snapshots${RESET}"
+    echo "  Total: $total | Keeping: $keep | Deleting: $to_delete"
+    echo ""
+
+    # Collect snapshots to delete (oldest ones = tail of the list)
+    local delete_list
+    delete_list=$(echo "$snaps" | tail -n "$to_delete")
+
+    echo "Snapshots to delete:"
+    while read -r name; do
+        local size
+        size=$(du -sh "$SNAPSHOT_DIR/$name" 2>/dev/null | cut -f1 || echo "?")
+        echo -e "  ${RED}x${RESET} $name ($size)"
+    done <<< "$delete_list"
+    echo ""
+
+    echo -n "Proceed? [y/N] "
+    read -r ans
+    [[ "$ans" =~ ^[Yy] ]] || { info "Clean cancelled."; return; }
+
+    local deleted=0
+    while read -r name; do
+        local path="$SNAPSHOT_DIR/$name"
+        if btrfs subvolume delete "$path" &>/dev/null; then
+            deleted=$((deleted + 1))
+        elif rm -rf "$path" 2>/dev/null; then
+            deleted=$((deleted + 1))
+        else
+            warn "Failed to delete: $name"
+        fi
+    done <<< "$delete_list"
+
+    info "Cleaned $deleted snapshot(s). $keep remaining."
+    log "Cleaned $deleted old snapshots (kept $keep)"
+}
+
+# ─── Daemon ───────────────────────────────────────────────────────────────────
+
+cmd_daemon() {
+    check_btrfs
+    ensure_snapshot_dir
+    load_config
+
+    if [[ "$AUTO_SNAPSHOT" != "on" ]]; then
+        warn "Auto-snapshots are disabled. Enable with: forge-snapshot auto on"
+        echo -n "Start daemon anyway? [y/N] "
+        read -r ans
+        [[ "$ans" =~ ^[Yy] ]] || exit 0
+    fi
+
+    # Check for existing daemon
+    if [[ -f "$DAEMON_PID_FILE" ]]; then
+        local existing_pid
+        existing_pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || true)
+        if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+            die "Snapshot daemon already running (PID $existing_pid). Stop it first."
+        fi
+        rm -f "$DAEMON_PID_FILE"
+    fi
+
+    info "Starting 24HG Forge Snapshot Daemon"
+    echo "  Poll interval: ${POLL_INTERVAL}s"
+    echo "  Max auto-snapshots: $MAX_AUTO_SNAPSHOTS"
+    echo "  PID file: $DAEMON_PID_FILE"
+    echo ""
+
+    echo $$ > "$DAEMON_PID_FILE"
+    log "Daemon started (PID $$)"
+
+    local was_gaming=false
+    local last_snapshot_time=0
+
+    # Graceful shutdown
+    trap 'info "Daemon stopping..."; rm -f "$DAEMON_PID_FILE"; log "Daemon stopped"; exit 0' SIGTERM SIGINT
+
+    while true; do
+        if games_running; then
+            if [[ "$was_gaming" == false ]]; then
+                # Game just started — create a snapshot
+                local now
+                now=$(date +%s)
+                local cooldown=300  # 5-minute cooldown between auto-snapshots
+
+                if (( now - last_snapshot_time > cooldown )); then
+                    local game_name
+                    game_name=$(detect_game_name)
+                    local snap_name="pre-${game_name}-$(date +%Y%m%d-%H%M%S)"
+
+                    echo -e "[$(date '+%H:%M:%S')] Game detected: ${BOLD}${game_name}${RESET}"
+
+                    # Check disk space silently
+                    local free
+                    free=$(get_free_bytes)
+                    local free_gb=$(( free / 1073741824 ))
+                    if (( free_gb < 10 )); then
+                        warn "Skipping auto-snapshot: only ${free_gb}GB free."
+                    else
+                        echo -n "  Creating snapshot: forge-${snap_name}... "
+                        if btrfs subvolume snapshot "$HOME" "$SNAPSHOT_DIR/forge-${snap_name}" &>/dev/null; then
+                            # Clean nested snapshots dir
+                            rm -rf "$SNAPSHOT_DIR/forge-${snap_name}/.snapshots" 2>/dev/null || true
+                            echo -e "${GREEN}done${RESET}"
+                            log "Auto-snapshot created: forge-${snap_name}"
+                            last_snapshot_time=$now
+
+                            # Clean excess auto-snapshots
+                            daemon_clean_auto_snapshots
+                        else
+                            echo -e "${RED}failed${RESET}"
+                            log "Auto-snapshot failed: forge-${snap_name}"
+                        fi
+                    fi
+                fi
+                was_gaming=true
+            fi
+        else
+            was_gaming=false
+        fi
+
+        sleep "$POLL_INTERVAL"
+    done
+}
+
+# Clean auto-snapshots beyond the maximum, non-interactively
+daemon_clean_auto_snapshots() {
+    local auto_snaps
+    auto_snaps=$(list_snapshot_names | grep '^forge-pre-' || true)
+    local count
+    count=$(echo "$auto_snaps" | grep -c . 2>/dev/null || echo "0")
+
+    if (( count > MAX_AUTO_SNAPSHOTS )); then
+        local excess=$((count - MAX_AUTO_SNAPSHOTS))
+        local to_delete
+        to_delete=$(echo "$auto_snaps" | tail -n "$excess")
+
+        while read -r name; do
+            [[ -z "$name" ]] && continue
+            local path="$SNAPSHOT_DIR/$name"
+            if btrfs subvolume delete "$path" &>/dev/null || rm -rf "$path" 2>/dev/null; then
+                log "Auto-cleaned old snapshot: $name"
+            fi
+        done <<< "$to_delete"
+    fi
+}
+
+# ─── Usage ────────────────────────────────────────────────────────────────────
+
+cmd_help() {
+    cat <<'HELP'
+24HG Forge Snapshot Manager — btrfs snapshots for gaming sessions
+
+USAGE
+  forge-snapshot <command> [args]
+
+COMMANDS
+  create [name]       Create a home directory snapshot
+                      Auto-named with timestamp if no name given
+
+  list                List all snapshots with size, date, and numeric ID
+
+  restore <name|id>   Restore home directory from a snapshot
+                      Creates a safety snapshot before restoring
+                      Use --system for rpm-ostree rollback
+
+  delete <name|id>    Delete a snapshot (with confirmation)
+
+  auto on|off         Toggle auto-snapshots before gaming sessions
+
+  diff <name|id>      Show files changed since a snapshot was taken
+
+  status              Disk usage, btrfs info, and rpm-ostree deployments
+
+  clean [keep]        Remove old snapshots, keeping N most recent (default 5)
+
+  daemon              Watch for game launches, auto-snapshot before each
+                      Keeps max 10 auto-snapshots, cleans oldest
+
+EXAMPLES
+  forge-snapshot create before-mods    # Snapshot before installing mods
+  forge-snapshot list                  # See all snapshots
+  forge-snapshot diff 1                # What changed since newest snapshot
+  forge-snapshot restore 1             # Restore from newest snapshot
+  forge-snapshot auto on && forge-snapshot daemon  # Auto-protect sessions
+
+NOTES
+  - Requires btrfs filesystem on home directory (Forge default)
+  - Snapshots stored in ~/.snapshots/ as btrfs subvolumes
+  - Auto-snapshots named: forge-pre-<game>-<timestamp>
+  - Restore uses rsync (safe for live home directory)
+  - System rollback available via 'restore --system' (rpm-ostree)
+  - Cannot restore while games are running
+HELP
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        create)     cmd_create "$@" ;;
+        list|ls)    cmd_list ;;
+        restore)    cmd_restore "$@" ;;
+        delete|rm)  cmd_delete "$@" ;;
+        auto)       cmd_auto "$@" ;;
+        diff)       cmd_diff "$@" ;;
+        status)     cmd_status ;;
+        clean)      cmd_clean "$@" ;;
+        daemon)     cmd_daemon ;;
+        help|--help|-h)
+                    cmd_help ;;
+        *)
+            error "Unknown command: $cmd"
+            echo ""
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

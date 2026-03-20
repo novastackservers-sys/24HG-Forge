@@ -1,0 +1,4 @@
+PRETTY_HOSTNAME="forge-desktop"
+ICON_NAME=forge-logo
+CHASSIS=desktop
+DEPLOYMENT=production

@@ -46,6 +46,8 @@ RUN rpm-ostree install \
     libappindicator-gtk3 \
     conky \
     java-21-openjdk \
+    bibata-cursor-themes \
+    fastfetch \
     && rpm-ostree cleanup -m \
     \
     # ── Sysctl gaming tweaks ── \
@@ -56,13 +58,25 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/etc/systemd/system/forge-first-boot-setup.service /etc/systemd/system/ \
     && cp /tmp/forge-build/etc/systemd/system/forge-auto-update.service /etc/systemd/system/ \
     && cp /tmp/forge-build/etc/systemd/system/forge-auto-update.timer /etc/systemd/system/ \
+    && cp /tmp/forge-build/etc/systemd/system/forge-heartbeat.service /etc/systemd/system/ \
+    && cp /tmp/forge-build/etc/systemd/system/forge-heartbeat.timer /etc/systemd/system/ \
     && systemctl enable forge-gaming-tweaks.service \
     && systemctl enable forge-first-boot-setup.service \
     && systemctl enable forge-auto-update.timer \
+    && systemctl enable forge-heartbeat.timer \
+    && cp /tmp/forge-build/etc/systemd/system/forge-parental.service /etc/systemd/system/ \
     \
-    # ── Plymouth boot splash ── \
+    # ── Plymouth boot splash (remove upstream branding, install 24HG) ── \
+    && rm -rf /usr/share/plymouth/themes/spinner/watermark.png 2>/dev/null || true \
+    && rm -rf /usr/share/plymouth/themes/bgrt/* 2>/dev/null || true \
+    && rm -f /usr/share/pixmaps/fedora-gdm-logo.png \
+              /usr/share/pixmaps/fedora-logo.png \
+              /usr/share/pixmaps/fedora-logo-small.png \
+              /usr/share/pixmaps/system-logo-white.png 2>/dev/null || true \
     && cp -r /tmp/forge-build/usr/share/plymouth/themes/forge /usr/share/plymouth/themes/forge \
-    && (plymouth-set-default-theme forge 2>/dev/null || true) \
+    && plymouth-set-default-theme forge 2>/dev/null || true \
+    && [ -d /usr/share/plymouth/themes/spinner ] \
+    && cp /tmp/forge-build/usr/share/plymouth/themes/forge/logo.png /usr/share/plymouth/themes/spinner/watermark.png 2>/dev/null || true \
     \
     # ── GRUB theme ── \
     && mkdir -p /usr/share/forge/grub /etc/default/grub.d \
@@ -79,6 +93,9 @@ RUN rpm-ostree install \
     && mkdir -p /usr/share/icons/forge \
     && cp -r /tmp/forge-build/branding/icons/* /usr/share/icons/forge/ \
     && cp /tmp/forge-build/branding/icons/forge-logo.svg /usr/share/pixmaps/forge-logo.svg \
+    && cp /tmp/forge-build/branding/icons/forge-logo.svg /usr/share/pixmaps/system-logo-white.png 2>/dev/null || true \
+    && cp /tmp/forge-build/branding/icons/forge-logo.svg /usr/share/pixmaps/fedora-logo.png 2>/dev/null || true \
+    && cp /tmp/forge-build/branding/icons/forge-logo.svg /usr/share/pixmaps/fedora-gdm-logo.png 2>/dev/null || true \
     \
     # ── KDE / Konsole / shell theming ── \
     && mkdir -p /etc/skel/.config/autostart /etc/skel/.config/MangoHud \
@@ -89,7 +106,12 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/etc/skel/.config/konsolerc /etc/skel/.config/ \
     && cp /tmp/forge-build/etc/skel/.local/share/konsole/* /etc/skel/.local/share/konsole/ \
     && cp /tmp/forge-build/etc/skel/.bashrc.d/forge.sh /etc/skel/.bashrc.d/ \
+    && mkdir -p /etc/bash_completion.d \
+    && cp /tmp/forge-build/etc/bash_completion.d/forge-completions.bash /etc/bash_completion.d/ \
     && cp /tmp/forge-build/etc/skel/.config/MangoHud/MangoHud.conf /etc/skel/.config/MangoHud/ \
+    && mkdir -p /etc/skel/.config/fastfetch \
+    && cp /tmp/forge-build/etc/skel/.config/fastfetch/config.jsonc /etc/skel/.config/fastfetch/ \
+    && cp /tmp/forge-build/etc/skel/.config/fastfetch/logo.txt /etc/skel/.config/fastfetch/ \
     && cp /tmp/forge-build/etc/skel/.config/flatpak-overrides/* /etc/skel/.config/flatpak-overrides/ \
     && mkdir -p /etc/skel/.config/kglobalshortcutsrc.d \
     && cp /tmp/forge-build/etc/skel/.config/kglobalshortcutsrc.d/forge.conf /etc/skel/.config/kglobalshortcutsrc.d/ \
@@ -107,6 +129,7 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/skel-dolphinrc /etc/skel/.config/dolphinrc \
     && cp /tmp/forge-build/skel-kwinrulesrc /etc/skel/.config/kwinrulesrc \
     && cp /tmp/forge-build/skel-kscreenlockerrc /etc/skel/.config/kscreenlockerrc \
+    && cp /tmp/forge-build/skel-spectaclerc /etc/skel/.config/spectaclerc \
     && mkdir -p /etc/skel/.config/kwinrc.d \
     && cp /tmp/forge-build/skel-kwinrc.d/* /etc/skel/.config/kwinrc.d/ \
     && mkdir -p /etc/skel/.local/share \
@@ -117,6 +140,10 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/skel-desktop/*.desktop /etc/skel/Desktop/ \
     \
     # ── Sound theme (uses freedesktop defaults) \
+    \
+    # ── KDE Plasma Hub Widget (Plasmoid) ── \
+    && mkdir -p /usr/share/plasma/plasmoids/com.24hg.hubwidget \
+    && cp -r /tmp/forge-build/usr/share/plasma/plasmoids/com.24hg.hubwidget/* /usr/share/plasma/plasmoids/com.24hg.hubwidget/ \
     \
     # ── KDE Plasma splash screen ── \
     && mkdir -p /usr/share/plasma/look-and-feel/com.forge.splash/contents/splash \
@@ -217,16 +244,141 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/forge-build/bin/forge-nvidia-wayland /usr/bin/forge-nvidia-wayland \
     && install -m 755 /tmp/forge-build/bin/forge-update-prompt /usr/bin/forge-update-prompt \
     \
+    # ── Wave 13: Killer features ── \
+    && install -m 755 /tmp/forge-build/bin/forge-sunshine-setup /usr/bin/forge-sunshine-setup \
+    && install -m 755 /tmp/forge-build/bin/forge-clip /usr/bin/forge-clip \
+    && install -m 755 /tmp/forge-build/bin/forge-lan-party /usr/bin/forge-lan-party \
+    && install -m 755 /tmp/forge-build/bin/forge-radio /usr/bin/forge-radio \
+    && install -m 755 /tmp/forge-build/bin/forge-rig-score /usr/bin/forge-rig-score \
+    && install -m 755 /tmp/forge-build/bin/forge-invite /usr/bin/forge-invite \
+    && install -m 755 /tmp/forge-build/bin/forge-game-compat /usr/bin/forge-game-compat \
+    && install -m 755 /tmp/forge-build/bin/forge-tournament /usr/bin/forge-tournament \
+    && install -m 755 /tmp/forge-build/bin/forge-live-wallpaper /usr/bin/forge-live-wallpaper \
+    && install -m 755 /tmp/forge-build/bin/forge-hw-optimizer /usr/bin/forge-hw-optimizer \
+    && cp /tmp/forge-build/desktop/forge-clip.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-radio.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-sunshine-setup.desktop /usr/share/applications/ \
+    \
+    # ── Wave 14: Social + Intelligence ── \
+    && install -m 755 /tmp/forge-build/bin/forge-overlay /usr/bin/forge-overlay \
+    && install -m 755 /tmp/forge-build/bin/forge-cloud-saves /usr/bin/forge-cloud-saves \
+    && install -m 755 /tmp/forge-build/bin/forge-launch /usr/bin/forge-launch \
+    && install -m 755 /tmp/forge-build/bin/forge-ping-optimizer /usr/bin/forge-ping-optimizer \
+    && install -m 755 /tmp/forge-build/bin/forge-rescue /usr/bin/forge-rescue \
+    && install -m 755 /tmp/forge-build/bin/forge-gallery /usr/bin/forge-gallery \
+    && install -m 755 /tmp/forge-build/bin/forge-mods /usr/bin/forge-mods \
+    && cp /tmp/forge-build/desktop/forge-overlay.desktop /usr/share/applications/ \
+    \
+    # ── Wave 15: Infrastructure ── \
+    && install -m 755 /tmp/forge-build/bin/forge-vpn /usr/bin/forge-vpn \
+    && install -m 755 /tmp/forge-build/bin/forge-retro /usr/bin/forge-retro \
+    && install -m 755 /tmp/forge-build/bin/forge-voice /usr/bin/forge-voice \
+    && cp /tmp/forge-build/desktop/forge-vpn.desktop /usr/share/applications/ \
+    \
+    # ── Wave 16: Polish + Security ── \
+    && install -m 755 /tmp/forge-build/bin/forge-settings /usr/bin/forge-settings \
+    && install -m 755 /tmp/forge-build/bin/forge-notify /usr/bin/forge-notify \
+    && install -m 755 /tmp/forge-build/bin/forge-tour /usr/bin/forge-tour \
+    && install -m 755 /tmp/forge-build/bin/forge-digest /usr/bin/forge-digest \
+    && install -m 755 /tmp/forge-build/bin/forge-feed /usr/bin/forge-feed \
+    && install -m 755 /tmp/forge-build/bin/forge-themes /usr/bin/forge-themes \
+    && install -m 755 /tmp/forge-build/bin/forge-firewall /usr/bin/forge-firewall \
+    && install -m 755 /tmp/forge-build/bin/forge-crash-report /usr/bin/forge-crash-report \
+    && install -m 755 /tmp/forge-build/bin/forge-mirror /usr/bin/forge-mirror \
+    && cp /tmp/forge-build/desktop/forge-tour.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-tour.desktop /etc/skel/.config/autostart/ \
+    \
+    # ── Wave 17: Smart Gaming + Family + Hardware ── \
+    && install -m 755 /tmp/forge-build/bin/forge-ai /usr/bin/forge-ai \
+    && install -m 755 /tmp/forge-build/bin/forge-perflog /usr/bin/forge-perflog \
+    && install -m 755 /tmp/forge-build/bin/forge-deals /usr/bin/forge-deals \
+    && install -m 755 /tmp/forge-build/bin/forge-highlights /usr/bin/forge-highlights \
+    && install -m 755 /tmp/forge-build/bin/forge-parental /usr/bin/forge-parental \
+    && install -m 755 /tmp/forge-build/bin/forge-a11y /usr/bin/forge-a11y \
+    && install -m 755 /tmp/forge-build/bin/forge-laptop /usr/bin/forge-laptop \
+    && install -m 755 /tmp/forge-build/bin/forge-controllers /usr/bin/forge-controllers \
+    && install -m 755 /tmp/forge-build/bin/forge-challenges /usr/bin/forge-challenges \
+    && install -m 755 /tmp/forge-build/bin/forge-discord-rpc /usr/bin/forge-discord-rpc \
+    && install -m 755 /tmp/forge-build/bin/forge-snapshot /usr/bin/forge-snapshot \
+    && install -m 755 /tmp/forge-build/bin/forge-windows-import /usr/bin/forge-windows-import \
+    && cp /tmp/forge-build/desktop/forge-discord-rpc.desktop /etc/skel/.config/autostart/ \
+    \
+    # ── Wave 18: Server Hosting + Streaming + Hardware + QoL ── \
+    && install -m 755 /tmp/forge-build/bin/forge-host /usr/bin/forge-host \
+    && install -m 755 /tmp/forge-build/bin/forge-go-live /usr/bin/forge-go-live \
+    && install -m 755 /tmp/forge-build/bin/forge-record /usr/bin/forge-record \
+    && install -m 755 /tmp/forge-build/bin/forge-vr /usr/bin/forge-vr \
+    && install -m 755 /tmp/forge-build/bin/forge-gamedrive /usr/bin/forge-gamedrive \
+    && install -m 755 /tmp/forge-build/bin/forge-nas /usr/bin/forge-nas \
+    && install -m 755 /tmp/forge-build/bin/forge-proton-pick /usr/bin/forge-proton-pick \
+    && install -m 755 /tmp/forge-build/bin/forge-game-backup /usr/bin/forge-game-backup \
+    && install -m 755 /tmp/forge-build/bin/forge-splitscreen /usr/bin/forge-splitscreen \
+    && install -m 755 /tmp/forge-build/bin/forge-focus /usr/bin/forge-focus \
+    && install -m 755 /tmp/forge-build/bin/forge-help /usr/bin/forge-help \
+    \
+    # ── Wave 19: Smart Gaming OS Features ── \
+    && install -m 755 /tmp/forge-build/bin/forge-game-ready /usr/bin/forge-game-ready \
+    && install -m 755 /tmp/forge-build/bin/forge-smart-updates /usr/bin/forge-smart-updates \
+    && install -m 755 /tmp/forge-build/bin/forge-quick-resume /usr/bin/forge-quick-resume \
+    && install -m 755 /tmp/forge-build/bin/forge-hw-scout /usr/bin/forge-hw-scout \
+    && install -m 755 /tmp/forge-build/bin/forge-game-installer /usr/bin/forge-game-installer \
+    && install -m 755 /tmp/forge-build/bin/forge-lan-mode /usr/bin/forge-lan-mode \
+    && install -m 755 /tmp/forge-build/bin/forge-perf-profiles /usr/bin/forge-perf-profiles \
+    && install -m 755 /tmp/forge-build/bin/forge-boot-select /usr/bin/forge-boot-select \
+    && install -m 755 /tmp/forge-build/bin/forge-driver-mgr /usr/bin/forge-driver-mgr \
+    && install -m 755 /tmp/forge-build/bin/forge-net-optimizer /usr/bin/forge-net-optimizer \
+    && install -m 755 /tmp/forge-build/bin/forge-game-migrate /usr/bin/forge-game-migrate \
+    && install -m 755 /tmp/forge-build/bin/forge-tray-dashboard /usr/bin/forge-tray-dashboard \
+    && install -m 755 /tmp/forge-build/bin/forge-sandbox /usr/bin/forge-sandbox \
+    && install -m 755 /tmp/forge-build/bin/forge-power-plan /usr/bin/forge-power-plan \
+    && install -m 755 /tmp/forge-build/bin/forge-one-click-server /usr/bin/forge-one-click-server \
+    \
+    # ── Wave 20: Hardware Control + Polish ── \
+    && install -m 755 /tmp/forge-build/bin/forge-peripherals /usr/bin/forge-peripherals \
+    && install -m 755 /tmp/forge-build/bin/forge-input-lag /usr/bin/forge-input-lag \
+    && install -m 755 /tmp/forge-build/bin/forge-audio-router /usr/bin/forge-audio-router \
+    && install -m 755 /tmp/forge-build/bin/forge-cleaner /usr/bin/forge-cleaner \
+    && install -m 755 /tmp/forge-build/bin/forge-dual-gpu /usr/bin/forge-dual-gpu \
+    && install -m 755 /tmp/forge-build/bin/forge-mod-manager /usr/bin/forge-mod-manager \
+    && install -m 755 /tmp/forge-build/bin/forge-custom-res /usr/bin/forge-custom-res \
+    && install -m 755 /tmp/forge-build/bin/forge-boot-speed /usr/bin/forge-boot-speed \
+    && cp /tmp/forge-build/desktop/forge-record.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-game-ready.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-smart-updates.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-quick-resume.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-hw-scout.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-game-installer.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-lan-mode.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-perf-profiles.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-boot-select.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-driver-mgr.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-net-optimizer.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-game-migrate.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-tray-dashboard.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-sandbox.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-power-plan.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-one-click-server.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-peripherals.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-input-lag.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-audio-router.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-cleaner.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-dual-gpu.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-mod-manager.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-custom-res.desktop /usr/share/applications/ \
+    && cp /tmp/forge-build/desktop/forge-boot-speed.desktop /usr/share/applications/ \
+    \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/forge \
     && install -m 755 /tmp/forge-build/lib/forge-first-boot-setup.sh /usr/lib/forge/first-boot-setup.sh \
     && install -m 755 /tmp/forge-build/lib/configure-steam-servers.sh /usr/lib/forge/ \
     && install -m 755 /tmp/forge-build/lib/forge-auto-update.sh /usr/lib/forge/auto-update.sh \
+    && install -m 755 /tmp/forge-build/lib/forge-heartbeat.sh /usr/lib/forge/heartbeat.sh \
     && install -m 755 /tmp/forge-build/lib/forge-game-configs.sh /usr/lib/forge/ \
     && install -m 755 /tmp/forge-build/lib/forge-obs-setup.sh /usr/lib/forge/ \
     && install -m 755 /tmp/forge-build/lib/gamemode-start.sh /usr/lib/forge/ \
     && install -m 755 /tmp/forge-build/lib/gamemode-end.sh /usr/lib/forge/ \
     && install -m 755 /tmp/forge-build/lib/forge-update-guard-hook.sh /usr/lib/forge/ \
+    && install -m 755 /tmp/forge-build/lib/forge-i18n.sh /usr/lib/forge/forge-i18n.sh \
     \
     # ── User systemd services ── \
     && mkdir -p /etc/skel/.config/systemd/user/default.target.wants \
@@ -259,6 +411,50 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/systemd-user/forge-wallpaper.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-wallpaper.timer /etc/skel/.config/systemd/user/ \
     && ln -sf ../forge-wallpaper.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-wallpaper.timer \
+    && cp /tmp/forge-build/systemd-user/forge-live-wallpaper.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-achievements.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-achievements.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../forge-achievements.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-achievements.timer \
+    && cp /tmp/forge-build/systemd-user/forge-notify.service /etc/skel/.config/systemd/user/ \
+    && ln -sf ../forge-notify.service /etc/skel/.config/systemd/user/default.target.wants/forge-notify.service \
+    && cp /tmp/forge-build/systemd-user/forge-digest.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-digest.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../forge-digest.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-digest.timer \
+    && cp /tmp/forge-build/systemd-user/forge-crash-report.service /etc/skel/.config/systemd/user/ \
+    && ln -sf ../forge-crash-report.service /etc/skel/.config/systemd/user/default.target.wants/forge-crash-report.service \
+    && cp /tmp/forge-build/systemd-user/forge-deals.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-deals.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../forge-deals.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-deals.timer \
+    && cp /tmp/forge-build/systemd-user/forge-challenges.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-challenges.timer /etc/skel/.config/systemd/user/ \
+    && ln -sf ../forge-challenges.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-challenges.timer \
+    \
+    # ── Wave 19 systemd services ── \
+    && cp /tmp/forge-build/systemd-user/forge-game-ready.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-smart-updates.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-hw-scout.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-perf-profiles.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-power-plan.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-tray-dashboard.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-quick-resume.service /etc/skel/.config/systemd/user/ \
+    \
+    # ── Wave 20 systemd services ── \
+    && cp /tmp/forge-build/systemd-user/forge-peripherals.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-cleaner.service /etc/skel/.config/systemd/user/ \
+    && cp /tmp/forge-build/systemd-user/forge-cleaner.timer /etc/skel/.config/systemd/user/ \
+    \
+    # ── Enable Wave 19 + 20 user services on login ── \
+    && mkdir -p /etc/skel/.config/systemd/user/default.target.wants \
+    && mkdir -p /etc/skel/.config/systemd/user/timers.target.wants \
+    && ln -sf ../forge-game-ready.service /etc/skel/.config/systemd/user/default.target.wants/forge-game-ready.service \
+    && ln -sf ../forge-smart-updates.service /etc/skel/.config/systemd/user/default.target.wants/forge-smart-updates.service \
+    && ln -sf ../forge-hw-scout.service /etc/skel/.config/systemd/user/default.target.wants/forge-hw-scout.service \
+    && ln -sf ../forge-perf-profiles.service /etc/skel/.config/systemd/user/default.target.wants/forge-perf-profiles.service \
+    && ln -sf ../forge-power-plan.service /etc/skel/.config/systemd/user/default.target.wants/forge-power-plan.service \
+    && ln -sf ../forge-tray-dashboard.service /etc/skel/.config/systemd/user/default.target.wants/forge-tray-dashboard.service \
+    && ln -sf ../forge-quick-resume.service /etc/skel/.config/systemd/user/default.target.wants/forge-quick-resume.service \
+    && ln -sf ../forge-peripherals.service /etc/skel/.config/systemd/user/default.target.wants/forge-peripherals.service \
+    && ln -sf ../forge-cleaner.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-cleaner.timer \
     \
     # ── PipeWire gaming config ── \
     && mkdir -p /etc/pipewire/pipewire.conf.d \
@@ -275,6 +471,49 @@ RUN rpm-ostree install \
     \
     # ── TTY branding ── \
     && cp /tmp/forge-build/etc/issue /etc/issue \
+    && cp /tmp/forge-build/etc/motd /etc/motd \
+    \
+    # ── Avahi LAN party discovery service ── \
+    && mkdir -p /etc/avahi/services \
+    && cp /tmp/forge-build/etc/avahi/services/forge-lan.service /etc/avahi/services/ \
+    \
+    # ── Tournament overlay branding ── \
+    && mkdir -p /usr/share/forge/overlays \
+    && cp /tmp/forge-build/branding/overlays/* /usr/share/forge/overlays/ 2>/dev/null || true \
+    \
+    # ── Firefox homepage & bookmarks ── \
+    && mkdir -p /usr/lib/firefox/distribution \
+    && cp /tmp/forge-build/usr/lib/firefox/distribution/policies.json /usr/lib/firefox/distribution/ \
+    \
+    # ── Login / logout / notification sounds ── \
+    && mkdir -p /usr/share/sounds/forge/stereo \
+    && cp /tmp/forge-build/usr/share/sounds/forge/index.theme /usr/share/sounds/forge/ \
+    && cp /tmp/forge-build/usr/share/sounds/forge/stereo/* /usr/share/sounds/forge/stereo/ \
+    \
+    # ── Gaming-optimized DNS (Cloudflare + Google) ── \
+    && mkdir -p /etc/NetworkManager/conf.d \
+    && cp /tmp/forge-build/etc/NetworkManager/conf.d/24hg-dns.conf /etc/NetworkManager/conf.d/ \
+    \
+    # ── Default hostname + vendor info ── \
+    && cp /tmp/forge-build/etc/machine-info /etc/machine-info \
+    && echo "forge-desktop" > /etc/hostname \
+    && mkdir -p /usr/share/kcm-about \
+    && cp /tmp/forge-build/usr/share/kcm-about/24hg-forge.json /usr/share/kcm-about/ \
+    \
+    # ── Default user avatar (SDDM + KDE) ── \
+    && cp /tmp/forge-build/branding/icons/forge-logo-256.png /usr/share/sddm/faces/.default.face.icon \
+    && mkdir -p /etc/skel/.face.d \
+    && cp /tmp/forge-build/branding/icons/forge-logo-256.png /etc/skel/.face.icon \
+    \
+    # ── Cursor theme for SDDM fallback ── \
+    && mkdir -p /usr/share/icons/default \
+    && printf "[Icon Theme]\\nInherits=Bibata-Modern-Ice\\n" > /usr/share/icons/default/index.theme \
+    \
+    # ── KInfoCenter vendor logo ── \
+    && mkdir -p /etc/xdg/discover \
+    && cp /tmp/forge-build/etc/xdg/kcm-about-distrorc /etc/xdg/ \
+    && cp /tmp/forge-build/etc/xdg/discover/featured.json /etc/xdg/discover/ \
+    && cp /tmp/forge-build/branding/icons/forge-logo-256.png /usr/share/pixmaps/forge-logo-256.png \
     \
     # ── OS identity ── \
     && sed -i 's/^NAME=.*/NAME="24HG Forge"/' /usr/lib/os-release \

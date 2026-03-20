@@ -1,122 +1,388 @@
+# 24HG Forge — Build OCI Image + ISO Pipeline
+# Builds AMD and NVIDIA variants, pushes to GHCR, generates bootable ISOs,
+# uploads to GitHub Releases and R2 storage, notifies Discord.
+#
+# Estimated build time: ~45-60 minutes per variant (OCI build ~15min, ISO gen ~30min)
+#
+# Required secrets:
+#   GHCR_TOKEN        — GitHub Container Registry PAT (packages:write)
+#   R2_ACCESS_KEY     — Cloudflare R2 access key
+#   R2_SECRET_KEY     — Cloudflare R2 secret key
+#   R2_ENDPOINT       — Cloudflare R2 endpoint URL (e.g. https://<account>.r2.cloudflarestorage.com)
+#   DISCORD_WEBHOOK   — Discord webhook URL for build notifications
+#
+# Status badge:
+#   ![Build ISO](https://github.com/24hgaming/forge/actions/workflows/build-iso.yml/badge.svg)
+
 name: Build 24HG Forge ISO
 
 on:
   push:
+    branches: [main]
+    paths:
+      - 'Containerfile'
+      - 'Containerfile.nvidia'
+      - 'system_files/**'
+      - 'scripts/**'
+      - 'hub-app/**'
+      - 'branding/**'
+      - 'stage-build.sh'
+      - 'installer/**'
     tags: ['v*']
   workflow_dispatch:
     inputs:
       variant:
-        description: 'ISO Variant'
+        description: 'GPU variant to build'
         required: true
-        default: 'desktop'
+        default: 'both'
         type: choice
         options:
-          - desktop
+          - amd
           - nvidia
           - both
+      channel:
+        description: 'Release channel'
+        required: true
+        default: 'stable'
+        type: choice
+        options:
+          - stable
+          - beta
+
+concurrency:
+  group: build-iso-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/forge
+  BASE_TAG: stable
 
 jobs:
-  build-iso:
-    name: Build ISO (${{ matrix.variant }})
-    runs-on: ubuntu-latest
+  # ── Build OCI images and generate ISOs ──
+  build:
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     permissions:
       contents: write
-      packages: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
-        variant: [desktop, nvidia]
+        include:
+          - variant: amd
+            base_image: ghcr.io/ublue-os/bazzite
+            containerfile: Containerfile
+          - variant: nvidia
+            base_image: ghcr.io/ublue-os/bazzite-nvidia
+            containerfile: Containerfile.nvidia
+        # Filter matrix when manual dispatch selects a single variant
+        exclude:
+          - variant: ${{ github.event.inputs.variant == 'nvidia' && 'amd' || 'NONE' }}
+          - variant: ${{ github.event.inputs.variant == 'amd' && 'nvidia' || 'NONE' }}
 
     steps:
+      - name: Maximize build space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af --volumes || true
+          echo "Available disk space:"
+          df -h /
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Lowercase Registry
-        id: registry_case
-        uses: ASzc/change-string-case-action@v6
-        with:
-          string: ghcr.io/${{ github.repository_owner }}
-
-      - name: Determine version tag
-        id: version
+      - name: Determine version and channel
+        id: meta
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          DATE=$(date +%Y%m%d)
+          CHANNEL="${{ github.event.inputs.channel || 'stable' }}"
+
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            IS_RELEASE="true"
           else
-            echo "tag=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+            VERSION="${DATE}"
+            IS_RELEASE="false"
           fi
 
-      - name: Build ISO
-        uses: jasonn3/build-container-installer@main
-        id: build-iso
-        with:
-          arch: x86_64
-          image_name: forge
-          image_repo: ${{ steps.registry_case.outputs.lowercase }}
-          image_tag: ${{ matrix.variant }}-latest
-          variant: Kinoite
-          version: "41"
-          iso_name: forge-${{ matrix.variant }}-${{ steps.version.outputs.tag }}.iso
-          image_signed: "false"
-          enable_cache_dnf: "true"
-          enable_cache_skopeo: "false"
-          enable_flatpak_dependencies: "false"
+          FULL_IMAGE="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
+          # Lowercase the image path for GHCR compatibility
+          FULL_IMAGE=$(echo "$FULL_IMAGE" | tr '[:upper:]' '[:lower:]')
 
-      - name: Generate checksum
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "date=${DATE}" >> "$GITHUB_OUTPUT"
+          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
+          echo "is_release=${IS_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "full_image=${FULL_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "iso_name=forge-${{ matrix.variant }}-${VERSION}.iso" >> "$GITHUB_OUTPUT"
+
+      - name: Stage build files
         run: |
-          cd ${{ steps.build-iso.outputs.iso_path }}
-          sha256sum *.iso > SHA256SUMS
+          chmod +x stage-build.sh
+          ./stage-build.sh
 
-      - name: Upload ISO artifact
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # Cache podman layers via GitHub Actions cache
+      - name: Cache container layers
+        uses: actions/cache@v4
+        with:
+          path: /var/tmp/podman-cache
+          key: podman-${{ matrix.variant }}-${{ hashFiles(matrix.containerfile, 'stage-build.sh') }}
+          restore-keys: |
+            podman-${{ matrix.variant }}-
+
+      - name: Restore podman cache
+        run: |
+          if [ -f /var/tmp/podman-cache/layers.tar ]; then
+            echo "Restoring cached layers..."
+            podman load -i /var/tmp/podman-cache/layers.tar || true
+          fi
+
+      - name: Build OCI image
+        run: |
+          podman build \
+            --build-arg BASE_IMAGE=${{ matrix.base_image }} \
+            --build-arg BASE_TAG=${{ env.BASE_TAG }} \
+            --layers=true \
+            -f ${{ matrix.containerfile }} \
+            -t ${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }} \
+            -t ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.version }} \
+            -t ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.date }} \
+            .
+
+      - name: Save podman cache
+        run: |
+          mkdir -p /var/tmp/podman-cache
+          podman save -o /var/tmp/podman-cache/layers.tar \
+            ${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }} || true
+
+      - name: Push OCI image to GHCR
+        run: |
+          podman push ${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }}
+          podman push ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.version }}
+          podman push ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.date }}
+          echo "Pushed images:"
+          echo "  - ${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }}"
+          echo "  - ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.version }}"
+
+      - name: Generate ISO with bootc-image-builder
+        id: iso
+        run: |
+          mkdir -p ./output
+
+          sudo podman run \
+            --rm \
+            --privileged \
+            --pull=newer \
+            --security-opt label=type:unconfined_t \
+            -v ./output:/output \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            ghcr.io/osbuild/bootc-image-builder:latest \
+              --type iso \
+              --rootfs btrfs \
+              ${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }}
+
+          # Rename to our naming convention
+          ISO_SRC=$(find ./output -name '*.iso' -type f | head -1)
+          if [ -z "$ISO_SRC" ]; then
+            echo "::error::No ISO file generated"
+            exit 1
+          fi
+          mv "$ISO_SRC" "./output/${{ steps.meta.outputs.iso_name }}"
+          echo "iso_path=./output" >> "$GITHUB_OUTPUT"
+          echo "iso_file=${{ steps.meta.outputs.iso_name }}" >> "$GITHUB_OUTPUT"
+
+          echo "ISO generated:"
+          ls -lh "./output/${{ steps.meta.outputs.iso_name }}"
+
+      - name: Generate checksums
+        working-directory: ${{ steps.iso.outputs.iso_path }}
+        run: |
+          sha256sum "${{ steps.meta.outputs.iso_name }}" > "${{ steps.meta.outputs.iso_name }}.sha256"
+          md5sum "${{ steps.meta.outputs.iso_name }}" > "${{ steps.meta.outputs.iso_name }}.md5"
+          echo "Checksums:"
+          cat "${{ steps.meta.outputs.iso_name }}.sha256"
+
+      - name: Upload ISO as artifact
         uses: actions/upload-artifact@v4
         with:
           name: forge-${{ matrix.variant }}-iso
           path: |
-            ${{ steps.build-iso.outputs.iso_path }}/*.iso
-            ${{ steps.build-iso.outputs.iso_path }}/SHA256SUMS
+            ${{ steps.iso.outputs.iso_path }}/${{ steps.meta.outputs.iso_name }}
+            ${{ steps.iso.outputs.iso_path }}/${{ steps.meta.outputs.iso_name }}.sha256
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
 
-      - name: Split ISO into chunks
-        if: startsWith(github.ref, 'refs/tags/')
+      # Split large ISOs for GitHub Releases (2GB file limit)
+      - name: Split ISO for release
+        if: steps.meta.outputs.is_release == 'true'
+        working-directory: ${{ steps.iso.outputs.iso_path }}
         run: |
-          cd ${{ steps.build-iso.outputs.iso_path }}
-          ISO_FILE="forge-${{ matrix.variant }}-${{ steps.version.outputs.tag }}.iso"
-          echo "Splitting $ISO_FILE into 1900MB chunks..."
-          split -b 1900m "$ISO_FILE" "${ISO_FILE}.part-"
-          echo "Chunks created:"
-          ls -lh "${ISO_FILE}.part-"*
+          ISO="${{ steps.meta.outputs.iso_name }}"
+          ISO_SIZE=$(stat -c%s "$ISO")
+          LIMIT=$((1900 * 1024 * 1024))
 
-      - name: Create/Update Release
-        if: startsWith(github.ref, 'refs/tags/')
+          if [ "$ISO_SIZE" -gt "$LIMIT" ]; then
+            echo "ISO is ${ISO_SIZE} bytes, splitting into 1900MB chunks..."
+            split -b 1900m "$ISO" "${ISO}.part-"
+            rm "$ISO"
+            echo "Chunks:"
+            ls -lh "${ISO}.part-"*
+          else
+            echo "ISO is ${ISO_SIZE} bytes, no split needed."
+          fi
+
+      - name: Create GitHub Release
+        if: steps.meta.outputs.is_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          name: "24HG Forge ${{ github.ref_name }}"
+          name: "24HG Forge ${{ steps.meta.outputs.version }}"
+          generate_release_notes: true
           body: |
-            ## 24HG Forge ${{ github.ref_name }}
+            ## 24HG Forge ${{ steps.meta.outputs.version }}
 
             Custom gaming Linux distribution built on Bazzite (Fedora Atomic).
 
             ### Downloads
-            ISOs are split into <2GB chunks for GitHub Releases compatibility.
+            - **AMD/Intel GPU**: `forge-amd-${{ steps.meta.outputs.version }}.iso`
+            - **NVIDIA GPU**: `forge-nvidia-${{ steps.meta.outputs.version }}.iso`
 
-            - **Desktop** (AMD/Intel GPU) — `forge-desktop-${{ github.ref_name }}.iso.part-*`
-            - **NVIDIA** (GTX 900+) — `forge-nvidia-${{ github.ref_name }}.iso.part-*`
-
-            ### Reassemble & Verify
-            Download all `.part-*` files for your variant, then run:
+            If ISOs are split into parts (>1.9GB), reassemble with:
             ```bash
-            cat forge-desktop-${{ github.ref_name }}.iso.part-* > forge-desktop-${{ github.ref_name }}.iso
-            sha256sum -c SHA256SUMS
-            ```
-            For NVIDIA:
-            ```bash
-            cat forge-nvidia-${{ github.ref_name }}.iso.part-* > forge-nvidia-${{ github.ref_name }}.iso
-            sha256sum -c SHA256SUMS
+            cat forge-amd-${{ steps.meta.outputs.version }}.iso.part-* > forge-amd-${{ steps.meta.outputs.version }}.iso
+            sha256sum -c forge-amd-${{ steps.meta.outputs.version }}.iso.sha256
             ```
 
             See [Changelog](https://os.24hgaming.com/roadmap.html) for details.
           files: |
-            ${{ steps.build-iso.outputs.iso_path }}/*.iso.part-*
-            ${{ steps.build-iso.outputs.iso_path }}/SHA256SUMS
+            ${{ steps.iso.outputs.iso_path }}/${{ steps.meta.outputs.iso_name }}*
+
+      - name: Upload ISO to R2
+        if: always() && steps.iso.outcome == 'success'
+        env:
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          if [ -z "$R2_ACCESS_KEY" ] || [ -z "$R2_SECRET_KEY" ] || [ -z "$R2_ENDPOINT" ]; then
+            echo "::warning::R2 credentials not configured, skipping upload"
+            exit 0
+          fi
+
+          sudo apt-get install -y -qq rclone > /dev/null 2>&1
+
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<RCONF
+          [r2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = ${R2_ACCESS_KEY}
+          secret_access_key = ${R2_SECRET_KEY}
+          endpoint = ${R2_ENDPOINT}
+          acl = private
+          no_check_bucket = true
+          RCONF
+
+          CHANNEL="${{ steps.meta.outputs.channel }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          # Upload ISO
+          rclone copy \
+            "${{ steps.iso.outputs.iso_path }}/${{ steps.meta.outputs.iso_name }}" \
+            "r2:forge-releases/${CHANNEL}/${VERSION}/" \
+            --progress --transfers=4
+
+          # Upload checksum
+          rclone copy \
+            "${{ steps.iso.outputs.iso_path }}/${{ steps.meta.outputs.iso_name }}.sha256" \
+            "r2:forge-releases/${CHANNEL}/${VERSION}/" \
+            --progress
+
+          # Update latest symlink file
+          echo "${VERSION}" | rclone rcat "r2:forge-releases/${CHANNEL}/latest-${{ matrix.variant }}.txt"
+
+          echo "Uploaded to r2:forge-releases/${CHANNEL}/${VERSION}/"
+
+      - name: Post Discord notification
+        if: always()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            echo "::warning::Discord webhook not configured, skipping notification"
+            exit 0
+          fi
+
+          STATUS="${{ job.status }}"
+          VARIANT="${{ matrix.variant }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if [ "$STATUS" = "success" ]; then
+            COLOR=3066993  # Green
+            EMOJI="<:forge:>"
+            TITLE="Forge ISO Build Successful"
+            DESC="**${VARIANT^^}** variant \`${VERSION}\` built successfully."
+          else
+            COLOR=15158332  # Red
+            EMOJI=""
+            TITLE="Forge ISO Build Failed"
+            DESC="**${VARIANT^^}** variant \`${VERSION}\` build failed."
+          fi
+
+          # Get ISO size if available
+          ISO_SIZE=""
+          if [ -f "${{ steps.iso.outputs.iso_path || '.' }}/${{ steps.meta.outputs.iso_name }}" ]; then
+            ISO_SIZE=$(du -h "${{ steps.iso.outputs.iso_path }}/${{ steps.meta.outputs.iso_name }}" | cut -f1)
+          fi
+
+          PAYLOAD=$(cat <<DISCORD
+          {
+            "username": "Forge CI",
+            "avatar_url": "https://os.24hgaming.com/assets/forge-logo-256.png",
+            "embeds": [{
+              "title": "${EMOJI} ${TITLE}",
+              "description": "${DESC}",
+              "color": ${COLOR},
+              "fields": [
+                {"name": "Variant", "value": "\`${VARIANT}\`", "inline": true},
+                {"name": "Version", "value": "\`${VERSION}\`", "inline": true},
+                {"name": "Channel", "value": "\`${{ steps.meta.outputs.channel }}\`", "inline": true}
+                ${ISO_SIZE:+,{"name": "ISO Size", "value": "\`${ISO_SIZE}\`", "inline": true}}
+              ],
+              "url": "${RUN_URL}",
+              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+              "footer": {"text": "24HG Forge CI/CD"}
+            }]
+          }
+          DISCORD
+          )
+
+          curl -sf -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" || echo "::warning::Failed to send Discord notification"
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "### 24HG Forge Build — ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Variant | \`${{ matrix.variant }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Channel | \`${{ steps.meta.outputs.channel }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| OCI Image | \`${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | \`${{ job.status }}\` |" >> $GITHUB_STEP_SUMMARY
+          if [ -f "${{ steps.iso.outputs.iso_path || '.' }}/${{ steps.meta.outputs.iso_name }}.sha256" ]; then
+            echo "| SHA256 | \`$(cat "${{ steps.iso.outputs.iso_path }}/${{ steps.meta.outputs.iso_name }}.sha256" | cut -d' ' -f1)\` |" >> $GITHUB_STEP_SUMMARY
+          fi

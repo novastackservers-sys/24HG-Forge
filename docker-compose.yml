@@ -1,22 +1,23 @@
 services:
   control-room:
     build: ./control-room
-    container_name: forge-control-room
+    container_name: hubos-control-room
     restart: unless-stopped
     volumes:
-      - ./landing-page:/srv/landing-page:ro
+      - ./landing-page:/srv/landing-page
       - ./control-room/data:/app/data
     env_file: .env
     environment:
       - PORT=3847
       - ISO_DIR=/srv/landing-page/iso
       - LANDING_DIR=/srv/landing-page
+      - VPN_API_URL=http://10.0.1.1:3860
     networks:
       - coolify
 
   site:
     image: nginx:alpine
-    container_name: forge-site
+    container_name: hubos-site
     restart: unless-stopped
     volumes:
       - ./landing-page:/usr/share/nginx/html:ro

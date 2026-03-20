@@ -1,0 +1,1538 @@
+#!/usr/bin/env python3
+"""24HG Forge Proton/Wine Version Selector — Smart Proton management for gaming
+
+Commands:
+    check <game>           Check best Proton version for a game
+    apply <game> [version] Set Proton version for a game (or auto-pick best)
+    list                   List all installed Proton versions
+    install <version>      Install a Proton version (GE, official, TKG)
+    remove <version>       Remove a Proton version
+    test <game>            Quick-test a game with different Proton versions
+    report <game>          Submit compatibility report to Hub
+    update                 Check for Proton-GE updates
+    auto on|off            Auto-pick Proton version when launching games
+    tricks <game>          Apply common Winetricks for a game
+"""
+
+import argparse
+import glob
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+# ─── Color Helpers ───────────────────────────────────────────────────────────
+
+class C:
+    """ANSI color codes."""
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    RED     = "\033[91m"
+    GREEN   = "\033[92m"
+    YELLOW  = "\033[93m"
+    BLUE    = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN    = "\033[96m"
+    WHITE   = "\033[97m"
+    GRAY    = "\033[90m"
+    BG_RED    = "\033[41m"
+    BG_GREEN  = "\033[42m"
+    BG_YELLOW = "\033[43m"
+    BG_BLUE   = "\033[44m"
+
+    @staticmethod
+    def enabled():
+        return sys.stdout.isatty()
+
+def c(text, *codes):
+    """Colorize text if stdout is a tty."""
+    if not C.enabled():
+        return text
+    return "".join(codes) + str(text) + C.RESET
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+APP_NAME = "forge-proton-pick"
+CONFIG_DIR = os.path.expanduser("~/.config/24hg-forge")
+CACHE_DIR = os.path.expanduser("~/.cache/24hg-forge/proton-pick")
+AUTO_PICK_FILE = os.path.join(CONFIG_DIR, "proton-auto-pick.json")
+TEST_RESULTS_FILE = os.path.join(CACHE_DIR, "test-results.json")
+CACHE_TTL = 3600 * 6  # 6 hours
+
+STEAM_PATHS = [
+    os.path.expanduser("~/.local/share/Steam"),
+    os.path.expanduser("~/.steam/steam"),
+    os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam"),
+]
+
+COMPAT_TOOLS_DIRS = [
+    os.path.expanduser("~/.steam/root/compatibilitytools.d"),
+    os.path.expanduser("~/.local/share/Steam/compatibilitytools.d"),
+    os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d"),
+]
+
+LUTRIS_WINE_DIR = os.path.expanduser("~/.local/share/lutris/runners/wine")
+
+HUB_API = "https://hub.24hgaming.com/api"
+PROTONDB_API = "https://www.protondb.com/api/v1/reports/summaries"
+GE_RELEASES_API = "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"
+
+# ─── Winetricks Database ────────────────────────────────────────────────────
+
+COMMON_TRICKS = {
+    "vcrun2019":    "Visual C++ 2015-2019 Redistributable",
+    "vcrun2022":    "Visual C++ 2015-2022 Redistributable",
+    "d3dx9":        "DirectX 9 shader libraries (d3dx9_26 through d3dx9_43)",
+    "d3dcompiler_47": "DirectX shader compiler",
+    "d3dx11_43":    "DirectX 11 libraries",
+    "dxvk":         "Vulkan-based DirectX 9/10/11 implementation",
+    "dotnet48":     ".NET Framework 4.8",
+    "dotnet40":     ".NET Framework 4.0",
+    "dotnet35sp1":  ".NET Framework 3.5 SP1",
+    "xact":         "XAudio/XACT audio libraries",
+    "xna40":        "XNA Framework 4.0",
+    "faudio":       "FAudio (XAudio2 reimplementation)",
+    "corefonts":    "Microsoft core fonts",
+    "mf":           "Media Foundation (video playback)",
+    "lavfilters":   "LAV Filters (video/audio codecs)",
+    "quartz":       "DirectShow runtime (quartz.dll)",
+    "wmp11":        "Windows Media Player 11",
+    "physx":        "NVIDIA PhysX",
+    "sdl":          "SDL2 library",
+}
+
+# Per-game known fixes (~30 popular games)
+GAME_TRICKS = {
+    "252490":  {"name": "Rust",                    "tricks": ["vcrun2019"],             "notes": "EAC needs Proton runtime"},
+    "730":     {"name": "CS2",                     "tricks": [],                        "notes": "Native Vulkan, no tricks needed"},
+    "440":     {"name": "TF2",                     "tricks": [],                        "notes": "Native Linux build available"},
+    "570":     {"name": "Dota 2",                  "tricks": [],                        "notes": "Native Linux, runs out of the box"},
+    "292030":  {"name": "The Witcher 3",           "tricks": ["vcrun2019", "d3dx11_43"],"notes": "DXVK handles most issues"},
+    "1091500": {"name": "Cyberpunk 2077",          "tricks": ["vcrun2019"],             "notes": "Use GE-Proton for best results"},
+    "1245620": {"name": "Elden Ring",              "tricks": ["vcrun2019"],             "notes": "Works well with latest GE-Proton"},
+    "413150":  {"name": "Stardew Valley",          "tricks": [],                        "notes": "Native Linux, no tricks needed"},
+    "377160":  {"name": "Fallout 4",               "tricks": ["vcrun2019", "d3dx11_43", "xact"], "notes": "May need xact for audio"},
+    "489830":  {"name": "Skyrim SE",               "tricks": ["vcrun2019", "d3dx9"],    "notes": "Works well with Proton"},
+    "814380":  {"name": "Sekiro",                  "tricks": ["vcrun2019"],             "notes": "Runs great on Proton"},
+    "1174180": {"name": "Red Dead Redemption 2",   "tricks": ["vcrun2019", "mf"],       "notes": "Media Foundation for cutscenes"},
+    "271590":  {"name": "GTA V",                   "tricks": ["vcrun2019", "d3dx11_43"],"notes": "Works well, may need mf for videos"},
+    "1593500": {"name": "God of War",              "tricks": ["vcrun2019"],             "notes": "Latest GE-Proton recommended"},
+    "1551360": {"name": "Forza Horizon 5",         "tricks": ["vcrun2019"],             "notes": "Runs via Proton, occasional stutters"},
+    "1240440": {"name": "Halo Infinite",           "tricks": ["vcrun2019"],             "notes": "EAC enabled for Proton"},
+    "427520":  {"name": "Factorio",                "tricks": [],                        "notes": "Native Linux, flawless"},
+    "105600":  {"name": "Terraria",                "tricks": ["dotnet40"],              "notes": "Native Linux or Proton both work"},
+    "1086940": {"name": "Baldur's Gate 3",         "tricks": ["vcrun2019"],             "notes": "Native Vulkan renderer available"},
+    "892970":  {"name": "Valheim",                 "tricks": ["vcrun2019"],             "notes": "Native Linux or Proton"},
+    "367520":  {"name": "Hollow Knight",           "tricks": [],                        "notes": "Native Linux, runs perfectly"},
+    "1449850": {"name": "Monster Hunter Rise",     "tricks": ["vcrun2019", "d3dx11_43"],"notes": "GE-Proton for best performance"},
+    "582010":  {"name": "Monster Hunter World",    "tricks": ["vcrun2019"],             "notes": "Works well with GE-Proton"},
+    "374320":  {"name": "Dark Souls III",          "tricks": ["vcrun2019", "d3dx11_43"],"notes": "Solid on Proton"},
+    "1938090": {"name": "CoD: MW3",                "tricks": ["vcrun2022"],             "notes": "Ricochet AC works on Proton"},
+    "1962663": {"name": "CoD: Warzone",            "tricks": ["vcrun2022"],             "notes": "Ricochet AC works on Proton"},
+    "230410":  {"name": "Warframe",                "tricks": [],                        "notes": "Native Linux build available"},
+    "553850":  {"name": "Helldivers 2",            "tricks": ["vcrun2019"],             "notes": "Works with GE-Proton"},
+    "1716740": {"name": "Palworld",                "tricks": ["vcrun2019"],             "notes": "Works well on Proton"},
+    "1203220": {"name": "Naraka: Bladepoint",      "tricks": ["vcrun2019"],             "notes": "Kernel EAC - may be blocked"},
+}
+
+# ─── Utility Functions ──────────────────────────────────────────────────────
+
+def ensure_dirs():
+    """Create config and cache directories."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+def info(msg):
+    print(f"  {c('>', C.CYAN)} {msg}")
+
+def success(msg):
+    print(f"  {c('✓', C.GREEN)} {msg}")
+
+def warn(msg):
+    print(f"  {c('!', C.YELLOW)} {msg}")
+
+def error(msg):
+    print(f"  {c('✗', C.RED)} {msg}")
+
+def header(title):
+    print(f"\n  {c(f'=== {title} ===', C.BOLD, C.CYAN)}\n")
+
+def api_get(url, timeout=10):
+    """Fetch JSON from a URL with caching."""
+    cache_key = hashlib.md5(url.encode()).hexdigest()
+    cache_file = os.path.join(CACHE_DIR, f"{cache_key}.json")
+
+    # Check cache
+    if os.path.exists(cache_file):
+        mtime = os.path.getmtime(cache_file)
+        if time.time() - mtime < CACHE_TTL:
+            with open(cache_file) as f:
+                return json.load(f)
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "24HG-Forge/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+            # Cache the result
+            ensure_dirs()
+            with open(cache_file, "w") as f:
+                json.dump(data, f)
+            return data
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return None
+
+def api_post(url, payload, timeout=10):
+    """POST JSON to a URL."""
+    try:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"User-Agent": "24HG-Forge/1.0", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return None
+
+# ─── Steam Helpers ───────────────────────────────────────────────────────────
+
+def find_steam():
+    """Find the Steam installation directory."""
+    for path in STEAM_PATHS:
+        if os.path.isdir(path):
+            return path
+    return None
+
+def find_library_folders(steam_dir):
+    """Parse libraryfolders.vdf to find all Steam library paths."""
+    vdf_path = os.path.join(steam_dir, "steamapps", "libraryfolders.vdf")
+    folders = [os.path.join(steam_dir, "steamapps")]
+    if os.path.exists(vdf_path):
+        with open(vdf_path) as f:
+            for line in f:
+                m = re.search(r'"path"\s+"(.+)"', line)
+                if m:
+                    p = os.path.join(m.group(1), "steamapps")
+                    if os.path.isdir(p):
+                        folders.append(p)
+    return folders
+
+def find_appid(steam_dir, search):
+    """Find an AppID by name or number."""
+    if search.isdigit():
+        return search
+
+    search_lower = search.lower()
+    # Check built-in database first
+    for appid, data in GAME_TRICKS.items():
+        if search_lower in data["name"].lower():
+            return appid
+
+    # Search appmanifest files
+    for folder in find_library_folders(steam_dir):
+        for manifest in glob.glob(os.path.join(folder, "appmanifest_*.acf")):
+            try:
+                with open(manifest) as f:
+                    content = f.read()
+                    name_match = re.search(r'"name"\s+"(.+)"', content)
+                    appid_match = re.search(r'"appid"\s+"(\d+)"', content)
+                    if name_match and appid_match:
+                        if search_lower in name_match.group(1).lower():
+                            return appid_match.group(1)
+            except OSError:
+                continue
+    return None
+
+def get_game_name(steam_dir, appid):
+    """Get the game name for an AppID."""
+    # Check built-in database
+    if appid in GAME_TRICKS:
+        return GAME_TRICKS[appid]["name"]
+
+    if not steam_dir:
+        return f"AppID {appid}"
+
+    for folder in find_library_folders(steam_dir):
+        manifest = os.path.join(folder, f"appmanifest_{appid}.acf")
+        if os.path.exists(manifest):
+            with open(manifest) as f:
+                m = re.search(r'"name"\s+"(.+)"', f.read())
+                if m:
+                    return m.group(1)
+    return f"AppID {appid}"
+
+def parse_config_vdf(steam_dir):
+    """Parse Steam config.vdf to read compat tool mappings."""
+    config_path = os.path.join(steam_dir, "config", "config.vdf")
+    mappings = {}
+    if not os.path.exists(config_path):
+        return mappings
+
+    with open(config_path) as f:
+        content = f.read()
+
+    # Find CompatToolMapping section
+    compat_match = re.search(
+        r'"CompatToolMapping"\s*\{(.*?)\n\t\t\t\}',
+        content, re.DOTALL
+    )
+    if not compat_match:
+        return mappings
+
+    block = compat_match.group(1)
+    # Parse each appid entry
+    for app_match in re.finditer(
+        r'"(\d+)"\s*\{[^}]*"name"\s+"([^"]*)"[^}]*\}',
+        block, re.DOTALL
+    ):
+        appid = app_match.group(1)
+        tool_name = app_match.group(2)
+        if tool_name:
+            mappings[appid] = tool_name
+    return mappings
+
+def set_compat_tool(steam_dir, appid, tool_name):
+    """Set the compatibility tool for a game in config.vdf."""
+    config_path = os.path.join(steam_dir, "config", "config.vdf")
+    if not os.path.exists(config_path):
+        error(f"Config file not found: {config_path}")
+        return False
+
+    with open(config_path) as f:
+        content = f.read()
+
+    # Build the entry block
+    entry = f'\n\t\t\t\t"{appid}"\n\t\t\t\t{{\n\t\t\t\t\t"name"\t\t"{tool_name}"\n\t\t\t\t\t"config"\t\t""\n\t\t\t\t\t"priority"\t\t"250"\n\t\t\t\t}}'
+
+    # Check if CompatToolMapping section exists
+    compat_match = re.search(r'"CompatToolMapping"\s*\{', content)
+    if not compat_match:
+        # Insert CompatToolMapping section before the closing braces
+        content = content.rstrip().rstrip("}") + f'\n\t\t\t"CompatToolMapping"\n\t\t\t{{{entry}\n\t\t\t}}\n' + "}" * 3
+    else:
+        # Check if appid already has an entry
+        existing = re.search(
+            rf'"{appid}"\s*\{{[^}}]*\}}',
+            content[compat_match.end():]
+        )
+        if existing:
+            # Replace existing entry
+            start = compat_match.end() + existing.start()
+            end = compat_match.end() + existing.end()
+            replacement = f'"{appid}"\n\t\t\t\t{{\n\t\t\t\t\t"name"\t\t"{tool_name}"\n\t\t\t\t\t"config"\t\t""\n\t\t\t\t\t"priority"\t\t"250"\n\t\t\t\t}}'
+            content = content[:start] + replacement + content[end:]
+        else:
+            # Add new entry after CompatToolMapping opening brace
+            insert_pos = compat_match.end()
+            content = content[:insert_pos] + entry + content[insert_pos:]
+
+    # Backup and write
+    backup_path = config_path + f".bak.{int(time.time())}"
+    shutil.copy2(config_path, backup_path)
+
+    with open(config_path, "w") as f:
+        f.write(content)
+
+    return True
+
+# ─── Proton Version Detection ───────────────────────────────────────────────
+
+def detect_proton_versions():
+    """Scan all known locations for Proton/Wine versions."""
+    versions = []
+
+    steam_dir = find_steam()
+
+    # 1. Custom compatibility tools (GE-Proton, TKG, etc.)
+    for compat_dir in COMPAT_TOOLS_DIRS:
+        if not os.path.isdir(compat_dir):
+            continue
+        for entry in sorted(os.listdir(compat_dir)):
+            full_path = os.path.join(compat_dir, entry)
+            if not os.path.isdir(full_path):
+                continue
+            # Determine type
+            vtype = "custom"
+            if "GE-Proton" in entry or "ge-proton" in entry.lower():
+                vtype = "ge"
+            elif "tkg" in entry.lower():
+                vtype = "tkg"
+            elif "proton" in entry.lower():
+                vtype = "custom-proton"
+
+            versions.append({
+                "name": entry,
+                "path": full_path,
+                "type": vtype,
+                "source": "compatibilitytools.d",
+            })
+
+    # 2. Built-in Steam Proton versions
+    if steam_dir:
+        for folder in find_library_folders(steam_dir):
+            common_dir = os.path.join(folder, "common")
+            if not os.path.isdir(common_dir):
+                continue
+            for entry in sorted(os.listdir(common_dir)):
+                if not entry.startswith("Proton"):
+                    continue
+                full_path = os.path.join(common_dir, entry)
+                if os.path.isdir(full_path):
+                    versions.append({
+                        "name": entry,
+                        "path": full_path,
+                        "type": "official",
+                        "source": "steam",
+                    })
+
+    # 3. System Wine
+    wine_paths = ["/usr/bin/wine", "/usr/local/bin/wine"]
+    for wp in wine_paths:
+        if os.path.exists(wp):
+            try:
+                result = subprocess.run(
+                    [wp, "--version"], capture_output=True, text=True, timeout=5
+                )
+                ver = result.stdout.strip()
+            except (subprocess.TimeoutExpired, OSError):
+                ver = "unknown"
+            versions.append({
+                "name": f"System Wine ({ver})",
+                "path": wp,
+                "type": "wine",
+                "source": "system",
+            })
+
+    # 4. Lutris Wine runners
+    if os.path.isdir(LUTRIS_WINE_DIR):
+        for entry in sorted(os.listdir(LUTRIS_WINE_DIR)):
+            full_path = os.path.join(LUTRIS_WINE_DIR, entry)
+            if os.path.isdir(full_path):
+                versions.append({
+                    "name": f"Lutris: {entry}",
+                    "path": full_path,
+                    "type": "lutris-wine",
+                    "source": "lutris",
+                })
+
+    # 5. Flatpak Steam compat tools
+    flatpak_compat = os.path.expanduser(
+        "~/.var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d"
+    )
+    if os.path.isdir(flatpak_compat) and flatpak_compat not in COMPAT_TOOLS_DIRS:
+        for entry in sorted(os.listdir(flatpak_compat)):
+            full_path = os.path.join(flatpak_compat, entry)
+            if os.path.isdir(full_path):
+                versions.append({
+                    "name": entry,
+                    "path": full_path,
+                    "type": "ge" if "GE" in entry else "custom",
+                    "source": "flatpak",
+                })
+
+    return versions
+
+def get_proton_sort_key(name):
+    """Extract a sortable version tuple from a Proton version name."""
+    # Try GE-Proton format: GE-ProtonX-Y
+    m = re.search(r'GE-Proton(\d+)-(\d+)', name)
+    if m:
+        return (2, int(m.group(1)), int(m.group(2)))
+    # Try official format: Proton X.Y or Proton - X.Y.Z
+    m = re.search(r'Proton[- ]+(\d+)\.(\d+)', name)
+    if m:
+        return (1, int(m.group(1)), int(m.group(2)))
+    return (0, 0, 0)
+
+# ─── ProtonDB / Hub API ─────────────────────────────────────────────────────
+
+def get_protondb_summary(appid):
+    """Get ProtonDB compatibility summary for a game."""
+    url = f"{PROTONDB_API}/{appid}.json"
+    return api_get(url)
+
+def get_hub_compat(appid):
+    """Get 24HG Hub community compatibility reports."""
+    url = f"{HUB_API}/forge/game-compat/{appid}"
+    return api_get(url, timeout=5)
+
+def get_ge_releases(count=10):
+    """Get latest GE-Proton releases from GitHub."""
+    url = f"{GE_RELEASES_API}?per_page={count}"
+    return api_get(url)
+
+# ─── Test Results Cache ──────────────────────────────────────────────────────
+
+def load_test_results():
+    """Load cached local test results."""
+    ensure_dirs()
+    if os.path.exists(TEST_RESULTS_FILE):
+        try:
+            with open(TEST_RESULTS_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+def save_test_results(results):
+    """Save local test results."""
+    ensure_dirs()
+    with open(TEST_RESULTS_FILE, "w") as f:
+        json.dump(results, f, indent=2)
+
+def load_auto_config():
+    """Load auto-pick configuration."""
+    ensure_dirs()
+    if os.path.exists(AUTO_PICK_FILE):
+        try:
+            with open(AUTO_PICK_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"enabled": False, "overrides": {}}
+
+def save_auto_config(config):
+    """Save auto-pick configuration."""
+    ensure_dirs()
+    with open(AUTO_PICK_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+
+# ─── Auto-Pick Logic ────────────────────────────────────────────────────────
+
+def auto_pick_version(appid, installed_versions):
+    """Determine the best Proton version for a game.
+
+    Priority order:
+      1. Local test results (user-verified)
+      2. Hub community reports (most votes)
+      3. ProtonDB recommended version
+      4. Fall back to latest GE-Proton if no data
+    """
+    installed_names = {v["name"] for v in installed_versions}
+    recommendation = {
+        "version": None,
+        "source": None,
+        "confidence": "low",
+        "notes": [],
+    }
+
+    # 1. Local test results
+    results = load_test_results()
+    if appid in results:
+        app_results = results[appid]
+        # Find best rated locally tested version
+        best = None
+        for ver_name, data in app_results.items():
+            if ver_name in installed_names:
+                if best is None or data.get("score", 0) > best[1].get("score", 0):
+                    best = (ver_name, data)
+        if best:
+            recommendation["version"] = best[0]
+            recommendation["source"] = "local-test"
+            recommendation["confidence"] = "high"
+            recommendation["notes"].append(
+                f"Locally tested: score {best[1].get('score', '?')}/5"
+            )
+            return recommendation
+
+    # 2. Hub community reports
+    hub_data = get_hub_compat(appid)
+    if hub_data and isinstance(hub_data, dict):
+        reports = hub_data.get("reports", [])
+        if reports:
+            # Group by proton version, pick most-voted
+            version_votes = {}
+            for r in reports:
+                ver = r.get("proton_version", "")
+                score = r.get("score", 0)
+                if ver:
+                    if ver not in version_votes:
+                        version_votes[ver] = {"count": 0, "total_score": 0}
+                    version_votes[ver]["count"] += 1
+                    version_votes[ver]["total_score"] += score
+
+            # Find best matching installed version
+            for ver_name in sorted(
+                version_votes,
+                key=lambda v: (version_votes[v]["count"], version_votes[v]["total_score"]),
+                reverse=True,
+            ):
+                if ver_name in installed_names:
+                    avg = version_votes[ver_name]["total_score"] / version_votes[ver_name]["count"]
+                    recommendation["version"] = ver_name
+                    recommendation["source"] = "hub-community"
+                    recommendation["confidence"] = "high" if version_votes[ver_name]["count"] >= 3 else "medium"
+                    recommendation["notes"].append(
+                        f"Hub community: {version_votes[ver_name]['count']} reports, avg {avg:.1f}/5"
+                    )
+                    return recommendation
+
+    # 3. ProtonDB data
+    pdb = get_protondb_summary(appid)
+    if pdb:
+        tier = pdb.get("tier", "").lower()
+        best_tier = pdb.get("bestReportedTier", "").lower()
+
+        if tier in ("platinum", "gold"):
+            recommendation["notes"].append(f"ProtonDB rating: {tier}")
+            # ProtonDB doesn't always specify exact version, prefer latest official
+            for v in sorted(installed_versions, key=lambda x: get_proton_sort_key(x["name"]), reverse=True):
+                if v["type"] == "official":
+                    recommendation["version"] = v["name"]
+                    recommendation["source"] = "protondb"
+                    recommendation["confidence"] = "medium"
+                    return recommendation
+
+        elif tier in ("silver", "bronze"):
+            recommendation["notes"].append(f"ProtonDB rating: {tier} - GE-Proton may help")
+            # Prefer GE-Proton for silver/bronze games
+            for v in sorted(installed_versions, key=lambda x: get_proton_sort_key(x["name"]), reverse=True):
+                if v["type"] == "ge":
+                    recommendation["version"] = v["name"]
+                    recommendation["source"] = "protondb"
+                    recommendation["confidence"] = "medium"
+                    return recommendation
+
+        elif tier == "native":
+            recommendation["version"] = "native"
+            recommendation["source"] = "protondb"
+            recommendation["confidence"] = "high"
+            recommendation["notes"].append("Native Linux build available")
+            return recommendation
+
+    # 4. Fallback: latest GE-Proton
+    ge_versions = [v for v in installed_versions if v["type"] == "ge"]
+    if ge_versions:
+        latest_ge = sorted(ge_versions, key=lambda x: get_proton_sort_key(x["name"]))[-1]
+        recommendation["version"] = latest_ge["name"]
+        recommendation["source"] = "fallback"
+        recommendation["confidence"] = "low"
+        recommendation["notes"].append("No specific data found, using latest GE-Proton")
+        return recommendation
+
+    # Ultimate fallback: latest official Proton
+    official = [v for v in installed_versions if v["type"] == "official"]
+    if official:
+        latest = sorted(official, key=lambda x: get_proton_sort_key(x["name"]))[-1]
+        recommendation["version"] = latest["name"]
+        recommendation["source"] = "fallback"
+        recommendation["confidence"] = "low"
+        recommendation["notes"].append("No GE-Proton found, using latest official Proton")
+        return recommendation
+
+    recommendation["notes"].append("No Proton versions found")
+    return recommendation
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+def cmd_check(args):
+    """Check best Proton version for a game."""
+    steam_dir = find_steam()
+    appid = find_appid(steam_dir, args.game) if steam_dir else (args.game if args.game.isdigit() else None)
+    if not appid:
+        error(f"Could not find game: {args.game}")
+        return 1
+
+    game_name = get_game_name(steam_dir, appid)
+    header(f"Proton Check: {game_name} ({appid})")
+
+    # Get installed versions
+    versions = detect_proton_versions()
+    if not versions:
+        warn("No Proton versions detected")
+
+    # Current assignment
+    if steam_dir:
+        mappings = parse_config_vdf(steam_dir)
+        current = mappings.get(appid)
+        if current:
+            info(f"Currently using: {c(current, C.BOLD, C.YELLOW)}")
+        else:
+            info(f"Currently using: {c('Steam default', C.DIM)}")
+
+    # ProtonDB data
+    pdb = get_protondb_summary(appid)
+    if pdb:
+        tier = pdb.get("tier", "unknown")
+        best = pdb.get("bestReportedTier", "unknown")
+        trend = pdb.get("trendingTier", "")
+        tier_colors = {
+            "platinum": C.CYAN, "gold": C.YELLOW, "silver": C.WHITE,
+            "bronze": C.RED, "borked": C.RED, "native": C.GREEN,
+        }
+        tc = tier_colors.get(tier.lower(), C.DIM)
+        info(f"ProtonDB rating: {c(tier, C.BOLD, tc)}")
+        if best and best != tier:
+            info(f"Best reported:   {c(best, C.BOLD, tier_colors.get(best.lower(), C.DIM))}")
+        if trend:
+            info(f"Trending:        {c(trend, C.BOLD)}")
+    else:
+        warn("Could not fetch ProtonDB data")
+
+    # Hub community data
+    hub = get_hub_compat(appid)
+    if hub and isinstance(hub, dict) and hub.get("reports"):
+        report_count = len(hub["reports"])
+        info(f"Hub reports:     {c(report_count, C.BOLD)} community reports")
+    else:
+        info(f"Hub reports:     {c('none', C.DIM)}")
+
+    # Built-in game tricks info
+    if appid in GAME_TRICKS:
+        gt = GAME_TRICKS[appid]
+        if gt["tricks"]:
+            info(f"Known fixes:     {', '.join(gt['tricks'])}")
+        if gt["notes"]:
+            info(f"Notes:           {gt['notes']}")
+
+    # Auto-pick recommendation
+    print()
+    rec = auto_pick_version(appid, versions)
+    if rec["version"]:
+        if rec["version"] == "native":
+            success(f"Recommendation:  {c('Native Linux', C.BOLD, C.GREEN)} (no Proton needed)")
+        else:
+            conf_color = {"high": C.GREEN, "medium": C.YELLOW, "low": C.RED}
+            conf_c = conf_color.get(rec["confidence"], C.DIM)
+            success(f"Recommendation:  {c(rec['version'], C.BOLD, C.GREEN)}")
+            info(f"Confidence:      {c(rec['confidence'], C.BOLD, conf_c)}")
+            info(f"Source:          {rec['source']}")
+        for note in rec["notes"]:
+            info(f"  {c('>', C.DIM)} {note}")
+    else:
+        warn("No recommendation available")
+        for note in rec["notes"]:
+            warn(f"  {note}")
+
+    # Local test results
+    results = load_test_results()
+    if appid in results:
+        print(f"\n  {c('Local test history:', C.BOLD)}")
+        for ver_name, data in results[appid].items():
+            score = data.get("score", "?")
+            tested = data.get("date", "unknown")
+            stars = c("*" * int(score), C.YELLOW) if str(score).isdigit() else score
+            print(f"    {ver_name}: {stars} ({tested})")
+
+    return 0
+
+def cmd_apply(args):
+    """Set Proton version for a game."""
+    steam_dir = find_steam()
+    if not steam_dir:
+        error("Steam not found")
+        return 1
+
+    appid = find_appid(steam_dir, args.game)
+    if not appid:
+        error(f"Could not find game: {args.game}")
+        return 1
+
+    game_name = get_game_name(steam_dir, appid)
+    versions = detect_proton_versions()
+
+    if args.version:
+        # Find matching version
+        tool_name = None
+        for v in versions:
+            if args.version.lower() in v["name"].lower():
+                tool_name = v["name"]
+                break
+        if not tool_name:
+            error(f"Proton version not found: {args.version}")
+            info("Run 'forge-proton-pick list' to see installed versions")
+            return 1
+    else:
+        # Auto-pick
+        rec = auto_pick_version(appid, versions)
+        if not rec["version"] or rec["version"] == "native":
+            if rec["version"] == "native":
+                info(f"{game_name} has a native Linux build, no Proton needed")
+            else:
+                error("Could not determine best Proton version")
+            return 1
+        tool_name = rec["version"]
+        info(f"Auto-picked: {c(tool_name, C.BOLD, C.CYAN)} ({rec['source']})")
+
+    # Apply
+    if set_compat_tool(steam_dir, appid, tool_name):
+        success(f"Set {c(game_name, C.BOLD)} to use {c(tool_name, C.BOLD, C.GREEN)}")
+        warn("Restart Steam for changes to take effect")
+    else:
+        error("Failed to update config.vdf")
+        return 1
+
+    return 0
+
+def cmd_list(args):
+    """List all installed Proton versions."""
+    header("Installed Proton/Wine Versions")
+
+    versions = detect_proton_versions()
+    if not versions:
+        warn("No Proton or Wine versions detected")
+        info("Install GE-Proton: forge-proton-pick install ge-latest")
+        return 0
+
+    steam_dir = find_steam()
+    mappings = parse_config_vdf(steam_dir) if steam_dir else {}
+    used_versions = set(mappings.values())
+
+    # Group by type
+    groups = {}
+    for v in versions:
+        key = v["type"]
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(v)
+
+    type_labels = {
+        "ge": "GE-Proton (Glorious Eggroll)",
+        "official": "Steam Proton (Official)",
+        "tkg": "Proton-TKG",
+        "custom": "Custom Compatibility Tools",
+        "custom-proton": "Custom Proton Builds",
+        "wine": "System Wine",
+        "lutris-wine": "Lutris Wine Runners",
+    }
+
+    for vtype in ["ge", "official", "tkg", "custom", "custom-proton", "wine", "lutris-wine"]:
+        if vtype not in groups:
+            continue
+        label = type_labels.get(vtype, vtype)
+        print(f"  {c(label, C.BOLD, C.CYAN)}")
+        for v in sorted(groups[vtype], key=lambda x: get_proton_sort_key(x["name"]), reverse=True):
+            in_use = v["name"] in used_versions
+            marker = c(" [in use]", C.GREEN) if in_use else ""
+            src = c(f"({v['source']})", C.DIM)
+            print(f"    {c(v['name'], C.BOLD)}{marker} {src}")
+        print()
+
+    info(f"Total: {len(versions)} version(s) detected")
+    return 0
+
+def cmd_install(args):
+    """Install a Proton version."""
+    version_str = args.version.lower()
+    header(f"Install Proton: {args.version}")
+
+    # Determine install target directory
+    install_dir = None
+    for d in COMPAT_TOOLS_DIRS:
+        parent = os.path.dirname(d)
+        if os.path.isdir(parent):
+            install_dir = d
+            break
+
+    if not install_dir:
+        install_dir = COMPAT_TOOLS_DIRS[0]
+
+    os.makedirs(install_dir, exist_ok=True)
+
+    if "ge" in version_str:
+        return _install_ge_proton(version_str, install_dir)
+    elif version_str.startswith("proton"):
+        info("Official Proton versions are managed by Steam.")
+        info("Go to Steam > Settings > Compatibility to enable Proton versions.")
+        info("Or install a specific game and force Proton in its properties.")
+        return 0
+    else:
+        error(f"Unknown version type: {args.version}")
+        info("Supported: ge-latest, ge-protonX-Y, proton-X.Y")
+        info("Example:   forge-proton-pick install ge-latest")
+        return 1
+
+def _install_ge_proton(version_str, install_dir):
+    """Install a GE-Proton version from GitHub."""
+    releases = get_ge_releases(20)
+    if not releases:
+        error("Could not fetch GE-Proton releases from GitHub")
+        return 1
+
+    target_release = None
+
+    if version_str in ("ge-latest", "ge", "latest"):
+        target_release = releases[0]
+    else:
+        # Search for matching release
+        for r in releases:
+            tag = r.get("tag_name", "").lower()
+            name = r.get("name", "").lower()
+            if version_str in tag or version_str in name:
+                target_release = r
+                break
+
+    if not target_release:
+        error(f"Release not found: {version_str}")
+        info("Available releases:")
+        for r in releases[:10]:
+            print(f"    {r.get('tag_name', '?')} - {r.get('name', '?')}")
+        return 1
+
+    tag = target_release["tag_name"]
+    release_name = target_release.get("name", tag)
+
+    # Check if already installed
+    target_path = os.path.join(install_dir, tag)
+    if os.path.isdir(target_path):
+        warn(f"{tag} is already installed at {target_path}")
+        return 0
+
+    # Find tarball asset
+    tarball_url = None
+    sha_url = None
+    for asset in target_release.get("assets", []):
+        name = asset.get("name", "")
+        if name.endswith(".tar.gz"):
+            tarball_url = asset["browser_download_url"]
+        elif name.endswith(".sha512sum"):
+            sha_url = asset["browser_download_url"]
+
+    if not tarball_url:
+        error("Could not find tarball in release assets")
+        return 1
+
+    info(f"Installing {c(release_name, C.BOLD, C.CYAN)}")
+    info(f"Target: {install_dir}")
+
+    # Download checksum first
+    expected_sha = None
+    if sha_url:
+        info("Downloading checksum...")
+        try:
+            req = urllib.request.Request(sha_url, headers={"User-Agent": "24HG-Forge/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                sha_content = resp.read().decode().strip()
+                expected_sha = sha_content.split()[0]
+        except (urllib.error.URLError, OSError) as e:
+            warn(f"Could not download checksum: {e}")
+
+    # Download tarball
+    info(f"Downloading {tarball_url.split('/')[-1]}...")
+    tmpdir = tempfile.mkdtemp(prefix="forge-proton-")
+    tarball_path = os.path.join(tmpdir, f"{tag}.tar.gz")
+
+    try:
+        req = urllib.request.Request(tarball_url, headers={"User-Agent": "24HG-Forge/1.0"})
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            total = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            chunk_size = 1024 * 256
+            with open(tarball_path, "wb") as f:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total > 0 and sys.stdout.isatty():
+                        pct = downloaded * 100 // total
+                        mb_done = downloaded / (1024 * 1024)
+                        mb_total = total / (1024 * 1024)
+                        bar_len = 30
+                        filled = pct * bar_len // 100
+                        bar = "#" * filled + "-" * (bar_len - filled)
+                        print(
+                            f"\r  [{bar}] {pct}% ({mb_done:.1f}/{mb_total:.1f} MB)",
+                            end="", flush=True,
+                        )
+            if total > 0 and sys.stdout.isatty():
+                print()
+
+        # Verify checksum
+        if expected_sha:
+            info("Verifying SHA-512 checksum...")
+            sha512 = hashlib.sha512()
+            with open(tarball_path, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 256), b""):
+                    sha512.update(chunk)
+            actual_sha = sha512.hexdigest()
+            if actual_sha != expected_sha:
+                error("Checksum mismatch! Download may be corrupted.")
+                error(f"Expected: {expected_sha[:32]}...")
+                error(f"Got:      {actual_sha[:32]}...")
+                return 1
+            success("Checksum verified")
+        else:
+            warn("No checksum available, skipping verification")
+
+        # Extract
+        info("Extracting...")
+        with tarfile.open(tarball_path, "r:gz") as tar:
+            tar.extractall(path=install_dir)
+
+        success(f"Installed {c(tag, C.BOLD, C.GREEN)} to {install_dir}")
+        warn("Restart Steam to see the new version in compatibility settings")
+
+    except (urllib.error.URLError, OSError, tarfile.TarError) as e:
+        error(f"Installation failed: {e}")
+        return 1
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return 0
+
+def cmd_remove(args):
+    """Remove a Proton version."""
+    header(f"Remove Proton: {args.version}")
+
+    versions = detect_proton_versions()
+    target = None
+
+    for v in versions:
+        if args.version.lower() in v["name"].lower():
+            if v["type"] in ("ge", "tkg", "custom", "custom-proton"):
+                target = v
+                break
+
+    if not target:
+        error(f"Removable version not found: {args.version}")
+        info("Only custom/GE/TKG versions can be removed (not Steam built-in)")
+        return 1
+
+    # Check if in use
+    steam_dir = find_steam()
+    if steam_dir:
+        mappings = parse_config_vdf(steam_dir)
+        games_using = [appid for appid, tool in mappings.items() if tool == target["name"]]
+        if games_using:
+            warn(f"This version is in use by {len(games_using)} game(s):")
+            for appid in games_using[:5]:
+                name = get_game_name(steam_dir, appid)
+                print(f"    - {name} ({appid})")
+            if len(games_using) > 5:
+                print(f"    ... and {len(games_using) - 5} more")
+
+    # Confirm
+    print(f"\n  Remove {c(target['name'], C.BOLD, C.RED)} from {target['path']}?")
+    try:
+        answer = input(f"  Type {c('yes', C.BOLD)} to confirm: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        info("Cancelled")
+        return 0
+
+    if answer != "yes":
+        info("Cancelled")
+        return 0
+
+    try:
+        shutil.rmtree(target["path"])
+        success(f"Removed {target['name']}")
+        warn("Restart Steam for changes to take effect")
+    except OSError as e:
+        error(f"Failed to remove: {e}")
+        return 1
+
+    return 0
+
+def cmd_test(args):
+    """Quick-test a game with different Proton versions."""
+    steam_dir = find_steam()
+    if not steam_dir:
+        error("Steam not found")
+        return 1
+
+    appid = find_appid(steam_dir, args.game)
+    if not appid:
+        error(f"Could not find game: {args.game}")
+        return 1
+
+    game_name = get_game_name(steam_dir, appid)
+    header(f"Proton Test: {game_name} ({appid})")
+
+    versions = detect_proton_versions()
+    proton_versions = [v for v in versions if v["type"] in ("ge", "official", "tkg", "custom-proton")]
+
+    if not proton_versions:
+        error("No Proton versions available for testing")
+        return 1
+
+    # Sort by version
+    proton_versions.sort(key=lambda x: get_proton_sort_key(x["name"]), reverse=True)
+
+    info(f"Available versions to test ({len(proton_versions)}):")
+    for i, v in enumerate(proton_versions):
+        type_badge = c(f"[{v['type']}]", C.DIM)
+        print(f"    {c(i + 1, C.BOLD)}. {v['name']} {type_badge}")
+
+    print()
+    info("For each version, the game will launch. Rate how well it works.")
+    info("Press Ctrl+C to stop testing at any time.\n")
+
+    results = load_test_results()
+    if appid not in results:
+        results[appid] = {}
+
+    for v in proton_versions:
+        print(f"\n  {c('---', C.DIM)} Testing with {c(v['name'], C.BOLD, C.CYAN)} {c('---', C.DIM)}")
+
+        # Set the compat tool
+        if not set_compat_tool(steam_dir, appid, v["name"]):
+            error(f"Failed to set {v['name']}")
+            continue
+
+        info(f"Set to {v['name']}. Launching game...")
+
+        # Launch via Steam protocol
+        try:
+            subprocess.Popen(
+                ["xdg-open", f"steam://run/{appid}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            try:
+                subprocess.Popen(
+                    ["steam", f"steam://run/{appid}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                error("Could not launch game")
+                continue
+
+        print(f"\n  Game launching with {c(v['name'], C.BOLD)}.")
+        print("  Play for a few minutes, then close the game and rate it.\n")
+
+        try:
+            score_input = input(f"  Rate {v['name']} (1-5, s=skip, q=quit): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            info("Testing stopped")
+            break
+
+        if score_input == "q":
+            info("Testing stopped")
+            break
+        elif score_input == "s":
+            info(f"Skipped {v['name']}")
+            continue
+        elif score_input.isdigit() and 1 <= int(score_input) <= 5:
+            score = int(score_input)
+            results[appid][v["name"]] = {
+                "score": score,
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "game": game_name,
+            }
+            save_test_results(results)
+            stars = c("*" * score + "." * (5 - score), C.YELLOW)
+            success(f"Recorded: {v['name']} = {stars}")
+        else:
+            warn("Invalid input, skipping")
+
+    # Show summary
+    if appid in results and results[appid]:
+        print(f"\n  {c('Test Summary:', C.BOLD)}")
+        sorted_results = sorted(
+            results[appid].items(),
+            key=lambda x: x[1].get("score", 0),
+            reverse=True,
+        )
+        for ver_name, data in sorted_results:
+            score = data.get("score", 0)
+            stars = c("*" * score + "." * (5 - score), C.YELLOW)
+            print(f"    {ver_name}: {stars}")
+
+        best_name = sorted_results[0][0]
+        success(f"\nBest version: {c(best_name, C.BOLD, C.GREEN)}")
+        print(f"  Apply it with: {c(f'forge-proton-pick apply {appid} {best_name}', C.DIM)}")
+
+    return 0
+
+def cmd_report(args):
+    """Submit compatibility report to Hub."""
+    steam_dir = find_steam()
+    appid = find_appid(steam_dir, args.game) if steam_dir else (args.game if args.game.isdigit() else None)
+    if not appid:
+        error(f"Could not find game: {args.game}")
+        return 1
+
+    game_name = get_game_name(steam_dir, appid)
+    header(f"Compatibility Report: {game_name} ({appid})")
+
+    # Get current Proton version
+    current_version = "unknown"
+    if steam_dir:
+        mappings = parse_config_vdf(steam_dir)
+        current_version = mappings.get(appid, "Steam default")
+
+    info(f"Current Proton: {c(current_version, C.BOLD)}")
+
+    # Collect report data
+    try:
+        print()
+        score_input = input("  How well does the game work? (1-5): ").strip()
+        if not score_input.isdigit() or not (1 <= int(score_input) <= 5):
+            error("Invalid score (must be 1-5)")
+            return 1
+        score = int(score_input)
+
+        notes = input("  Notes (optional, press Enter to skip): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        info("Cancelled")
+        return 0
+
+    # Detect system info
+    gpu = "unknown"
+    try:
+        result = subprocess.run(
+            ["lspci"], capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            if "VGA" in line or "3D" in line:
+                gpu = line.split(":")[-1].strip()
+                break
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    kernel = "unknown"
+    try:
+        kernel = subprocess.run(
+            ["uname", "-r"], capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    report = {
+        "appid": appid,
+        "game_name": game_name,
+        "proton_version": current_version,
+        "score": score,
+        "notes": notes,
+        "gpu": gpu,
+        "kernel": kernel,
+        "timestamp": datetime.now().isoformat(),
+        "client": "forge-proton-pick",
+    }
+
+    # Submit to Hub
+    info("Submitting report to 24HG Hub...")
+    result = api_post(f"{HUB_API}/forge/game-compat/{appid}/report", report)
+    if result:
+        success("Report submitted to Hub")
+    else:
+        warn("Could not reach Hub API (report saved locally)")
+
+    # Also save locally
+    results = load_test_results()
+    if appid not in results:
+        results[appid] = {}
+    results[appid][current_version] = {
+        "score": score,
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "game": game_name,
+        "notes": notes,
+    }
+    save_test_results(results)
+    success("Report saved locally")
+
+    return 0
+
+def cmd_update(args):
+    """Check for GE-Proton updates."""
+    header("GE-Proton Update Check")
+
+    # Get installed GE versions
+    versions = detect_proton_versions()
+    ge_installed = [v for v in versions if v["type"] == "ge"]
+
+    if ge_installed:
+        info("Installed GE-Proton versions:")
+        for v in sorted(ge_installed, key=lambda x: get_proton_sort_key(x["name"]), reverse=True):
+            print(f"    {c(v['name'], C.BOLD)}")
+    else:
+        info("No GE-Proton versions installed")
+
+    # Check latest release
+    print()
+    info("Checking GitHub for latest releases...")
+    releases = get_ge_releases(5)
+
+    if not releases:
+        error("Could not fetch GE-Proton releases")
+        return 1
+
+    installed_names = {v["name"] for v in ge_installed}
+    latest = releases[0]
+    latest_tag = latest["tag_name"]
+
+    print()
+    info("Latest GE-Proton releases:")
+    for r in releases:
+        tag = r["tag_name"]
+        date = r.get("published_at", "")[:10]
+        is_installed = tag in installed_names
+
+        status = c(" [installed]", C.GREEN) if is_installed else ""
+        print(f"    {c(tag, C.BOLD)} ({date}){status}")
+
+        # Show key highlights from release body (first 2 lines of notes)
+        body = r.get("body", "")
+        if body:
+            lines = [l.strip() for l in body.splitlines() if l.strip() and not l.startswith("#")]
+            for line in lines[:2]:
+                # Truncate long lines
+                if len(line) > 80:
+                    line = line[:77] + "..."
+                print(f"      {c(line, C.DIM)}")
+
+    if latest_tag in installed_names:
+        print()
+        success(f"You have the latest: {c(latest_tag, C.BOLD, C.GREEN)}")
+    else:
+        print()
+        warn(f"Update available: {c(latest_tag, C.BOLD, C.YELLOW)}")
+        info(f"Install with: {c(f'forge-proton-pick install ge-latest', C.DIM)}")
+
+    return 0
+
+def cmd_auto(args):
+    """Toggle auto-pick mode."""
+    config = load_auto_config()
+
+    if args.state == "on":
+        config["enabled"] = True
+        save_auto_config(config)
+        success("Auto-pick enabled")
+        info("Proton version will be auto-selected when launching games via Forge")
+        info("Override per-game with: forge-proton-pick apply <game> <version>")
+    elif args.state == "off":
+        config["enabled"] = False
+        save_auto_config(config)
+        success("Auto-pick disabled")
+        info("Games will use their current Proton settings")
+    else:
+        error(f"Invalid state: {args.state} (use 'on' or 'off')")
+        return 1
+
+    # Show current status
+    print()
+    info(f"Auto-pick:  {c('ON', C.GREEN, C.BOLD) if config['enabled'] else c('OFF', C.RED, C.BOLD)}")
+    overrides = config.get("overrides", {})
+    if overrides:
+        info(f"Overrides:  {len(overrides)} game(s) have manual assignments")
+
+    return 0
+
+def cmd_tricks(args):
+    """Apply Winetricks for a game."""
+    steam_dir = find_steam()
+    appid = find_appid(steam_dir, args.game) if steam_dir else (args.game if args.game.isdigit() else None)
+    if not appid:
+        error(f"Could not find game: {args.game}")
+        return 1
+
+    game_name = get_game_name(steam_dir, appid)
+    header(f"Winetricks: {game_name} ({appid})")
+
+    # Check for protontricks
+    has_protontricks = shutil.which("protontricks")
+    has_winetricks = shutil.which("winetricks")
+
+    if not has_protontricks and not has_winetricks:
+        error("Neither protontricks nor winetricks found")
+        info("Install protontricks: flatpak install com.github.Matoking.protontricks")
+        info("  or: pip install protontricks")
+        return 1
+
+    # Determine which tricks to apply
+    game_data = GAME_TRICKS.get(appid)
+    suggested_tricks = []
+
+    if game_data and game_data["tricks"]:
+        info(f"Known fixes for {game_name}:")
+        for trick in game_data["tricks"]:
+            desc = COMMON_TRICKS.get(trick, trick)
+            print(f"    {c(trick, C.BOLD, C.CYAN)}: {desc}")
+            suggested_tricks.append(trick)
+        if game_data["notes"]:
+            info(f"Notes: {game_data['notes']}")
+    else:
+        info(f"No specific fixes known for {game_name}")
+        info("Common tricks you might want to try:")
+        for trick, desc in list(COMMON_TRICKS.items())[:10]:
+            print(f"    {c(trick, C.BOLD)}: {desc}")
+
+    # Ask what to install
+    print()
+    if suggested_tricks:
+        info(f"Suggested: {', '.join(suggested_tricks)}")
+        try:
+            custom = input("  Install suggested tricks? (y/n/custom list): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            info("Cancelled")
+            return 0
+
+        if custom == "n":
+            info("Cancelled")
+            return 0
+        elif custom == "y" or custom == "":
+            tricks_to_install = suggested_tricks
+        else:
+            tricks_to_install = [t.strip() for t in custom.split(",") if t.strip()]
+    else:
+        try:
+            custom = input("  Enter tricks to install (comma-separated): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            info("Cancelled")
+            return 0
+
+        if not custom:
+            info("No tricks specified")
+            return 0
+        tricks_to_install = [t.strip() for t in custom.split(",") if t.strip()]
+
+    # Apply tricks
+    for trick in tricks_to_install:
+        info(f"Installing {c(trick, C.BOLD)}...")
+        try:
+            if has_protontricks:
+                # protontricks for Steam games
+                cmd = ["protontricks", appid, trick]
+                if shutil.which("flatpak"):
+                    # Check if protontricks is a flatpak
+                    fp_check = subprocess.run(
+                        ["flatpak", "list", "--columns=application"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if "protontricks" in fp_check.stdout.lower():
+                        cmd = [
+                            "flatpak", "run",
+                            "com.github.Matoking.protontricks",
+                            appid, trick,
+                        ]
+
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300,
+                )
+                if result.returncode == 0:
+                    success(f"Installed {trick}")
+                else:
+                    error(f"Failed to install {trick}")
+                    if result.stderr:
+                        for line in result.stderr.strip().splitlines()[-3:]:
+                            print(f"      {c(line, C.DIM)}")
+            else:
+                warn(f"protontricks not found, cannot install {trick} for Steam game")
+                info("Install protontricks for Steam game prefix management")
+
+        except subprocess.TimeoutExpired:
+            error(f"Timed out installing {trick}")
+        except OSError as e:
+            error(f"Error installing {trick}: {e}")
+
+    return 0
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+def build_parser():
+    """Build the argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="forge-proton-pick",
+        description="24HG Forge Proton/Wine Version Selector",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  forge-proton-pick check "Cyberpunk 2077"
+  forge-proton-pick check 1091500
+  forge-proton-pick apply Rust
+  forge-proton-pick apply 252490 GE-Proton9-7
+  forge-proton-pick list
+  forge-proton-pick install ge-latest
+  forge-proton-pick install GE-Proton9-7
+  forge-proton-pick remove GE-Proton8-25
+  forge-proton-pick test "Elden Ring"
+  forge-proton-pick report "Elden Ring"
+  forge-proton-pick update
+  forge-proton-pick auto on
+  forge-proton-pick tricks "Fallout 4"
+""",
+    )
+
+    sub = parser.add_subparsers(dest="command", help="Command to run")
+
+    # check
+    p = sub.add_parser("check", help="Check best Proton version for a game")
+    p.add_argument("game", help="Game name or AppID")
+
+    # apply
+    p = sub.add_parser("apply", help="Set Proton version for a game")
+    p.add_argument("game", help="Game name or AppID")
+    p.add_argument("version", nargs="?", default=None, help="Proton version (auto-pick if omitted)")
+
+    # list
+    sub.add_parser("list", help="List all installed Proton versions")
+
+    # install
+    p = sub.add_parser("install", help="Install a Proton version")
+    p.add_argument("version", help="Version to install (ge-latest, GE-ProtonX-Y, etc.)")
+
+    # remove
+    p = sub.add_parser("remove", help="Remove a Proton version")
+    p.add_argument("version", help="Version to remove")
+
+    # test
+    p = sub.add_parser("test", help="Quick-test a game with different Proton versions")
+    p.add_argument("game", help="Game name or AppID")
+
+    # report
+    p = sub.add_parser("report", help="Submit compatibility report to Hub")
+    p.add_argument("game", help="Game name or AppID")
+
+    # update
+    sub.add_parser("update", help="Check for GE-Proton updates")
+
+    # auto
+    p = sub.add_parser("auto", help="Toggle auto-pick Proton on game launch")
+    p.add_argument("state", choices=["on", "off"], help="Enable or disable auto-pick")
+
+    # tricks
+    p = sub.add_parser("tricks", help="Apply Winetricks for a game")
+    p.add_argument("game", help="Game name or AppID")
+
+    return parser
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 0
+
+    ensure_dirs()
+
+    commands = {
+        "check": cmd_check,
+        "apply": cmd_apply,
+        "list": cmd_list,
+        "install": cmd_install,
+        "remove": cmd_remove,
+        "test": cmd_test,
+        "report": cmd_report,
+        "update": cmd_update,
+        "auto": cmd_auto,
+        "tricks": cmd_tricks,
+    }
+
+    handler = commands.get(args.command)
+    if handler:
+        return handler(args)
+    else:
+        parser.print_help()
+        return 0
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

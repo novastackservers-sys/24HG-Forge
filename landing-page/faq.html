@@ -6,20 +6,23 @@
     <title>24HG Forge FAQ — Frequently Asked Questions</title>
     <meta name="description" content="Common questions about 24HG Forge, the custom Linux gaming distribution from 24 Hour Gaming.">
     <link rel="icon" href="favicon.ico" type="image/x-icon">
+    <meta property="og:image" content="https://os.24hgaming.com/og-image.png">
     <link rel="stylesheet" href="style.css">
+    <script async src="https://analytics.24hgaming.com/track" data-website-id="a052da7e-3afe-40b1-9354-071901dd26e4"></script>
 </head>
 <body>
 
 <nav class="nav">
     <a href="index.html" class="nav-logo">24HG Forge</a>
     <div class="nav-links">
-        <a href="index.html">Home</a>
-        <a href="install.html">Install Guide</a>
+        <a href="download.html">Download</a>
+        <a href="features.html">Features</a>
+        <a href="install.html">Install</a>
         <a href="compatibility.html">Compatibility</a>
         <a href="roadmap.html">Roadmap</a>
         <a href="faq.html" class="active">FAQ</a>
-        <a href="https://hub.24hgaming.com">Hub</a>
-        <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+        <a href="status.html">Status</a>
+        <a href="https://hub.24hgaming.com" class="btn-nav">Open Hub</a>
     </div>
 </nav>
 
@@ -31,7 +34,7 @@
 
         <details class="faq-item" open>
             <summary>What is 24HG Forge?</summary>
-            <p>24HG Forge is a custom Linux distribution built for gamers. It's based on Bazzite (Fedora Atomic) and comes pre-configured with everything you need to game on Linux — GPU drivers, Steam, Proton, performance tools — plus the 24HG community hub with 88+ game servers, voice chat, tournaments, and more.</p>
+            <p>24HG Forge is a custom Linux distribution built for gamers. It's based on Bazzite (Fedora Atomic) and comes pre-configured with everything you need to game on Linux — GPU drivers, Steam, Proton, performance tools — plus 150+ built-in gaming tools and the 24HG community hub with 89 game servers, voice chat, tournaments, and more.</p>
         </details>
 
         <details class="faq-item">
@@ -41,7 +44,7 @@
 
         <details class="faq-item">
             <summary>How is 24HG Forge different from Bazzite, Nobara, or SteamOS?</summary>
-            <p>Those are great gaming distros, but they're generic — they give you tools and leave you to figure it out. 24HG Forge integrates the 24HG gaming community directly into the OS. You boot up and you're already connected to 88+ servers, voice chat, tournaments, and a full community platform. No other distro does this.</p>
+            <p>Those are great gaming distros, but they're generic — they give you tools and leave you to figure it out. 24HG Forge integrates the 24HG gaming community directly into the OS. You boot up and you're already connected to 89 servers with 150+ tools, voice chat, tournaments, and a full community platform. No other distro does this.</p>
         </details>
 
         <details class="faq-item">
@@ -110,6 +113,17 @@
         </details>
 
         <details class="faq-item">
+            <summary>What is the Discovery VPN?</summary>
+            <p>Discovery VPN is a WireGuard-based virtual LAN that connects all 24HG members worldwide. It lets you find other gamers, host private matches, and play LAN-only games together — without port forwarding or complex setup.</p>
+            <ul>
+                <li><strong>Join from Hub:</strong> Click the VPN widget on your dashboard</li>
+                <li><strong>Join from Forge:</strong> Run <code>forge-vpn</code> or enable auto-connect during first boot</li>
+                <li><strong>Zero extra latency:</strong> Only discovery traffic goes through the server — game traffic is peer-to-peer</li>
+                <li><strong>Free for all members:</strong> Any Hub account can join</li>
+            </ul>
+        </details>
+
+        <details class="faq-item">
             <summary>What's MangoHud? How do I use it?</summary>
             <p>MangoHud is a performance overlay that shows FPS, GPU/CPU usage, temperatures, and frame timing while gaming. Press <kbd>F12</kbd> to toggle it on/off in any game. It's pre-configured with 24HG-themed colors.</p>
         </details>
@@ -146,11 +160,31 @@
 </main>
 
 <footer>
-    <p>
-        <a href="https://24hgaming.com">24 Hour Gaming</a> &middot;
-        <a href="https://discord.gg/ymfEjH6EJN">Discord</a> &middot;
-        <a href="https://hub.24hgaming.com">Hub</a>
-    </p>
+    <div class="footer-grid">
+        <div class="footer-col">
+            <h4>24HG Forge</h4>
+            <a href="download.html">Download</a>
+            <a href="install.html">Install Guide</a>
+            <a href="roadmap.html">Roadmap</a>
+            <a href="faq.html">FAQ</a>
+            <a href="status.html">Status</a>
+        </div>
+        <div class="footer-col">
+            <h4>Community</h4>
+            <a href="https://hub.24hgaming.com">24HG Hub</a>
+            <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+            <a href="https://24hgaming.com">24hgaming.com</a>
+        </div>
+        <div class="footer-col">
+            <h4>Built on</h4>
+            <a href="https://bazzite.gg">Bazzite</a>
+            <a href="https://universal-blue.org">Universal Blue</a>
+            <a href="https://fedoraproject.org">Fedora</a>
+        </div>
+    </div>
+    <div class="footer-bottom">
+        <p>Made by <a href="https://24hgaming.com">24 Hour Gaming</a> &middot; MIT License</p>
+    </div>
 </footer>
 
 <script>fetch("/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.pathname,referer:document.referrer})}).catch(()=>{})</script>

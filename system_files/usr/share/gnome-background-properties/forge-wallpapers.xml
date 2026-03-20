@@ -6,27 +6,27 @@
     <filename>/usr/share/forge/wallpapers/forge-dark.png</filename>
     <options>zoom</options>
     <shade_type>solid</shade_type>
-    <pcolor>#0a0a14</pcolor>
+    <pcolor>#040910</pcolor>
   </wallpaper>
   <wallpaper deleted="false">
     <name>24HG Forge Neon</name>
     <filename>/usr/share/forge/wallpapers/forge-neon.png</filename>
     <options>zoom</options>
     <shade_type>solid</shade_type>
-    <pcolor>#0a0a14</pcolor>
+    <pcolor>#040910</pcolor>
   </wallpaper>
   <wallpaper deleted="false">
     <name>24HG Forge Minimal</name>
     <filename>/usr/share/forge/wallpapers/forge-minimal.png</filename>
     <options>zoom</options>
     <shade_type>solid</shade_type>
-    <pcolor>#0a0a14</pcolor>
+    <pcolor>#040910</pcolor>
   </wallpaper>
   <wallpaper deleted="false">
     <name>24HG Forge Circuit</name>
     <filename>/usr/share/forge/wallpapers/forge-circuit.png</filename>
     <options>zoom</options>
     <shade_type>solid</shade_type>
-    <pcolor>#0a0a14</pcolor>
+    <pcolor>#040910</pcolor>
   </wallpaper>
 </wallpapers>

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Forge Input Lag Analyzer
+Comment=Input latency optimization
+Exec=/usr/bin/forge-input-lag
+Icon=forge-logo
+Terminal=true
+Type=Application
+Categories=Game;System;
+Keywords=input;latency;lag;mouse;keyboard;optimize;

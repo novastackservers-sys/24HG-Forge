@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Forge Mod Manager
+Comment=Game mod management
+Exec=/usr/bin/forge-mod-manager
+Icon=forge-logo
+Terminal=true
+Type=Application
+Categories=Game;
+Keywords=mod;workshop;nexus;manage;game;

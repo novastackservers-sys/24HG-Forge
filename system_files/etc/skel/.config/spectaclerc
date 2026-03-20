@@ -1,0 +1,14 @@
+[General]
+autoSaveImage=true
+clipboardGroup=PostScreenshotCopyImage
+lastUsedSaveMode=0
+launchAction=UseLastUsedCapturemode
+
+[Save]
+defaultSaveLocation=file:///home/$USER/Pictures/Screenshots/
+defaultSaveImageFormat=png
+translatedScreenshotsFolderName=Screenshots
+
+[ImageSave]
+lastSaveAsLocation=file:///home/$USER/Pictures/Screenshots/
+translatedScreenshotsFolderName=Screenshots

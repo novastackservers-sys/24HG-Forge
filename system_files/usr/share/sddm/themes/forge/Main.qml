@@ -1,11 +1,11 @@
-import QtQuick
+import QtQuick 2.15
 import SddmComponents 2.0
 
 Rectangle {
     id: root
     width: 1920
     height: 1080
-    color: "#0a0a14"
+    color: "#040910"
 
     property int sessionIndex: session.index
 
@@ -35,9 +35,9 @@ Rectangle {
     Rectangle {
         anchors.fill: parent
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "#cc0a0a14" }
-            GradientStop { position: 0.5; color: "#880a0a14" }
-            GradientStop { position: 1.0; color: "#cc0a0a14" }
+            GradientStop { position: 0.0; color: "#cc040910" }
+            GradientStop { position: 0.5; color: "#88040910" }
+            GradientStop { position: 1.0; color: "#cc040910" }
         }
     }
 
@@ -61,7 +61,7 @@ Rectangle {
         height: 460
         radius: 16
         color: "#dd0e0e1c"
-        border.color: "#2058a6ff"
+        border.color: "#2000e5ff"
         border.width: 1
 
         Column {
@@ -104,7 +104,7 @@ Rectangle {
                 height: 44
                 font.pixelSize: 14
                 color: "#1a1a2e"
-                borderColor: focus ? "#58a6ff" : "#2a2a3e"
+                borderColor: focus ? "#00e5ff" : "#2a2a3e"
                 textColor: "#e0e0f0"
                 text: userModel.lastUser
                 KeyNavigation.tab: password
@@ -123,7 +123,7 @@ Rectangle {
                 height: 44
                 font.pixelSize: 14
                 color: "#1a1a2e"
-                borderColor: focus ? "#58a6ff" : "#2a2a3e"
+                borderColor: focus ? "#00e5ff" : "#2a2a3e"
                 textColor: "#e0e0f0"
                 tooltipBG: "#1a1a2e"
                 KeyNavigation.tab: loginButton
@@ -156,7 +156,7 @@ Rectangle {
                 width: parent.width
                 height: 48
                 radius: 8
-                color: loginArea.pressed ? "#3b82f6" : (loginArea.containsMouse ? "#4a94ff" : "#58a6ff")
+                color: loginArea.pressed ? "#00b8d4" : (loginArea.containsMouse ? "#00d4f5" : "#00e5ff")
 
                 Text {
                     anchors.centerIn: parent

@@ -33,5 +33,5 @@
 
   <!-- Small "24HG Forge" text -->
   <text x="256" y="370" text-anchor="middle" font-family="Arial, sans-serif"
-        font-size="28" font-weight="600" fill="#8080b0" letter-spacing="8">HUBOS</text>
+        font-size="28" font-weight="600" fill="#8080b0" letter-spacing="8">FORGE</text>
 </svg>

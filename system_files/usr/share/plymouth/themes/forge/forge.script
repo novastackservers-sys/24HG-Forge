@@ -1,64 +1,284 @@
 // 24HG Forge Plymouth Boot Splash Script
-// Shows 24HG logo with a pulsing glow animation and progress bar
+// Animated boot sequence with particle effects, staged reveals, and glow pulse
+
+// ── Constants ──
+FPS = 50;
+FADE_IN_FRAMES = FPS * 1;         // 0-1s: fade in from black
+LOGO_START = FPS * 1;             // 1s: logo begins reveal
+LOGO_END = FPS * 2;               // 2s: logo fully revealed
+TEXT_START = FPS * 2;             // 2s: text begins reveal
+TEXT_END = FPS * 3;               // 3s: text fully revealed
+PARTICLE_COUNT = 28;
+GLOW_SPEED = 0.03;
+
+// ── Screen dimensions (cache once) ──
+screen_w = Window.GetWidth();
+screen_h = Window.GetHeight();
+center_x = screen_w / 2;
+center_y = screen_h / 2;
 
 // ── Background ──
-Window.SetBackgroundTopColor(0.05, 0.05, 0.10);     // Dark blue-black
-Window.SetBackgroundBottomColor(0.02, 0.02, 0.05);   // Near black
+Window.SetBackgroundTopColor(0.016, 0.035, 0.063);
+Window.SetBackgroundBottomColor(0.008, 0.018, 0.031);
+
+// ── Black overlay for fade-in from black ──
+// Use a text-rendered solid block as a fullscreen overlay
+black_overlay_img = Image.Text(" ", 0, 0, 0, 1, "Sans 1");
+// Scale it to cover the entire screen
+black_overlay_img = black_overlay_img.Scale(screen_w, screen_h);
+black_overlay = Sprite(black_overlay_img);
+black_overlay.SetPosition(0, 0, 100);
+black_overlay.SetOpacity(1.0);
 
 // ── Logo ──
-logo.image = Image("logo.png");
-logo.sprite = Sprite(logo.image);
-logo.sprite.SetX(Window.GetWidth() / 2 - logo.image.GetWidth() / 2);
-logo.sprite.SetY(Window.GetHeight() / 2 - logo.image.GetHeight() / 2 - 40);
-logo.sprite.SetOpacity(1);
+logo.original = Image("logo.png");
+logo_w = logo.original.GetWidth();
+logo_h = logo.original.GetHeight();
+logo_target_x = center_x - logo_w / 2;
+logo_target_y = center_y - logo_h / 2 - 40;
 
-// ── Tagline text ──
+logo.sprite = Sprite(logo.original);
+logo.sprite.SetX(logo_target_x);
+logo.sprite.SetY(logo_target_y);
+logo.sprite.SetZ(10);
+logo.sprite.SetOpacity(0);
+
+// ── Tagline text: "24 HOUR GAMING" ──
 tagline_image = Image.Text("24 HOUR GAMING", 0.7, 0.7, 0.8, 1, "Sans 14");
+tagline_w = tagline_image.GetWidth();
+tagline_h = tagline_image.GetHeight();
+tagline_x = center_x - tagline_w / 2;
+tagline_y = center_y + logo_h / 2;
+
 tagline_sprite = Sprite(tagline_image);
-tagline_sprite.SetX(Window.GetWidth() / 2 - tagline_image.GetWidth() / 2);
-tagline_sprite.SetY(Window.GetHeight() / 2 + logo.image.GetHeight() / 2);
+tagline_sprite.SetX(tagline_x);
+tagline_sprite.SetY(tagline_y);
+tagline_sprite.SetZ(10);
+tagline_sprite.SetOpacity(0);
+
+// ── Glow overlay behind logo (cyan tint) ──
+// Create a slightly larger cyan-tinted text block as glow
+glow_pad = 40;
+glow_img = Image.Text(" ", 0, 0.05, 0.08, 1, "Sans 1");
+glow_img = glow_img.Scale(logo_w + glow_pad * 2, logo_h + glow_pad * 2);
+glow_sprite = Sprite(glow_img);
+glow_sprite.SetX(logo_target_x - glow_pad);
+glow_sprite.SetY(logo_target_y - glow_pad);
+glow_sprite.SetZ(9);
+glow_sprite.SetOpacity(0);
 
 // ── Progress bar ──
 progress_box.image = Image("progress-bar-bg.png");
-progress_box.sprite = Sprite(progress_box.image);
 progress_bar.original_image = Image("progress-bar.png");
+bar_total_w = progress_box.image.GetWidth();
+bar_total_h = progress_box.image.GetHeight();
 
-bar_x = Window.GetWidth() / 2 - progress_box.image.GetWidth() / 2;
-bar_y = Window.GetHeight() / 2 + logo.image.GetHeight() / 2 + 50;
+// Position progress bar near the bottom of screen
+bar_x = center_x - bar_total_w / 2;
+bar_y = screen_h - 80;
 
-progress_box.sprite.SetPosition(bar_x, bar_y, 0);
+// Background track
+progress_box.sprite = Sprite(progress_box.image);
+progress_box.sprite.SetPosition(bar_x, bar_y, 10);
+progress_box.sprite.SetOpacity(0);
 
+// Fill bar
 progress_bar.sprite = Sprite();
-progress_bar.sprite.SetPosition(bar_x + 2, bar_y + 2, 1);
+progress_bar.sprite.SetPosition(bar_x + 2, bar_y + 2, 11);
+progress_bar.sprite.SetOpacity(0);
+
+// Glow on leading edge of progress bar
+bar_glow_img = Image.Text(" ", 0, 0.83, 1, 1, "Sans 1");
+bar_glow_img = bar_glow_img.Scale(8, bar_total_h + 6);
+bar_glow_sprite = Sprite(bar_glow_img);
+bar_glow_sprite.SetY(bar_y - 3);
+bar_glow_sprite.SetZ(12);
+bar_glow_sprite.SetOpacity(0);
+
+// ── Particles ──
+// Create particle sprites — small cyan dots
+fun init_particle(idx) {
+    particle[idx].img = Image.Text("•", 0, 0.83, 1, 1, "Sans 6");
+    particle[idx].sprite = Sprite(particle[idx].img);
+    particle[idx].sprite.SetZ(5);
+    reset_particle(idx);
+    // Stagger initial Y so they don't all start at bottom
+    particle[idx].y = screen_h * Math.Random();
+    particle[idx].sprite.SetY(particle[idx].y);
+}
+
+fun reset_particle(idx) {
+    particle[idx].x = Math.Int(Math.Random() * screen_w);
+    particle[idx].y = screen_h + Math.Int(Math.Random() * 40);
+    // Speed: pixels per frame (1.0 to 3.5)
+    particle[idx].speed = 1.0 + Math.Random() * 2.5;
+    // Horizontal drift per frame
+    particle[idx].drift = (Math.Random() - 0.5) * 0.8;
+    // Opacity variance
+    particle[idx].base_opacity = 0.3 + Math.Random() * 0.5;
+    // Size variant (some bigger, some smaller)
+    sz = 2 + Math.Int(Math.Random() * 4);
+    particle[idx].sized_img = particle[idx].img.Scale(sz, sz);
+    particle[idx].sprite.SetImage(particle[idx].sized_img);
+    particle[idx].sprite.SetX(particle[idx].x);
+    particle[idx].sprite.SetY(particle[idx].y);
+    particle[idx].sprite.SetOpacity(0);
+}
+
+// Initialize all particles
+p_idx = 0;
+while (p_idx < PARTICLE_COUNT) {
+    init_particle(p_idx);
+    p_idx++;
+}
 
 // ── Animation state ──
-global.pulse_opacity = 0.6;
-global.pulse_direction = 0.01;
+global.counter = 0;
+global.glow_phase = 0;
+global.boot_progress = 0;
+global.bar_visible = 0;
 
+// ── Refresh callback (~50fps) ──
 fun refresh_callback() {
-    // Pulse the logo opacity
-    global.pulse_opacity += global.pulse_direction;
-    if (global.pulse_opacity >= 1.0) {
-        global.pulse_opacity = 1.0;
-        global.pulse_direction = -0.01;
+    global.counter++;
+    f = global.counter;
+
+    // --- Phase 1: Fade in from black (frames 0 to FADE_IN_FRAMES) ---
+    if (f <= FADE_IN_FRAMES) {
+        fade = 1.0 - (f / FADE_IN_FRAMES);
+        black_overlay.SetOpacity(fade);
+    } else {
+        black_overlay.SetOpacity(0);
     }
-    if (global.pulse_opacity <= 0.6) {
-        global.pulse_opacity = 0.6;
-        global.pulse_direction = 0.01;
+
+    // --- Phase 2: Logo reveal with scale-up (LOGO_START to LOGO_END) ---
+    if (f >= LOGO_START && f <= LOGO_END) {
+        t = (f - LOGO_START) / (LOGO_END - LOGO_START);
+        // Ease-out cubic
+        t_ease = 1 - (1 - t) * (1 - t) * (1 - t);
+
+        logo_opacity = t_ease;
+        // Scale from 80% to 100%
+        scale_factor = 0.8 + 0.2 * t_ease;
+        scaled_w = Math.Int(logo_w * scale_factor);
+        scaled_h = Math.Int(logo_h * scale_factor);
+
+        if (scaled_w > 1 && scaled_h > 1) {
+            scaled_logo = logo.original.Scale(scaled_w, scaled_h);
+            logo.sprite.SetImage(scaled_logo);
+            logo.sprite.SetX(center_x - scaled_w / 2);
+            logo.sprite.SetY(center_y - scaled_h / 2 - 40);
+        }
+        logo.sprite.SetOpacity(logo_opacity);
     }
-    logo.sprite.SetOpacity(global.pulse_opacity);
+    if (f > LOGO_END) {
+        // Ensure final state is clean full-size
+        if (global.logo_finalized != 1) {
+            logo.sprite.SetImage(logo.original);
+            logo.sprite.SetX(logo_target_x);
+            logo.sprite.SetY(logo_target_y);
+            global.logo_finalized = 1;
+        }
+
+        // Breathing glow effect
+        global.glow_phase += GLOW_SPEED;
+        if (global.glow_phase > 6.283) {
+            global.glow_phase -= 6.283;
+        }
+        // Pulse opacity between 0.7 and 1.0
+        glow_val = 0.85 + 0.15 * Math.Sin(global.glow_phase);
+        logo.sprite.SetOpacity(glow_val);
+
+        // Glow overlay behind logo pulses inversely
+        glow_bg_val = 0.15 + 0.15 * Math.Sin(global.glow_phase);
+        glow_sprite.SetOpacity(glow_bg_val);
+    }
+
+    // --- Phase 3: Text reveal (TEXT_START to TEXT_END) ---
+    if (f >= TEXT_START && f <= TEXT_END) {
+        t = (f - TEXT_START) / (TEXT_END - TEXT_START);
+        // Ease-out quad
+        t_ease = 1 - (1 - t) * (1 - t);
+        tagline_sprite.SetOpacity(t_ease);
+    }
+    if (f > TEXT_END) {
+        tagline_sprite.SetOpacity(1.0);
+    }
+
+    // --- Progress bar fade in ---
+    if (f > LOGO_END && global.bar_visible < 1) {
+        global.bar_visible += 0.04;
+        if (global.bar_visible > 1) {
+            global.bar_visible = 1;
+        }
+        progress_box.sprite.SetOpacity(global.bar_visible * 0.6);
+        progress_bar.sprite.SetOpacity(global.bar_visible);
+        bar_glow_sprite.SetOpacity(global.bar_visible * 0.5);
+    }
+
+    // --- Particles: always active, fade in with the scene ---
+    particle_master_opacity = 1.0;
+    if (f <= FADE_IN_FRAMES) {
+        particle_master_opacity = f / FADE_IN_FRAMES;
+    }
+
+    p = 0;
+    while (p < PARTICLE_COUNT) {
+        // Move upward
+        particle[p].y -= particle[p].speed;
+        // Horizontal drift
+        particle[p].x += particle[p].drift;
+
+        // Reset when off screen top
+        if (particle[p].y < -20) {
+            reset_particle(p);
+            particle[p].y = screen_h + 5;
+        }
+
+        // Fade in near bottom, fade out near top
+        rel_y = particle[p].y / screen_h;
+        // Strongest in middle, fades at edges
+        if (rel_y > 0.85) {
+            y_fade = (1.0 - rel_y) / 0.15;
+        } else {
+            if (rel_y < 0.1) {
+                y_fade = rel_y / 0.1;
+            } else {
+                y_fade = 1.0;
+            }
+        }
+
+        p_opacity = particle[p].base_opacity * y_fade * particle_master_opacity;
+        particle[p].sprite.SetX(Math.Int(particle[p].x));
+        particle[p].sprite.SetY(Math.Int(particle[p].y));
+        particle[p].sprite.SetOpacity(p_opacity);
+
+        p++;
+    }
 }
 
 Plymouth.SetRefreshFunction(refresh_callback);
 
 // ── Boot progress ──
 fun boot_progress_callback(duration, progress) {
+    global.boot_progress = progress;
+
     if (progress_bar.original_image) {
-        new_width = progress_bar.original_image.GetWidth() * progress;
+        fill_w = progress_bar.original_image.GetWidth();
+        fill_h = progress_bar.original_image.GetHeight();
+        new_width = Math.Int(fill_w * progress);
         if (new_width > 1) {
-            progress_bar.image = progress_bar.original_image.Scale(new_width, progress_bar.original_image.GetHeight());
+            progress_bar.image = progress_bar.original_image.Scale(new_width, fill_h);
             progress_bar.sprite.SetImage(progress_bar.image);
         }
+
+        // Position the glow at the leading edge
+        glow_x = bar_x + 2 + new_width - 4;
+        bar_glow_sprite.SetX(glow_x);
+
+        // Pulse the glow brightness on the leading edge
+        edge_glow = 0.4 + 0.3 * Math.Sin(global.counter * 0.15);
+        bar_glow_sprite.SetOpacity(edge_glow);
     }
 }
 
@@ -66,13 +286,15 @@ Plymouth.SetBootProgressFunction(boot_progress_callback);
 
 // ── Messages ──
 message_sprite = Sprite();
+message_sprite.SetZ(20);
+
 fun message_callback(text) {
     msg_image = Image.Text(text, 0.5, 0.5, 0.6, 1, "Sans 10");
     message_sprite.SetImage(msg_image);
     message_sprite.SetPosition(
-        Window.GetWidth() / 2 - msg_image.GetWidth() / 2,
-        bar_y + 40,
-        2
+        center_x - msg_image.GetWidth() / 2,
+        bar_y + 30,
+        20
     );
 }
 

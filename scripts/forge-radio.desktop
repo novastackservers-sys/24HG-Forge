@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Radio
+Comment=Background gaming music from the community
+Exec=forge-radio --tray
+Icon=forge-logo
+Terminal=false
+Type=Application
+Categories=Audio;Music;
+StartupNotify=false

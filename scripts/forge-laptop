@@ -1,0 +1,1556 @@
+#!/usr/bin/env bash
+# 24HG Forge Laptop — Gaming optimization for laptops
+# Usage: forge-laptop [status|gaming|balanced|battery|charge-limit|gpu|thermal|fan|brightness|display|lid|wake-lock|daemon]
+
+set -euo pipefail
+
+# ─── Configuration paths ────────────────────────────────────────────────────────
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/forge/laptop"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/forge"
+CONFIG_FILE="$CONFIG_DIR/laptop.json"
+PROFILES_FILE="$CONFIG_DIR/laptop-profiles.json"
+LOG_FILE="$DATA_DIR/transitions.log"
+DAEMON_PID_FILE="$DATA_DIR/daemon.pid"
+WAKE_LOCK_PID_FILE="$DATA_DIR/wake-lock.pid"
+POLL_INTERVAL=5
+
+mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$CACHE_DIR"
+
+# ─── Colors ──────────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    ORANGE='\033[0;33m'
+    YELLOW='\033[1;33m'
+    GREEN='\033[0;32m'
+    CYAN='\033[0;36m'
+    BLUE='\033[0;34m'
+    MAGENTA='\033[0;35m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    RESET='\033[0m'
+else
+    RED='' ORANGE='' YELLOW='' GREEN='' CYAN='' BLUE='' MAGENTA='' BOLD='' DIM='' RESET=''
+fi
+
+# ─── Logging ─────────────────────────────────────────────────────────────────────
+log_transition() {
+    local msg="$1"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $msg" >> "$LOG_FILE"
+}
+
+info()  { echo -e "${CYAN}[info]${RESET} $*"; }
+ok()    { echo -e "${GREEN}[ok]${RESET} $*"; }
+warn()  { echo -e "${YELLOW}[warn]${RESET} $*"; }
+err()   { echo -e "${RED}[error]${RESET} $*" >&2; }
+
+# ─── Detection helpers ───────────────────────────────────────────────────────────
+
+is_laptop() {
+    # Check for battery presence
+    [[ -d /sys/class/power_supply/BAT0 ]] || [[ -d /sys/class/power_supply/BAT1 ]] ||
+    [[ -d /sys/class/power_supply/BATT ]] || [[ -f /sys/class/dmi/id/chassis_type ]] && {
+        local chassis
+        chassis=$(< /sys/class/dmi/id/chassis_type 2>/dev/null) || return 0
+        # 8=Portable, 9=Laptop, 10=Notebook, 14=Sub Notebook, 31=Convertible, 32=Detachable
+        [[ "$chassis" =~ ^(8|9|10|14|31|32)$ ]] && return 0
+    }
+    return 1
+}
+
+detect_gpu_vendor() {
+    local vendor="none"
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        vendor="nvidia"
+    fi
+    # Check for discrete AMD
+    for card_dir in /sys/class/drm/card*/device; do
+        [[ -f "$card_dir/vendor" ]] || continue
+        local v
+        v=$(< "$card_dir/vendor")
+        case "$v" in
+            0x1002)
+                if [[ "$vendor" == "nvidia" ]]; then vendor="nvidia"; else vendor="amd"; fi
+                ;;
+            0x10de) vendor="nvidia" ;;
+        esac
+    done
+    echo "$vendor"
+}
+
+has_dual_gpu() {
+    local gpu_count=0
+    for card_dir in /sys/class/drm/card*/device; do
+        [[ -f "$card_dir/vendor" ]] || continue
+        local v
+        v=$(< "$card_dir/vendor")
+        case "$v" in
+            0x1002|0x10de|0x8086) ((gpu_count++)) ;;
+        esac
+    done
+    [[ "$gpu_count" -ge 2 ]]
+}
+
+detect_laptop_vendor() {
+    local vendor="generic"
+    if [[ -f /sys/class/dmi/id/sys_vendor ]]; then
+        local sv
+        sv=$(< /sys/class/dmi/id/sys_vendor)
+        case "${sv,,}" in
+            *asus*)   vendor="asus" ;;
+            *lenovo*) vendor="lenovo" ;;
+            *dell*)   vendor="dell" ;;
+            *hp*|*hewlett*) vendor="hp" ;;
+            *acer*)   vendor="acer" ;;
+            *msi*)    vendor="msi" ;;
+            *razer*)  vendor="razer" ;;
+            *system76*) vendor="system76" ;;
+            *framework*) vendor="framework" ;;
+            *)        vendor="generic" ;;
+        esac
+    fi
+    echo "$vendor"
+}
+
+get_battery_path() {
+    for bat in /sys/class/power_supply/BAT0 /sys/class/power_supply/BAT1 /sys/class/power_supply/BATT; do
+        [[ -d "$bat" ]] && { echo "$bat"; return 0; }
+    done
+    return 1
+}
+
+# ─── Battery info ────────────────────────────────────────────────────────────────
+
+read_battery_status() {
+    local bat_path
+    bat_path=$(get_battery_path 2>/dev/null) || { echo "no_battery"; return; }
+
+    local status capacity energy_now energy_full power_now charge_limit
+    status=$(< "$bat_path/status" 2>/dev/null) || status="Unknown"
+    capacity=$(< "$bat_path/capacity" 2>/dev/null) || capacity="?"
+
+    # Energy-based (most common)
+    if [[ -f "$bat_path/energy_now" ]]; then
+        energy_now=$(< "$bat_path/energy_now")
+        energy_full=$(< "$bat_path/energy_full" 2>/dev/null) || energy_full=0
+        power_now=$(< "$bat_path/power_now" 2>/dev/null) || power_now=0
+    elif [[ -f "$bat_path/charge_now" ]]; then
+        energy_now=$(< "$bat_path/charge_now")
+        energy_full=$(< "$bat_path/charge_full" 2>/dev/null) || energy_full=0
+        power_now=$(< "$bat_path/current_now" 2>/dev/null) || power_now=0
+    else
+        energy_now=0; energy_full=0; power_now=0
+    fi
+
+    # Charge limit
+    if [[ -f "$bat_path/charge_control_end_threshold" ]]; then
+        charge_limit=$(< "$bat_path/charge_control_end_threshold")
+    else
+        charge_limit="unsupported"
+    fi
+
+    # Estimate time remaining
+    local time_remaining="N/A"
+    if [[ "$power_now" -gt 0 && "$energy_now" -gt 0 ]]; then
+        if [[ "$status" == "Discharging" ]]; then
+            local hours=$(( energy_now / power_now ))
+            local mins=$(( (energy_now * 60 / power_now) % 60 ))
+            time_remaining="${hours}h ${mins}m remaining"
+        elif [[ "$status" == "Charging" && "$energy_full" -gt 0 ]]; then
+            local remaining=$(( energy_full - energy_now ))
+            if [[ "$remaining" -gt 0 ]]; then
+                local hours=$(( remaining / power_now ))
+                local mins=$(( (remaining * 60 / power_now) % 60 ))
+                time_remaining="${hours}h ${mins}m to full"
+            else
+                time_remaining="Full"
+            fi
+        fi
+    fi
+
+    local power_watts="?"
+    if [[ "$power_now" -gt 0 ]]; then
+        power_watts=$(( power_now / 1000000 ))
+    fi
+
+    echo "$status|$capacity|$power_watts|$time_remaining|$charge_limit"
+}
+
+# ─── Power profile ──────────────────────────────────────────────────────────────
+
+get_power_profile() {
+    if command -v powerprofilesctl &>/dev/null; then
+        powerprofilesctl get 2>/dev/null || echo "unknown"
+    elif command -v tuned-adm &>/dev/null; then
+        tuned-adm active 2>/dev/null | awk '{print $NF}' || echo "unknown"
+    else
+        echo "unmanaged"
+    fi
+}
+
+set_power_profile() {
+    local profile="$1"
+    if command -v powerprofilesctl &>/dev/null; then
+        powerprofilesctl set "$profile" 2>/dev/null && return 0
+    fi
+    if command -v tuned-adm &>/dev/null; then
+        sudo tuned-adm profile "$profile" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+# ─── GPU switching ───────────────────────────────────────────────────────────────
+
+get_gpu_mode() {
+    # supergfxctl (Bazzite/ublue ASUS)
+    if command -v supergfxctl &>/dev/null; then
+        supergfxctl -g 2>/dev/null && return 0
+    fi
+    # envycontrol
+    if command -v envycontrol &>/dev/null; then
+        envycontrol --query 2>/dev/null && return 0
+    fi
+    # switcherooctl (GNOME)
+    if command -v switcherooctl &>/dev/null; then
+        local gpus
+        gpus=$(switcherooctl list 2>/dev/null)
+        if echo "$gpus" | grep -qi "default.*yes.*nvidia\|default.*yes.*AMD"; then
+            echo "discrete"
+        else
+            echo "hybrid"
+        fi
+        return 0
+    fi
+    # Fallback: check prime-select (Ubuntu)
+    if command -v prime-select &>/dev/null; then
+        prime-select query 2>/dev/null && return 0
+    fi
+    echo "unknown"
+}
+
+set_gpu_mode() {
+    local mode="$1"
+
+    # supergfxctl
+    if command -v supergfxctl &>/dev/null; then
+        local sgfx_mode
+        case "$mode" in
+            integrated) sgfx_mode="Integrated" ;;
+            hybrid)     sgfx_mode="Hybrid" ;;
+            discrete)   sgfx_mode="Dedicated" ;;
+            compute)    sgfx_mode="Compute" ;;
+            *) err "Unknown GPU mode: $mode"; return 1 ;;
+        esac
+        if supergfxctl -m "$sgfx_mode" 2>/dev/null; then
+            ok "GPU mode set to $mode via supergfxctl (may require logout)"
+            log_transition "GPU mode -> $mode (supergfxctl)"
+            return 0
+        fi
+    fi
+
+    # envycontrol
+    if command -v envycontrol &>/dev/null; then
+        local ec_mode
+        case "$mode" in
+            integrated) ec_mode="integrated" ;;
+            hybrid)     ec_mode="hybrid" ;;
+            discrete)   ec_mode="nvidia" ;;
+            compute)    ec_mode="hybrid" ;; # closest equivalent
+            *) err "Unknown GPU mode: $mode"; return 1 ;;
+        esac
+        if sudo envycontrol -s "$ec_mode" 2>/dev/null; then
+            ok "GPU mode set to $mode via envycontrol (reboot required)"
+            log_transition "GPU mode -> $mode (envycontrol)"
+            return 0
+        fi
+    fi
+
+    # prime-select
+    if command -v prime-select &>/dev/null; then
+        local ps_mode
+        case "$mode" in
+            integrated) ps_mode="intel" ;;
+            hybrid)     ps_mode="on-demand" ;;
+            discrete)   ps_mode="nvidia" ;;
+            *) err "Unknown GPU mode: $mode"; return 1 ;;
+        esac
+        if sudo prime-select "$ps_mode" 2>/dev/null; then
+            ok "GPU mode set to $mode via prime-select (reboot required)"
+            log_transition "GPU mode -> $mode (prime-select)"
+            return 0
+        fi
+    fi
+
+    # Manual DRI_PRIME for AMD
+    if [[ "$mode" == "integrated" ]]; then
+        info "Setting DRI_PRIME=0 for next launch"
+        save_env_override "DRI_PRIME" "0"
+        ok "Next game will use integrated GPU"
+    elif [[ "$mode" == "discrete" || "$mode" == "hybrid" ]]; then
+        info "Setting DRI_PRIME=1 for next launch"
+        save_env_override "DRI_PRIME" "1"
+        save_env_override "__NV_PRIME_RENDER_OFFLOAD" "1"
+        save_env_override "__GLX_VENDOR_LIBRARY_NAME" "nvidia"
+        save_env_override "__VK_LAYER_NV_optimus" "NVIDIA_only"
+        ok "Next game will use discrete GPU"
+    fi
+    log_transition "GPU mode -> $mode (env override)"
+}
+
+save_env_override() {
+    local key="$1" val="$2"
+    local env_file="$CONFIG_DIR/laptop-gpu-env"
+    touch "$env_file"
+    # Remove existing entry
+    grep -v "^${key}=" "$env_file" > "${env_file}.tmp" 2>/dev/null || true
+    echo "${key}=${val}" >> "${env_file}.tmp"
+    mv "${env_file}.tmp" "$env_file"
+}
+
+# ─── Thermal profile ────────────────────────────────────────────────────────────
+
+get_thermal_profile() {
+    local vendor
+    vendor=$(detect_laptop_vendor)
+
+    case "$vendor" in
+        asus)
+            if [[ -f /sys/devices/platform/asus-nb-wmi/throttle_thermal_policy ]]; then
+                local policy
+                policy=$(< /sys/devices/platform/asus-nb-wmi/throttle_thermal_policy)
+                case "$policy" in
+                    0) echo "balanced" ;;
+                    1) echo "performance" ;;
+                    2) echo "cool" ;;
+                    *) echo "unknown ($policy)" ;;
+                esac
+                return 0
+            fi
+            ;;
+        lenovo)
+            if [[ -f /sys/bus/platform/drivers/ideapad_acpi/VPC2004:00/conservation_mode ]]; then
+                local cm
+                cm=$(< /sys/bus/platform/drivers/ideapad_acpi/VPC2004:00/conservation_mode)
+                [[ "$cm" == "1" ]] && { echo "cool (conservation)"; return 0; }
+            fi
+            if [[ -f /sys/firmware/acpi/platform_profile ]]; then
+                < /sys/firmware/acpi/platform_profile
+                return 0
+            fi
+            ;;
+        dell)
+            if command -v smbios-thermal-ctl &>/dev/null; then
+                smbios-thermal-ctl --get-thermal-info 2>/dev/null | grep -i "current" | awk '{print $NF}'
+                return 0
+            fi
+            ;;
+    esac
+
+    # Generic: ACPI platform profile
+    if [[ -f /sys/firmware/acpi/platform_profile ]]; then
+        < /sys/firmware/acpi/platform_profile
+        return 0
+    fi
+
+    get_power_profile
+}
+
+set_thermal_profile() {
+    local mode="$1"
+    local vendor
+    vendor=$(detect_laptop_vendor)
+
+    case "$vendor" in
+        asus)
+            if [[ -f /sys/devices/platform/asus-nb-wmi/throttle_thermal_policy ]]; then
+                local policy
+                case "$mode" in
+                    cool)        policy=2 ;;
+                    balanced)    policy=0 ;;
+                    performance) policy=1 ;;
+                    *) err "Unknown thermal mode: $mode (use cool, balanced, performance)"; return 1 ;;
+                esac
+                echo "$policy" | sudo tee /sys/devices/platform/asus-nb-wmi/throttle_thermal_policy > /dev/null 2>&1 && {
+                    ok "ASUS thermal policy set to $mode"
+                    log_transition "Thermal -> $mode (asus-nb-wmi)"
+                    return 0
+                }
+            fi
+            ;;
+        lenovo)
+            if [[ -f /sys/firmware/acpi/platform_profile ]]; then
+                local profile
+                case "$mode" in
+                    cool)        profile="low-power" ;;
+                    balanced)    profile="balanced" ;;
+                    performance) profile="performance" ;;
+                    *) err "Unknown thermal mode: $mode"; return 1 ;;
+                esac
+                echo "$profile" | sudo tee /sys/firmware/acpi/platform_profile > /dev/null 2>&1 && {
+                    ok "Lenovo platform profile set to $mode"
+                    log_transition "Thermal -> $mode (platform_profile)"
+                    return 0
+                }
+            fi
+            ;;
+        dell)
+            if command -v smbios-thermal-ctl &>/dev/null; then
+                local dell_mode
+                case "$mode" in
+                    cool)        dell_mode="quiet" ;;
+                    balanced)    dell_mode="balanced" ;;
+                    performance) dell_mode="performance" ;;
+                    *) err "Unknown thermal mode: $mode"; return 1 ;;
+                esac
+                sudo smbios-thermal-ctl --set-thermal-mode="$dell_mode" 2>/dev/null && {
+                    ok "Dell thermal mode set to $mode"
+                    log_transition "Thermal -> $mode (smbios)"
+                    return 0
+                }
+            fi
+            ;;
+    esac
+
+    # Generic: ACPI platform profile
+    if [[ -f /sys/firmware/acpi/platform_profile ]]; then
+        local profile
+        case "$mode" in
+            cool)        profile="low-power" ;;
+            balanced)    profile="balanced" ;;
+            performance) profile="performance" ;;
+            *) err "Unknown thermal mode: $mode"; return 1 ;;
+        esac
+        echo "$profile" | sudo tee /sys/firmware/acpi/platform_profile > /dev/null 2>&1 && {
+            ok "Platform profile set to $mode"
+            log_transition "Thermal -> $mode (acpi)"
+            return 0
+        }
+    fi
+
+    # Fallback: powerprofilesctl mapping
+    local pp_profile
+    case "$mode" in
+        cool)        pp_profile="power-saver" ;;
+        balanced)    pp_profile="balanced" ;;
+        performance) pp_profile="performance" ;;
+        *) err "Unknown thermal mode: $mode"; return 1 ;;
+    esac
+    set_power_profile "$pp_profile" && {
+        ok "Power profile set to $pp_profile (thermal approximation)"
+        log_transition "Thermal -> $mode (powerprofiles)"
+    }
+}
+
+# ─── Fan control ─────────────────────────────────────────────────────────────────
+
+get_fan_mode() {
+    # Try nbfc-linux first
+    if command -v nbfc &>/dev/null; then
+        local nbfc_status
+        nbfc_status=$(nbfc status -a 2>/dev/null)
+        if [[ -n "$nbfc_status" ]]; then
+            echo "$nbfc_status" | grep -oP 'TargetFanSpeed:\s*\K[0-9.]+' | head -1
+            return 0
+        fi
+    fi
+
+    # ASUS fan boost
+    if [[ -f /sys/devices/platform/asus-nb-wmi/fan_boost_mode ]]; then
+        local fm
+        fm=$(< /sys/devices/platform/asus-nb-wmi/fan_boost_mode)
+        case "$fm" in
+            0) echo "auto" ;;
+            1) echo "performance" ;;
+            2) echo "max" ;;
+            *) echo "unknown" ;;
+        esac
+        return 0
+    fi
+
+    # Generic hwmon PWM
+    for pwm in /sys/class/hwmon/hwmon*/pwm1_enable; do
+        if [[ -f "$pwm" ]]; then
+            local enable
+            enable=$(< "$pwm")
+            case "$enable" in
+                0) echo "max (full speed)" ;;
+                1) echo "manual" ;;
+                2) echo "auto" ;;
+                *) echo "unknown ($enable)" ;;
+            esac
+            return 0
+        fi
+    done
+
+    echo "unmanaged"
+}
+
+get_fan_speed() {
+    # Try to read actual RPM
+    for fan_input in /sys/class/hwmon/hwmon*/fan1_input; do
+        if [[ -f "$fan_input" ]]; then
+            local rpm
+            rpm=$(< "$fan_input")
+            echo "${rpm} RPM"
+            return 0
+        fi
+    done
+    # NVIDIA fan
+    if command -v nvidia-smi &>/dev/null; then
+        local fan_pct
+        fan_pct=$(nvidia-smi --query-gpu=fan.speed --format=csv,noheader,nounits 2>/dev/null | head -1)
+        if [[ -n "$fan_pct" && "$fan_pct" != "0" ]]; then
+            echo "${fan_pct}%"
+            return 0
+        fi
+    fi
+    echo "N/A"
+}
+
+set_fan_mode() {
+    local mode="$1"
+
+    # nbfc-linux
+    if command -v nbfc &>/dev/null; then
+        case "$mode" in
+            auto)        nbfc set -a 2>/dev/null ;;
+            quiet)       nbfc set -s 30 2>/dev/null ;;
+            performance) nbfc set -s 75 2>/dev/null ;;
+            max)         nbfc set -s 100 2>/dev/null ;;
+            *) err "Unknown fan mode: $mode (use auto, quiet, performance, max)"; return 1 ;;
+        esac
+        ok "Fan mode set to $mode via nbfc"
+        log_transition "Fan -> $mode (nbfc)"
+        return 0
+    fi
+
+    # ASUS fan boost
+    if [[ -f /sys/devices/platform/asus-nb-wmi/fan_boost_mode ]]; then
+        local val
+        case "$mode" in
+            auto|quiet)  val=0 ;;
+            performance) val=1 ;;
+            max)         val=2 ;;
+            *) err "Unknown fan mode: $mode"; return 1 ;;
+        esac
+        echo "$val" | sudo tee /sys/devices/platform/asus-nb-wmi/fan_boost_mode > /dev/null 2>&1 && {
+            ok "ASUS fan boost set to $mode"
+            log_transition "Fan -> $mode (asus fan_boost)"
+            return 0
+        }
+    fi
+
+    # Generic hwmon PWM
+    local pwm_enable pwm_value
+    for pwm_enable in /sys/class/hwmon/hwmon*/pwm1_enable; do
+        [[ -f "$pwm_enable" ]] || continue
+        pwm_value="${pwm_enable%_enable}"
+
+        case "$mode" in
+            auto)
+                echo 2 | sudo tee "$pwm_enable" > /dev/null 2>&1
+                ok "Fan set to auto via hwmon"
+                ;;
+            quiet)
+                echo 1 | sudo tee "$pwm_enable" > /dev/null 2>&1
+                echo 80 | sudo tee "$pwm_value" > /dev/null 2>&1  # ~31%
+                ok "Fan set to quiet via hwmon"
+                ;;
+            performance)
+                echo 1 | sudo tee "$pwm_enable" > /dev/null 2>&1
+                echo 200 | sudo tee "$pwm_value" > /dev/null 2>&1  # ~78%
+                ok "Fan set to performance via hwmon"
+                ;;
+            max)
+                echo 0 | sudo tee "$pwm_enable" > /dev/null 2>&1  # full speed
+                ok "Fan set to max (full speed) via hwmon"
+                ;;
+            *) err "Unknown fan mode: $mode (use auto, quiet, performance, max)"; return 1 ;;
+        esac
+        log_transition "Fan -> $mode (hwmon)"
+        return 0
+    done
+
+    warn "No supported fan control interface found"
+    warn "Install nbfc-linux for broader fan control support"
+    return 1
+}
+
+# ─── Display management ─────────────────────────────────────────────────────────
+
+get_display_session() {
+    if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+        echo "wayland"
+    elif [[ -n "${DISPLAY:-}" ]]; then
+        echo "x11"
+    else
+        echo "none"
+    fi
+}
+
+set_display_mode() {
+    local mode="$1"
+    local session
+    session=$(get_display_session)
+
+    case "$session" in
+        wayland)
+            if command -v kscreen-doctor &>/dev/null; then
+                case "$mode" in
+                    internal)
+                        info "Disabling external outputs..."
+                        kscreen-doctor output.HDMI-A-1.disable output.DP-1.disable 2>/dev/null || true
+                        ok "Switched to internal display"
+                        ;;
+                    external)
+                        info "Switching to external display..."
+                        kscreen-doctor output.eDP-1.disable 2>/dev/null || true
+                        ok "Switched to external display"
+                        ;;
+                    mirror)
+                        kscreen-doctor output.eDP-1.enable output.HDMI-A-1.enable 2>/dev/null || true
+                        kscreen-doctor output.HDMI-A-1.position.0,0 2>/dev/null || true
+                        ok "Display set to mirror mode"
+                        ;;
+                    extend)
+                        kscreen-doctor output.eDP-1.enable output.HDMI-A-1.enable 2>/dev/null || true
+                        ok "Display set to extend mode"
+                        ;;
+                    *) err "Unknown display mode: $mode (use internal, external, mirror, extend)"; return 1 ;;
+                esac
+            elif command -v wlr-randr &>/dev/null; then
+                case "$mode" in
+                    internal)
+                        for out in $(wlr-randr --json 2>/dev/null | python3 -c "
+import json,sys
+for o in json.load(sys.stdin):
+    if not o['name'].startswith('eDP'):
+        print(o['name'])" 2>/dev/null); do
+                            wlr-randr --output "$out" --off 2>/dev/null || true
+                        done
+                        ok "Switched to internal display"
+                        ;;
+                    *) info "Use wlr-randr manually for $mode mode on wlroots compositors" ;;
+                esac
+            else
+                warn "No Wayland display manager found (install kscreen-doctor or wlr-randr)"
+            fi
+            ;;
+        x11)
+            if command -v xrandr &>/dev/null; then
+                local internal external
+                internal=$(xrandr --query 2>/dev/null | grep -oP '(eDP[\w-]*)\s+connected' | awk '{print $1}' | head -1)
+                external=$(xrandr --query 2>/dev/null | grep -oP '(HDMI|DP|DVI)[\w-]*\s+connected' | awk '{print $1}' | head -1)
+
+                case "$mode" in
+                    internal)
+                        [[ -n "$external" ]] && xrandr --output "$external" --off 2>/dev/null || true
+                        [[ -n "$internal" ]] && xrandr --output "$internal" --auto 2>/dev/null || true
+                        ok "Switched to internal display"
+                        ;;
+                    external)
+                        [[ -n "$internal" ]] && xrandr --output "$internal" --off 2>/dev/null || true
+                        [[ -n "$external" ]] && xrandr --output "$external" --auto 2>/dev/null || true
+                        ok "Switched to external display"
+                        ;;
+                    mirror)
+                        [[ -n "$internal" && -n "$external" ]] && \
+                            xrandr --output "$internal" --auto --output "$external" --auto --same-as "$internal" 2>/dev/null
+                        ok "Display set to mirror mode"
+                        ;;
+                    extend)
+                        [[ -n "$internal" && -n "$external" ]] && \
+                            xrandr --output "$internal" --auto --output "$external" --auto --right-of "$internal" 2>/dev/null
+                        ok "Display set to extend mode"
+                        ;;
+                    *) err "Unknown display mode: $mode"; return 1 ;;
+                esac
+            else
+                warn "xrandr not found"
+            fi
+            ;;
+        *)
+            err "No display session detected"
+            return 1
+            ;;
+    esac
+    log_transition "Display -> $mode"
+}
+
+# ─── Brightness ──────────────────────────────────────────────────────────────────
+
+get_brightness() {
+    if command -v brightnessctl &>/dev/null; then
+        local cur max
+        cur=$(brightnessctl g 2>/dev/null) || cur=0
+        max=$(brightnessctl m 2>/dev/null) || max=1
+        if [[ "$max" -gt 0 ]]; then
+            echo $(( cur * 100 / max ))
+        else
+            echo "?"
+        fi
+        return 0
+    fi
+    # Fallback: sysfs
+    for bl in /sys/class/backlight/*/brightness; do
+        [[ -f "$bl" ]] || continue
+        local cur max
+        cur=$(< "$bl")
+        max=$(< "${bl%brightness}max_brightness")
+        [[ "$max" -gt 0 ]] && echo $(( cur * 100 / max )) || echo "?"
+        return 0
+    done
+    echo "N/A"
+}
+
+set_brightness_value() {
+    local value="$1"
+    if command -v brightnessctl &>/dev/null; then
+        brightnessctl set "${value}%" > /dev/null 2>&1 && return 0
+    fi
+    # Sysfs fallback
+    for bl in /sys/class/backlight/*/brightness; do
+        [[ -f "$bl" ]] || continue
+        local max
+        max=$(< "${bl%brightness}max_brightness")
+        local target=$(( max * value / 100 ))
+        echo "$target" | sudo tee "$bl" > /dev/null 2>&1 && return 0
+    done
+    warn "Could not set brightness"
+    return 1
+}
+
+save_game_brightness() {
+    local game="$1" value="$2"
+    python3 -c "
+import json, os
+path = '$PROFILES_FILE'
+try:
+    data = json.load(open(path))
+except:
+    data = {}
+if 'brightness' not in data:
+    data['brightness'] = {}
+data['brightness']['$game'] = int('$value')
+os.makedirs(os.path.dirname(path), exist_ok=True)
+json.dump(data, open(path, 'w'), indent=2)
+" 2>/dev/null
+    ok "Brightness $value% saved for '$game'"
+}
+
+load_game_brightness() {
+    local game="$1"
+    python3 -c "
+import json
+try:
+    data = json.load(open('$PROFILES_FILE'))
+    print(data.get('brightness', {}).get('$game', ''))
+except:
+    print('')
+" 2>/dev/null
+}
+
+# ─── Charge limit ────────────────────────────────────────────────────────────────
+
+get_charge_limit() {
+    local bat_path
+    bat_path=$(get_battery_path 2>/dev/null) || return 1
+    if [[ -f "$bat_path/charge_control_end_threshold" ]]; then
+        < "$bat_path/charge_control_end_threshold"
+    else
+        echo "unsupported"
+    fi
+}
+
+set_charge_limit() {
+    local limit="$1"
+
+    # Validate
+    case "$limit" in
+        60|80|100) ;;
+        *) err "Charge limit must be 60, 80, or 100"; return 1 ;;
+    esac
+
+    local bat_path
+    bat_path=$(get_battery_path 2>/dev/null) || { err "No battery found"; return 1; }
+
+    # Direct sysfs
+    if [[ -f "$bat_path/charge_control_end_threshold" ]]; then
+        echo "$limit" | sudo tee "$bat_path/charge_control_end_threshold" > /dev/null 2>&1 && {
+            ok "Charge limit set to ${limit}%"
+            log_transition "Charge limit -> ${limit}%"
+
+            # Persist via TLP if available
+            if command -v tlp &>/dev/null; then
+                local tlp_conf="/etc/tlp.d/forge-gaming.conf"
+                sudo mkdir -p /etc/tlp.d 2>/dev/null || true
+                sudo bash -c "cat > $tlp_conf" <<TLPEOF
+# 24HG Forge Laptop — battery charge limit
+STOP_CHARGE_THRESH_BAT0=$limit
+START_CHARGE_THRESH_BAT0=$(( limit - 2 ))
+TLPEOF
+                info "TLP config updated at $tlp_conf"
+            fi
+            return 0
+        }
+    fi
+
+    # Lenovo conservation mode
+    local lenovo_cons="/sys/bus/platform/drivers/ideapad_acpi/VPC2004:00/conservation_mode"
+    if [[ -f "$lenovo_cons" ]]; then
+        if [[ "$limit" -le 80 ]]; then
+            echo 1 | sudo tee "$lenovo_cons" > /dev/null 2>&1
+            ok "Lenovo conservation mode enabled (charges to ~60%)"
+        else
+            echo 0 | sudo tee "$lenovo_cons" > /dev/null 2>&1
+            ok "Lenovo conservation mode disabled (charges to 100%)"
+        fi
+        log_transition "Charge limit -> ${limit}% (lenovo conservation)"
+        return 0
+    fi
+
+    # ASUS charge limit
+    local asus_limit="/sys/class/power_supply/BAT0/charge_control_end_threshold"
+    if [[ -f "$asus_limit" ]]; then
+        echo "$limit" | sudo tee "$asus_limit" > /dev/null 2>&1 && {
+            ok "ASUS charge limit set to ${limit}%"
+            log_transition "Charge limit -> ${limit}%"
+            return 0
+        }
+    fi
+
+    err "Charge limit not supported on this hardware"
+    warn "Some laptops need vendor-specific tools (e.g., system76-power, framework-tool)"
+    return 1
+}
+
+# ─── Lid action ──────────────────────────────────────────────────────────────────
+
+get_lid_action() {
+    if [[ -f /etc/systemd/logind.conf.d/forge-lid.conf ]]; then
+        grep -oP 'HandleLidSwitch=\K.*' /etc/systemd/logind.conf.d/forge-lid.conf 2>/dev/null || echo "default"
+    else
+        grep -oP '^HandleLidSwitch=\K.*' /etc/systemd/logind.conf 2>/dev/null || echo "suspend (default)"
+    fi
+}
+
+set_lid_action() {
+    local action="$1"
+    local logind_val
+    case "$action" in
+        nothing|ignore) logind_val="ignore" ;;
+        lock)           logind_val="lock" ;;
+        suspend)        logind_val="suspend" ;;
+        *) err "Unknown lid action: $action (use nothing, lock, suspend)"; return 1 ;;
+    esac
+
+    sudo mkdir -p /etc/systemd/logind.conf.d 2>/dev/null || true
+    sudo bash -c "cat > /etc/systemd/logind.conf.d/forge-lid.conf" <<EOF
+# 24HG Forge Laptop — lid close action for gaming
+[Login]
+HandleLidSwitch=$logind_val
+HandleLidSwitchExternalPower=$logind_val
+HandleLidSwitchDocked=$logind_val
+EOF
+
+    # Reload logind config
+    sudo systemctl kill -s HUP systemd-logind 2>/dev/null || true
+
+    ok "Lid close action set to '$action'"
+    log_transition "Lid action -> $action"
+}
+
+# ─── Wake lock ───────────────────────────────────────────────────────────────────
+
+is_wake_locked() {
+    if [[ -f "$WAKE_LOCK_PID_FILE" ]]; then
+        local pid
+        pid=$(< "$WAKE_LOCK_PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "$WAKE_LOCK_PID_FILE"
+    fi
+    return 1
+}
+
+set_wake_lock() {
+    local state="$1"
+    case "$state" in
+        on)
+            if is_wake_locked; then
+                info "Wake lock already active (PID $(< "$WAKE_LOCK_PID_FILE"))"
+                return 0
+            fi
+            # Use systemd-inhibit in background
+            if command -v systemd-inhibit &>/dev/null; then
+                systemd-inhibit --what=idle:sleep:handle-lid-switch \
+                    --who="forge-laptop" \
+                    --why="Gaming session active" \
+                    --mode=block \
+                    sleep infinity &
+                local pid=$!
+                echo "$pid" > "$WAKE_LOCK_PID_FILE"
+                ok "Wake lock enabled (PID $pid) — system will not sleep"
+                log_transition "Wake lock -> on (PID $pid)"
+            else
+                # D-Bus fallback
+                python3 -c "
+import dbus, os, time, signal, sys
+bus = dbus.SessionBus()
+ss = bus.get_object('org.freedesktop.ScreenSaver', '/org/freedesktop/ScreenSaver')
+iface = dbus.Interface(ss, 'org.freedesktop.ScreenSaver')
+cookie = iface.Inhibit('forge-laptop', 'Gaming session active')
+print(f'Inhibit cookie: {cookie}')
+signal.pause()
+" &
+                local pid=$!
+                echo "$pid" > "$WAKE_LOCK_PID_FILE"
+                ok "Wake lock enabled via D-Bus (PID $pid)"
+                log_transition "Wake lock -> on (PID $pid, dbus)"
+            fi
+            ;;
+        off)
+            if ! is_wake_locked; then
+                info "Wake lock not active"
+                return 0
+            fi
+            local pid
+            pid=$(< "$WAKE_LOCK_PID_FILE")
+            kill "$pid" 2>/dev/null || true
+            rm -f "$WAKE_LOCK_PID_FILE"
+            ok "Wake lock disabled"
+            log_transition "Wake lock -> off"
+            ;;
+        *)
+            err "Usage: forge-laptop wake-lock on|off"
+            return 1
+            ;;
+    esac
+}
+
+# ─── Game process detection (shared with forge-game-timer) ───────────────────────
+
+GAME_PATTERNS=(
+    # Steam/Proton
+    "SteamLaunch AppId"
+    "proton waitforexitandrun"
+    # Wine/Lutris
+    "wine.*\\.exe"
+    "lutris-wrapper"
+    # Heroic
+    "heroic.*--"
+    "legendary launch"
+    # Native games (common engines)
+    "Unreal.*Shipping"
+    "unity.*player"
+    "godot"
+    # GameMode
+    "gamemoderun"
+)
+
+is_game_running() {
+    for pattern in "${GAME_PATTERNS[@]}"; do
+        if pgrep -f "$pattern" > /dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+get_running_game_name() {
+    # Try Steam AppID first
+    local cmdline
+    cmdline=$(pgrep -af "SteamLaunch AppId" 2>/dev/null | head -1) || true
+    if [[ -n "$cmdline" ]]; then
+        local appid
+        appid=$(echo "$cmdline" | grep -oP 'AppId=\K\d+' || true)
+        if [[ -n "$appid" ]]; then
+            # Resolve from Steam manifests
+            local name
+            for acf in ~/.steam/steam/steamapps/appmanifest_${appid}.acf \
+                       ~/.local/share/Steam/steamapps/appmanifest_${appid}.acf; do
+                if [[ -f "$acf" ]]; then
+                    name=$(grep -oP '"name"\s+"\K[^"]+' "$acf" | head -1)
+                    [[ -n "$name" ]] && { echo "$name"; return 0; }
+                fi
+            done
+            echo "Steam App $appid"
+            return 0
+        fi
+    fi
+
+    # Wine/Proton .exe
+    cmdline=$(pgrep -af 'wine.*\.exe' 2>/dev/null | head -1) || true
+    if [[ -n "$cmdline" ]]; then
+        local exe
+        exe=$(echo "$cmdline" | grep -oP '[^\\/]+\.exe' | tail -1)
+        [[ -n "$exe" ]] && { echo "$exe"; return 0; }
+    fi
+
+    # Lutris
+    if pgrep -f "lutris-wrapper" > /dev/null 2>&1; then
+        echo "Lutris game"
+        return 0
+    fi
+
+    echo "Unknown game"
+}
+
+# ─── Profile presets ─────────────────────────────────────────────────────────────
+
+apply_gaming_profile() {
+    echo -e "${BOLD}${MAGENTA}  Switching to Gaming Mode${RESET}"
+    echo ""
+
+    # Power profile
+    info "Setting power profile to performance..."
+    set_power_profile "performance" 2>/dev/null && ok "Power: performance" || warn "Could not set power profile"
+
+    # Thermal
+    info "Setting thermal profile to performance..."
+    set_thermal_profile "performance" 2>/dev/null || true
+
+    # Fan boost
+    info "Boosting fans..."
+    set_fan_mode "performance" 2>/dev/null || true
+
+    # GPU: prefer discrete
+    if has_dual_gpu; then
+        info "Switching to discrete GPU..."
+        set_gpu_mode "discrete" 2>/dev/null || true
+    fi
+
+    # Wake lock
+    set_wake_lock "on" 2>/dev/null || true
+
+    # Lid action: do nothing
+    set_lid_action "nothing" 2>/dev/null || true
+
+    # Max brightness
+    info "Setting brightness to 100%..."
+    set_brightness_value 100 2>/dev/null || true
+
+    # CPU governor direct set (in case powerprofilesctl doesn't cover it)
+    for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [[ -f "$gov" ]] && echo performance | sudo tee "$gov" > /dev/null 2>&1 || true
+    done
+
+    # AMD GPU performance
+    for card in /sys/class/drm/card*/device/power_dpm_force_performance_level; do
+        [[ -f "$card" ]] && echo high | sudo tee "$card" > /dev/null 2>&1 || true
+    done
+
+    # NVIDIA max clocks
+    if command -v nvidia-smi &>/dev/null; then
+        nvidia-smi -pm 1 2>/dev/null || true
+    fi
+
+    echo ""
+    echo -e "${GREEN}${BOLD}Gaming mode active.${RESET}"
+    echo -e "  CPU: performance governor"
+    echo -e "  GPU: discrete/max clocks"
+    echo -e "  Fan: performance boost"
+    echo -e "  Lid: ignore close"
+    echo -e "  Sleep: inhibited"
+    echo ""
+    echo -e "${DIM}Run 'forge-laptop balanced' when done gaming.${RESET}"
+    log_transition "Profile -> gaming"
+}
+
+apply_balanced_profile() {
+    echo -e "${BOLD}${CYAN}  Switching to Balanced Mode${RESET}"
+    echo ""
+
+    set_power_profile "balanced" 2>/dev/null && ok "Power: balanced" || warn "Could not set power profile"
+    set_thermal_profile "balanced" 2>/dev/null || true
+    set_fan_mode "auto" 2>/dev/null || true
+
+    if has_dual_gpu; then
+        set_gpu_mode "hybrid" 2>/dev/null || true
+    fi
+
+    set_wake_lock "off" 2>/dev/null || true
+    set_lid_action "suspend" 2>/dev/null || true
+
+    for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [[ -f "$gov" ]] && echo schedutil | sudo tee "$gov" > /dev/null 2>&1 || true
+    done
+
+    for card in /sys/class/drm/card*/device/power_dpm_force_performance_level; do
+        [[ -f "$card" ]] && echo auto | sudo tee "$card" > /dev/null 2>&1 || true
+    done
+
+    echo ""
+    echo -e "${GREEN}${BOLD}Balanced mode active.${RESET}"
+    echo -e "  CPU: schedutil governor"
+    echo -e "  GPU: hybrid/auto"
+    echo -e "  Fan: auto"
+    echo -e "  Lid: suspend on close"
+    echo -e "  Sleep: normal"
+    log_transition "Profile -> balanced"
+}
+
+apply_battery_profile() {
+    echo -e "${BOLD}${YELLOW}  Switching to Battery Saver Mode${RESET}"
+    echo ""
+
+    set_power_profile "power-saver" 2>/dev/null && ok "Power: power-saver" || warn "Could not set power profile"
+    set_thermal_profile "cool" 2>/dev/null || true
+    set_fan_mode "quiet" 2>/dev/null || true
+
+    if has_dual_gpu; then
+        set_gpu_mode "integrated" 2>/dev/null || true
+    fi
+
+    set_wake_lock "off" 2>/dev/null || true
+    set_lid_action "suspend" 2>/dev/null || true
+
+    # Power-save governor
+    for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [[ -f "$gov" ]] && echo powersave | sudo tee "$gov" > /dev/null 2>&1 || true
+    done
+
+    # AMD GPU low power
+    for card in /sys/class/drm/card*/device/power_dpm_force_performance_level; do
+        [[ -f "$card" ]] && echo low | sudo tee "$card" > /dev/null 2>&1 || true
+    done
+
+    # Dim screen
+    info "Dimming screen to 40%..."
+    set_brightness_value 40 2>/dev/null || true
+
+    # NVIDIA power management
+    if command -v nvidia-smi &>/dev/null; then
+        nvidia-smi -pm 0 2>/dev/null || true
+    fi
+
+    echo ""
+    echo -e "${GREEN}${BOLD}Battery saver active.${RESET}"
+    echo -e "  CPU: powersave governor"
+    echo -e "  GPU: integrated only"
+    echo -e "  Fan: quiet"
+    echo -e "  Screen: 40% brightness"
+    echo -e "  Lid: suspend on close"
+    log_transition "Profile -> battery"
+}
+
+# ─── Status display ─────────────────────────────────────────────────────────────
+
+show_status() {
+    echo -e "${BOLD}${CYAN}  24HG Forge Laptop Status${RESET}"
+    echo ""
+
+    # System info
+    local vendor product
+    vendor=$(< /sys/class/dmi/id/sys_vendor 2>/dev/null) || vendor="Unknown"
+    product=$(< /sys/class/dmi/id/product_name 2>/dev/null) || product="Unknown"
+    echo -e "${BOLD}System:${RESET}  $vendor $product"
+
+    local laptop_vendor
+    laptop_vendor=$(detect_laptop_vendor)
+    [[ "$laptop_vendor" != "generic" ]] && echo -e "${DIM}         Vendor profile: $laptop_vendor${RESET}"
+
+    # Battery
+    echo ""
+    echo -e "${BOLD}Battery:${RESET}"
+    local bat_info
+    bat_info=$(read_battery_status)
+    if [[ "$bat_info" != "no_battery" ]]; then
+        IFS='|' read -r status capacity power time_est charge_lim <<< "$bat_info"
+        local bat_color="$GREEN"
+        [[ "${capacity:-0}" -le 20 ]] && bat_color="$RED"
+        [[ "${capacity:-0}" -le 50 && "${capacity:-0}" -gt 20 ]] && bat_color="$YELLOW"
+
+        local bar=""
+        local filled=$(( ${capacity:-0} / 5 ))
+        local empty=$(( 20 - filled ))
+        bar="${bat_color}"
+        for ((i=0; i<filled; i++)); do bar+="█"; done
+        bar+="${DIM}"
+        for ((i=0; i<empty; i++)); do bar+="░"; done
+        bar+="${RESET}"
+
+        echo -e "  Level:    $bar ${bat_color}${capacity}%${RESET}"
+        echo -e "  Status:   $status"
+        [[ "$power" != "?" && "$power" != "0" ]] && echo -e "  Power:    ${power}W draw"
+        [[ "$time_est" != "N/A" ]] && echo -e "  Time:     $time_est"
+        if [[ "$charge_lim" != "unsupported" ]]; then
+            echo -e "  Limit:    ${charge_lim}%"
+        fi
+    else
+        echo -e "  ${DIM}No battery detected (desktop or unsupported)${RESET}"
+    fi
+
+    # Power profile
+    echo ""
+    echo -e "${BOLD}Power:${RESET}"
+    local pp
+    pp=$(get_power_profile)
+    local pp_color="$CYAN"
+    [[ "$pp" == "performance" ]] && pp_color="$RED"
+    [[ "$pp" == "power-saver" ]] && pp_color="$GREEN"
+    echo -e "  Profile:  ${pp_color}${pp}${RESET}"
+
+    # CPU governor
+    local gov="unknown"
+    if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+        gov=$(< /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+    fi
+    echo -e "  Governor: $gov"
+
+    # Thermal
+    echo ""
+    echo -e "${BOLD}Thermal:${RESET}"
+    local thermal
+    thermal=$(get_thermal_profile)
+    echo -e "  Profile:  $thermal"
+
+    # CPU temp
+    local cpu_temp="N/A"
+    for tz in /sys/class/thermal/thermal_zone*/temp; do
+        [[ -f "$tz" ]] || continue
+        local t
+        t=$(< "$tz")
+        if [[ "$t" -gt 1000 ]]; then
+            t=$(( t / 1000 ))
+        fi
+        if [[ "$t" -gt 0 && "$t" -lt 150 ]]; then
+            cpu_temp="${t}°C"
+            break
+        fi
+    done
+    local temp_color="$GREEN"
+    if [[ "$cpu_temp" != "N/A" ]]; then
+        local temp_val="${cpu_temp%°C}"
+        [[ "$temp_val" -ge 80 ]] && temp_color="$RED"
+        [[ "$temp_val" -ge 60 && "$temp_val" -lt 80 ]] && temp_color="$YELLOW"
+    fi
+    echo -e "  CPU temp: ${temp_color}${cpu_temp}${RESET}"
+
+    # Fan
+    local fan_mode fan_speed
+    fan_mode=$(get_fan_mode)
+    fan_speed=$(get_fan_speed)
+    echo -e "  Fan:      $fan_mode ($fan_speed)"
+
+    # GPU
+    echo ""
+    echo -e "${BOLD}GPU:${RESET}"
+    local dgpu
+    dgpu=$(detect_gpu_vendor)
+    echo -e "  Vendor:   $dgpu"
+    if has_dual_gpu; then
+        local gpu_mode
+        gpu_mode=$(get_gpu_mode)
+        echo -e "  Mode:     $gpu_mode ${DIM}(dual GPU detected)${RESET}"
+    fi
+
+    # GPU temp
+    if [[ "$dgpu" == "nvidia" ]] && command -v nvidia-smi &>/dev/null; then
+        local gpu_temp gpu_power
+        gpu_temp=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -1) || true
+        gpu_power=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits 2>/dev/null | head -1) || true
+        [[ -n "$gpu_temp" ]] && echo -e "  Temp:     ${gpu_temp}°C"
+        [[ -n "$gpu_power" ]] && echo -e "  Power:    ${gpu_power}W"
+    fi
+
+    # Display
+    echo ""
+    echo -e "${BOLD}Display:${RESET}"
+    local session brightness
+    session=$(get_display_session)
+    brightness=$(get_brightness)
+    echo -e "  Session:  $session"
+    echo -e "  Bright:   ${brightness}%"
+
+    # Lid action
+    local lid_act
+    lid_act=$(get_lid_action)
+    echo -e "  Lid:      $lid_act"
+
+    # Wake lock
+    echo ""
+    echo -e "${BOLD}Locks:${RESET}"
+    if is_wake_locked; then
+        echo -e "  Wake:     ${YELLOW}active${RESET} (PID $(< "$WAKE_LOCK_PID_FILE"))"
+    else
+        echo -e "  Wake:     ${DIM}inactive${RESET}"
+    fi
+
+    # Daemon
+    if [[ -f "$DAEMON_PID_FILE" ]]; then
+        local dpid
+        dpid=$(< "$DAEMON_PID_FILE")
+        if kill -0 "$dpid" 2>/dev/null; then
+            echo -e "  Daemon:   ${GREEN}running${RESET} (PID $dpid)"
+        else
+            echo -e "  Daemon:   ${DIM}stale PID file${RESET}"
+            rm -f "$DAEMON_PID_FILE"
+        fi
+    else
+        echo -e "  Daemon:   ${DIM}not running${RESET}"
+    fi
+
+    # Game status
+    echo ""
+    if is_game_running; then
+        local game_name
+        game_name=$(get_running_game_name)
+        echo -e "${BOLD}Game:${RESET}    ${GREEN}$game_name${RESET} is running"
+    else
+        echo -e "${BOLD}Game:${RESET}    ${DIM}No game detected${RESET}"
+    fi
+    echo ""
+}
+
+# ─── Daemon mode ─────────────────────────────────────────────────────────────────
+
+run_daemon() {
+    # Check if already running
+    if [[ -f "$DAEMON_PID_FILE" ]]; then
+        local existing_pid
+        existing_pid=$(< "$DAEMON_PID_FILE")
+        if kill -0 "$existing_pid" 2>/dev/null; then
+            err "Daemon already running (PID $existing_pid)"
+            err "Kill it with: kill $existing_pid"
+            return 1
+        fi
+        rm -f "$DAEMON_PID_FILE"
+    fi
+
+    echo "$$" > "$DAEMON_PID_FILE"
+    info "Laptop daemon started (PID $$)"
+    info "Watching for game processes every ${POLL_INTERVAL}s..."
+    log_transition "Daemon started (PID $$)"
+
+    local was_gaming=false
+
+    cleanup_daemon() {
+        info "Daemon shutting down..."
+        rm -f "$DAEMON_PID_FILE"
+        if [[ "$was_gaming" == true ]]; then
+            info "Reverting to balanced profile..."
+            apply_balanced_profile
+        fi
+        log_transition "Daemon stopped"
+        exit 0
+    }
+    trap cleanup_daemon SIGINT SIGTERM
+
+    while true; do
+        if is_game_running; then
+            if [[ "$was_gaming" == false ]]; then
+                local game_name
+                game_name=$(get_running_game_name)
+                info "Game detected: $game_name"
+                log_transition "Daemon: game detected ($game_name)"
+
+                # Apply gaming profile
+                apply_gaming_profile
+
+                # Load per-game brightness if saved
+                local saved_brightness
+                saved_brightness=$(load_game_brightness "$game_name")
+                if [[ -n "$saved_brightness" ]]; then
+                    info "Applying saved brightness ${saved_brightness}% for '$game_name'"
+                    set_brightness_value "$saved_brightness" 2>/dev/null || true
+                fi
+
+                was_gaming=true
+            fi
+        else
+            if [[ "$was_gaming" == true ]]; then
+                info "Game exited, reverting to balanced..."
+                log_transition "Daemon: game exited, reverting"
+
+                apply_balanced_profile
+                was_gaming=false
+            fi
+        fi
+        sleep "$POLL_INTERVAL"
+    done
+}
+
+# ─── Help ────────────────────────────────────────────────────────────────────────
+
+show_help() {
+    cat <<'HELP'
+24HG Forge Laptop — Gaming optimization for laptops
+
+USAGE:
+  forge-laptop <command> [options]
+
+PROFILE COMMANDS:
+  status                Show battery, thermal, GPU, and power profile status
+  gaming                Switch to gaming mode (max performance, dGPU, fans)
+  balanced              Balanced mode (adaptive performance)
+  battery               Battery saver (iGPU, low clocks, dim screen)
+
+HARDWARE COMMANDS:
+  charge-limit <pct>    Set battery charge limit (60, 80, or 100)
+  gpu <mode>            GPU switching: integrated, hybrid, discrete, compute
+  thermal <mode>        Thermal profile: cool, balanced, performance
+  fan <mode>            Fan control: auto, quiet, performance, max
+  brightness <game> <v> Set per-game brightness (0-100)
+  display <mode>        Display: internal, external, mirror, extend
+
+SESSION COMMANDS:
+  lid <action>          Lid close action: nothing, lock, suspend
+  wake-lock on|off      Prevent sleep while gaming
+  daemon                Auto-switch profiles on game start/stop
+
+EXAMPLES:
+  forge-laptop gaming               Max performance for gaming
+  forge-laptop charge-limit 80      Limit charge to 80% for battery health
+  forge-laptop gpu discrete         Force discrete GPU
+  forge-laptop brightness cs2 70    Set 70% brightness for CS2
+  forge-laptop fan performance      Boost fan speed
+  forge-laptop daemon               Auto-detect games and switch profiles
+
+SUPPORTED HARDWARE:
+  Battery:  /sys/class/power_supply/BAT*
+  GPU:      NVIDIA (nvidia-smi, supergfxctl, envycontrol)
+            AMD (DRI_PRIME, switcherooctl)
+  Thermal:  ASUS (throttle_thermal_policy), Lenovo (ideapad_acpi),
+            Dell (smbios-thermal-ctl), Generic (platform_profile)
+  Fan:      nbfc-linux, ASUS fan_boost, hwmon PWM
+  Display:  X11 (xrandr), Wayland (kscreen-doctor, wlr-randr)
+
+DATA:
+  Config:     ~/.config/forge/laptop.json
+  Profiles:   ~/.config/forge/laptop-profiles.json
+  Log:        ~/.local/share/forge/laptop/transitions.log
+HELP
+}
+
+# ─── Main dispatch ───────────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-status}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        status)
+            show_status
+            ;;
+        gaming)
+            apply_gaming_profile
+            ;;
+        balanced)
+            apply_balanced_profile
+            ;;
+        battery)
+            apply_battery_profile
+            ;;
+        charge-limit)
+            local pct="${1:-}"
+            if [[ -z "$pct" ]]; then
+                local current
+                current=$(get_charge_limit)
+                info "Current charge limit: $current"
+                echo "Usage: forge-laptop charge-limit <60|80|100>"
+                return 0
+            fi
+            set_charge_limit "$pct"
+            ;;
+        gpu)
+            local mode="${1:-}"
+            if [[ -z "$mode" ]]; then
+                local current
+                current=$(get_gpu_mode)
+                info "Current GPU mode: $current"
+                echo "Usage: forge-laptop gpu <integrated|hybrid|discrete|compute>"
+                return 0
+            fi
+            set_gpu_mode "$mode"
+            ;;
+        thermal)
+            local mode="${1:-}"
+            if [[ -z "$mode" ]]; then
+                local current
+                current=$(get_thermal_profile)
+                info "Current thermal profile: $current"
+                echo "Usage: forge-laptop thermal <cool|balanced|performance>"
+                return 0
+            fi
+            set_thermal_profile "$mode"
+            ;;
+        fan)
+            local mode="${1:-}"
+            if [[ -z "$mode" ]]; then
+                local fan_mode fan_speed
+                fan_mode=$(get_fan_mode)
+                fan_speed=$(get_fan_speed)
+                info "Fan: $fan_mode ($fan_speed)"
+                echo "Usage: forge-laptop fan <auto|quiet|performance|max>"
+                return 0
+            fi
+            set_fan_mode "$mode"
+            ;;
+        brightness)
+            local game="${1:-}" value="${2:-}"
+            if [[ -z "$game" || -z "$value" ]]; then
+                local current
+                current=$(get_brightness)
+                info "Current brightness: ${current}%"
+                echo "Usage: forge-laptop brightness <game-name> <0-100>"
+                return 0
+            fi
+            if [[ "$value" -lt 0 || "$value" -gt 100 ]] 2>/dev/null; then
+                err "Brightness must be 0-100"
+                return 1
+            fi
+            set_brightness_value "$value"
+            save_game_brightness "$game" "$value"
+            ;;
+        display)
+            local mode="${1:-}"
+            if [[ -z "$mode" ]]; then
+                local session
+                session=$(get_display_session)
+                info "Display session: $session"
+                echo "Usage: forge-laptop display <internal|external|mirror|extend>"
+                return 0
+            fi
+            set_display_mode "$mode"
+            ;;
+        lid)
+            local action="${1:-}"
+            if [[ -z "$action" ]]; then
+                local current
+                current=$(get_lid_action)
+                info "Lid close action: $current"
+                echo "Usage: forge-laptop lid <nothing|lock|suspend>"
+                return 0
+            fi
+            set_lid_action "$action"
+            ;;
+        wake-lock)
+            local state="${1:-}"
+            if [[ -z "$state" ]]; then
+                if is_wake_locked; then
+                    info "Wake lock: active (PID $(< "$WAKE_LOCK_PID_FILE"))"
+                else
+                    info "Wake lock: inactive"
+                fi
+                echo "Usage: forge-laptop wake-lock on|off"
+                return 0
+            fi
+            set_wake_lock "$state"
+            ;;
+        daemon)
+            run_daemon
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        *)
+            err "Unknown command: $cmd"
+            echo "Run 'forge-laptop help' for usage."
+            return 1
+            ;;
+    esac
+}
+
+main "$@"

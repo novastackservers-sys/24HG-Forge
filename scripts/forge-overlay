@@ -1,0 +1,749 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Forge Overlay — In-game friend activity and notification overlay
+
+# ── Colors ──────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# ── Paths ───────────────────────────────────────────────────────────────────
+PID_FILE="/tmp/forge-overlay.pid"
+RENDERER_SCRIPT="/tmp/forge-overlay-renderer.py"
+CONFIG_DIR="${HOME}/.config/forge"
+CONFIG_FILE="${CONFIG_DIR}/overlay.conf"
+TOKEN_FILE="${CONFIG_DIR}/hub-token"
+LOG_TAG="forge-overlay"
+
+# ── Defaults ────────────────────────────────────────────────────────────────
+POSITION="top-right"
+OPACITY=80
+NOTIFICATION_DURATION=5
+SHOW_FRIENDS="yes"
+SHOW_INVITES="yes"
+SHOW_CLIPS="yes"
+SHOW_TOURNAMENTS="yes"
+POLL_INTERVAL=30
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+log_info()  { logger -t "$LOG_TAG" "$*"; echo -e "${CYAN}[INFO]${RESET}  $*"; }
+log_ok()    { logger -t "$LOG_TAG" "$*"; echo -e "${GREEN}[  OK]${RESET}  $*"; }
+log_warn()  { logger -t "$LOG_TAG" "WARN: $*"; echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+log_err()   { logger -t "$LOG_TAG" "ERROR: $*"; echo -e "${RED}[ ERR]${RESET}  $*" >&2; }
+
+ensure_config() {
+    mkdir -p "$CONFIG_DIR"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        cat > "$CONFIG_FILE" <<'CONF'
+POSITION=top-right
+OPACITY=80
+NOTIFICATION_DURATION=5
+SHOW_FRIENDS=yes
+SHOW_INVITES=yes
+SHOW_CLIPS=yes
+SHOW_TOURNAMENTS=yes
+POLL_INTERVAL=30
+CONF
+        log_info "Created default config at ${CONFIG_FILE}"
+    fi
+}
+
+load_config() {
+    ensure_config
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+}
+
+is_running() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(<"$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "$PID_FILE"
+    fi
+    return 1
+}
+
+get_pid() {
+    if [[ -f "$PID_FILE" ]]; then
+        cat "$PID_FILE"
+    fi
+}
+
+# ── Write the Python renderer ──────────────────────────────────────────────
+write_renderer() {
+    cat > "$RENDERER_SCRIPT" <<'PYEOF'
+#!/usr/bin/env python3
+"""24HG Forge Overlay — Notification renderer (Gtk 3 + Layer Shell / X11)."""
+
+import gi
+import json
+import os
+import signal
+import sys
+import threading
+import time
+import urllib.request
+import urllib.error
+from collections import deque
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib, Pango
+
+# Try layer shell for Wayland
+HAS_LAYER_SHELL = False
+try:
+    gi.require_version("GtkLayerShell", "0.1")
+    from gi.repository import GtkLayerShell
+    HAS_LAYER_SHELL = True
+except (ValueError, ImportError):
+    pass
+
+# ── Configuration ───────────────────────────────────────────────────────
+CONFIG_FILE = os.path.expanduser("~/.config/forge/overlay.conf")
+TOKEN_FILE = os.path.expanduser("~/.config/forge/hub-token")
+API_URL = "https://hub.24hgaming.com/api/notifications/poll"
+
+def load_config():
+    conf = {
+        "POSITION": "top-right",
+        "OPACITY": 80,
+        "NOTIFICATION_DURATION": 5,
+        "SHOW_FRIENDS": True,
+        "SHOW_INVITES": True,
+        "SHOW_CLIPS": True,
+        "SHOW_TOURNAMENTS": True,
+        "POLL_INTERVAL": 30,
+    }
+    if os.path.isfile(CONFIG_FILE):
+        with open(CONFIG_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip()
+                    if k in ("OPACITY", "NOTIFICATION_DURATION", "POLL_INTERVAL"):
+                        conf[k] = int(v)
+                    elif k in ("SHOW_FRIENDS", "SHOW_INVITES", "SHOW_CLIPS", "SHOW_TOURNAMENTS"):
+                        conf[k] = v.lower() in ("yes", "true", "1")
+                    else:
+                        conf[k] = v
+    return conf
+
+def load_token():
+    if os.path.isfile(TOKEN_FILE):
+        with open(TOKEN_FILE) as f:
+            return f.read().strip()
+    return None
+
+# ── CSS ─────────────────────────────────────────────────────────────────
+OVERLAY_CSS = """
+#overlay-window {
+    background-color: transparent;
+}
+
+#notification-box {
+    background-color: rgba(10, 10, 20, 0.80);
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin: 8px;
+    border: 1px solid rgba(110, 60, 255, 0.35);
+}
+
+#notification-box.fade-in {
+    opacity: 1;
+}
+
+#notification-box.fade-out {
+    opacity: 0;
+}
+
+#notif-title {
+    color: #b388ff;
+    font-weight: bold;
+    font-size: 13px;
+}
+
+#notif-body {
+    color: #e0e0e0;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+#notif-meta {
+    color: #888888;
+    font-size: 10px;
+    margin-top: 2px;
+}
+
+#btn-accept {
+    background-color: rgba(76, 175, 80, 0.85);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 14px;
+    font-size: 11px;
+    font-weight: bold;
+    margin-right: 6px;
+}
+
+#btn-accept:hover {
+    background-color: rgba(76, 175, 80, 1.0);
+}
+
+#btn-decline {
+    background-color: rgba(198, 40, 40, 0.85);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 14px;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+#btn-decline:hover {
+    background-color: rgba(198, 40, 40, 1.0);
+}
+"""
+
+# ── Notification types ──────────────────────────────────────────────────
+TYPE_FRIEND_ACTIVITY = "friend_activity"
+TYPE_GAME_INVITE = "game_invite"
+TYPE_CLIP_SAVED = "clip_saved"
+TYPE_TOURNAMENT = "tournament"
+
+class Notification:
+    def __init__(self, ntype, title, body, meta="", data=None):
+        self.ntype = ntype
+        self.title = title
+        self.body = body
+        self.meta = meta
+        self.data = data or {}
+        self.interactive = ntype == TYPE_GAME_INVITE
+
+# ── Overlay Window ──────────────────────────────────────────────────────
+class OverlayWindow(Gtk.Window):
+    def __init__(self, config):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.config = config
+        self.queue = deque()
+        self.current_widget = None
+        self.visible_overlay = False
+        self.forced_hidden = False
+
+        # Apply CSS
+        css_provider = Gtk.CssProvider()
+        opacity_pct = config["OPACITY"] / 100.0
+        css_text = OVERLAY_CSS.replace("0.80", f"{opacity_pct:.2f}")
+        css_provider.load_from_data(css_text.encode())
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            css_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+
+        self.set_name("overlay-window")
+        self.set_title("24HG Overlay")
+        self.set_decorated(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_keep_above(True)
+        self.set_accept_focus(False)
+        self.set_default_size(320, 1)
+        self.set_app_paintable(True)
+
+        # Transparency
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+
+        # Wayland layer shell setup
+        is_wayland = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland"
+        if HAS_LAYER_SHELL and is_wayland:
+            GtkLayerShell.init_for_window(self)
+            GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+            GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
+            GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, True)
+            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, 40)
+            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, 20)
+            GtkLayerShell.set_namespace(self, "forge-overlay")
+            # Click-through by default; interactive notifications will grab input
+            GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        else:
+            # X11 positioning
+            display = Gdk.Display.get_default()
+            monitor = display.get_primary_monitor() or display.get_monitor(0)
+            geom = monitor.get_geometry()
+            self.move(geom.x + geom.width - 340, geom.y + 40)
+
+        # Container
+        self.container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(self.container)
+
+        # X11: make click-through when non-interactive
+        self.connect("realize", self._on_realize)
+        self.connect("draw", self._on_draw)
+        self.connect("destroy", Gtk.main_quit)
+
+        # Start fully transparent (no notifications)
+        self.set_opacity(0)
+        self.show_all()
+
+    def _on_realize(self, widget):
+        """Set input passthrough on X11."""
+        is_wayland = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland"
+        if not is_wayland:
+            self._set_click_through(True)
+
+    def _set_click_through(self, passthrough):
+        """Make the window click-through on X11 using an empty input region."""
+        win = self.get_window()
+        if win is None:
+            return
+        if passthrough:
+            region = __import__("cairo").Region(
+                __import__("cairo").RectangleInt(0, 0, 0, 0)
+            )
+            win.input_shape_combine_region(region, 0, 0)
+        else:
+            win.input_shape_combine_region(None, 0, 0)
+
+    def _on_draw(self, widget, cr):
+        """Draw transparent background."""
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.set_operator(__import__("cairo").OPERATOR_SOURCE)
+        cr.paint()
+        cr.set_operator(__import__("cairo").OPERATOR_OVER)
+        return False
+
+    def push_notification(self, notif):
+        """Add a notification to the queue."""
+        if self.forced_hidden:
+            return
+        # Filter by config
+        type_map = {
+            TYPE_FRIEND_ACTIVITY: "SHOW_FRIENDS",
+            TYPE_GAME_INVITE: "SHOW_INVITES",
+            TYPE_CLIP_SAVED: "SHOW_CLIPS",
+            TYPE_TOURNAMENT: "SHOW_TOURNAMENTS",
+        }
+        cfg_key = type_map.get(notif.ntype)
+        if cfg_key and not self.config.get(cfg_key, True):
+            return
+
+        self.queue.append(notif)
+        if self.current_widget is None:
+            GLib.idle_add(self._show_next)
+
+    def _show_next(self):
+        """Display the next notification from the queue."""
+        if not self.queue:
+            self.current_widget = None
+            self.set_opacity(0)
+            is_wayland = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland"
+            if not is_wayland:
+                self._set_click_through(True)
+            return False
+
+        notif = self.queue.popleft()
+        self._render_notification(notif)
+        return False
+
+    def _render_notification(self, notif):
+        """Build and show a notification widget."""
+        # Remove old widget
+        if self.current_widget:
+            self.container.remove(self.current_widget)
+            self.current_widget = None
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.set_name("notification-box")
+
+        # Type icon prefix
+        icons = {
+            TYPE_FRIEND_ACTIVITY: "\U0001f3ae",  # controller
+            TYPE_GAME_INVITE: "\U0001f4e9",       # envelope
+            TYPE_CLIP_SAVED: "\U0001f3ac",         # clapper
+            TYPE_TOURNAMENT: "\U0001f3c6",         # trophy
+        }
+        icon = icons.get(notif.ntype, "\U0001f514")  # bell default
+
+        title_label = Gtk.Label()
+        title_label.set_name("notif-title")
+        title_label.set_markup(f"<b>{icon}  {GLib.markup_escape_text(notif.title)}</b>")
+        title_label.set_halign(Gtk.Align.START)
+        title_label.set_line_wrap(True)
+        title_label.set_max_width_chars(35)
+        box.pack_start(title_label, False, False, 0)
+
+        body_label = Gtk.Label(label=notif.body)
+        body_label.set_name("notif-body")
+        body_label.set_halign(Gtk.Align.START)
+        body_label.set_line_wrap(True)
+        body_label.set_max_width_chars(35)
+        box.pack_start(body_label, False, False, 0)
+
+        if notif.meta:
+            meta_label = Gtk.Label(label=notif.meta)
+            meta_label.set_name("notif-meta")
+            meta_label.set_halign(Gtk.Align.START)
+            box.pack_start(meta_label, False, False, 0)
+
+        # Interactive buttons for invites
+        if notif.interactive:
+            btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            btn_box.set_margin_top(8)
+
+            accept_btn = Gtk.Button(label="Accept")
+            accept_btn.set_name("btn-accept")
+            accept_btn.connect("clicked", self._on_invite_accept, notif.data)
+            btn_box.pack_start(accept_btn, False, False, 0)
+
+            decline_btn = Gtk.Button(label="Decline")
+            decline_btn.set_name("btn-decline")
+            decline_btn.connect("clicked", self._on_invite_decline, notif.data)
+            btn_box.pack_start(decline_btn, False, False, 0)
+
+            box.pack_start(btn_box, False, False, 0)
+
+            # Make window accept input for interactive notifications
+            is_wayland = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland"
+            if not is_wayland:
+                self._set_click_through(False)
+
+        self.container.pack_start(box, False, False, 0)
+        self.current_widget = box
+        self.set_opacity(1)
+        self.show_all()
+
+        # Auto-dismiss after duration (non-interactive only)
+        if not notif.interactive:
+            duration = self.config.get("NOTIFICATION_DURATION", 5)
+            GLib.timeout_add_seconds(duration, self._dismiss_current)
+
+    def _dismiss_current(self):
+        """Remove the current notification and show next."""
+        if self.current_widget:
+            self.container.remove(self.current_widget)
+            self.current_widget = None
+        self._show_next()
+        return False
+
+    def _on_invite_accept(self, button, data):
+        """Handle invite acceptance."""
+        invite_id = data.get("invite_id", "")
+        token = load_token()
+        if token and invite_id:
+            try:
+                req = urllib.request.Request(
+                    f"https://hub.24hgaming.com/api/invites/{invite_id}/accept",
+                    method="POST",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                urllib.request.urlopen(req, timeout=5)
+            except Exception:
+                pass
+        self._dismiss_current()
+
+    def _on_invite_decline(self, button, data):
+        """Handle invite decline."""
+        invite_id = data.get("invite_id", "")
+        token = load_token()
+        if token and invite_id:
+            try:
+                req = urllib.request.Request(
+                    f"https://hub.24hgaming.com/api/invites/{invite_id}/decline",
+                    method="POST",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                urllib.request.urlopen(req, timeout=5)
+            except Exception:
+                pass
+        self._dismiss_current()
+
+    def toggle_visibility(self):
+        """Toggle overlay visibility."""
+        self.forced_hidden = not self.forced_hidden
+        if self.forced_hidden:
+            self.set_opacity(0)
+        elif self.current_widget:
+            self.set_opacity(1)
+
+
+# ── Polling thread ──────────────────────────────────────────────────────
+class NotificationPoller(threading.Thread):
+    def __init__(self, overlay, config):
+        super().__init__(daemon=True)
+        self.overlay = overlay
+        self.config = config
+        self.running = True
+
+    def run(self):
+        while self.running:
+            try:
+                self._poll()
+            except Exception as e:
+                sys.stderr.write(f"[forge-overlay] Poll error: {e}\n")
+            time.sleep(self.config.get("POLL_INTERVAL", 30))
+
+    def _poll(self):
+        token = load_token()
+        if not token:
+            return
+
+        req = urllib.request.Request(
+            API_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=10)
+            data = json.loads(resp.read().decode())
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+            return
+
+        notifications = data if isinstance(data, list) else data.get("notifications", [])
+
+        for item in notifications:
+            ntype = item.get("type", "unknown")
+            title = item.get("title", "Notification")
+            body = item.get("body", "")
+            meta = item.get("meta", "")
+            notif_data = item.get("data", {})
+
+            notif = Notification(ntype, title, body, meta, notif_data)
+            GLib.idle_add(self.overlay.push_notification, notif)
+
+    def stop(self):
+        self.running = False
+
+
+# ── Signal handling ─────────────────────────────────────────────────────
+def handle_sigusr1(overlay):
+    """Toggle visibility on SIGUSR1."""
+    GLib.idle_add(overlay.toggle_visibility)
+
+# ── Main ────────────────────────────────────────────────────────────────
+def main():
+    config = load_config()
+
+    overlay = OverlayWindow(config)
+
+    # Handle SIGUSR1 for toggle
+    signal.signal(signal.SIGUSR1, lambda *_: handle_sigusr1(overlay))
+    # Handle SIGTERM for clean exit
+    signal.signal(signal.SIGTERM, lambda *_: GLib.idle_add(Gtk.main_quit))
+    signal.signal(signal.SIGINT, lambda *_: GLib.idle_add(Gtk.main_quit))
+
+    # Start poller
+    poller = NotificationPoller(overlay, config)
+    poller.start()
+
+    try:
+        Gtk.main()
+    finally:
+        poller.stop()
+
+if __name__ == "__main__":
+    main()
+PYEOF
+    chmod +x "$RENDERER_SCRIPT"
+}
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+cmd_start() {
+    local foreground=false
+    for arg in "$@"; do
+        [[ "$arg" == "--foreground" ]] && foreground=true
+    done
+
+    if is_running; then
+        log_warn "Overlay is already running (PID $(get_pid))"
+        return 1
+    fi
+
+    load_config
+
+    echo -e "${MAGENTA}${BOLD}"
+    echo "  ╔═══════════════════════════════════════╗"
+    echo "  ║     24HG Forge Overlay                ║"
+    echo "  ║     In-game notifications & friends   ║"
+    echo "  ╚═══════════════════════════════════════╝"
+    echo -e "${RESET}"
+
+    # Check for hub token
+    if [[ ! -f "$TOKEN_FILE" ]]; then
+        log_warn "No hub token found at ${TOKEN_FILE}"
+        log_info "Overlay will start but notifications require authentication"
+        log_info "Login with: ${CYAN}forge-hub-bridge login${RESET}"
+    fi
+
+    # Write the renderer script
+    write_renderer
+
+    log_info "Position: ${BOLD}${POSITION}${RESET}"
+    log_info "Opacity: ${BOLD}${OPACITY}%${RESET}"
+    log_info "Poll interval: ${BOLD}${POLL_INTERVAL}s${RESET}"
+    log_info "Notification duration: ${BOLD}${NOTIFICATION_DURATION}s${RESET}"
+
+    local show_list=""
+    [[ "$SHOW_FRIENDS" == "yes" ]] && show_list+="friends "
+    [[ "$SHOW_INVITES" == "yes" ]] && show_list+="invites "
+    [[ "$SHOW_CLIPS" == "yes" ]] && show_list+="clips "
+    [[ "$SHOW_TOURNAMENTS" == "yes" ]] && show_list+="tournaments "
+    log_info "Showing: ${BOLD}${show_list:-none}${RESET}"
+
+    if $foreground; then
+        log_info "Running in foreground (Ctrl+C to stop)"
+        echo $$ > "$PID_FILE"
+        trap 'rm -f "$PID_FILE"; log_info "Overlay stopped"' EXIT
+        exec python3 "$RENDERER_SCRIPT"
+    else
+        python3 "$RENDERER_SCRIPT" &
+        local pid=$!
+        echo "$pid" > "$PID_FILE"
+        disown "$pid" 2>/dev/null || true
+        log_ok "Overlay daemon started (PID ${pid})"
+        log_info "Toggle with: ${CYAN}forge-overlay toggle${RESET}"
+        log_info "Stop with: ${CYAN}forge-overlay stop${RESET}"
+    fi
+}
+
+cmd_stop() {
+    if ! is_running; then
+        log_warn "Overlay is not running"
+        return 1
+    fi
+
+    local pid
+    pid=$(get_pid)
+    kill "$pid" 2>/dev/null || true
+
+    # Wait briefly for clean shutdown
+    local tries=0
+    while kill -0 "$pid" 2>/dev/null && (( tries < 10 )); do
+        sleep 0.2
+        (( tries++ ))
+    done
+
+    # Force kill if still alive
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+
+    rm -f "$PID_FILE"
+    log_ok "Overlay stopped (was PID ${pid})"
+}
+
+cmd_toggle() {
+    if ! is_running; then
+        log_warn "Overlay is not running"
+        log_info "Start it with: ${CYAN}forge-overlay start${RESET}"
+        return 1
+    fi
+
+    local pid
+    pid=$(get_pid)
+    kill -USR1 "$pid" 2>/dev/null
+    log_ok "Toggled overlay visibility (PID ${pid})"
+}
+
+cmd_status() {
+    echo -e "${MAGENTA}${BOLD}Forge Overlay Status${RESET}"
+    echo -e "${DIM}─────────────────────────────────────${RESET}"
+
+    if is_running; then
+        local pid
+        pid=$(get_pid)
+        echo -e "  State:    ${GREEN}${BOLD}Running${RESET} (PID ${pid})"
+
+        # Show uptime if /proc available
+        if [[ -d "/proc/${pid}" ]]; then
+            local start_time
+            start_time=$(stat -c %Y "/proc/${pid}" 2>/dev/null || echo "")
+            if [[ -n "$start_time" ]]; then
+                local now
+                now=$(date +%s)
+                local uptime=$(( now - start_time ))
+                local hours=$(( uptime / 3600 ))
+                local mins=$(( (uptime % 3600) / 60 ))
+                echo -e "  Uptime:   ${hours}h ${mins}m"
+            fi
+        fi
+    else
+        echo -e "  State:    ${RED}${BOLD}Stopped${RESET}"
+    fi
+
+    load_config
+    echo -e "  Position: ${POSITION}"
+    echo -e "  Opacity:  ${OPACITY}%"
+    echo -e "  Interval: ${POLL_INTERVAL}s"
+
+    if [[ -f "$TOKEN_FILE" ]]; then
+        echo -e "  Auth:     ${GREEN}Token present${RESET}"
+    else
+        echo -e "  Auth:     ${YELLOW}No token${RESET}"
+    fi
+
+    echo -e "${DIM}─────────────────────────────────────${RESET}"
+}
+
+cmd_config() {
+    ensure_config
+
+    if command -v "${EDITOR:-nano}" &>/dev/null; then
+        "${EDITOR:-nano}" "$CONFIG_FILE"
+    elif command -v vi &>/dev/null; then
+        vi "$CONFIG_FILE"
+    else
+        log_err "No editor found. Set \$EDITOR or install nano"
+        log_info "Config file: ${CONFIG_FILE}"
+        return 1
+    fi
+
+    log_ok "Config saved. Restart the overlay to apply changes."
+    log_info "Run: ${CYAN}forge-overlay stop && forge-overlay start${RESET}"
+}
+
+# ── Usage ───────────────────────────────────────────────────────────────────
+
+usage() {
+    echo -e "${MAGENTA}${BOLD}24HG Forge Overlay${RESET}"
+    echo -e "${DIM}In-game friend activity and notification overlay${RESET}"
+    echo
+    echo -e "${BOLD}Usage:${RESET} forge-overlay <command> [options]"
+    echo
+    echo -e "${BOLD}Commands:${RESET}"
+    echo -e "  ${GREEN}start${RESET}   [--foreground]  Start the overlay daemon"
+    echo -e "  ${RED}stop${RESET}                    Stop the overlay"
+    echo -e "  ${YELLOW}toggle${RESET}                  Toggle visibility (bind to a key)"
+    echo -e "  ${CYAN}status${RESET}                  Show overlay status"
+    echo -e "  ${BLUE}config${RESET}                  Edit overlay settings"
+    echo
+    echo -e "${BOLD}Config:${RESET} ${DIM}${CONFIG_FILE}${RESET}"
+    echo -e "${BOLD}Logs:${RESET}   ${DIM}journalctl -t forge-overlay${RESET}"
+}
+
+# ── Entry point ─────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    start)   shift; cmd_start "$@" ;;
+    stop)    cmd_stop ;;
+    toggle)  cmd_toggle ;;
+    status)  cmd_status ;;
+    config)  cmd_config ;;
+    -h|--help|help) usage ;;
+    *)       usage; exit 1 ;;
+esac

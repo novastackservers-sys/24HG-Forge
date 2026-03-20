@@ -26,16 +26,20 @@ cp hub-app/forge-tray "${STAGE}/bin/"
 cp hub-app/forge-tray.desktop "${STAGE}/desktop/"
 cp hub-app/forge-gamescope-session "${STAGE}/bin/"
 
-# Desktop files from scripts
+# Desktop files from scripts/ and desktop/ directories
 for f in scripts/*.desktop; do
+    [ -f "$f" ] && cp "$f" "${STAGE}/desktop/"
+done
+for f in desktop/*.desktop; do
     [ -f "$f" ] && cp "$f" "${STAGE}/desktop/"
 done
 
 # Lib scripts
 for f in scripts/forge-first-boot-setup.sh scripts/configure-steam-servers.sh \
-         scripts/forge-auto-update.sh scripts/forge-game-configs.sh \
+         scripts/forge-auto-update.sh scripts/forge-heartbeat.sh \
+         scripts/forge-game-configs.sh \
          scripts/forge-obs-setup.sh scripts/gamemode-start.sh scripts/gamemode-end.sh \
-         scripts/forge-update-guard-hook.sh; do
+         scripts/forge-update-guard-hook.sh scripts/forge-i18n.sh; do
     [ -f "$f" ] && cp "$f" "${STAGE}/lib/$(basename "$f")"
 done
 
@@ -75,6 +79,7 @@ cp system_files/etc/skel/.config/plasmanotifyrc "${STAGE}/plasmanotifyrc" 2>/dev
 cp system_files/etc/skel/.config/dolphinrc "${STAGE}/skel-dolphinrc" 2>/dev/null || true
 cp system_files/etc/skel/.config/kwinrulesrc "${STAGE}/skel-kwinrulesrc" 2>/dev/null || true
 cp system_files/etc/skel/.config/kscreenlockerrc "${STAGE}/skel-kscreenlockerrc" 2>/dev/null || true
+cp system_files/etc/skel/.config/spectaclerc "${STAGE}/skel-spectaclerc" 2>/dev/null || true
 cp -r system_files/etc/skel/.config/kwinrc.d/* "${STAGE}/skel-kwinrc.d/" 2>/dev/null || true
 cp system_files/etc/skel/.local/share/user-places.xbel "${STAGE}/skel-user-places.xbel" 2>/dev/null || true
 cp -r system_files/etc/skel/.local/share/kservices5/* "${STAGE}/skel-kservices5/" 2>/dev/null || true

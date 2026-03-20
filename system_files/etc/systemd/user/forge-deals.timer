@@ -1,0 +1,10 @@
+[Unit]
+Description=24HG Forge Deals Check Timer
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

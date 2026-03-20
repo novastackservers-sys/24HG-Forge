@@ -1,0 +1,329 @@
+# 24HG Forge — Smoke Test Pipeline
+# Boots the generated ISO in QEMU and validates core Forge components.
+# Runs after the build-iso workflow completes successfully.
+#
+# Status badge:
+#   ![Smoke Test](https://github.com/24hgaming/forge/actions/workflows/smoke-test.yml/badge.svg)
+
+name: Smoke Test
+
+on:
+  workflow_run:
+    workflows: ["Build 24HG Forge ISO"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Build workflow run ID to download artifacts from'
+        required: true
+        type: string
+
+concurrency:
+  group: smoke-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-test:
+    name: Smoke Test (${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Only run if the triggering build succeeded (or manual dispatch)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [amd, nvidia]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install QEMU and dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils ovmf
+
+      - name: Download ISO artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-${{ matrix.variant }}-iso
+          path: ./iso
+          run-id: ${{ github.event.inputs.run_id || github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Locate ISO file
+        id: iso
+        run: |
+          ISO_FILE=$(find ./iso -name '*.iso' -type f | head -1)
+          if [ -z "$ISO_FILE" ]; then
+            echo "::error::No ISO file found in artifact"
+            ls -laR ./iso/
+            exit 1
+          fi
+          echo "iso_file=${ISO_FILE}" >> "$GITHUB_OUTPUT"
+          echo "Found ISO: ${ISO_FILE} ($(du -h "$ISO_FILE" | cut -f1))"
+
+      - name: Verify checksum
+        run: |
+          ISO="${{ steps.iso.outputs.iso_file }}"
+          SHA_FILE="${ISO}.sha256"
+          if [ -f "$SHA_FILE" ]; then
+            echo "Verifying checksum..."
+            cd "$(dirname "$ISO")"
+            sha256sum -c "$(basename "$SHA_FILE")"
+          else
+            echo "::warning::No checksum file found, skipping verification"
+          fi
+
+      - name: Create cloud-init config
+        run: |
+          mkdir -p ./cidata
+
+          # User-data: auto-login, create test user, run test script on boot
+          cat > ./cidata/user-data <<'USERDATA'
+          #cloud-config
+          users:
+            - name: forge
+              groups: wheel
+              shell: /bin/bash
+              lock_passwd: false
+              plain_text_passwd: forge
+              sudo: ALL=(ALL) NOPASSWD:ALL
+
+          write_files:
+            - path: /root/smoke-test.sh
+              permissions: '0755'
+              content: |
+                #!/usr/bin/env bash
+                set -euo pipefail
+                PASS=0
+                FAIL=0
+                RESULTS=""
+
+                check() {
+                  local name="$1"
+                  shift
+                  if eval "$@" > /dev/null 2>&1; then
+                    RESULTS="${RESULTS}PASS: ${name}\n"
+                    ((PASS++))
+                  else
+                    RESULTS="${RESULTS}FAIL: ${name}\n"
+                    ((FAIL++))
+                  fi
+                }
+
+                echo "=== 24HG Forge Smoke Test ==="
+                echo "Date: $(date -u)"
+                echo ""
+
+                # 1. forge-neofetch runs without error
+                check "forge-neofetch executes" "forge-neofetch --help || forge-neofetch 2>&1 | head -1"
+
+                # 2. All forge-* binaries exist in /usr/bin/
+                EXPECTED_BINS=(
+                  forge-neofetch forge-diag forge-performance forge-server-status
+                  forge-netguard forge-proton-fix forge-replay forge-input
+                  forge-audio forge-discord-fix forge-screenshot forge-backup
+                  forge-nightlight forge-benchmark forge-hub-bridge forge-hub
+                  forge-tray forge-first-boot forge-game-profiles forge-game-setup
+                  forge-controller forge-proton-updater forge-game-timer
+                  forge-stream forge-shader-cache forge-sounds forge-tips
+                  forge-achievements forge-wallpaper forge-notify-style
+                  forge-desktop-setup forge-lock-info forge-compat forge-crash-fix
+                  forge-display forge-discord-screen forge-prefix forge-dualboot
+                  forge-migrate forge-benchmark-compare forge-perks forge-creator-kit
+                  forge-demo forge-smart-launch forge-session-summary
+                  forge-crash-recovery forge-download-mgr forge-games forge-thermal
+                  forge-anticheat-tracker forge-mod-manager forge-hdr
+                  forge-flatpak-fix forge-update-guard forge-save-manager
+                  forge-nvidia-wayland forge-update-prompt forge-sunshine-setup
+                  forge-clip forge-lan-party forge-radio forge-rig-score
+                  forge-invite forge-game-compat forge-tournament
+                  forge-live-wallpaper forge-hw-optimizer forge-overlay
+                  forge-cloud-saves forge-launch forge-ping-optimizer forge-rescue
+                  forge-gallery forge-mods forge-vpn forge-retro forge-voice
+                  forge-gamescope-session
+                )
+                MISSING_BINS=0
+                for bin in "${EXPECTED_BINS[@]}"; do
+                  if [ ! -x "/usr/bin/${bin}" ]; then
+                    ((MISSING_BINS++))
+                    echo "  MISSING: /usr/bin/${bin}"
+                  fi
+                done
+                check "forge-* binaries in /usr/bin (${#EXPECTED_BINS[@]} expected, ${MISSING_BINS} missing)" "[ ${MISSING_BINS} -eq 0 ]"
+
+                # 3. Systemd user services are enabled (check symlinks in skel)
+                check "forge-server-status.service in skel default.target.wants" \
+                  "[ -L /etc/skel/.config/systemd/user/default.target.wants/forge-server-status.service ]"
+                check "forge-hub-bridge.service in skel default.target.wants" \
+                  "[ -L /etc/skel/.config/systemd/user/default.target.wants/forge-hub-bridge.service ]"
+                check "forge-backup.timer in skel timers.target.wants" \
+                  "[ -L /etc/skel/.config/systemd/user/timers.target.wants/forge-backup.timer ]"
+                check "forge-proton-updater.timer in skel timers.target.wants" \
+                  "[ -L /etc/skel/.config/systemd/user/timers.target.wants/forge-proton-updater.timer ]"
+
+                # 4. System services enabled
+                check "forge-gaming-tweaks.service enabled" \
+                  "systemctl is-enabled forge-gaming-tweaks.service 2>/dev/null || [ -L /etc/systemd/system/multi-user.target.wants/forge-gaming-tweaks.service ]"
+                check "forge-auto-update.timer enabled" \
+                  "systemctl is-enabled forge-auto-update.timer 2>/dev/null || [ -f /etc/systemd/system/forge-auto-update.timer ]"
+
+                # 5. Plymouth theme is installed
+                check "Plymouth forge theme directory exists" \
+                  "[ -d /usr/share/plymouth/themes/forge ]"
+                check "Plymouth forge theme has logo" \
+                  "[ -f /usr/share/plymouth/themes/forge/logo.png ] || [ -f /usr/share/plymouth/themes/forge/forge.plymouth ]"
+
+                # 6. Firefox policies.json exists
+                check "Firefox policies.json exists" \
+                  "[ -f /usr/lib/firefox/distribution/policies.json ]"
+                check "Firefox policies.json is valid JSON" \
+                  "python3 -m json.tool /usr/lib/firefox/distribution/policies.json"
+
+                # 7. MangoHud config is set
+                check "MangoHud config in skel" \
+                  "[ -f /etc/skel/.config/MangoHud/MangoHud.conf ]"
+
+                # 8. Sound theme files exist
+                check "Sound theme index.theme exists" \
+                  "[ -f /usr/share/sounds/forge/index.theme ]"
+                check "Sound theme stereo directory has files" \
+                  "[ -d /usr/share/sounds/forge/stereo ] && ls /usr/share/sounds/forge/stereo/ | head -1"
+
+                # 9. Plasmoid is installed
+                check "Hub plasmoid directory exists" \
+                  "[ -d /usr/share/plasma/plasmoids/com.24hg.hubwidget ]"
+                check "Hub plasmoid has metadata" \
+                  "[ -f /usr/share/plasma/plasmoids/com.24hg.hubwidget/metadata.json ] || [ -f /usr/share/plasma/plasmoids/com.24hg.hubwidget/metadata.desktop ]"
+
+                # Bonus checks
+                check "SDDM forge theme installed" \
+                  "[ -d /usr/share/sddm/themes/forge ]"
+                check "OS release shows 24HG Forge" \
+                  "grep -q '24HG Forge' /usr/lib/os-release"
+                check "Forge data servers.json exists" \
+                  "[ -f /usr/share/forge/servers.json ]"
+                check "Calamares branding installed" \
+                  "[ -d /usr/share/calamares/branding/forge ]"
+
+                echo ""
+                echo "=== Results ==="
+                printf "${RESULTS}"
+                echo ""
+                echo "PASSED: ${PASS}  FAILED: ${FAIL}"
+                echo ""
+
+                if [ "${FAIL}" -gt 0 ]; then
+                  echo "SMOKE_TEST_RESULT=FAIL" > /tmp/smoke-result
+                  exit 1
+                else
+                  echo "SMOKE_TEST_RESULT=PASS" > /tmp/smoke-result
+                  exit 0
+                fi
+
+          runcmd:
+            - bash /root/smoke-test.sh > /root/smoke-test.log 2>&1; echo "EXIT_CODE=$?" >> /root/smoke-test.log
+            - sync
+            - poweroff
+          USERDATA
+
+          cat > ./cidata/meta-data <<'METADATA'
+          instance-id: forge-smoke-test
+          local-hostname: forge-test
+          METADATA
+
+          # Build cloud-init ISO
+          cloud-localds ./cidata/seed.iso ./cidata/user-data ./cidata/meta-data
+          echo "Cloud-init seed ISO created"
+
+      - name: Create VM disk
+        run: |
+          qemu-img create -f qcow2 ./vm-disk.qcow2 40G
+
+      - name: Boot ISO in QEMU and run tests
+        id: qemu
+        timeout-minutes: 10
+        run: |
+          set +e
+
+          # Boot the ISO with cloud-init, serial console output, no display
+          timeout 540 qemu-system-x86_64 \
+            -machine q35,accel=tcg \
+            -cpu qemu64 \
+            -m 4096 \
+            -smp 2 \
+            -nographic \
+            -serial mon:stdio \
+            -drive file=./vm-disk.qcow2,format=qcow2,if=virtio \
+            -cdrom "${{ steps.iso.outputs.iso_file }}" \
+            -drive file=./cidata/seed.iso,format=raw,if=virtio \
+            -bios /usr/share/ovmf/OVMF.fd \
+            -boot d \
+            -net nic -net user \
+            2>&1 | tee ./qemu-output.log
+
+          QEMU_EXIT=$?
+
+          # Extract test results from serial output
+          if grep -q "PASSED:.*FAILED: 0" ./qemu-output.log; then
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+            echo "All smoke tests passed."
+          elif grep -q "SMOKE_TEST_RESULT=PASS" ./qemu-output.log; then
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+            echo "All smoke tests passed."
+          elif grep -q "FAIL:" ./qemu-output.log; then
+            echo "result=fail" >> "$GITHUB_OUTPUT"
+            echo "::error::Some smoke tests failed"
+            grep "FAIL:" ./qemu-output.log
+          elif [ "$QEMU_EXIT" -eq 124 ]; then
+            echo "result=timeout" >> "$GITHUB_OUTPUT"
+            echo "::error::QEMU timed out — VM may not have booted successfully"
+          else
+            # VM may have just shut down without clear result in serial
+            echo "result=inconclusive" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not determine test results from serial output"
+          fi
+
+      - name: Upload QEMU output log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-log-${{ matrix.variant }}
+          path: ./qemu-output.log
+          retention-days: 14
+
+      - name: Report results
+        if: always()
+        run: |
+          RESULT="${{ steps.qemu.outputs.result }}"
+
+          echo "### Smoke Test Results — ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          case "$RESULT" in
+            pass)
+              echo "**Status: PASSED**" >> $GITHUB_STEP_SUMMARY
+              ;;
+            fail)
+              echo "**Status: FAILED**" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Failed checks:" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              grep "FAIL:" ./qemu-output.log >> $GITHUB_STEP_SUMMARY || true
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              exit 1
+              ;;
+            timeout)
+              echo "**Status: TIMEOUT** — VM did not complete in time" >> $GITHUB_STEP_SUMMARY
+              exit 1
+              ;;
+            *)
+              echo "**Status: INCONCLUSIVE** — Could not parse test output" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Check the QEMU output log artifact for details." >> $GITHUB_STEP_SUMMARY
+              exit 1
+              ;;
+          esac

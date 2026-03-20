@@ -1,0 +1,1217 @@
+#!/bin/bash
+# 24HG Forge Performance Logger & Analyzer
+# Records, analyzes, and visualizes gaming performance metrics.
+#
+# Usage: forge-perflog <command> [args]
+#   start [game]          Start recording performance metrics
+#   stop                  Stop recording and save session
+#   list                  List recorded sessions
+#   view <session>        View a session's performance summary
+#   graph <session>       Render ASCII graphs of a session's metrics
+#   compare <s1> <s2>     Compare two sessions side by side
+#   export <session>      Export session data as CSV
+#   live                  Show live performance metrics (gaming-focused htop)
+#   daemon                Auto-start recording when games launch
+
+set -euo pipefail
+
+# --- Constants & Colors ---
+DATA_DIR="$HOME/.local/share/forge/perflog"
+PID_FILE="/tmp/forge-perflog.pid"
+SAMPLE_FILE="/tmp/forge-perflog-samples.json"
+SESSION_META="/tmp/forge-perflog-meta.json"
+SAMPLE_INTERVAL=1
+FPS_TARGET="${FORGE_FPS_TARGET:-60}"
+
+BOLD='\033[1m'
+DIM='\033[2m'
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+BLUE='\033[34m'
+MAGENTA='\033[35m'
+CYAN='\033[36m'
+WHITE='\033[37m'
+BG_RED='\033[41m'
+BG_GREEN='\033[42m'
+BG_YELLOW='\033[43m'
+RESET='\033[0m'
+
+mkdir -p "$DATA_DIR"
+
+# --- Helper Functions ---
+
+die() { echo -e "${RED}Error: $1${RESET}" >&2; exit 1; }
+
+header() {
+    echo -e "\n${BOLD}${CYAN}=== $1 ===${RESET}"
+}
+
+color_value() {
+    local val="$1" warn="${2:-70}" crit="${3:-90}" invert="${4:-0}"
+    local num="${val%%.*}"
+    if [[ "$invert" == "1" ]]; then
+        if (( num >= crit )); then echo -e "${RED}${val}${RESET}"
+        elif (( num >= warn )); then echo -e "${YELLOW}${val}${RESET}"
+        else echo -e "${GREEN}${val}${RESET}"; fi
+    else
+        if (( num >= crit )); then echo -e "${GREEN}${val}${RESET}"
+        elif (( num >= warn )); then echo -e "${YELLOW}${val}${RESET}"
+        else echo -e "${RED}${val}${RESET}"; fi
+    fi
+}
+
+# Read CPU usage from /proc/stat — returns overall and per-core usage
+get_cpu_usage() {
+    local stat1 stat2
+    stat1=$(grep '^cpu' /proc/stat)
+    sleep 0.1
+    stat2=$(grep '^cpu' /proc/stat)
+
+    while IFS= read -r line1; do
+        local name1 rest1
+        name1=$(echo "$line1" | awk '{print $1}')
+        local line2
+        line2=$(echo "$stat2" | grep "^${name1} ")
+        [[ -z "$line2" ]] && continue
+
+        local u1 n1 s1 i1 w1 q1 sq1 st1
+        read -r _ u1 n1 s1 i1 w1 q1 sq1 st1 <<< "$line1"
+        local u2 n2 s2 i2 w2 q2 sq2 st2
+        read -r _ u2 n2 s2 i2 w2 q2 sq2 st2 <<< "$line2"
+
+        local total1=$(( u1+n1+s1+i1+w1+q1+sq1+${st1:-0} ))
+        local total2=$(( u2+n2+s2+i2+w2+q2+sq2+${st2:-0} ))
+        local idle1=$i1 idle2=$i2
+        local dtotal=$(( total2 - total1 ))
+        local didle=$(( idle2 - idle1 ))
+
+        if (( dtotal > 0 )); then
+            echo "${name1}:$(( (dtotal - didle) * 100 / dtotal ))"
+        else
+            echo "${name1}:0"
+        fi
+    done <<< "$stat1"
+}
+
+get_cpu_temps() {
+    # Try hwmon first
+    for hwmon in /sys/class/hwmon/hwmon*/; do
+        local name=""
+        [[ -f "${hwmon}name" ]] && name=$(cat "${hwmon}name")
+        if [[ "$name" == "coretemp" || "$name" == "k10temp" || "$name" == "zenpower" ]]; then
+            for temp_input in "${hwmon}"temp*_input; do
+                [[ -f "$temp_input" ]] || continue
+                local val
+                val=$(cat "$temp_input" 2>/dev/null || echo "0")
+                echo "$(( val / 1000 ))"
+                return
+            done
+        fi
+    done
+    # Fallback: first temp input found
+    for temp_input in /sys/class/hwmon/hwmon*/temp1_input; do
+        [[ -f "$temp_input" ]] || continue
+        local val
+        val=$(cat "$temp_input" 2>/dev/null || echo "0")
+        echo "$(( val / 1000 ))"
+        return
+    done
+    echo "0"
+}
+
+get_cpu_freq() {
+    local total=0 count=0
+    for freq_file in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
+        [[ -f "$freq_file" ]] || continue
+        local freq
+        freq=$(cat "$freq_file" 2>/dev/null || echo "0")
+        total=$(( total + freq ))
+        count=$(( count + 1 ))
+    done
+    if (( count > 0 )); then
+        echo "$(( total / count / 1000 ))"
+    else
+        echo "0"
+    fi
+}
+
+get_gpu_nvidia() {
+    if ! command -v nvidia-smi &>/dev/null; then return 1; fi
+    local out
+    out=$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,clocks.gr,memory.used,memory.total \
+        --format=csv,noheader,nounits 2>/dev/null) || return 1
+    echo "nvidia:${out// /}"
+}
+
+get_gpu_amd() {
+    for card in /sys/class/drm/card*/device/gpu_busy_percent; do
+        [[ -f "$card" ]] || continue
+        local base dir usage temp clock vram_used vram_total
+        base=$(dirname "$card")
+        dir=$(dirname "$base")
+        usage=$(cat "$card" 2>/dev/null || echo "0")
+        temp="0"
+        for hwmon in "${base}"/hwmon/hwmon*/temp1_input; do
+            [[ -f "$hwmon" ]] && temp=$(( $(cat "$hwmon") / 1000 )) && break
+        done
+        clock="0"
+        if [[ -f "${base}/pp_dpm_sclk" ]]; then
+            clock=$(grep '\*' "${base}/pp_dpm_sclk" 2>/dev/null | grep -oP '\d+(?=Mhz)' || echo "0")
+        fi
+        vram_used="0"; vram_total="0"
+        [[ -f "${base}/mem_info_vram_used" ]] && vram_used=$(( $(cat "${base}/mem_info_vram_used") / 1048576 ))
+        [[ -f "${base}/mem_info_vram_total" ]] && vram_total=$(( $(cat "${base}/mem_info_vram_total") / 1048576 ))
+        echo "amd:${usage},${temp},${clock},${vram_used},${vram_total}"
+        return
+    done
+    return 1
+}
+
+get_gpu_info() {
+    get_gpu_nvidia 2>/dev/null || get_gpu_amd 2>/dev/null || echo "none:0,0,0,0,0"
+}
+
+get_ram_info() {
+    local total avail used swap_total swap_free swap_used
+    total=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+    avail=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
+    used=$(( total - avail ))
+    swap_total=$(awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo)
+    swap_free=$(awk '/^SwapFree:/ {print int($2/1024)}' /proc/meminfo)
+    swap_used=$(( swap_total - swap_free ))
+    echo "${used},${total},${swap_used},${swap_total}"
+}
+
+get_net_bytes() {
+    awk 'NR>2 {r+=$2; t+=$10} END {print r, t}' /proc/net/dev
+}
+
+get_disk_io() {
+    # Returns sectors read, sectors written across all disks
+    awk '$3 ~ /^(sd|nvme|vd)/ && $3 !~ /[0-9]p?[0-9]/ {r+=$6; w+=$10} END {print r+0, w+0}' /proc/diskstats
+}
+
+get_fps() {
+    # Try MangoHud log first
+    local mh_log
+    mh_log=$(ls -t /tmp/mangohud_*.csv 2>/dev/null | head -1)
+    if [[ -n "$mh_log" && -f "$mh_log" ]]; then
+        tail -1 "$mh_log" 2>/dev/null | awk -F',' '{print $2+0}' | grep -oP '^\d+' || echo "0"
+        return
+    fi
+    # Try MangoHud frametime
+    local ft_file="/tmp/mangohud_frametime.log"
+    if [[ -f "$ft_file" ]]; then
+        local ft
+        ft=$(tail -1 "$ft_file" 2>/dev/null | awk '{print $1}')
+        if [[ -n "$ft" ]] && (( $(echo "$ft > 0" | bc -l 2>/dev/null || echo 0) )); then
+            echo "$(echo "1000 / $ft" | bc 2>/dev/null || echo 0)"
+            return
+        fi
+    fi
+    # Try gamemode/steam frametime paths
+    for path in "$HOME/.steam/steam/logs/frame_timing.csv" \
+                "$HOME/.local/share/Steam/logs/frame_timing.csv"; do
+        if [[ -f "$path" ]]; then
+            tail -1 "$path" 2>/dev/null | awk -F',' '{if($1>0) printf "%d\n", 1000/$1; else print 0}' || echo "0"
+            return
+        fi
+    done
+    echo "0"
+}
+
+# --- Sampling ---
+
+collect_sample() {
+    local cpu_data cpu_overall cpu_cores cpu_temp cpu_freq
+    local gpu_raw gpu_type gpu_usage gpu_temp gpu_clock gpu_vram_used gpu_vram_total
+    local ram_raw ram_used ram_total swap_used swap_total
+    local fps net_now disk_now ts
+
+    ts=$(date +%s)
+    fps=$(get_fps)
+
+    cpu_data=$(get_cpu_usage)
+    cpu_overall=$(echo "$cpu_data" | head -1 | cut -d: -f2)
+    cpu_cores=$(echo "$cpu_data" | tail -n +2 | cut -d: -f2 | paste -sd,)
+    cpu_temp=$(get_cpu_temps)
+    cpu_freq=$(get_cpu_freq)
+
+    gpu_raw=$(get_gpu_info)
+    gpu_type="${gpu_raw%%:*}"
+    IFS=',' read -r gpu_usage gpu_temp gpu_clock gpu_vram_used gpu_vram_total <<< "${gpu_raw#*:}"
+
+    ram_raw=$(get_ram_info)
+    IFS=',' read -r ram_used ram_total swap_used swap_total <<< "$ram_raw"
+
+    net_now=$(get_net_bytes)
+    disk_now=$(get_disk_io)
+
+    cat <<SAMPLE
+{"ts":${ts},"fps":${fps:-0},"cpu":${cpu_overall:-0},"cpu_cores":[${cpu_cores:-0}],"cpu_temp":${cpu_temp:-0},"cpu_freq":${cpu_freq:-0},"gpu_type":"${gpu_type}","gpu":${gpu_usage:-0},"gpu_temp":${gpu_temp:-0},"gpu_clock":${gpu_clock:-0},"gpu_vram_used":${gpu_vram_used:-0},"gpu_vram_total":${gpu_vram_total:-0},"ram_used":${ram_used:-0},"ram_total":${ram_total:-0},"swap_used":${swap_used:-0},"swap_total":${swap_total:-0},"net_rx":${net_now%% *},"net_tx":${net_now##* },"disk_r":${disk_now%% *},"disk_w":${disk_now##* }}
+SAMPLE
+}
+
+# --- Commands ---
+
+cmd_start() {
+    local game="${1:-unknown}"
+    if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        die "Recording already in progress (PID $(cat "$PID_FILE")). Run 'forge-perflog stop' first."
+    fi
+
+    local start_ts
+    start_ts=$(date +%s)
+    local start_iso
+    start_iso=$(date -Iseconds)
+
+    cat > "$SESSION_META" <<EOF
+{"game":"${game}","start_ts":${start_ts},"start_iso":"${start_iso}"}
+EOF
+
+    echo '[]' > "$SAMPLE_FILE"
+
+    echo -e "${GREEN}${BOLD}Recording started${RESET} for ${CYAN}${game}${RESET}"
+    echo -e "  Sampling every ${SAMPLE_INTERVAL}s. Run ${BOLD}forge-perflog stop${RESET} to finish."
+
+    # Background sampler
+    (
+        trap 'exit 0' TERM INT
+        local prev_net_rx=0 prev_net_tx=0 prev_disk_r=0 prev_disk_w=0 first=1
+        while true; do
+            local sample
+            sample=$(collect_sample)
+
+            # Compute deltas for net and disk
+            local net_rx net_tx disk_r disk_w
+            net_rx=$(echo "$sample" | grep -oP '"net_rx":\K[0-9]+')
+            net_tx=$(echo "$sample" | grep -oP '"net_tx":\K[0-9]+')
+            disk_r=$(echo "$sample" | grep -oP '"disk_r":\K[0-9]+')
+            disk_w=$(echo "$sample" | grep -oP '"disk_w":\K[0-9]+')
+
+            if (( first )); then
+                prev_net_rx=$net_rx; prev_net_tx=$net_tx
+                prev_disk_r=$disk_r; prev_disk_w=$disk_w
+                first=0
+                sleep "$SAMPLE_INTERVAL"
+                continue
+            fi
+
+            local net_rx_rate=$(( (net_rx - prev_net_rx) ))
+            local net_tx_rate=$(( (net_tx - prev_net_tx) ))
+            local disk_r_rate=$(( (disk_r - prev_disk_r) * 512 ))
+            local disk_w_rate=$(( (disk_w - prev_disk_w) * 512 ))
+            prev_net_rx=$net_rx; prev_net_tx=$net_tx
+            prev_disk_r=$disk_r; prev_disk_w=$disk_w
+
+            # Replace raw counters with rates
+            sample=$(echo "$sample" | sed \
+                -e "s/\"net_rx\":${net_rx}/\"net_rx_bps\":${net_rx_rate}/" \
+                -e "s/\"net_tx\":${net_tx}/\"net_tx_bps\":${net_tx_rate}/" \
+                -e "s/\"disk_r\":${disk_r}/\"disk_r_bps\":${disk_r_rate}/" \
+                -e "s/\"disk_w\":${disk_w}/\"disk_w_bps\":${disk_w_rate}/")
+
+            # Append sample (atomic write via temp file)
+            local tmp
+            tmp=$(mktemp)
+            if command -v jq &>/dev/null; then
+                jq --argjson s "$sample" '. += [$s]' "$SAMPLE_FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$SAMPLE_FILE"
+            else
+                # Fallback: manual JSON array append
+                local content
+                content=$(cat "$SAMPLE_FILE")
+                if [[ "$content" == "[]" ]]; then
+                    echo "[${sample}]" > "$tmp"
+                else
+                    echo "${content%]},${sample}]" > "$tmp"
+                fi
+                mv "$tmp" "$SAMPLE_FILE"
+            fi
+
+            sleep "$SAMPLE_INTERVAL"
+        done
+    ) &
+
+    echo "$!" > "$PID_FILE"
+    disown
+}
+
+cmd_stop() {
+    if [[ ! -f "$PID_FILE" ]]; then
+        die "No recording in progress."
+    fi
+
+    local pid
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+
+    if [[ ! -f "$SESSION_META" || ! -f "$SAMPLE_FILE" ]]; then
+        die "Session data missing."
+    fi
+
+    local meta game start_ts end_ts duration sample_count session_name out_file
+    meta=$(cat "$SESSION_META")
+    game=$(echo "$meta" | grep -oP '"game":"\K[^"]+')
+    start_ts=$(echo "$meta" | grep -oP '"start_ts":\K[0-9]+')
+    end_ts=$(date +%s)
+    duration=$(( end_ts - start_ts ))
+    sample_count=$(wc -l < <(grep -c '"ts"' "$SAMPLE_FILE" || echo 0))
+    session_name="$(date -d @"$start_ts" +%Y%m%d-%H%M%S)-${game}"
+    out_file="${DATA_DIR}/${session_name}.json"
+
+    # Build final session file
+    if command -v jq &>/dev/null; then
+        jq -n \
+            --arg game "$game" \
+            --argjson start "$start_ts" \
+            --argjson end "$end_ts" \
+            --argjson dur "$duration" \
+            --arg start_iso "$(date -d @"$start_ts" -Iseconds)" \
+            --arg end_iso "$(date -Iseconds)" \
+            --argjson fps_target "$FPS_TARGET" \
+            --slurpfile samples "$SAMPLE_FILE" \
+            '{game:$game, start_ts:$start, end_ts:$end, duration:$dur,
+              start_iso:$start_iso, end_iso:$end_iso, fps_target:$fps_target,
+              samples:$samples[0]}' > "$out_file"
+    else
+        local samples
+        samples=$(cat "$SAMPLE_FILE")
+        cat > "$out_file" <<EOF
+{"game":"${game}","start_ts":${start_ts},"end_ts":${end_ts},"duration":${duration},"start_iso":"$(date -d @"$start_ts" -Iseconds)","end_iso":"$(date -Iseconds)","fps_target":${FPS_TARGET},"samples":${samples}}
+EOF
+    fi
+
+    rm -f "$SESSION_META" "$SAMPLE_FILE"
+
+    echo -e "${GREEN}${BOLD}Recording stopped.${RESET}"
+    echo -e "  Game:     ${CYAN}${game}${RESET}"
+    echo -e "  Duration: ${duration}s"
+    echo -e "  Saved:    ${out_file}"
+    echo -e "\nView with: ${BOLD}forge-perflog view ${session_name}${RESET}"
+}
+
+cmd_list() {
+    header "Recorded Sessions"
+    local count=0
+    for f in "$DATA_DIR"/*.json; do
+        [[ -f "$f" ]] || continue
+        local name game dur
+        name=$(basename "$f" .json)
+        if command -v jq &>/dev/null; then
+            game=$(jq -r '.game' "$f")
+            dur=$(jq -r '.duration' "$f")
+        else
+            game=$(grep -oP '"game":"\K[^"]+' "$f")
+            dur=$(grep -oP '"duration":\K[0-9]+' "$f")
+        fi
+        local mins=$(( dur / 60 ))
+        local secs=$(( dur % 60 ))
+        printf "  ${BOLD}%-35s${RESET}  ${CYAN}%-15s${RESET}  %dm %ds\n" "$name" "$game" "$mins" "$secs"
+        count=$(( count + 1 ))
+    done
+    if (( count == 0 )); then
+        echo -e "  ${DIM}No sessions recorded yet. Run 'forge-perflog start [game]' to begin.${RESET}"
+    else
+        echo -e "\n  ${DIM}${count} session(s) found.${RESET}"
+    fi
+}
+
+resolve_session() {
+    local name="$1"
+    local path="${DATA_DIR}/${name}.json"
+    if [[ -f "$path" ]]; then echo "$path"; return; fi
+    # Try partial match
+    local matches
+    matches=$(ls "$DATA_DIR"/*"${name}"*.json 2>/dev/null | head -1)
+    if [[ -n "$matches" ]]; then echo "$matches"; return; fi
+    die "Session '${name}' not found. Run 'forge-perflog list' to see sessions."
+}
+
+# Extract numeric array from samples JSON using field name
+extract_field() {
+    local file="$1" field="$2"
+    if command -v jq &>/dev/null; then
+        jq -r ".samples[].$field // 0" "$file"
+    else
+        grep -oP "\"${field}\":\K[0-9.]+" "$file"
+    fi
+}
+
+calc_stats() {
+    local values="$1"
+    local count avg min max sum p1 p01 sorted
+
+    count=$(echo "$values" | wc -l)
+    (( count == 0 )) && { echo "0 0 0 0 0 0"; return; }
+
+    sorted=$(echo "$values" | sort -n)
+    min=$(echo "$sorted" | head -1)
+    max=$(echo "$sorted" | tail -1)
+    sum=0
+    while IFS= read -r v; do
+        sum=$(( sum + ${v%%.*} ))
+    done <<< "$values"
+    avg=$(( sum / count ))
+
+    # 1% low = average of bottom 1% values
+    local p1_count=$(( count / 100 ))
+    (( p1_count < 1 )) && p1_count=1
+    p1=$(echo "$sorted" | head -n "$p1_count" | awk '{s+=$1;c++} END{printf "%d", s/c}')
+
+    # 0.1% low
+    local p01_count=$(( count / 1000 ))
+    (( p01_count < 1 )) && p01_count=1
+    p01=$(echo "$sorted" | head -n "$p01_count" | awk '{s+=$1;c++} END{printf "%d", s/c}')
+
+    # Standard deviation
+    local sq_sum=0 diff
+    while IFS= read -r v; do
+        diff=$(( ${v%%.*} - avg ))
+        sq_sum=$(( sq_sum + diff * diff ))
+    done <<< "$values"
+    local variance=$(( sq_sum / count ))
+    local stddev
+    stddev=$(echo "scale=1; sqrt($variance)" | bc 2>/dev/null || echo "0")
+
+    echo "$avg $min $max $p1 $p01 $stddev"
+}
+
+cmd_view() {
+    local session="${1:-}"
+    [[ -z "$session" ]] && die "Usage: forge-perflog view <session>"
+    local file
+    file=$(resolve_session "$session")
+
+    local game dur start_iso fps_target
+    if command -v jq &>/dev/null; then
+        game=$(jq -r '.game' "$file")
+        dur=$(jq -r '.duration' "$file")
+        start_iso=$(jq -r '.start_iso' "$file")
+        fps_target=$(jq -r '.fps_target // 60' "$file")
+    else
+        game=$(grep -oP '"game":"\K[^"]+' "$file")
+        dur=$(grep -oP '"duration":\K[0-9]+' "$file")
+        start_iso=$(grep -oP '"start_iso":"\K[^"]+' "$file")
+        fps_target=$FPS_TARGET
+    fi
+
+    header "Performance Summary: ${game}"
+    echo -e "  Session:    $(basename "$file" .json)"
+    echo -e "  Started:    ${start_iso}"
+    echo -e "  Duration:   $(( dur / 60 ))m $(( dur % 60 ))s"
+    echo -e "  FPS Target: ${fps_target}"
+
+    # FPS stats
+    local fps_vals fps_stats
+    fps_vals=$(extract_field "$file" "fps")
+    fps_stats=$(calc_stats "$fps_vals")
+    read -r fps_avg fps_min fps_max fps_1low fps_01low fps_stddev <<< "$fps_stats"
+    local stability
+    if (( fps_avg > 0 )); then
+        stability=$(echo "scale=0; 100 - ($fps_stddev * 100 / $fps_avg)" | bc 2>/dev/null || echo "0")
+        (( stability < 0 )) && stability=0
+    else
+        stability=0
+    fi
+
+    header "FPS"
+    printf "  Average:    %s\n" "$(color_value "$fps_avg" "$((fps_target/2))" "$fps_target")"
+    printf "  1%% Low:     %s\n" "$(color_value "$fps_1low" "$((fps_target/3))" "$((fps_target/2))")"
+    printf "  0.1%% Low:   %s\n" "$(color_value "$fps_01low" "$((fps_target/4))" "$((fps_target/3))")"
+    printf "  Max:        %s\n" "$fps_max"
+    printf "  Min:        %s\n" "$fps_min"
+    printf "  Stability:  %s%%\n" "$(color_value "$stability" 60 80)"
+
+    # CPU stats
+    local cpu_vals cpu_stats cpu_temp_vals cpu_temp_stats
+    cpu_vals=$(extract_field "$file" "cpu")
+    cpu_stats=$(calc_stats "$cpu_vals")
+    read -r cpu_avg _ cpu_max _ _ _ <<< "$cpu_stats"
+    cpu_temp_vals=$(extract_field "$file" "cpu_temp")
+    cpu_temp_stats=$(calc_stats "$cpu_temp_vals")
+    read -r ct_avg ct_min ct_max _ _ _ <<< "$cpu_temp_stats"
+
+    # Count thermal throttle events (temp > 95)
+    local throttle_events=0
+    while IFS= read -r t; do
+        (( ${t%%.*} >= 95 )) && throttle_events=$(( throttle_events + 1 ))
+    done <<< "$cpu_temp_vals"
+
+    header "CPU"
+    printf "  Avg Usage:  %s%%\n" "$(color_value "$cpu_avg" 70 90 1)"
+    printf "  Peak Usage: %s%%\n" "$cpu_max"
+    printf "  Avg Temp:   %s C\n" "$(color_value "$ct_avg" 70 85 1)"
+    printf "  Max Temp:   %s C\n" "$(color_value "$ct_max" 80 95 1)"
+    if (( throttle_events > 0 )); then
+        echo -e "  ${RED}${BOLD}Thermal Throttle Events: ${throttle_events}${RESET}"
+    fi
+
+    # GPU stats
+    local gpu_vals gpu_stats gpu_temp_vals gpu_temp_stats
+    gpu_vals=$(extract_field "$file" "gpu")
+    gpu_stats=$(calc_stats "$gpu_vals")
+    read -r gpu_avg _ gpu_max _ _ _ <<< "$gpu_stats"
+    gpu_temp_vals=$(extract_field "$file" "gpu_temp")
+    gpu_temp_stats=$(calc_stats "$gpu_temp_vals")
+    read -r gt_avg _ gt_max _ _ _ <<< "$gpu_temp_stats"
+
+    local gpu_throttle=0
+    while IFS= read -r t; do
+        (( ${t%%.*} >= 90 )) && gpu_throttle=$(( gpu_throttle + 1 ))
+    done <<< "$gpu_temp_vals"
+
+    header "GPU"
+    printf "  Avg Usage:  %s%%\n" "$(color_value "$gpu_avg" 50 80)"
+    printf "  Peak Usage: %s%%\n" "$gpu_max"
+    printf "  Avg Temp:   %s C\n" "$(color_value "$gt_avg" 70 85 1)"
+    printf "  Max Temp:   %s C\n" "$(color_value "$gt_max" 80 90 1)"
+    if (( gpu_throttle > 0 )); then
+        echo -e "  ${RED}${BOLD}Thermal Throttle Events: ${gpu_throttle}${RESET}"
+    fi
+
+    # RAM stats
+    local ram_vals ram_stats
+    ram_vals=$(extract_field "$file" "ram_used")
+    ram_stats=$(calc_stats "$ram_vals")
+    read -r ram_avg _ ram_peak _ _ _ <<< "$ram_stats"
+    local ram_total_val
+    ram_total_val=$(extract_field "$file" "ram_total" | head -1)
+
+    header "Memory"
+    printf "  Avg Usage:  %s MB / %s MB\n" "$ram_avg" "$ram_total_val"
+    printf "  Peak Usage: %s MB\n" "$ram_peak"
+    if (( ram_total_val > 0 )); then
+        local ram_pct=$(( ram_peak * 100 / ram_total_val ))
+        printf "  Peak %%:     %s%%\n" "$(color_value "$ram_pct" 70 90 1)"
+    fi
+    echo ""
+}
+
+# --- ASCII Graphs ---
+
+sparkline() {
+    local values="$1" max_val="$2"
+    local chars=("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█")
+    local result=""
+    while IFS= read -r v; do
+        local num=${v%%.*}
+        (( max_val == 0 )) && max_val=1
+        local idx=$(( num * 7 / max_val ))
+        (( idx > 7 )) && idx=7
+        (( idx < 0 )) && idx=0
+        result+="${chars[$idx]}"
+    done <<< "$values"
+    echo "$result"
+}
+
+draw_bar_graph() {
+    local title="$1" values="$2" width="$3" max_val="$4" unit="$5" target="${6:-0}" color="${7:-$GREEN}"
+    local count val_arr=() i
+
+    while IFS= read -r v; do val_arr+=("${v%%.*}"); done <<< "$values"
+    count=${#val_arr[@]}
+    (( count == 0 )) && return
+
+    # Downsample to fit width
+    local step=$(( count / width + 1 ))
+    local bars=()
+    for (( i=0; i<count; i+=step )); do
+        local sum=0 c=0
+        for (( j=i; j<i+step && j<count; j++ )); do
+            sum=$(( sum + val_arr[j] ))
+            c=$(( c + 1 ))
+        done
+        bars+=("$(( sum / c ))")
+    done
+
+    echo -e "\n  ${BOLD}${title}${RESET}  (max: ${max_val}${unit})"
+    local bar_count=${#bars[@]}
+    local height=10
+    for (( row=height; row>=1; row-- )); do
+        local threshold=$(( max_val * row / height ))
+        printf "  %4d${unit} │" "$threshold"
+        for (( b=0; b<bar_count; b++ )); do
+            if (( bars[b] >= threshold )); then
+                if (( target > 0 && threshold <= target && threshold > target - max_val/height )); then
+                    printf "${YELLOW}━${RESET}"
+                elif (( bars[b] > max_val * 90 / 100 )); then
+                    printf "${RED}█${RESET}"
+                elif (( bars[b] > max_val * 70 / 100 )); then
+                    printf "${YELLOW}█${RESET}"
+                else
+                    printf "${color}█${RESET}"
+                fi
+            elif (( target > 0 && threshold <= target && threshold > target - max_val/height )); then
+                printf "${YELLOW}─${RESET}"
+            else
+                printf " "
+            fi
+        done
+        echo "│"
+    done
+    printf "       └"
+    printf '─%.0s' $(seq 1 "$bar_count")
+    echo "┘"
+
+    # Time axis
+    local dur_label
+    if (( count > 60 )); then
+        printf "        0"
+        local mid=$(( count / 2 / 60 ))
+        local end_m=$(( count / 60 ))
+        local pad=$(( bar_count / 2 - 2 ))
+        (( pad < 0 )) && pad=0
+        printf "%${pad}s%dm" "" "$mid"
+        pad=$(( bar_count - bar_count/2 - 4 ))
+        (( pad < 0 )) && pad=0
+        printf "%${pad}s%dm" "" "$end_m"
+    else
+        printf "        0s"
+        local pad=$(( bar_count - 6 ))
+        (( pad < 0 )) && pad=0
+        printf "%${pad}s%ds" "" "$count"
+    fi
+    echo ""
+}
+
+cmd_graph() {
+    local session="${1:-}"
+    [[ -z "$session" ]] && die "Usage: forge-perflog graph <session>"
+    local file
+    file=$(resolve_session "$session")
+
+    local game term_width
+    game=$(grep -oP '"game":"\K[^"]+' "$file" || echo "unknown")
+    term_width=$(tput cols 2>/dev/null || echo 80)
+    local graph_width=$(( term_width - 12 ))
+    (( graph_width > 120 )) && graph_width=120
+    (( graph_width < 20 )) && graph_width=20
+
+    header "Performance Graphs: ${game}"
+
+    # Sparkline overview
+    local fps_vals cpu_vals gpu_vals ram_vals fps_max cpu_max gpu_max ram_max
+    fps_vals=$(extract_field "$file" "fps")
+    cpu_vals=$(extract_field "$file" "cpu")
+    gpu_vals=$(extract_field "$file" "gpu")
+    ram_vals=$(extract_field "$file" "ram_used")
+
+    fps_max=$(echo "$fps_vals" | sort -n | tail -1)
+    (( fps_max < FPS_TARGET )) && fps_max=$FPS_TARGET
+    cpu_max=100; gpu_max=100
+    ram_max=$(extract_field "$file" "ram_total" | head -1)
+
+    echo -e "\n  ${BOLD}Sparklines:${RESET}"
+    echo -e "  FPS:  $(sparkline "$fps_vals" "$fps_max")"
+    echo -e "  CPU:  $(sparkline "$cpu_vals" "$cpu_max")"
+    echo -e "  GPU:  $(sparkline "$gpu_vals" "$gpu_max")"
+    echo -e "  RAM:  $(sparkline "$ram_vals" "$ram_max")"
+
+    # Full graphs
+    draw_bar_graph "FPS" "$fps_vals" "$graph_width" "$(( fps_max + fps_max/10 ))" "" "$FPS_TARGET" "$GREEN"
+    draw_bar_graph "CPU Usage" "$cpu_vals" "$graph_width" "100" "%" "0" "$CYAN"
+    draw_bar_graph "GPU Usage" "$gpu_vals" "$graph_width" "100" "%" "0" "$MAGENTA"
+
+    local cpu_temp_vals gpu_temp_vals ct_max gt_max temp_max
+    cpu_temp_vals=$(extract_field "$file" "cpu_temp")
+    gpu_temp_vals=$(extract_field "$file" "gpu_temp")
+    ct_max=$(echo "$cpu_temp_vals" | sort -n | tail -1)
+    gt_max=$(echo "$gpu_temp_vals" | sort -n | tail -1)
+    temp_max=$ct_max
+    (( gt_max > temp_max )) && temp_max=$gt_max
+    (( temp_max < 50 )) && temp_max=100
+
+    draw_bar_graph "CPU Temp" "$cpu_temp_vals" "$graph_width" "$(( temp_max + 10 ))" "C" "90" "$YELLOW"
+    draw_bar_graph "GPU Temp" "$gpu_temp_vals" "$graph_width" "$(( temp_max + 10 ))" "C" "85" "$YELLOW"
+    echo ""
+}
+
+# --- Compare ---
+
+cmd_compare() {
+    local s1="${1:-}" s2="${2:-}"
+    [[ -z "$s1" || -z "$s2" ]] && die "Usage: forge-perflog compare <session1> <session2>"
+    local f1 f2
+    f1=$(resolve_session "$s1")
+    f2=$(resolve_session "$s2")
+
+    local g1 g2 d1 d2
+    g1=$(grep -oP '"game":"\K[^"]+' "$f1" || echo "?")
+    g2=$(grep -oP '"game":"\K[^"]+' "$f2" || echo "?")
+    d1=$(grep -oP '"duration":\K[0-9]+' "$f1" || echo "0")
+    d2=$(grep -oP '"duration":\K[0-9]+' "$f2" || echo "0")
+
+    header "Session Comparison"
+    printf "\n  %-22s ${CYAN}%-25s${RESET} ${MAGENTA}%-25s${RESET}\n" "" "$(basename "$f1" .json)" "$(basename "$f2" .json)"
+    printf "  %-22s %-25s %-25s\n" "Game:" "$g1" "$g2"
+    printf "  %-22s %-25s %-25s\n" "Duration:" "$(( d1/60 ))m $(( d1%60 ))s" "$(( d2/60 ))m $(( d2%60 ))s"
+
+    compare_metric() {
+        local label="$1" field="$2" unit="$3" higher_better="${4:-1}"
+        local v1_raw v2_raw s1_stats s2_stats
+        v1_raw=$(extract_field "$f1" "$field")
+        v2_raw=$(extract_field "$f2" "$field")
+        s1_stats=$(calc_stats "$v1_raw")
+        s2_stats=$(calc_stats "$v2_raw")
+        local a1 a2 diff pct arrow color
+        a1=$(echo "$s1_stats" | awk '{print $1}')
+        a2=$(echo "$s2_stats" | awk '{print $1}')
+        diff=$(( a2 - a1 ))
+        if (( a1 != 0 )); then
+            pct=$(( diff * 100 / a1 ))
+        else
+            pct=0
+        fi
+        if (( diff > 0 )); then
+            arrow="+"
+            if (( higher_better )); then color="$GREEN"; else color="$RED"; fi
+        elif (( diff < 0 )); then
+            arrow=""
+            if (( higher_better )); then color="$RED"; else color="$GREEN"; fi
+        else
+            arrow="="; color="$DIM"
+        fi
+        printf "  %-22s %-25s %-25s ${color}%s%d${unit} (%s%d%%)${RESET}\n" \
+            "${label}:" "${a1}${unit}" "${a2}${unit}" "$arrow" "$diff" "$arrow" "$pct"
+    }
+
+    echo ""
+    echo -e "  ${BOLD}Metric                 Session 1                 Session 2                 Delta${RESET}"
+    echo "  ─────────────────────────────────────────────────────────────────────────────────────"
+    compare_metric "FPS (avg)"       "fps"       ""   1
+    compare_metric "CPU Usage (avg)" "cpu"       "%"  0
+    compare_metric "CPU Temp (avg)"  "cpu_temp"  "C"  0
+    compare_metric "GPU Usage (avg)" "gpu"       "%"  0
+    compare_metric "GPU Temp (avg)"  "gpu_temp"  "C"  0
+    compare_metric "RAM Used (avg)"  "ram_used"  "MB" 0
+
+    # FPS lows comparison
+    echo ""
+    echo -e "  ${BOLD}FPS Breakdown:${RESET}"
+    local fps1 fps2 s1s s2s
+    fps1=$(extract_field "$f1" "fps")
+    fps2=$(extract_field "$f2" "fps")
+    s1s=$(calc_stats "$fps1"); s2s=$(calc_stats "$fps2")
+    local avg1 min1 max1 p1_1 p01_1 std1
+    local avg2 min2 max2 p1_2 p01_2 std2
+    read -r avg1 min1 max1 p1_1 p01_1 std1 <<< "$s1s"
+    read -r avg2 min2 max2 p1_2 p01_2 std2 <<< "$s2s"
+    printf "  %-22s %-25s %-25s\n" "Average:" "$avg1" "$avg2"
+    printf "  %-22s %-25s %-25s\n" "1% Low:" "$p1_1" "$p1_2"
+    printf "  %-22s %-25s %-25s\n" "0.1% Low:" "$p01_1" "$p01_2"
+    printf "  %-22s %-25s %-25s\n" "Max:" "$max1" "$max2"
+    printf "  %-22s %-25s %-25s\n" "Min:" "$min1" "$min2"
+    echo ""
+}
+
+# --- Export ---
+
+cmd_export() {
+    local session="${1:-}"
+    [[ -z "$session" ]] && die "Usage: forge-perflog export <session>"
+    local file
+    file=$(resolve_session "$session")
+
+    local csv_file="${file%.json}.csv"
+
+    echo "timestamp,fps,cpu_pct,cpu_temp_c,cpu_freq_mhz,gpu_pct,gpu_temp_c,gpu_clock_mhz,gpu_vram_used_mb,gpu_vram_total_mb,ram_used_mb,ram_total_mb,swap_used_mb,swap_total_mb,net_rx_bps,net_tx_bps,disk_r_bps,disk_w_bps" > "$csv_file"
+
+    if command -v jq &>/dev/null; then
+        jq -r '.samples[] |
+            [.ts, .fps, .cpu, .cpu_temp, .cpu_freq,
+             .gpu, .gpu_temp, .gpu_clock, .gpu_vram_used, .gpu_vram_total,
+             .ram_used, .ram_total, .swap_used, .swap_total,
+             (.net_rx_bps // 0), (.net_tx_bps // 0),
+             (.disk_r_bps // 0), (.disk_w_bps // 0)] | @csv' "$file" >> "$csv_file"
+    else
+        # Fallback: extract line by line
+        local samples
+        samples=$(grep -oP '\{[^}]+\}' "$file" | tail -n +1)
+        while IFS= read -r sample; do
+            local ts fps cpu ct cf gu gt gc gvu gvt ru rt su st nrx ntx dr dw
+            ts=$(echo "$sample" | grep -oP '"ts":\K[0-9]+' || echo 0)
+            fps=$(echo "$sample" | grep -oP '"fps":\K[0-9]+' || echo 0)
+            cpu=$(echo "$sample" | grep -oP '"cpu":\K[0-9]+' || echo 0)
+            ct=$(echo "$sample" | grep -oP '"cpu_temp":\K[0-9]+' || echo 0)
+            cf=$(echo "$sample" | grep -oP '"cpu_freq":\K[0-9]+' || echo 0)
+            gu=$(echo "$sample" | grep -oP '"gpu":\K[0-9]+' || echo 0)
+            gt=$(echo "$sample" | grep -oP '"gpu_temp":\K[0-9]+' || echo 0)
+            gc=$(echo "$sample" | grep -oP '"gpu_clock":\K[0-9]+' || echo 0)
+            gvu=$(echo "$sample" | grep -oP '"gpu_vram_used":\K[0-9]+' || echo 0)
+            gvt=$(echo "$sample" | grep -oP '"gpu_vram_total":\K[0-9]+' || echo 0)
+            ru=$(echo "$sample" | grep -oP '"ram_used":\K[0-9]+' || echo 0)
+            rt=$(echo "$sample" | grep -oP '"ram_total":\K[0-9]+' || echo 0)
+            su=$(echo "$sample" | grep -oP '"swap_used":\K[0-9]+' || echo 0)
+            st=$(echo "$sample" | grep -oP '"swap_total":\K[0-9]+' || echo 0)
+            nrx=$(echo "$sample" | grep -oP '"net_rx_bps":\K[0-9]+' || echo 0)
+            ntx=$(echo "$sample" | grep -oP '"net_tx_bps":\K[0-9]+' || echo 0)
+            dr=$(echo "$sample" | grep -oP '"disk_r_bps":\K[0-9]+' || echo 0)
+            dw=$(echo "$sample" | grep -oP '"disk_w_bps":\K[0-9]+' || echo 0)
+            echo "$ts,$fps,$cpu,$ct,$cf,$gu,$gt,$gc,$gvu,$gvt,$ru,$rt,$su,$st,$nrx,$ntx,$dr,$dw"
+        done <<< "$samples" >> "$csv_file"
+    fi
+
+    echo -e "${GREEN}Exported to:${RESET} ${csv_file}"
+}
+
+# --- Live Mode ---
+
+cmd_live() {
+    local recording=0 rec_start=0 peak_fps=0 peak_cpu_temp=0 peak_gpu_temp=0 peak_ram=0
+    local prev_net_rx=0 prev_net_tx=0 prev_disk_r=0 prev_disk_w=0 first_tick=1
+    local fps_history=() cpu_history=() gpu_history=()
+
+    cleanup_live() {
+        tput cnorm 2>/dev/null  # restore cursor
+        tput rmcup 2>/dev/null  # restore screen
+        stty echo 2>/dev/null
+        if (( recording )); then
+            cmd_stop 2>/dev/null || true
+        fi
+    }
+    trap cleanup_live EXIT
+
+    tput smcup 2>/dev/null  # alternate screen
+    tput civis 2>/dev/null  # hide cursor
+    stty -echo 2>/dev/null
+
+    while true; do
+        # Non-blocking key read
+        local key=""
+        read -rsn1 -t 0.05 key 2>/dev/null || true
+        case "$key" in
+            q|Q) break ;;
+            s|S)
+                if (( ! recording )); then
+                    cmd_start "live-session" 2>/dev/null
+                    recording=1; rec_start=$(date +%s)
+                fi ;;
+            p|P)
+                if (( recording )); then
+                    cmd_stop 2>/dev/null; recording=0
+                fi ;;
+            r|R) peak_fps=0; peak_cpu_temp=0; peak_gpu_temp=0; peak_ram=0 ;;
+        esac
+
+        local cols rows
+        cols=$(tput cols 2>/dev/null || echo 80)
+        rows=$(tput lines 2>/dev/null || echo 24)
+
+        # Collect data
+        local fps cpu_temp cpu_freq gpu_raw gpu_type gpu_usage gpu_temp gpu_clock gpu_vram_used gpu_vram_total
+        local ram_raw ram_used ram_total swap_used swap_total
+        local net_now net_rx net_tx disk_now disk_r disk_w
+        local net_rx_rate=0 net_tx_rate=0 disk_r_rate=0 disk_w_rate=0
+
+        fps=$(get_fps)
+        cpu_temp=$(get_cpu_temps)
+        cpu_freq=$(get_cpu_freq)
+
+        gpu_raw=$(get_gpu_info)
+        gpu_type="${gpu_raw%%:*}"
+        IFS=',' read -r gpu_usage gpu_temp gpu_clock gpu_vram_used gpu_vram_total <<< "${gpu_raw#*:}"
+
+        ram_raw=$(get_ram_info)
+        IFS=',' read -r ram_used ram_total swap_used swap_total <<< "$ram_raw"
+
+        net_now=$(get_net_bytes)
+        net_rx=${net_now%% *}; net_tx=${net_now##* }
+        disk_now=$(get_disk_io)
+        disk_r=${disk_now%% *}; disk_w=${disk_now##* }
+
+        if (( first_tick )); then
+            prev_net_rx=$net_rx; prev_net_tx=$net_tx
+            prev_disk_r=$disk_r; prev_disk_w=$disk_w
+            first_tick=0
+        else
+            net_rx_rate=$(( net_rx - prev_net_rx ))
+            net_tx_rate=$(( net_tx - prev_net_tx ))
+            disk_r_rate=$(( (disk_r - prev_disk_r) * 512 ))
+            disk_w_rate=$(( (disk_w - prev_disk_w) * 512 ))
+            prev_net_rx=$net_rx; prev_net_tx=$net_tx
+            prev_disk_r=$disk_r; prev_disk_w=$disk_w
+        fi
+
+        # Update peaks
+        (( ${fps:-0} > peak_fps )) && peak_fps=${fps:-0}
+        (( ${cpu_temp:-0} > peak_cpu_temp )) && peak_cpu_temp=${cpu_temp:-0}
+        (( ${gpu_temp:-0} > peak_gpu_temp )) && peak_gpu_temp=${gpu_temp:-0}
+        (( ${ram_used:-0} > peak_ram )) && peak_ram=${ram_used:-0}
+
+        # History for sparklines (keep last 60)
+        fps_history+=("${fps:-0}")
+        cpu_history+=("${gpu_usage:-0}")
+        gpu_history+=("${gpu_usage:-0}")
+        (( ${#fps_history[@]} > 60 )) && fps_history=("${fps_history[@]:1}")
+        (( ${#cpu_history[@]} > 60 )) && cpu_history=("${cpu_history[@]:1}")
+        (( ${#gpu_history[@]} > 60 )) && gpu_history=("${gpu_history[@]:1}")
+
+        # CPU per-core (quick read without the sleep-based method)
+        local core_usages=()
+        for stat_file in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
+            [[ -f "$stat_file" ]] || continue
+            core_usages+=(1)  # placeholder
+        done
+        local num_cores=${#core_usages[@]}
+        (( num_cores == 0 )) && num_cores=$(nproc 2>/dev/null || echo 4)
+
+        # Read overall CPU from /proc/stat quickly
+        local cpu_line cpu_usage_pct=0
+        cpu_line=$(head -1 /proc/stat)
+        local cu cn cs ci
+        read -r _ cu cn cs ci _ <<< "$cpu_line"
+        # We'll use a simple instant read (less accurate but non-blocking for live)
+        local cpu_total=$(( cu + cn + cs + ci ))
+        if (( cpu_total > 0 )); then
+            cpu_usage_pct=$(( (cu + cn + cs) * 100 / cpu_total ))
+        fi
+
+        # Format network rates
+        format_bytes() {
+            local bytes=$1
+            if (( bytes > 1048576 )); then echo "$(( bytes / 1048576 )) MB/s"
+            elif (( bytes > 1024 )); then echo "$(( bytes / 1024 )) KB/s"
+            else echo "${bytes} B/s"; fi
+        }
+
+        # --- Render ---
+        tput cup 0 0 2>/dev/null
+        tput ed 2>/dev/null
+
+        # Title bar
+        local title="  FORGE PERFLOG - Live Monitor"
+        local rec_indicator=""
+        if (( recording )); then
+            local elapsed=$(( $(date +%s) - rec_start ))
+            rec_indicator="${RED}● REC ${elapsed}s${RESET}"
+        fi
+        printf "${BG_GREEN}${WHITE}${BOLD}%-$(( cols - 20 ))s${RESET}" "$title"
+        printf " %b  " "$rec_indicator"
+        echo ""
+        printf "${DIM}%s${RESET}\n" "$(printf '─%.0s' $(seq 1 "$cols"))"
+
+        # FPS section
+        local fps_color="$GREEN"
+        (( ${fps:-0} < FPS_TARGET )) && fps_color="$YELLOW"
+        (( ${fps:-0} < FPS_TARGET/2 )) && fps_color="$RED"
+
+        echo -e "  ${BOLD}FPS${RESET}"
+        printf "  ${fps_color}${BOLD}%4d${RESET}  target: %d  peak: %d" "${fps:-0}" "$FPS_TARGET" "$peak_fps"
+        # Mini sparkline
+        if (( ${#fps_history[@]} > 1 )); then
+            local spark_data
+            spark_data=$(printf '%s\n' "${fps_history[@]}")
+            local spark_max
+            spark_max=$(printf '%s\n' "${fps_history[@]}" | sort -n | tail -1)
+            (( spark_max < FPS_TARGET )) && spark_max=$FPS_TARGET
+            printf "  %s" "$(sparkline "$spark_data" "$spark_max")"
+        fi
+        echo ""
+        echo ""
+
+        # CPU section
+        echo -e "  ${BOLD}CPU${RESET}  ${cpu_freq}MHz  ${cpu_temp}C (peak: ${peak_cpu_temp}C)"
+        local bar_width=$(( cols - 20 ))
+        (( bar_width > 80 )) && bar_width=80
+        local filled=$(( cpu_usage_pct * bar_width / 100 ))
+        local bar_color="$GREEN"
+        (( cpu_usage_pct > 80 )) && bar_color="$YELLOW"
+        (( cpu_usage_pct > 95 )) && bar_color="$RED"
+        printf "  [${bar_color}"
+        printf '█%.0s' $(seq 1 $((filled > 0 ? filled : 1))) 2>/dev/null
+        printf "${DIM}"
+        local empty=$(( bar_width - filled ))
+        (( empty > 0 )) && printf '░%.0s' $(seq 1 "$empty") 2>/dev/null
+        printf "${RESET}] %3d%%\n" "$cpu_usage_pct"
+        echo ""
+
+        # GPU section
+        echo -e "  ${BOLD}GPU${RESET} (${gpu_type})  ${gpu_clock:-0}MHz  ${gpu_temp:-0}C (peak: ${peak_gpu_temp}C)"
+        local gpu_filled=$(( ${gpu_usage:-0} * bar_width / 100 ))
+        local gpu_bar_color="$GREEN"
+        (( ${gpu_usage:-0} > 80 )) && gpu_bar_color="$YELLOW"
+        (( ${gpu_usage:-0} > 95 )) && gpu_bar_color="$RED"
+        printf "  [${gpu_bar_color}"
+        printf '█%.0s' $(seq 1 $((gpu_filled > 0 ? gpu_filled : 1))) 2>/dev/null
+        printf "${DIM}"
+        local gpu_empty=$(( bar_width - gpu_filled ))
+        (( gpu_empty > 0 )) && printf '░%.0s' $(seq 1 "$gpu_empty") 2>/dev/null
+        printf "${RESET}] %3d%%\n" "${gpu_usage:-0}"
+
+        if (( ${gpu_vram_total:-0} > 0 )); then
+            local vram_pct=$(( gpu_vram_used * 100 / gpu_vram_total ))
+            printf "  VRAM: %d / %d MB (%d%%)\n" "${gpu_vram_used:-0}" "${gpu_vram_total:-0}" "$vram_pct"
+        fi
+        echo ""
+
+        # Memory section
+        local ram_pct=0
+        (( ram_total > 0 )) && ram_pct=$(( ram_used * 100 / ram_total ))
+        echo -e "  ${BOLD}Memory${RESET}  (peak: ${peak_ram}MB)"
+        local ram_filled=$(( ram_pct * bar_width / 100 ))
+        local ram_bar_color="$GREEN"
+        (( ram_pct > 70 )) && ram_bar_color="$YELLOW"
+        (( ram_pct > 90 )) && ram_bar_color="$RED"
+        printf "  [${ram_bar_color}"
+        printf '█%.0s' $(seq 1 $((ram_filled > 0 ? ram_filled : 1))) 2>/dev/null
+        printf "${DIM}"
+        local ram_empty=$(( bar_width - ram_filled ))
+        (( ram_empty > 0 )) && printf '░%.0s' $(seq 1 "$ram_empty") 2>/dev/null
+        printf "${RESET}] %dMB / %dMB (%d%%)\n" "$ram_used" "$ram_total" "$ram_pct"
+
+        if (( swap_total > 0 )); then
+            printf "  Swap: %dMB / %dMB\n" "$swap_used" "$swap_total"
+        fi
+        echo ""
+
+        # Network & Disk
+        echo -e "  ${BOLD}Network${RESET}  ↓ $(format_bytes "$net_rx_rate")  ↑ $(format_bytes "$net_tx_rate")"
+        echo -e "  ${BOLD}Disk${RESET}     R $(format_bytes "$disk_r_rate")  W $(format_bytes "$disk_w_rate")"
+
+        # Footer
+        echo ""
+        printf "${DIM}"
+        printf '─%.0s' $(seq 1 "$cols")
+        printf "${RESET}\n"
+        echo -e "  ${DIM}[q]uit  [s]tart recording  [p]ause/stop  [r]eset peaks${RESET}"
+
+        sleep "$SAMPLE_INTERVAL"
+    done
+}
+
+# --- Daemon Mode ---
+
+# Known game process names
+KNOWN_GAMES=(
+    "gamescope:Game (Gamescope)"
+    "wine:Wine Game"
+    "proton:Proton Game"
+    "steam:Steam Game"
+    "lutris:Lutris Game"
+    "heroic:Heroic Game"
+    "minecraft:Minecraft"
+    "factorio:Factorio"
+    "dota2:Dota 2"
+    "csgo:CS:GO"
+    "cs2:CS2"
+    "hl2_linux:Half-Life 2"
+    "portal2_linux:Portal 2"
+    "valheim:Valheim"
+    "terraria:Terraria"
+    "RustClient:Rust"
+)
+
+detect_game() {
+    for entry in "${KNOWN_GAMES[@]}"; do
+        local proc="${entry%%:*}"
+        local name="${entry#*:}"
+        if pgrep -x "$proc" &>/dev/null; then
+            echo "$name"
+            return 0
+        fi
+    done
+    # Check for any process using significant GPU
+    if command -v nvidia-smi &>/dev/null; then
+        local gpu_proc
+        gpu_proc=$(nvidia-smi --query-compute-apps=process_name --format=csv,noheader 2>/dev/null | head -1)
+        if [[ -n "$gpu_proc" ]]; then
+            echo "$(basename "$gpu_proc")"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+cmd_daemon() {
+    echo -e "${BOLD}Forge PerfLog Daemon${RESET}"
+    echo -e "Watching for game launches... Press Ctrl+C to stop."
+    echo ""
+
+    local was_recording=0
+    local current_game=""
+
+    trap 'echo -e "\n${YELLOW}Daemon stopped.${RESET}"; if (( was_recording )); then cmd_stop 2>/dev/null; fi; exit 0' INT TERM
+
+    while true; do
+        local detected
+        if detected=$(detect_game); then
+            if (( ! was_recording )); then
+                echo -e "  ${GREEN}Game detected:${RESET} ${detected}"
+                current_game="$detected"
+                cmd_start "$detected"
+                was_recording=1
+            fi
+        else
+            if (( was_recording )); then
+                echo -e "  ${YELLOW}Game closed:${RESET} ${current_game}"
+                cmd_stop
+                was_recording=0
+                current_game=""
+                echo -e "  Watching for next game launch..."
+            fi
+        fi
+        sleep 3
+    done
+}
+
+# --- Help ---
+
+cmd_help() {
+    echo -e "${BOLD}${CYAN}Forge PerfLog${RESET} — Gaming Performance Recorder & Analyzer"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET} forge-perflog <command> [args]"
+    echo ""
+    echo -e "${BOLD}Commands:${RESET}"
+    echo "  start [game]          Start recording performance metrics"
+    echo "  stop                  Stop recording and save session"
+    echo "  list                  List recorded sessions"
+    echo "  view <session>        View performance summary"
+    echo "  graph <session>       Render ASCII graphs of metrics"
+    echo "  compare <s1> <s2>    Compare two sessions side by side"
+    echo "  export <session>      Export session data as CSV"
+    echo "  live                  Live performance monitor (gaming htop)"
+    echo "  daemon                Auto-record when games launch"
+    echo "  help                  Show this help"
+    echo ""
+    echo -e "${BOLD}Metrics:${RESET}"
+    echo "  FPS (MangoHud), CPU (usage/temp/freq per-core), GPU (usage/temp/clock/VRAM),"
+    echo "  RAM, Swap, Network throughput, Disk I/O — sampled every 1 second"
+    echo ""
+    echo -e "${BOLD}Environment:${RESET}"
+    echo "  FORGE_FPS_TARGET    FPS target for graphs/analysis (default: 60)"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  forge-perflog start \"Cyberpunk 2077\""
+    echo "  forge-perflog stop"
+    echo "  forge-perflog view 20260319-142300-Cyberpunk"
+    echo "  forge-perflog graph 20260319"
+    echo "  forge-perflog compare session1 session2"
+    echo "  forge-perflog live"
+    echo "  forge-perflog daemon &"
+    echo ""
+    echo -e "${DIM}Sessions stored in: ${DATA_DIR}${RESET}"
+}
+
+# --- Main ---
+
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+    start)    cmd_start "$@" ;;
+    stop)     cmd_stop ;;
+    list)     cmd_list ;;
+    view)     cmd_view "$@" ;;
+    graph)    cmd_graph "$@" ;;
+    compare)  cmd_compare "$@" ;;
+    export)   cmd_export "$@" ;;
+    live)     cmd_live ;;
+    daemon)   cmd_daemon ;;
+    help|-h|--help) cmd_help ;;
+    *)        die "Unknown command: ${CMD}. Run 'forge-perflog help' for usage." ;;
+esac

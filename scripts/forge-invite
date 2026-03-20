@@ -1,0 +1,503 @@
+#!/bin/bash
+# 24HG Forge Invite — Create a bootable USB for a friend with your referral code
+#
+# Commands:
+#   forge-invite create [device]  — Interactive wizard to create bootable USB
+#   forge-invite code             — Show your personal referral/invite code
+#   forge-invite generate         — Generate a new invite code (registers with Hub API)
+#   forge-invite status           — Show how many friends installed via your code, rewards earned
+#   forge-invite download         — Download latest ISO if not cached
+
+set -euo pipefail
+
+# ── Configuration ──
+CONFIG_DIR="$HOME/.config/forge"
+INVITE_CODE_FILE="$CONFIG_DIR/invite-code"
+TOKEN_FILE="$CONFIG_DIR/hub-token"
+ISO_PATH="$HOME/Downloads/24hg-forge-latest.iso"
+ISO_CHECKSUM_URL="https://os.24hgaming.com/download/latest.iso.sha256"
+ISO_DOWNLOAD_URL="https://os.24hgaming.com/download/latest.iso"
+HUB_API="https://hub.24hgaming.com/api"
+LOG_TAG="forge-invite"
+
+# ── Colors ──
+RESET="\033[0m"
+BOLD="\033[1m"
+DIM="\033[2m"
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+BLUE="\033[34m"
+MAGENTA="\033[35m"
+CYAN="\033[36m"
+WHITE="\033[97m"
+BG_RED="\033[41m"
+BG_BLUE="\033[44m"
+
+# ── Helpers ──
+
+log() {
+    logger -t "$LOG_TAG" "$*"
+}
+
+step() {
+    local num="$1"; shift
+    echo -e "\n${BOLD}${CYAN}  [$num]${RESET} ${BOLD}$*${RESET}"
+}
+
+info() {
+    echo -e "  ${BLUE}ℹ${RESET}  $*"
+}
+
+success() {
+    echo -e "  ${GREEN}✓${RESET}  $*"
+}
+
+warn() {
+    echo -e "  ${YELLOW}⚠${RESET}  $*"
+}
+
+error() {
+    echo -e "  ${RED}✗${RESET}  $*" >&2
+}
+
+die() {
+    error "$*"
+    log "ERROR: $*"
+    exit 1
+}
+
+banner() {
+    echo -e "${BOLD}${MAGENTA}"
+    echo "  ╔═══════════════════════════════════════════════╗"
+    echo "  ║         24HG Forge — Invite a Friend          ║"
+    echo "  ║    Create a bootable USB with your code       ║"
+    echo "  ╚═══════════════════════════════════════════════╝"
+    echo -e "${RESET}"
+}
+
+ensure_config_dir() {
+    mkdir -p "$CONFIG_DIR"
+}
+
+get_auth_token() {
+    if [[ -f "$TOKEN_FILE" ]]; then
+        cat "$TOKEN_FILE"
+    else
+        die "Not logged in. Run ${BOLD}forge-hub login${RESET} first."
+    fi
+}
+
+get_username() {
+    local token
+    token="$(get_auth_token)"
+    # Decode JWT payload (middle segment) to extract username
+    local payload
+    payload="$(echo "$token" | cut -d. -f2 | base64 -d 2>/dev/null || true)"
+    if [[ -n "$payload" ]]; then
+        echo "$payload" | python3 -c "import sys,json; print(json.load(sys.stdin).get('username','forge-user'))" 2>/dev/null || echo "forge-user"
+    else
+        echo "forge-user"
+    fi
+}
+
+# ── Commands ──
+
+cmd_code() {
+    ensure_config_dir
+    if [[ -f "$INVITE_CODE_FILE" ]]; then
+        local code
+        code="$(cat "$INVITE_CODE_FILE")"
+        echo -e "\n  ${BOLD}Your invite code:${RESET}  ${GREEN}${BOLD}$code${RESET}\n"
+        echo -e "  Share this with friends — when they install 24HG Forge"
+        echo -e "  from a USB you create, you both earn rewards!\n"
+        log "Displayed invite code"
+    else
+        warn "No invite code found."
+        echo -e "  Run ${CYAN}forge-invite generate${RESET} to create one.\n"
+    fi
+}
+
+cmd_generate() {
+    ensure_config_dir
+    local token
+    token="$(get_auth_token)"
+
+    step 1 "Generating invite code..."
+    log "Generating new invite code"
+
+    local response
+    response="$(curl -sf -X POST "$HUB_API/invite/generate" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" 2>&1)" \
+        || die "Failed to contact Hub API. Check your connection and login."
+
+    local code
+    code="$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['code'])" 2>/dev/null)" \
+        || die "Unexpected API response."
+
+    echo "$code" > "$INVITE_CODE_FILE"
+    log "Generated invite code: $code"
+
+    success "Invite code generated!"
+    echo -e "\n  ${BOLD}Your code:${RESET}  ${GREEN}${BOLD}$code${RESET}\n"
+    echo -e "  This code is linked to your Hub account."
+    echo -e "  Use ${CYAN}forge-invite create${RESET} to burn a USB with it.\n"
+}
+
+cmd_status() {
+    local token
+    token="$(get_auth_token)"
+
+    step 1 "Fetching invite status..."
+    log "Fetching invite status"
+
+    local response
+    response="$(curl -sf -X GET "$HUB_API/invite/status" \
+        -H "Authorization: Bearer $token" 2>&1)" \
+        || die "Failed to contact Hub API. Check your connection and login."
+
+    local installs coins badge
+    installs="$(echo "$response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('installs',0))" 2>/dev/null || echo "0")"
+    coins="$(echo "$response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('coins_earned',0))" 2>/dev/null || echo "0")"
+    badge="$(echo "$response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('badge','none'))" 2>/dev/null || echo "none")"
+
+    local code="(none)"
+    [[ -f "$INVITE_CODE_FILE" ]] && code="$(cat "$INVITE_CODE_FILE")"
+
+    echo ""
+    echo -e "  ${BOLD}═══ Invite Status ═══${RESET}"
+    echo ""
+    echo -e "  ${DIM}Invite code:${RESET}       ${CYAN}$code${RESET}"
+    echo -e "  ${DIM}Friends installed:${RESET}  ${GREEN}${BOLD}$installs${RESET}"
+    echo -e "  ${DIM}Coins earned:${RESET}      ${YELLOW}${BOLD}$coins${RESET} Hub coins"
+    echo -e "  ${DIM}Badge:${RESET}             ${MAGENTA}$badge${RESET}"
+    echo ""
+
+    # Reward tiers
+    echo -e "  ${BOLD}Reward tiers:${RESET}"
+    local check_1="${DIM}○${RESET}" check_3="${DIM}○${RESET}" check_5="${DIM}○${RESET}" check_10="${DIM}○${RESET}"
+    (( installs >= 1 ))  && check_1="${GREEN}●${RESET}"
+    (( installs >= 3 ))  && check_3="${GREEN}●${RESET}"
+    (( installs >= 5 ))  && check_5="${GREEN}●${RESET}"
+    (( installs >= 10 )) && check_10="${GREEN}●${RESET}"
+    echo -e "  $check_1  1 friend   → 100 Hub coins"
+    echo -e "  $check_3  3 friends  → 500 Hub coins + VIP badge"
+    echo -e "  $check_5  5 friends  → 1,000 Hub coins + Exclusive title"
+    echo -e "  $check_10 10 friends → 2,500 Hub coins + Legend status"
+    echo ""
+    log "Status: $installs installs, $coins coins"
+}
+
+cmd_download() {
+    step 1 "Checking for cached ISO..."
+
+    if [[ -f "$ISO_PATH" ]]; then
+        local size
+        size="$(du -h "$ISO_PATH" | cut -f1)"
+        info "Found cached ISO: $ISO_PATH ($size)"
+        echo ""
+        read -r -p "  Re-download latest version? [y/N] " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            success "Using cached ISO."
+            log "Using cached ISO"
+            return 0
+        fi
+    fi
+
+    step 2 "Downloading 24HG Forge ISO..."
+    info "Source: $ISO_DOWNLOAD_URL"
+    info "Destination: $ISO_PATH"
+    echo ""
+    log "Downloading ISO from $ISO_DOWNLOAD_URL"
+
+    mkdir -p "$(dirname "$ISO_PATH")"
+    curl --progress-bar -fL -o "$ISO_PATH.part" "$ISO_DOWNLOAD_URL" \
+        || die "Download failed. Check your internet connection."
+    mv "$ISO_PATH.part" "$ISO_PATH"
+
+    step 3 "Verifying checksum..."
+    local expected_checksum
+    expected_checksum="$(curl -sf "$ISO_CHECKSUM_URL" | awk '{print $1}')" \
+        || { warn "Could not fetch checksum — skipping verification."; log "Checksum fetch failed"; return 0; }
+
+    local actual_checksum
+    actual_checksum="$(sha256sum "$ISO_PATH" | awk '{print $1}')"
+
+    if [[ "$expected_checksum" == "$actual_checksum" ]]; then
+        success "Checksum verified: $actual_checksum"
+        log "ISO checksum verified"
+    else
+        rm -f "$ISO_PATH"
+        die "Checksum mismatch! Expected $expected_checksum, got $actual_checksum. Deleted corrupt file."
+    fi
+
+    local size
+    size="$(du -h "$ISO_PATH" | cut -f1)"
+    success "Download complete ($size)"
+    echo ""
+}
+
+list_usb_drives() {
+    # Returns lines like: sdb 14.5G disk usb Kingston_DataTraveler
+    lsblk -J -o NAME,SIZE,TYPE,TRAN,MODEL 2>/dev/null \
+        | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for dev in data.get('blockdevices', []):
+    if dev.get('tran') == 'usb' and dev.get('type') == 'disk':
+        name = dev.get('name', '')
+        size = dev.get('size', '?')
+        model = (dev.get('model') or 'Unknown').strip()
+        print(f'{name}\t{size}\t{model}')
+" 2>/dev/null
+}
+
+cmd_create() {
+    local target_device="${1:-}"
+
+    banner
+
+    # Ensure invite code exists
+    ensure_config_dir
+    if [[ ! -f "$INVITE_CODE_FILE" ]]; then
+        step 1 "No invite code found — generating one..."
+        cmd_generate
+    else
+        step 1 "Invite code loaded"
+        local code
+        code="$(cat "$INVITE_CODE_FILE")"
+        success "Code: ${GREEN}$code${RESET}"
+    fi
+
+    # Ensure ISO exists
+    step 2 "Checking ISO..."
+    if [[ ! -f "$ISO_PATH" ]]; then
+        info "ISO not found. Downloading..."
+        cmd_download
+    else
+        local size
+        size="$(du -h "$ISO_PATH" | cut -f1)"
+        success "ISO ready: $ISO_PATH ($size)"
+    fi
+
+    # Select USB drive
+    step 3 "Detecting USB drives..."
+    log "Scanning for USB drives"
+
+    local drives
+    drives="$(list_usb_drives)"
+
+    if [[ -z "$drives" ]]; then
+        die "No USB drives detected. Insert a USB drive and try again."
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Available USB drives:${RESET}"
+    echo ""
+
+    local -a dev_names=() dev_sizes=() dev_models=()
+    local idx=0
+    while IFS=$'\t' read -r name size model; do
+        idx=$((idx + 1))
+        dev_names+=("$name")
+        dev_sizes+=("$size")
+        dev_models+=("$model")
+        echo -e "    ${BOLD}${CYAN}[$idx]${RESET}  /dev/$name  —  ${WHITE}$size${RESET}  ${DIM}$model${RESET}"
+    done <<< "$drives"
+    echo ""
+
+    local selected_dev=""
+    if [[ -n "$target_device" ]]; then
+        # Validate provided device
+        local bare_dev="${target_device#/dev/}"
+        for i in "${!dev_names[@]}"; do
+            if [[ "${dev_names[$i]}" == "$bare_dev" ]]; then
+                selected_dev="$bare_dev"
+                break
+            fi
+        done
+        if [[ -z "$selected_dev" ]]; then
+            die "Device $target_device is not a detected USB drive."
+        fi
+    else
+        read -r -p "  Select drive number [1-$idx]: " choice
+        if [[ ! "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > idx )); then
+            die "Invalid selection."
+        fi
+        selected_dev="${dev_names[$((choice - 1))]}"
+    fi
+
+    local dev_path="/dev/$selected_dev"
+
+    # Safety: refuse /dev/sda
+    if [[ "$selected_dev" == "sda" ]]; then
+        die "/dev/sda is typically the system drive. Refusing to write. Use a different USB port or device."
+    fi
+
+    local sel_idx=-1
+    for i in "${!dev_names[@]}"; do
+        [[ "${dev_names[$i]}" == "$selected_dev" ]] && sel_idx=$i && break
+    done
+
+    # Double-confirm
+    step 4 "Confirm device selection"
+    echo ""
+    echo -e "  ${BG_RED}${WHITE}${BOLD}  ╔══════════════════════════════════════════════╗  ${RESET}"
+    echo -e "  ${BG_RED}${WHITE}${BOLD}  ║              *** WARNING ***                 ║  ${RESET}"
+    echo -e "  ${BG_RED}${WHITE}${BOLD}  ║   ALL DATA ON THIS DEVICE WILL BE ERASED!    ║  ${RESET}"
+    echo -e "  ${BG_RED}${WHITE}${BOLD}  ╚══════════════════════════════════════════════╝  ${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Device:${RESET}  $dev_path"
+    echo -e "  ${BOLD}Size:${RESET}    ${dev_sizes[$sel_idx]}"
+    echo -e "  ${BOLD}Model:${RESET}   ${dev_models[$sel_idx]}"
+    echo ""
+    read -r -p "  Type YES (uppercase) to proceed: " confirm
+    if [[ "$confirm" != "YES" ]]; then
+        info "Aborted."
+        log "User aborted write to $dev_path"
+        exit 0
+    fi
+
+    # Unmount any mounted partitions
+    step 5 "Unmounting $dev_path partitions..."
+    log "Unmounting partitions on $dev_path"
+    for part in "${dev_path}"*; do
+        if mountpoint -q "$part" 2>/dev/null || mount | grep -q "^$part "; then
+            sudo umount "$part" 2>/dev/null || true
+            info "Unmounted $part"
+        fi
+    done
+    success "Partitions unmounted"
+
+    # Write ISO
+    step 6 "Writing ISO to $dev_path..."
+    info "This may take several minutes depending on USB speed."
+    echo ""
+    log "Writing ISO to $dev_path"
+
+    sudo dd if="$ISO_PATH" of="$dev_path" bs=4M status=progress oflag=sync 2>&1 \
+        || die "dd failed. Check that the device is not write-protected."
+    sudo sync
+
+    success "ISO written successfully!"
+    log "ISO written to $dev_path"
+
+    # Inject referral file
+    step 7 "Injecting referral code..."
+    log "Injecting referral code into USB"
+
+    local code username referral_date
+    code="$(cat "$INVITE_CODE_FILE")"
+    username="$(get_username)"
+    referral_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    # Re-read partition table
+    sudo partprobe "$dev_path" 2>/dev/null || true
+    sleep 2
+
+    # Find and mount the EFI partition (typically partition 1 or 2, FAT32/vfat)
+    local efi_part=""
+    for p in "${dev_path}1" "${dev_path}2" "${dev_path}p1" "${dev_path}p2"; do
+        if [[ -b "$p" ]]; then
+            local fstype
+            fstype="$(lsblk -no FSTYPE "$p" 2>/dev/null || true)"
+            if [[ "$fstype" == "vfat" || "$fstype" == "fat32" ]]; then
+                efi_part="$p"
+                break
+            fi
+        fi
+    done
+
+    if [[ -z "$efi_part" ]]; then
+        # Fallback: try the first partition
+        for p in "${dev_path}1" "${dev_path}p1"; do
+            [[ -b "$p" ]] && efi_part="$p" && break
+        done
+    fi
+
+    if [[ -n "$efi_part" ]]; then
+        local mount_point
+        mount_point="$(mktemp -d /tmp/forge-invite-efi.XXXXXX)"
+
+        if sudo mount "$efi_part" "$mount_point" 2>/dev/null; then
+            sudo tee "$mount_point/referral.conf" > /dev/null <<REFERRAL
+REFERRAL_CODE=$code
+REFERRAL_USER=$username
+REFERRAL_DATE=$referral_date
+REFERRAL
+
+            sudo umount "$mount_point"
+            rmdir "$mount_point"
+            success "Referral code injected into $efi_part"
+            log "Referral written to $efi_part/referral.conf"
+        else
+            rmdir "$mount_point" 2>/dev/null || true
+            warn "Could not mount $efi_part to inject referral. The USB is still bootable."
+            log "WARNING: Failed to mount $efi_part for referral injection"
+        fi
+    else
+        warn "No mountable partition found. The USB is still bootable."
+        warn "Referral code will need to be entered manually on first boot."
+        log "WARNING: No partition found for referral injection"
+    fi
+
+    # Done
+    echo ""
+    echo -e "  ${BG_BLUE}${WHITE}${BOLD}  ╔══════════════════════════════════════════════╗  ${RESET}"
+    echo -e "  ${BG_BLUE}${WHITE}${BOLD}  ║             USB Ready!                       ║  ${RESET}"
+    echo -e "  ${BG_BLUE}${WHITE}${BOLD}  ╚══════════════════════════════════════════════╝  ${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Invite code:${RESET}  ${GREEN}$code${RESET}"
+    echo -e "  ${BOLD}Device:${RESET}       $dev_path"
+    echo ""
+    echo -e "  Give this USB to a friend — when they install 24HG Forge,"
+    echo -e "  your referral is automatically registered and you both earn rewards."
+    echo ""
+    echo -e "  Track your referrals with: ${CYAN}forge-invite status${RESET}"
+    echo ""
+    log "USB creation complete: $dev_path with code $code"
+}
+
+# ── Main ──
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+    create)
+        cmd_create "${1:-}"
+        ;;
+    code)
+        cmd_code
+        ;;
+    generate)
+        cmd_generate
+        ;;
+    status)
+        cmd_status
+        ;;
+    download)
+        cmd_download
+        ;;
+    -h|--help|help|"")
+        banner
+        echo -e "  ${BOLD}Usage:${RESET}  forge-invite <command> [options]"
+        echo ""
+        echo -e "  ${BOLD}Commands:${RESET}"
+        echo -e "    ${CYAN}create${RESET} [device]  Interactive wizard to create bootable USB"
+        echo -e "    ${CYAN}code${RESET}             Show your personal invite code"
+        echo -e "    ${CYAN}generate${RESET}         Generate a new invite code"
+        echo -e "    ${CYAN}status${RESET}           Show referral stats and rewards"
+        echo -e "    ${CYAN}download${RESET}         Download latest ISO if not cached"
+        echo ""
+        echo -e "  ${BOLD}Examples:${RESET}"
+        echo -e "    ${DIM}forge-invite create${RESET}          # Interactive USB wizard"
+        echo -e "    ${DIM}forge-invite create /dev/sdb${RESET}  # Write to specific device"
+        echo -e "    ${DIM}forge-invite status${RESET}          # Check your referral rewards"
+        echo ""
+        ;;
+    *)
+        die "Unknown command: $cmd. Run ${BOLD}forge-invite --help${RESET} for usage."
+        ;;
+esac

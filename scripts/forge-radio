@@ -1,0 +1,629 @@
+#!/bin/bash
+# 24HG Forge Community Radio — Background gaming music from the 24HG community
+set -euo pipefail
+
+# --- Constants ---
+APPNAME="forge-radio"
+SOCK="/tmp/forge-radio.sock"
+PIDFILE="/tmp/forge-radio.pid"
+CONFIG_DIR="${HOME}/.config/forge"
+CONFIG_FILE="${CONFIG_DIR}/radio.conf"
+STATIONS_FILE="/usr/share/forge/radio-stations.json"
+
+# --- Colors ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# --- Built-in stations ---
+declare -A STATION_URLS=(
+    [lofi-gaming]="https://play.streamafrica.net/lofiradio"
+    [synthwave]="https://stream.nightride.fm/nightride.m4a"
+    [edm]="https://stream.electronicmusic.com/edm"
+    [metal]="http://stream.zeno.fm/fyn8eh3h5bzuv"
+    [chill]="https://stream.nightride.fm/chillsynth.m4a"
+    [24hg]="https://radio.24hgaming.com/stream"
+)
+
+declare -A STATION_NAMES=(
+    [lofi-gaming]="Lo-Fi Gaming Beats"
+    [synthwave]="Synthwave Radio"
+    [edm]="Gaming EDM"
+    [metal]="Gaming Metal"
+    [chill]="Chill Vibes"
+    [24hg]="24HG Radio"
+)
+
+STATION_ORDER=(lofi-gaming synthwave edm metal chill 24hg)
+
+# --- Logging ---
+log() {
+    logger -t "$APPNAME" "$*"
+}
+
+# --- Config ---
+load_config() {
+    DEFAULT_STATION="lofi-gaming"
+    VOLUME=50
+    AUTO_DUCK="yes"
+    DUCK_VOLUME=30
+
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+    fi
+}
+
+save_config() {
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_FILE" <<EOF
+DEFAULT_STATION=${DEFAULT_STATION}
+VOLUME=${VOLUME}
+AUTO_DUCK=${AUTO_DUCK}
+DUCK_VOLUME=${DUCK_VOLUME}
+EOF
+    log "Config saved to $CONFIG_FILE"
+}
+
+ensure_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        save_config
+    fi
+}
+
+# --- Load external stations (JSON override) ---
+load_external_stations() {
+    if [[ -f "$STATIONS_FILE" ]] && command -v jq &>/dev/null; then
+        local keys
+        keys=$(jq -r 'keys[]' "$STATIONS_FILE" 2>/dev/null) || return 0
+        for key in $keys; do
+            local url name
+            url=$(jq -r ".\"$key\".url // empty" "$STATIONS_FILE" 2>/dev/null)
+            name=$(jq -r ".\"$key\".name // empty" "$STATIONS_FILE" 2>/dev/null)
+            if [[ -n "$url" && -n "$name" ]]; then
+                STATION_URLS[$key]="$url"
+                STATION_NAMES[$key]="$name"
+                # Add to order if not already present
+                local found=0
+                for s in "${STATION_ORDER[@]}"; do
+                    [[ "$s" == "$key" ]] && found=1 && break
+                done
+                [[ $found -eq 0 ]] && STATION_ORDER+=("$key")
+            fi
+        done
+        log "Loaded external stations from $STATIONS_FILE"
+    fi
+}
+
+# --- Helpers ---
+is_running() {
+    [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+mpv_cmd() {
+    if [[ -S "$SOCK" ]]; then
+        echo "$1" | socat - "$SOCK" 2>/dev/null
+    else
+        echo -e "${RED}Error:${RESET} mpv IPC socket not available."
+        return 1
+    fi
+}
+
+get_current_station() {
+    if [[ -f "/tmp/forge-radio.station" ]]; then
+        cat "/tmp/forge-radio.station"
+    else
+        echo "unknown"
+    fi
+}
+
+notify() {
+    local title="$1"
+    local body="${2:-}"
+    if command -v notify-send &>/dev/null; then
+        notify-send -a "24HG Radio" -i "forge-logo" "$title" "$body" 2>/dev/null || true
+    fi
+}
+
+check_deps() {
+    if ! command -v mpv &>/dev/null; then
+        echo -e "${RED}Error:${RESET} mpv is required but not installed."
+        echo -e "${DIM}Install it with: sudo dnf install mpv  (or your distro's package manager)${RESET}"
+        exit 1
+    fi
+    if ! command -v socat &>/dev/null; then
+        echo -e "${RED}Error:${RESET} socat is required but not installed."
+        echo -e "${DIM}Install it with: sudo dnf install socat  (or your distro's package manager)${RESET}"
+        exit 1
+    fi
+}
+
+# --- Audio ducking ---
+duck_monitor() {
+    log "Audio duck monitor started"
+    local ducked=0
+    while true; do
+        sleep 5
+        if [[ ! -f "$PIDFILE" ]] || ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            log "Duck monitor: player gone, exiting"
+            break
+        fi
+
+        # Detect running games via gamemoderun or common game processes
+        local game_running=0
+        if pgrep -x "gamemoded" &>/dev/null; then
+            game_running=1
+        elif pgrep -f "wine.*\.exe" &>/dev/null; then
+            game_running=1
+        elif pgrep -f "proton" &>/dev/null; then
+            game_running=1
+        fi
+
+        if [[ "$game_running" -eq 1 && "$ducked" -eq 0 ]]; then
+            mpv_cmd '{"command":["set_property","volume",'"$DUCK_VOLUME"']}' &>/dev/null || true
+            ducked=1
+            log "Audio ducked to $DUCK_VOLUME (game detected)"
+        elif [[ "$game_running" -eq 0 && "$ducked" -eq 1 ]]; then
+            mpv_cmd '{"command":["set_property","volume",'"$VOLUME"']}' &>/dev/null || true
+            ducked=0
+            log "Audio restored to $VOLUME (game ended)"
+        fi
+    done
+}
+
+# --- Commands ---
+cmd_play() {
+    local station="${1:-$DEFAULT_STATION}"
+
+    if [[ -z "${STATION_URLS[$station]+x}" ]]; then
+        echo -e "${RED}Error:${RESET} Unknown station '${station}'"
+        echo -e "Run ${CYAN}forge-radio list${RESET} to see available stations."
+        exit 1
+    fi
+
+    # Stop existing playback first
+    if is_running; then
+        cmd_stop quiet
+    fi
+
+    check_deps
+
+    local url="${STATION_URLS[$station]}"
+    local name="${STATION_NAMES[$station]}"
+
+    echo -e "${GREEN}${BOLD}  Playing:${RESET} ${CYAN}${name}${RESET}"
+    echo -e "${DIM}  Station: ${station} | URL: ${url}${RESET}"
+    log "Playing station: $station ($name)"
+
+    # Remove stale socket
+    rm -f "$SOCK"
+
+    # Start mpv in background
+    mpv \
+        --no-video \
+        --no-terminal \
+        --input-ipc-server="$SOCK" \
+        --volume="$VOLUME" \
+        --title="24HG Radio - ${name}" \
+        --force-media-title="${name}" \
+        "$url" &
+
+    local pid=$!
+    echo "$pid" > "$PIDFILE"
+    echo "$station" > /tmp/forge-radio.station
+
+    # Wait briefly for socket
+    for _ in {1..10}; do
+        [[ -S "$SOCK" ]] && break
+        sleep 0.2
+    done
+
+    notify "Now Playing" "$name"
+
+    # Start duck monitor if enabled
+    if [[ "$AUTO_DUCK" == "yes" ]]; then
+        duck_monitor &
+        disown
+    fi
+
+    echo -e "${GREEN}  Stream started.${RESET} PID: ${DIM}${pid}${RESET}"
+}
+
+cmd_stop() {
+    local quiet="${1:-}"
+
+    if is_running; then
+        local pid
+        pid=$(cat "$PIDFILE")
+        kill "$pid" 2>/dev/null || true
+        rm -f "$PIDFILE" "$SOCK" /tmp/forge-radio.station
+        if [[ "$quiet" != "quiet" ]]; then
+            echo -e "${YELLOW}  Playback stopped.${RESET}"
+            notify "Stopped" "Radio playback stopped"
+        fi
+        log "Playback stopped (PID $pid)"
+    else
+        if [[ "$quiet" != "quiet" ]]; then
+            echo -e "${DIM}  Nothing is playing.${RESET}"
+        fi
+        # Clean up stale files
+        rm -f "$PIDFILE" "$SOCK" /tmp/forge-radio.station
+    fi
+}
+
+cmd_pause() {
+    if ! is_running; then
+        echo -e "${DIM}  Nothing is playing.${RESET}"
+        exit 1
+    fi
+
+    local result
+    result=$(mpv_cmd '{"command":["cycle","pause"]}') || exit 1
+
+    # Check current pause state
+    local paused
+    paused=$(mpv_cmd '{"command":["get_property","pause"]}' | grep -o '"data":[a-z]*' | cut -d: -f2)
+
+    if [[ "$paused" == "true" ]]; then
+        echo -e "${YELLOW}  Paused.${RESET}"
+        log "Playback paused"
+    else
+        echo -e "${GREEN}  Resumed.${RESET}"
+        log "Playback resumed"
+    fi
+}
+
+cmd_next() {
+    if ! is_running; then
+        echo -e "${DIM}  Nothing is playing. Start with: ${CYAN}forge-radio play${RESET}"
+        exit 1
+    fi
+
+    local current
+    current=$(get_current_station)
+
+    # Find next station in order
+    local next_station="${STATION_ORDER[0]}"
+    for i in "${!STATION_ORDER[@]}"; do
+        if [[ "${STATION_ORDER[$i]}" == "$current" ]]; then
+            local next_idx=$(( (i + 1) % ${#STATION_ORDER[@]} ))
+            next_station="${STATION_ORDER[$next_idx]}"
+            break
+        fi
+    done
+
+    echo -e "${MAGENTA}  Switching to next station...${RESET}"
+    log "Switching from $current to $next_station"
+    cmd_play "$next_station"
+}
+
+cmd_list() {
+    echo ""
+    echo -e "${BOLD}${CYAN}  24HG Forge Community Radio${RESET}"
+    echo -e "${DIM}  ─────────────────────────────────${RESET}"
+    echo ""
+
+    local current=""
+    if is_running; then
+        current=$(get_current_station)
+    fi
+
+    for station in "${STATION_ORDER[@]}"; do
+        local name="${STATION_NAMES[$station]}"
+        local indicator="  "
+        local color="$RESET"
+
+        if [[ "$station" == "$current" ]]; then
+            indicator="${GREEN}${BOLD}${RESET} "
+            color="$GREEN"
+        fi
+
+        printf "  %s ${color}${BOLD}%-14s${RESET} ${DIM}%s${RESET}\n" "$indicator" "$station" "$name"
+    done
+
+    echo ""
+    echo -e "${DIM}  Usage: forge-radio play <station>${RESET}"
+    echo ""
+}
+
+cmd_volume() {
+    local vol="${1:-}"
+
+    if [[ -z "$vol" ]]; then
+        echo -e "${RED}Error:${RESET} Specify volume (0-100)"
+        echo -e "${DIM}Usage: forge-radio volume 50${RESET}"
+        exit 1
+    fi
+
+    if [[ ! "$vol" =~ ^[0-9]+$ ]] || [[ "$vol" -gt 100 ]]; then
+        echo -e "${RED}Error:${RESET} Volume must be a number between 0 and 100."
+        exit 1
+    fi
+
+    VOLUME="$vol"
+    save_config
+
+    if is_running; then
+        mpv_cmd "{\"command\":[\"set_property\",\"volume\",${vol}]}" &>/dev/null
+        echo -e "${GREEN}  Volume set to ${BOLD}${vol}%${RESET}"
+    else
+        echo -e "${YELLOW}  Volume saved to ${BOLD}${vol}%${RESET} ${DIM}(will apply on next play)${RESET}"
+    fi
+
+    log "Volume set to $vol"
+}
+
+cmd_status() {
+    echo ""
+    if ! is_running; then
+        echo -e "  ${DIM}Radio is ${YELLOW}stopped${RESET}"
+        echo ""
+        return
+    fi
+
+    local station
+    station=$(get_current_station)
+    local name="${STATION_NAMES[$station]:-Unknown}"
+    local pid
+    pid=$(cat "$PIDFILE")
+
+    # Get current volume from mpv
+    local vol="$VOLUME"
+    if [[ -S "$SOCK" ]]; then
+        local vol_data
+        vol_data=$(mpv_cmd '{"command":["get_property","volume"]}' 2>/dev/null) || true
+        if [[ -n "$vol_data" ]]; then
+            local parsed_vol
+            parsed_vol=$(echo "$vol_data" | grep -oP '"data":\K[0-9.]+' 2>/dev/null) || true
+            [[ -n "$parsed_vol" ]] && vol="${parsed_vol%.*}"
+        fi
+    fi
+
+    # Get pause state
+    local pause_state="playing"
+    if [[ -S "$SOCK" ]]; then
+        local pause_data
+        pause_data=$(mpv_cmd '{"command":["get_property","pause"]}' 2>/dev/null) || true
+        if echo "$pause_data" | grep -q '"data":true'; then
+            pause_state="paused"
+        fi
+    fi
+
+    # Get media title if available
+    local title=""
+    if [[ -S "$SOCK" ]]; then
+        local title_data
+        title_data=$(mpv_cmd '{"command":["get_property","media-title"]}' 2>/dev/null) || true
+        if [[ -n "$title_data" ]]; then
+            title=$(echo "$title_data" | grep -oP '"data":"\K[^"]+' 2>/dev/null) || true
+        fi
+    fi
+
+    echo -e "  ${BOLD}${CYAN}24HG Forge Community Radio${RESET}"
+    echo -e "  ${DIM}─────────────────────────────${RESET}"
+    echo ""
+
+    if [[ "$pause_state" == "paused" ]]; then
+        echo -e "  Status:  ${YELLOW}${BOLD}Paused${RESET}"
+    else
+        echo -e "  Status:  ${GREEN}${BOLD}Playing${RESET}"
+    fi
+
+    echo -e "  Station: ${CYAN}${BOLD}${name}${RESET} ${DIM}(${station})${RESET}"
+    [[ -n "$title" ]] && echo -e "  Track:   ${MAGENTA}${title}${RESET}"
+    echo -e "  Volume:  ${BOLD}${vol}%${RESET}"
+    echo -e "  PID:     ${DIM}${pid}${RESET}"
+
+    if [[ "$AUTO_DUCK" == "yes" ]]; then
+        echo -e "  Duck:    ${GREEN}Enabled${RESET} ${DIM}(${DUCK_VOLUME}% when gaming)${RESET}"
+    else
+        echo -e "  Duck:    ${DIM}Disabled${RESET}"
+    fi
+
+    echo ""
+}
+
+# --- System Tray (--tray) ---
+cmd_tray() {
+    check_deps
+
+    if ! command -v python3 &>/dev/null; then
+        echo -e "${RED}Error:${RESET} python3 is required for tray mode."
+        exit 1
+    fi
+
+    log "Starting system tray applet"
+
+    # Start playing default station if not already
+    if ! is_running; then
+        cmd_play "$DEFAULT_STATION"
+    fi
+
+    exec python3 -c "
+import gi, subprocess, os, signal, time, threading
+gi.require_version('Gtk', '3.0')
+try:
+    gi.require_version('AppIndicator3', '0.1')
+    from gi.repository import AppIndicator3 as appindicator
+    USE_INDICATOR = True
+except (ValueError, ImportError):
+    USE_INDICATOR = False
+
+from gi.repository import Gtk, GLib
+
+APPNAME = 'forge-radio'
+STATIONS = {
+$(for s in "${STATION_ORDER[@]}"; do
+    echo "    '$s': '${STATION_NAMES[$s]}',"
+done)
+}
+STATION_ORDER = [$(printf "'%s', " "${STATION_ORDER[@]}")]
+
+def run_cmd(args):
+    try:
+        subprocess.run(['forge-radio'] + args, capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+def get_status():
+    try:
+        r = subprocess.run(['forge-radio', 'status'], capture_output=True, text=True, timeout=5)
+        return r.stdout
+    except Exception:
+        return 'Unknown'
+
+def get_station():
+    try:
+        with open('/tmp/forge-radio.station') as f:
+            return f.read().strip()
+    except Exception:
+        return 'unknown'
+
+class RadioTray:
+    def __init__(self):
+        self.build_menu()
+
+        if USE_INDICATOR:
+            self.indicator = appindicator.Indicator.new(
+                APPNAME, 'forge-logo',
+                appindicator.IndicatorCategory.APPLICATION_STATUS
+            )
+            self.indicator.set_status(appindicator.IndicatorStatus.ACTIVE)
+            self.indicator.set_menu(self.menu)
+            self.indicator.set_title('24HG Radio')
+        else:
+            self.icon = Gtk.StatusIcon()
+            self.icon.set_from_icon_name('audio-headphones')
+            self.icon.set_tooltip_text('24HG Radio')
+            self.icon.connect('popup-menu', self.on_popup)
+            self.icon.set_visible(True)
+
+        GLib.timeout_add_seconds(5, self.update_tooltip)
+
+    def build_menu(self):
+        self.menu = Gtk.Menu()
+
+        current = get_station()
+
+        # Station items
+        for sid in STATION_ORDER:
+            name = STATIONS.get(sid, sid)
+            label = f'  {name}' if sid != current else f'  {name}'
+            item = Gtk.MenuItem(label=label)
+            item.connect('activate', lambda w, s=sid: self.play_station(s))
+            self.menu.append(item)
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        pause_item = Gtk.MenuItem(label='Pause / Resume')
+        pause_item.connect('activate', lambda w: run_cmd(['pause']))
+        self.menu.append(pause_item)
+
+        next_item = Gtk.MenuItem(label='Next Station')
+        next_item.connect('activate', lambda w: run_cmd(['next']))
+        self.menu.append(next_item)
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        # Volume submenu
+        vol_menu = Gtk.Menu()
+        for v in [10, 25, 50, 75, 100]:
+            vi = Gtk.MenuItem(label=f'{v}%')
+            vi.connect('activate', lambda w, vol=v: run_cmd(['volume', str(vol)]))
+            vol_menu.append(vi)
+        vol_item = Gtk.MenuItem(label='Volume')
+        vol_item.set_submenu(vol_menu)
+        self.menu.append(vol_item)
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        stop_item = Gtk.MenuItem(label='Stop')
+        stop_item.connect('activate', lambda w: run_cmd(['stop']))
+        self.menu.append(stop_item)
+
+        quit_item = Gtk.MenuItem(label='Quit')
+        quit_item.connect('activate', lambda w: (run_cmd(['stop']), Gtk.main_quit()))
+        self.menu.append(quit_item)
+
+        self.menu.show_all()
+
+    def on_popup(self, icon, button, time):
+        self.build_menu()
+        self.menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, time)
+
+    def play_station(self, station):
+        threading.Thread(target=run_cmd, args=(['play', station],), daemon=True).start()
+
+    def update_tooltip(self):
+        station = get_station()
+        name = STATIONS.get(station, station)
+        tip = f'24HG Radio: {name}'
+        if USE_INDICATOR:
+            self.indicator.set_title(tip)
+        else:
+            self.icon.set_tooltip_text(tip)
+        return True
+
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+app = RadioTray()
+Gtk.main()
+"
+}
+
+# --- Usage ---
+usage() {
+    echo ""
+    echo -e "${BOLD}${CYAN}  24HG Forge Community Radio${RESET}"
+    echo -e "${DIM}  Background gaming music from the 24HG community${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Usage:${RESET}"
+    echo -e "    ${GREEN}forge-radio play ${DIM}[station]${RESET}    Start playing (default: ${DEFAULT_STATION})"
+    echo -e "    ${GREEN}forge-radio stop${RESET}              Stop playback"
+    echo -e "    ${GREEN}forge-radio pause${RESET}             Toggle pause"
+    echo -e "    ${GREEN}forge-radio next${RESET}              Switch to next station"
+    echo -e "    ${GREEN}forge-radio list${RESET}              Show available stations"
+    echo -e "    ${GREEN}forge-radio volume ${DIM}<0-100>${RESET}    Set volume"
+    echo -e "    ${GREEN}forge-radio status${RESET}            Show current station and track"
+    echo -e "    ${GREEN}forge-radio --tray${RESET}            Run as system tray applet"
+    echo ""
+    echo -e "  ${BOLD}Examples:${RESET}"
+    echo -e "    ${DIM}forge-radio play synthwave${RESET}"
+    echo -e "    ${DIM}forge-radio volume 40${RESET}"
+    echo ""
+}
+
+# --- Main ---
+main() {
+    load_config
+    ensure_config
+    load_external_stations
+
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        play)       cmd_play "${1:-$DEFAULT_STATION}" ;;
+        stop)       cmd_stop ;;
+        pause)      cmd_pause ;;
+        next)       cmd_next ;;
+        list)       cmd_list ;;
+        volume)     cmd_volume "${1:-}" ;;
+        status)     cmd_status ;;
+        --tray)     cmd_tray ;;
+        help|--help|-h) usage ;;
+        "")         usage ;;
+        *)
+            echo -e "${RED}Error:${RESET} Unknown command '${cmd}'"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

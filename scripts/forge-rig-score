@@ -1,0 +1,1000 @@
+#!/bin/bash
+# 24HG Forge Rig Score — Benchmark your system and compete on the hardware leaderboard
+set -euo pipefail
+
+# --- Configuration ---
+CONFIG_DIR="$HOME/.config/forge"
+RESULTS_FILE="$CONFIG_DIR/rig-score.json"
+HUB_URL="https://hub.24hgaming.com/api/rig-score"
+HUB_LEADERBOARD_URL="https://hub.24hgaming.com/api/rig-score/leaderboard"
+TOKEN_FILE="$HOME/.config/forge/hub-token"
+TEMP_DIR="${TMPDIR:-/tmp}/forge-rig-score-$$"
+
+mkdir -p "$CONFIG_DIR"
+
+# --- Colors ---
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+BLUE='\033[34m'
+MAGENTA='\033[35m'
+CYAN='\033[36m'
+WHITE='\033[97m'
+BG_RED='\033[41m'
+BG_GREEN='\033[42m'
+BG_YELLOW='\033[43m'
+BG_BLUE='\033[44m'
+BG_MAGENTA='\033[45m'
+BG_CYAN='\033[46m'
+
+# Tier colors
+DIAMOND_COLOR='\033[38;5;51m'   # Bright cyan
+PLATINUM_COLOR='\033[38;5;255m' # Bright white
+GOLD_COLOR='\033[38;5;220m'     # Gold
+SILVER_COLOR='\033[38;5;250m'   # Silver
+BRONZE_COLOR='\033[38;5;208m'   # Orange/bronze
+
+# --- Helpers ---
+log() { logger -t forge-rig-score "$*"; }
+
+die() {
+    echo -e "${RED}${BOLD}Error:${RESET} $*" >&2
+    log "ERROR: $*"
+    exit 1
+}
+
+info() { echo -e "${CYAN}${BOLD}[*]${RESET} $*"; }
+success() { echo -e "${GREEN}${BOLD}[+]${RESET} $*"; }
+warn() { echo -e "${YELLOW}${BOLD}[!]${RESET} $*"; }
+
+# Progress bar: progress_bar <current> <total> <label>
+progress_bar() {
+    local current=$1 total=$2 label="${3:-}"
+    local width=40
+    local pct=$(( current * 100 / total ))
+    local filled=$(( current * width / total ))
+    local empty=$(( width - filled ))
+
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+
+    printf "\r  ${DIM}[${RESET}${GREEN}%s${DIM}%s${RESET}${DIM}]${RESET} %3d%% %s" \
+        "${bar:0:$filled}" "${bar:$filled}" "$pct" "$label"
+}
+
+# Get hub auth token
+get_token() {
+    if [[ -f "$TOKEN_FILE" ]]; then
+        cat "$TOKEN_FILE"
+    else
+        die "Not logged in. Run ${BOLD}forge-hub-bridge login${RESET} first."
+    fi
+}
+
+# Get machine ID for consistent identification
+get_machine_id() {
+    if [[ -f /etc/machine-id ]]; then
+        cat /etc/machine-id
+    elif command -v hostnamectl &>/dev/null; then
+        hostnamectl --machine-id 2>/dev/null || hostname
+    else
+        hostname
+    fi
+}
+
+# Tier name and color from score
+get_tier() {
+    local score=$1
+    if (( score >= 9000 )); then
+        echo "Diamond"
+    elif (( score >= 7000 )); then
+        echo "Platinum"
+    elif (( score >= 5000 )); then
+        echo "Gold"
+    elif (( score >= 3000 )); then
+        echo "Silver"
+    else
+        echo "Bronze"
+    fi
+}
+
+get_tier_color() {
+    local score=$1
+    if (( score >= 9000 )); then
+        echo -ne "$DIAMOND_COLOR"
+    elif (( score >= 7000 )); then
+        echo -ne "$PLATINUM_COLOR"
+    elif (( score >= 5000 )); then
+        echo -ne "$GOLD_COLOR"
+    elif (( score >= 3000 )); then
+        echo -ne "$SILVER_COLOR"
+    else
+        echo -ne "$BRONZE_COLOR"
+    fi
+}
+
+tier_icon() {
+    local score=$1
+    if (( score >= 9000 )); then
+        echo "◆"
+    elif (( score >= 7000 )); then
+        echo "★"
+    elif (( score >= 5000 )); then
+        echo "●"
+    elif (( score >= 3000 )); then
+        echo "▲"
+    else
+        echo "■"
+    fi
+}
+
+# Collect hardware info
+collect_hw_info() {
+    local cpu_model gpu_info ram_total kernel hostname_val
+    cpu_model=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || echo "Unknown")
+    local cpu_cores
+    cpu_cores=$(nproc 2>/dev/null || echo "1")
+
+    gpu_info=$(lspci 2>/dev/null | grep -iE "VGA|3D|Display" | head -1 | sed 's/.*: //' || echo "Unknown")
+
+    ram_total=$(awk '/MemTotal/ {printf "%.1f GB", $2/1048576}' /proc/meminfo 2>/dev/null || echo "Unknown")
+
+    kernel=$(uname -r 2>/dev/null || echo "Unknown")
+    hostname_val=$(hostname 2>/dev/null || echo "Unknown")
+
+    cat <<EOJSON
+{
+    "cpu_model": "$cpu_model",
+    "cpu_cores": $cpu_cores,
+    "gpu_info": "$(echo "$gpu_info" | sed 's/"/\\"/g')",
+    "ram_total": "$ram_total",
+    "kernel": "$kernel",
+    "hostname": "$hostname_val",
+    "machine_id": "$(get_machine_id)"
+}
+EOJSON
+}
+
+# --- Benchmark Functions ---
+
+# Normalize raw score to 0-100 given reference values
+# normalize <raw> <low_ref> <high_ref>
+# low_ref = a "bad" system value, high_ref = a "great" system value
+normalize() {
+    local raw=$1 low=$2 high=$3
+    if (( raw <= low )); then echo 0; return; fi
+    if (( raw >= high )); then echo 100; return; fi
+    echo $(( (raw - low) * 100 / (high - low) ))
+}
+
+bench_cpu() {
+    info "CPU Benchmark — Multi-threaded cryptographic test"
+    local cpu_cores
+    cpu_cores=$(nproc 2>/dev/null || echo "1")
+
+    # Use openssl speed for a reliable, repeatable benchmark
+    # Run for 10 seconds measuring SHA256 throughput
+    local duration=10
+    local raw_score=0
+
+    progress_bar 0 4 "Warming up..."
+
+    if command -v openssl &>/dev/null; then
+        progress_bar 1 4 "Running openssl speed (single-thread)..."
+
+        # Single-threaded: openssl speed sha256 for $duration seconds
+        local st_output
+        st_output=$(openssl speed -seconds "$duration" sha256 2>/dev/null || true)
+        # Extract the largest block size result (16384 bytes), value is in 1000s of bytes/sec
+        local st_kbps
+        st_kbps=$(echo "$st_output" | grep -i "sha256" | awk '{print $NF}' | head -1 || echo "0")
+        # Convert from the openssl output (e.g., "789012.34k") - strip trailing 'k'
+        st_kbps=$(echo "$st_kbps" | sed 's/[^0-9.]//g' | cut -d. -f1)
+        [[ -z "$st_kbps" || "$st_kbps" == "0" ]] && st_kbps=50000
+
+        progress_bar 2 4 "Running openssl speed (multi-thread)..."
+
+        # Multi-threaded
+        local mt_output
+        mt_output=$(openssl speed -seconds "$duration" -multi "$cpu_cores" sha256 2>/dev/null || true)
+        local mt_kbps
+        mt_kbps=$(echo "$mt_output" | grep -i "sha256" | awk '{print $NF}' | head -1 || echo "0")
+        mt_kbps=$(echo "$mt_kbps" | sed 's/[^0-9.]//g' | cut -d. -f1)
+        [[ -z "$mt_kbps" || "$mt_kbps" == "0" ]] && mt_kbps=$((st_kbps * cpu_cores / 2))
+
+        progress_bar 3 4 "Calculating score..."
+
+        # Combined score: weight multi-thread more (70/30)
+        # Reference: low=100000 kB/s (old CPU), high=3000000 kB/s (fast modern CPU)
+        local st_norm mt_norm
+        st_norm=$(normalize "$st_kbps" 50000 800000)
+        mt_norm=$(normalize "$mt_kbps" 100000 5000000)
+        raw_score=$(( (st_norm * 30 + mt_norm * 70) / 100 ))
+
+        progress_bar 4 4 "Done"
+        echo ""
+        echo "    Single-thread: ${st_kbps} kB/s SHA256"
+        echo "    Multi-thread:  ${mt_kbps} kB/s SHA256 (${cpu_cores} cores)"
+    else
+        # Fallback: use bc or shell arithmetic for pi calculation
+        progress_bar 1 4 "Running fallback CPU test..."
+
+        local start_time end_time elapsed
+        start_time=$(date +%s%N)
+        # Parallel SHA256 hashing as fallback
+        seq 1 2000 | xargs -P "$cpu_cores" -I{} bash -c 'echo {} | sha256sum >/dev/null' 2>/dev/null
+        end_time=$(date +%s%N)
+        elapsed=$(( (end_time - start_time) / 1000000 )) # milliseconds
+
+        progress_bar 4 4 "Done"
+        echo ""
+        echo "    2000 SHA256 hashes in ${elapsed}ms ($cpu_cores threads)"
+
+        # Lower time is better; reference: 10000ms (slow) to 500ms (fast)
+        local inverted=$(( 10000 - elapsed ))
+        [[ $inverted -lt 0 ]] && inverted=0
+        raw_score=$(normalize "$inverted" 0 9500)
+    fi
+
+    [[ $raw_score -lt 0 ]] && raw_score=0
+    [[ $raw_score -gt 100 ]] && raw_score=100
+
+    echo -e "    ${BOLD}CPU Score: ${raw_score}/100${RESET}"
+    CPU_SCORE=$raw_score
+    log "CPU benchmark: score=$raw_score"
+}
+
+bench_gpu() {
+    info "GPU Benchmark — Rendering performance test"
+    local raw_score=0 fps=0 method="none"
+
+    progress_bar 0 3 "Detecting GPU test method..."
+
+    if command -v vkcube &>/dev/null && vulkaninfo &>/dev/null 2>&1; then
+        # Vulkan benchmark with vkcube
+        method="vkcube"
+        progress_bar 1 3 "Running vkcube (15 seconds)..."
+
+        local vk_output
+        vk_output=$(timeout 15 vkcube 2>&1 || true)
+        fps=$(echo "$vk_output" | grep -oP '[\d.]+(?=\s*fps)' | tail -1 || echo "0")
+        fps=$(echo "$fps" | cut -d. -f1)
+        [[ -z "$fps" || "$fps" == "0" ]] && fps=60
+
+        progress_bar 2 3 "Calculating..."
+
+    elif command -v glxgears &>/dev/null; then
+        # OpenGL benchmark with glxgears
+        method="glxgears"
+        progress_bar 1 3 "Running glxgears (15 seconds)..."
+
+        local glx_output
+        # Run glxgears for 15 seconds, capture FPS lines
+        glx_output=$(timeout 15 glxgears 2>&1 || true)
+        # glxgears prints "XXXX frames in Y.0 seconds = ZZZ.ZZZ FPS"
+        fps=$(echo "$glx_output" | grep -oP '[\d.]+(?= FPS)' | tail -1 || echo "0")
+        fps=$(echo "$fps" | cut -d. -f1)
+        [[ -z "$fps" || "$fps" == "0" ]] && {
+            # Try alternate parsing
+            fps=$(echo "$glx_output" | grep -oP '\d+(?= frames)' | tail -1 || echo "0")
+            # Approximate: frames / 5 seconds per report
+            [[ -n "$fps" && "$fps" != "0" ]] && fps=$(( fps / 5 ))
+        }
+
+        progress_bar 2 3 "Calculating..."
+
+    elif command -v glmark2 &>/dev/null; then
+        # glmark2 gives a direct score
+        method="glmark2"
+        progress_bar 1 3 "Running glmark2 (quick mode)..."
+
+        local gm_output
+        gm_output=$(timeout 60 glmark2 --run-forever --off-screen 2>&1 || true)
+        fps=$(echo "$gm_output" | grep -oP 'Score:\s*\K\d+' | tail -1 || echo "0")
+        [[ -z "$fps" ]] && fps=0
+
+        progress_bar 2 3 "Calculating..."
+    else
+        # No GPU test available — estimate from GPU info
+        method="estimated"
+        progress_bar 1 3 "No GPU benchmark tool found, estimating..."
+
+        local gpu_info
+        gpu_info=$(lspci 2>/dev/null | grep -iE "VGA|3D|Display" | head -1 || echo "")
+        if echo "$gpu_info" | grep -qiE "RTX 40[89]0|RTX 4090"; then
+            fps=5000
+        elif echo "$gpu_info" | grep -qiE "RTX 40[67]0|RX 7[89]00"; then
+            fps=3500
+        elif echo "$gpu_info" | grep -qiE "RTX 30[6789]0|RX 6[789]00"; then
+            fps=2500
+        elif echo "$gpu_info" | grep -qiE "RTX|RX 6[0-5]00|GTX 16"; then
+            fps=1500
+        elif echo "$gpu_info" | grep -qiE "GTX|RX 5[0-9]0|Radeon"; then
+            fps=800
+        else
+            fps=200
+        fi
+        warn "Install glxgears (mesa-demos) or glmark2 for accurate GPU testing"
+
+        progress_bar 2 3 "Estimated from hardware..."
+    fi
+
+    [[ -z "$fps" ]] && fps=0
+
+    # Normalize GPU score
+    case "$method" in
+        vkcube)
+            # vkcube: reference 100 FPS (low) to 5000 FPS (high)
+            raw_score=$(normalize "$fps" 100 5000)
+            ;;
+        glxgears)
+            # glxgears: reference 500 FPS (low) to 15000 FPS (high)
+            raw_score=$(normalize "$fps" 500 15000)
+            ;;
+        glmark2)
+            # glmark2 score: 500 (low) to 8000 (high)
+            raw_score=$(normalize "$fps" 500 8000)
+            ;;
+        estimated)
+            raw_score=$(normalize "$fps" 100 5000)
+            ;;
+    esac
+
+    progress_bar 3 3 "Done"
+    echo ""
+
+    [[ $raw_score -lt 0 ]] && raw_score=0
+    [[ $raw_score -gt 100 ]] && raw_score=100
+
+    echo "    Method: $method | Raw FPS/Score: $fps"
+    echo -e "    ${BOLD}GPU Score: ${raw_score}/100${RESET}"
+    GPU_SCORE=$raw_score
+    GPU_FPS=$fps
+    GPU_METHOD=$method
+    log "GPU benchmark: method=$method fps=$fps score=$raw_score"
+}
+
+bench_ram() {
+    info "RAM Benchmark — Memory bandwidth test"
+    local raw_score=0
+
+    progress_bar 0 3 "Preparing..."
+
+    # Test memory bandwidth using dd through tmpfs
+    local block_size="1M" count=1024
+    local tmpfs_dir="/dev/shm"
+    [[ ! -d "$tmpfs_dir" ]] && tmpfs_dir="/tmp"
+
+    local test_file="$tmpfs_dir/forge-rig-bench-$$"
+
+    progress_bar 1 3 "Write test (1 GB)..."
+
+    # Write test
+    local write_output
+    write_output=$(dd if=/dev/zero of="$test_file" bs=$block_size count=$count conv=fdatasync 2>&1 || true)
+    local write_speed
+    write_speed=$(echo "$write_output" | grep -oP '[\d.]+ [GM]B/s' | tail -1 || echo "0 MB/s")
+
+    # Parse to MB/s
+    local write_mbs=0
+    if echo "$write_speed" | grep -q "GB/s"; then
+        write_mbs=$(echo "$write_speed" | grep -oP '[\d.]+' | head -1)
+        write_mbs=$(echo "$write_mbs" | awk '{printf "%d", $1 * 1024}')
+    else
+        write_mbs=$(echo "$write_speed" | grep -oP '[\d.]+' | head -1)
+        write_mbs=$(echo "${write_mbs:-0}" | cut -d. -f1)
+    fi
+    [[ -z "$write_mbs" ]] && write_mbs=0
+
+    progress_bar 2 3 "Read test (1 GB)..."
+
+    # Read test — drop caches first if possible
+    sync
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+    local read_output
+    read_output=$(dd if="$test_file" of=/dev/null bs=$block_size count=$count 2>&1 || true)
+    local read_speed
+    read_speed=$(echo "$read_output" | grep -oP '[\d.]+ [GM]B/s' | tail -1 || echo "0 MB/s")
+
+    local read_mbs=0
+    if echo "$read_speed" | grep -q "GB/s"; then
+        read_mbs=$(echo "$read_speed" | grep -oP '[\d.]+' | head -1)
+        read_mbs=$(echo "$read_mbs" | awk '{printf "%d", $1 * 1024}')
+    else
+        read_mbs=$(echo "$read_speed" | grep -oP '[\d.]+' | head -1)
+        read_mbs=$(echo "${read_mbs:-0}" | cut -d. -f1)
+    fi
+    [[ -z "$read_mbs" ]] && read_mbs=0
+
+    # Clean up
+    rm -f "$test_file"
+
+    # Average bandwidth, normalize
+    local avg_mbs=$(( (write_mbs + read_mbs) / 2 ))
+    # Reference: 1000 MB/s (slow DDR3) to 20000 MB/s (fast DDR5)
+    raw_score=$(normalize "$avg_mbs" 1000 20000)
+
+    progress_bar 3 3 "Done"
+    echo ""
+
+    [[ $raw_score -lt 0 ]] && raw_score=0
+    [[ $raw_score -gt 100 ]] && raw_score=100
+
+    echo "    Write: ${write_mbs} MB/s | Read: ${read_mbs} MB/s | Avg: ${avg_mbs} MB/s"
+    echo -e "    ${BOLD}RAM Score: ${raw_score}/100${RESET}"
+    RAM_SCORE=$raw_score
+    log "RAM benchmark: write=${write_mbs}MB/s read=${read_mbs}MB/s score=$raw_score"
+}
+
+bench_storage() {
+    info "Storage Benchmark — Sequential read/write test"
+    local raw_score=0
+
+    mkdir -p "$TEMP_DIR"
+    local test_file="$TEMP_DIR/bench-storage-$$"
+
+    progress_bar 0 4 "Preparing..."
+
+    local block_size="1M" count=256
+
+    progress_bar 1 4 "Sequential write (256 MB)..."
+
+    # Write test with sync
+    local write_output
+    write_output=$(dd if=/dev/zero of="$test_file" bs=$block_size count=$count conv=fdatasync 2>&1 || true)
+    local write_speed
+    write_speed=$(echo "$write_output" | grep -oP '[\d.]+ [GM]B/s' | tail -1 || echo "0 MB/s")
+
+    local write_mbs=0
+    if echo "$write_speed" | grep -q "GB/s"; then
+        write_mbs=$(echo "$write_speed" | grep -oP '[\d.]+' | head -1)
+        write_mbs=$(echo "$write_mbs" | awk '{printf "%d", $1 * 1024}')
+    else
+        write_mbs=$(echo "$write_speed" | grep -oP '[\d.]+' | head -1)
+        write_mbs=$(echo "${write_mbs:-0}" | cut -d. -f1)
+    fi
+    [[ -z "$write_mbs" ]] && write_mbs=0
+
+    progress_bar 2 4 "Flushing to disk..."
+    sync
+
+    progress_bar 3 4 "Sequential read (256 MB)..."
+
+    # Drop caches for clean read
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+    local read_output
+    read_output=$(dd if="$test_file" of=/dev/null bs=$block_size count=$count 2>&1 || true)
+    local read_speed
+    read_speed=$(echo "$read_output" | grep -oP '[\d.]+ [GM]B/s' | tail -1 || echo "0 MB/s")
+
+    local read_mbs=0
+    if echo "$read_speed" | grep -q "GB/s"; then
+        read_mbs=$(echo "$read_speed" | grep -oP '[\d.]+' | head -1)
+        read_mbs=$(echo "$read_mbs" | awk '{printf "%d", $1 * 1024}')
+    else
+        read_mbs=$(echo "$read_speed" | grep -oP '[\d.]+' | head -1)
+        read_mbs=$(echo "${read_mbs:-0}" | cut -d. -f1)
+    fi
+    [[ -z "$read_mbs" ]] && read_mbs=0
+
+    # Clean up
+    rm -rf "$TEMP_DIR"
+
+    # Average, normalize: 50 MB/s (HDD) to 5000 MB/s (NVMe Gen4)
+    local avg_mbs=$(( (write_mbs + read_mbs) / 2 ))
+    raw_score=$(normalize "$avg_mbs" 50 5000)
+
+    progress_bar 4 4 "Done"
+    echo ""
+
+    [[ $raw_score -lt 0 ]] && raw_score=0
+    [[ $raw_score -gt 100 ]] && raw_score=100
+
+    echo "    Write: ${write_mbs} MB/s | Read: ${read_mbs} MB/s | Avg: ${avg_mbs} MB/s"
+    echo -e "    ${BOLD}Storage Score: ${raw_score}/100${RESET}"
+    STORAGE_SCORE=$raw_score
+    log "Storage benchmark: write=${write_mbs}MB/s read=${read_mbs}MB/s score=$raw_score"
+}
+
+# --- Score Display ---
+
+show_ascii_score() {
+    local score=$1
+    local tier
+    tier=$(get_tier "$score")
+    local tier_color
+    tier_color=$(get_tier_color "$score")
+    local icon
+    icon=$(tier_icon "$score")
+
+    echo ""
+    echo -e "${BOLD}${tier_color}"
+    cat <<'EOART'
+    ╔══════════════════════════════════════════════╗
+    ║                                              ║
+    ║         ████  ██  ██████                     ║
+    ║         █   █ ██  █                          ║
+    ║         ████  ██  █  ██                      ║
+    ║         █  █  ██  █   █                      ║
+    ║         █   █ ██  ██████                     ║
+    ║                                              ║
+    ║            S  C  O  R  E                     ║
+EOART
+    printf "    ║          %s  %-5d / 10000  %s              ║\n" "$icon" "$score" "$icon"
+    cat <<'EOART'
+    ║                                              ║
+    ╚══════════════════════════════════════════════╝
+EOART
+    echo -e "${RESET}"
+
+    # Score bar
+    local bar_width=40
+    local filled=$(( score * bar_width / 10000 ))
+    [[ $filled -gt $bar_width ]] && filled=$bar_width
+    local empty=$(( bar_width - filled ))
+
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+
+    echo -e "    ${tier_color}${bar}${RESET}  ${BOLD}${score}${RESET} / 10000"
+    echo ""
+    echo -e "    Tier: ${tier_color}${BOLD}${icon} ${tier} ${icon}${RESET}"
+    echo ""
+}
+
+show_component_scores() {
+    local cpu=$1 gpu=$2 ram=${3:-0} storage=${4:-0}
+
+    echo -e "    ${BOLD}Component Breakdown:${RESET}"
+    echo ""
+    printf "    %-12s " "CPU (30%)"
+    local cpu_bar=""
+    local cpu_filled=$(( cpu * 30 / 100 ))
+    for ((i=0; i<cpu_filled; i++)); do cpu_bar+="█"; done
+    for ((i=cpu_filled; i<30; i++)); do cpu_bar+="░"; done
+    echo -e "${CYAN}${cpu_bar}${RESET} ${cpu}/100"
+
+    printf "    %-12s " "GPU (40%)"
+    local gpu_bar=""
+    local gpu_filled=$(( gpu * 30 / 100 ))
+    for ((i=0; i<gpu_filled; i++)); do gpu_bar+="█"; done
+    for ((i=gpu_filled; i<30; i++)); do gpu_bar+="░"; done
+    echo -e "${GREEN}${gpu_bar}${RESET} ${gpu}/100"
+
+    printf "    %-12s " "RAM (15%)"
+    local ram_bar=""
+    local ram_filled=$(( ram * 30 / 100 ))
+    for ((i=0; i<ram_filled; i++)); do ram_bar+="█"; done
+    for ((i=ram_filled; i<30; i++)); do ram_bar+="░"; done
+    echo -e "${MAGENTA}${ram_bar}${RESET} ${ram}/100"
+
+    printf "    %-12s " "Disk (15%)"
+    local disk_bar=""
+    local disk_filled=$(( storage * 30 / 100 ))
+    for ((i=0; i<disk_filled; i++)); do disk_bar+="█"; done
+    for ((i=disk_filled; i<30; i++)); do disk_bar+="░"; done
+    echo -e "${YELLOW}${disk_bar}${RESET} ${storage}/100"
+    echo ""
+}
+
+# --- Commands ---
+
+cmd_run() {
+    echo ""
+    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${CYAN}║     24HG Forge — Full Rig Benchmark         ║${RESET}"
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════╝${RESET}"
+    echo ""
+
+    log "Starting full benchmark suite"
+
+    CPU_SCORE=0
+    GPU_SCORE=0
+    GPU_FPS=0
+    GPU_METHOD="none"
+    RAM_SCORE=0
+    STORAGE_SCORE=0
+
+    bench_cpu
+    echo ""
+    bench_gpu
+    echo ""
+    bench_ram
+    echo ""
+    bench_storage
+    echo ""
+
+    # Weighted combined score (GPU 40%, CPU 30%, RAM 15%, Storage 15%)
+    local combined=$(( GPU_SCORE * 40 + CPU_SCORE * 30 + RAM_SCORE * 15 + STORAGE_SCORE * 15 ))
+    # combined is out of 10000 (100 * 100)
+    # already on 0-10000 scale
+
+    echo -e "${BOLD}════════════════════════════════════════════════${RESET}"
+    show_ascii_score "$combined"
+    show_component_scores "$CPU_SCORE" "$GPU_SCORE" "$RAM_SCORE" "$STORAGE_SCORE"
+
+    # Save results
+    local hw_info
+    hw_info=$(collect_hw_info)
+    local timestamp
+    timestamp=$(date -Is)
+
+    cat > "$RESULTS_FILE" <<EOJSON
+{
+    "timestamp": "$timestamp",
+    "combined_score": $combined,
+    "tier": "$(get_tier "$combined")",
+    "components": {
+        "cpu": { "score": $CPU_SCORE, "weight": 30 },
+        "gpu": { "score": $GPU_SCORE, "weight": 40, "fps": $GPU_FPS, "method": "$GPU_METHOD" },
+        "ram": { "score": $RAM_SCORE, "weight": 15 },
+        "storage": { "score": $STORAGE_SCORE, "weight": 15 }
+    },
+    "hardware": $hw_info,
+    "mode": "full"
+}
+EOJSON
+
+    success "Results saved to $RESULTS_FILE"
+    info "Run ${BOLD}forge-rig-score submit${RESET} to post to the leaderboard"
+
+    # Desktop notification
+    if command -v notify-send &>/dev/null; then
+        notify-send -i computer "Forge Rig Score" \
+            "Score: $combined / 10000 — $(get_tier "$combined") Tier" 2>/dev/null || true
+    fi
+
+    log "Full benchmark complete: score=$combined tier=$(get_tier "$combined")"
+}
+
+cmd_quick() {
+    echo ""
+    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${CYAN}║     24HG Forge — Quick Rig Benchmark        ║${RESET}"
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════╝${RESET}"
+    echo ""
+
+    log "Starting quick benchmark (CPU + GPU)"
+
+    CPU_SCORE=0
+    GPU_SCORE=0
+    GPU_FPS=0
+    GPU_METHOD="none"
+
+    bench_cpu
+    echo ""
+    bench_gpu
+    echo ""
+
+    # Quick mode: weight GPU 57% CPU 43% (preserving 40:30 ratio), scale to 10000
+    local combined=$(( (GPU_SCORE * 57 + CPU_SCORE * 43) * 100 / 100 ))
+    # Clamp
+    [[ $combined -gt 10000 ]] && combined=10000
+    [[ $combined -lt 0 ]] && combined=0
+
+    echo -e "${BOLD}════════════════════════════════════════════════${RESET}"
+    show_ascii_score "$combined"
+    show_component_scores "$CPU_SCORE" "$GPU_SCORE" 0 0
+
+    # Save results
+    local hw_info
+    hw_info=$(collect_hw_info)
+    local timestamp
+    timestamp=$(date -Is)
+
+    cat > "$RESULTS_FILE" <<EOJSON
+{
+    "timestamp": "$timestamp",
+    "combined_score": $combined,
+    "tier": "$(get_tier "$combined")",
+    "components": {
+        "cpu": { "score": $CPU_SCORE, "weight": 43 },
+        "gpu": { "score": $GPU_SCORE, "weight": 57, "fps": $GPU_FPS, "method": "$GPU_METHOD" }
+    },
+    "hardware": $hw_info,
+    "mode": "quick"
+}
+EOJSON
+
+    success "Results saved to $RESULTS_FILE"
+    warn "Quick mode — run ${BOLD}forge-rig-score run${RESET} for full accuracy"
+
+    if command -v notify-send &>/dev/null; then
+        notify-send -i computer "Forge Rig Score (Quick)" \
+            "Score: $combined / 10000 — $(get_tier "$combined") Tier" 2>/dev/null || true
+    fi
+
+    log "Quick benchmark complete: score=$combined tier=$(get_tier "$combined")"
+}
+
+cmd_show() {
+    if [[ ! -f "$RESULTS_FILE" ]]; then
+        die "No benchmark results found. Run ${BOLD}forge-rig-score run${RESET} first."
+    fi
+
+    echo ""
+    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${CYAN}║     24HG Forge — Last Benchmark Results      ║${RESET}"
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════╝${RESET}"
+    echo ""
+
+    local data
+    data=$(cat "$RESULTS_FILE")
+
+    local score mode timestamp
+    score=$(echo "$data" | grep -oP '"combined_score":\s*\K\d+' | head -1)
+    mode=$(echo "$data" | grep -oP '"mode":\s*"\K[^"]+' | head -1)
+    timestamp=$(echo "$data" | grep -oP '"timestamp":\s*"\K[^"]+' | head -1)
+
+    local cpu_score gpu_score ram_score storage_score
+    cpu_score=$(echo "$data" | grep -A2 '"cpu"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    gpu_score=$(echo "$data" | grep -A2 '"gpu"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    ram_score=$(echo "$data" | grep -A2 '"ram"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    storage_score=$(echo "$data" | grep -A2 '"storage"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+
+    local cpu_model gpu_info ram_total
+    cpu_model=$(echo "$data" | grep -oP '"cpu_model":\s*"\K[^"]+' | head -1 || echo "N/A")
+    gpu_info=$(echo "$data" | grep -oP '"gpu_info":\s*"\K[^"]+' | head -1 || echo "N/A")
+    ram_total=$(echo "$data" | grep -oP '"ram_total":\s*"\K[^"]+' | head -1 || echo "N/A")
+
+    show_ascii_score "$score"
+
+    echo -e "    ${DIM}Benchmark date: $timestamp${RESET}"
+    echo -e "    ${DIM}Mode: $mode${RESET}"
+    echo ""
+    echo -e "    ${BOLD}Hardware:${RESET}"
+    echo "      CPU:  $cpu_model"
+    echo "      GPU:  $gpu_info"
+    echo "      RAM:  $ram_total"
+    echo ""
+    show_component_scores "$cpu_score" "$gpu_score" "$ram_score" "$storage_score"
+}
+
+cmd_submit() {
+    if [[ ! -f "$RESULTS_FILE" ]]; then
+        die "No benchmark results found. Run ${BOLD}forge-rig-score run${RESET} first."
+    fi
+
+    local token
+    token=$(get_token)
+
+    info "Submitting rig score to Hub leaderboard..."
+    log "Submitting rig score to Hub"
+
+    local response http_code
+    response=$(curl -s -w "\n%{http_code}" -X POST "$HUB_URL" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -d @"$RESULTS_FILE" 2>&1) || true
+
+    http_code=$(echo "$response" | tail -1)
+    local body
+    body=$(echo "$response" | head -n -1)
+
+    case "$http_code" in
+        200|201)
+            success "Score submitted successfully!"
+            local rank
+            rank=$(echo "$body" | grep -oP '"rank":\s*\K\d+' || echo "?")
+            if [[ "$rank" != "?" ]]; then
+                info "Your rank: #${rank} on the leaderboard"
+            fi
+            log "Score submitted: http=$http_code"
+            ;;
+        401)
+            die "Authentication failed. Run ${BOLD}forge-hub-bridge login${RESET} to re-authenticate."
+            ;;
+        *)
+            die "Submission failed (HTTP $http_code): $body"
+            ;;
+    esac
+}
+
+cmd_leaderboard() {
+    info "Fetching community leaderboard..."
+    log "Fetching leaderboard"
+
+    local token=""
+    [[ -f "$TOKEN_FILE" ]] && token=$(cat "$TOKEN_FILE")
+
+    local auth_header=""
+    [[ -n "$token" ]] && auth_header="-H \"Authorization: Bearer $token\""
+
+    local response
+    response=$(curl -s -X GET "$HUB_LEADERBOARD_URL?limit=20" \
+        ${token:+-H "Authorization: Bearer $token"} \
+        -H "Accept: application/json" 2>&1) || true
+
+    if ! echo "$response" | grep -q '"entries"\|"leaderboard"\|\['; then
+        die "Failed to fetch leaderboard. Hub may be unreachable."
+    fi
+
+    echo ""
+    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${CYAN}║              24HG Forge — Rig Score Leaderboard                  ║${RESET}"
+    echo -e "${BOLD}${CYAN}╠═══════════════════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${BOLD}${CYAN}║${RESET}  ${BOLD}#    Player              Score     Tier         CPU/GPU${RESET}         ${CYAN}║${RESET}"
+    echo -e "${BOLD}${CYAN}╠═══════════════════════════════════════════════════════════════════╣${RESET}"
+
+    # Parse JSON entries — each line has rank, username, score, tier, hardware
+    # Expected format: array of objects with username, combined_score, hardware.cpu_model, hardware.gpu_info
+    local i=1
+    while IFS= read -r line; do
+        local username score tier cpu gpu
+        username=$(echo "$line" | grep -oP '"username":\s*"\K[^"]+' || echo "Unknown")
+        score=$(echo "$line" | grep -oP '"combined_score":\s*\K\d+' || echo "0")
+        tier=$(get_tier "$score")
+        local color
+        color=$(get_tier_color "$score")
+        local icon
+        icon=$(tier_icon "$score")
+
+        # Truncate username to 18 chars
+        username="${username:0:18}"
+
+        printf "${BOLD}${CYAN}║${RESET}  ${BOLD}%-4d${RESET} %-18s  ${color}${BOLD}%-8d${RESET}  ${color}%s %-10s${RESET}" \
+            "$i" "$username" "$score" "$icon" "$tier"
+        # Pad to fill the line
+        printf "%*s${CYAN}║${RESET}\n" 6 ""
+
+        ((i++))
+    done < <(echo "$response" | grep -oP '\{[^{}]*"username"[^{}]*\}' | head -20)
+
+    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+
+    # Show tier legend
+    echo -e "    ${BOLD}Tier Legend:${RESET}"
+    echo -e "      ${DIAMOND_COLOR}◆ Diamond  ${RESET}9000+    ${PLATINUM_COLOR}★ Platinum ${RESET}7000+"
+    echo -e "      ${GOLD_COLOR}● Gold     ${RESET}5000+    ${SILVER_COLOR}▲ Silver   ${RESET}3000+"
+    echo -e "      ${BRONZE_COLOR}■ Bronze   ${RESET}< 3000"
+    echo ""
+
+    log "Leaderboard displayed"
+}
+
+cmd_compare() {
+    local target_id="${1:-}"
+    [[ -z "$target_id" ]] && die "Usage: forge-rig-score compare <machine_id>"
+
+    if [[ ! -f "$RESULTS_FILE" ]]; then
+        die "No local benchmark results. Run ${BOLD}forge-rig-score run${RESET} first."
+    fi
+
+    local token
+    token=$(get_token)
+
+    info "Fetching scores for machine $target_id..."
+    log "Comparing with machine $target_id"
+
+    local response
+    response=$(curl -s -X GET "$HUB_URL/$target_id" \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" 2>&1) || true
+
+    if ! echo "$response" | grep -q '"combined_score"'; then
+        die "Could not find rig scores for machine ID: $target_id"
+    fi
+
+    local local_data
+    local_data=$(cat "$RESULTS_FILE")
+
+    # Local scores
+    local l_score l_cpu l_gpu l_ram l_storage l_name
+    l_score=$(echo "$local_data" | grep -oP '"combined_score":\s*\K\d+' | head -1)
+    l_cpu=$(echo "$local_data" | grep -A2 '"cpu"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    l_gpu=$(echo "$local_data" | grep -A2 '"gpu"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    l_ram=$(echo "$local_data" | grep -A2 '"ram"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    l_storage=$(echo "$local_data" | grep -A2 '"storage"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    l_name=$(hostname 2>/dev/null || echo "Your Rig")
+
+    # Remote scores
+    local r_score r_cpu r_gpu r_ram r_storage r_name
+    r_score=$(echo "$response" | grep -oP '"combined_score":\s*\K\d+' | head -1)
+    r_cpu=$(echo "$response" | grep -A2 '"cpu"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    r_gpu=$(echo "$response" | grep -A2 '"gpu"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    r_ram=$(echo "$response" | grep -A2 '"ram"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    r_storage=$(echo "$response" | grep -A2 '"storage"' | grep -oP '"score":\s*\K\d+' | head -1 || echo "0")
+    r_name=$(echo "$response" | grep -oP '"hostname":\s*"\K[^"]+' | head -1 || echo "$target_id")
+
+    echo ""
+    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${CYAN}║          24HG Forge — Rig Comparison                 ║${RESET}"
+    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+
+    # Side by side comparison
+    local l_tier_color r_tier_color
+    l_tier_color=$(get_tier_color "$l_score")
+    r_tier_color=$(get_tier_color "$r_score")
+
+    printf "    ${BOLD}%-25s  vs  %-25s${RESET}\n" "${l_name:0:25}" "${r_name:0:25}"
+    echo -e "    ${DIM}$(printf '%.0s─' {1..55})${RESET}"
+
+    # Helper for comparison line
+    compare_line() {
+        local label="$1" lv="$2" rv="$3" suffix="${4:-}"
+        local indicator=""
+        if (( lv > rv )); then
+            indicator="${GREEN}+$((lv - rv))${RESET}"
+        elif (( lv < rv )); then
+            indicator="${RED}-$((rv - lv))${RESET}"
+        else
+            indicator="${DIM}tied${RESET}"
+        fi
+        printf "    %-12s  ${BOLD}%-8s${RESET}     ${BOLD}%-8s${RESET}    %b\n" \
+            "$label" "${lv}${suffix}" "${rv}${suffix}" "$indicator"
+    }
+
+    compare_line "Overall" "$l_score" "$r_score" "/10000"
+    compare_line "CPU" "$l_cpu" "$r_cpu" "/100"
+    compare_line "GPU" "$l_gpu" "$r_gpu" "/100"
+    compare_line "RAM" "$l_ram" "$r_ram" "/100"
+    compare_line "Storage" "$l_storage" "$r_storage" "/100"
+
+    echo ""
+
+    # Winner announcement
+    if (( l_score > r_score )); then
+        local diff=$(( l_score - r_score ))
+        echo -e "    ${GREEN}${BOLD}Your rig wins by $diff points!${RESET}"
+    elif (( l_score < r_score )); then
+        local diff=$(( r_score - l_score ))
+        echo -e "    ${RED}${BOLD}Their rig leads by $diff points.${RESET}"
+    else
+        echo -e "    ${YELLOW}${BOLD}It's a tie!${RESET}"
+    fi
+    echo ""
+
+    log "Comparison complete: local=$l_score remote=$r_score"
+}
+
+# --- Usage ---
+
+usage() {
+    echo -e "${BOLD}${CYAN}24HG Forge Rig Score${RESET} — Benchmark your system and compete"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET}"
+    echo "  forge-rig-score run              Run full benchmark (GPU + CPU + RAM + storage)"
+    echo "  forge-rig-score quick            Quick benchmark (~30s, CPU + GPU only)"
+    echo "  forge-rig-score show             Show last benchmark results"
+    echo "  forge-rig-score submit           Submit score to Hub leaderboard"
+    echo "  forge-rig-score leaderboard      Show top 20 community rigs"
+    echo "  forge-rig-score compare <id>     Compare your rig to another"
+    echo ""
+    echo -e "${BOLD}Tiers:${RESET}"
+    echo -e "  ${DIAMOND_COLOR}◆ Diamond${RESET}   9000+     ${PLATINUM_COLOR}★ Platinum${RESET}  7000+"
+    echo -e "  ${GOLD_COLOR}● Gold${RESET}      5000+     ${SILVER_COLOR}▲ Silver${RESET}    3000+"
+    echo -e "  ${BRONZE_COLOR}■ Bronze${RESET}    < 3000"
+    echo ""
+    echo -e "${BOLD}Score Weights:${RESET}  GPU 40% | CPU 30% | RAM 15% | Storage 15%"
+    echo ""
+    echo -e "${DIM}Results saved to ~/.config/forge/rig-score.json${RESET}"
+}
+
+# --- Main ---
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    run)        cmd_run ;;
+    quick)      cmd_quick ;;
+    show)       cmd_show ;;
+    submit)     cmd_submit ;;
+    leaderboard) cmd_leaderboard ;;
+    compare)    cmd_compare "$@" ;;
+    -h|--help|help|"")
+        usage
+        ;;
+    *)
+        die "Unknown command: $COMMAND. Run ${BOLD}forge-rig-score --help${RESET} for usage."
+        ;;
+esac

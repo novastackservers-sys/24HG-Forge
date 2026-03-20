@@ -1,4 +1,7 @@
 # 24HG Forge GRUB configuration
 GRUB_DISTRIBUTOR="24HG Forge"
 GRUB_THEME="/usr/share/forge/grub/theme.txt"
-GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX split_lock_detect=off tsc=reliable clocksource=tsc usbhid.mousepoll=1"
+GRUB_TIMEOUT=5
+GRUB_TIMEOUT_STYLE=menu
+GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX quiet splash plymouth.use-hierarchical-themes=0 rd.plymouth=1 rd.systemd.show_status=false split_lock_detect=off tsc=reliable clocksource=tsc usbhid.mousepoll=1"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"

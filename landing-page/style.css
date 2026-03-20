@@ -1,12 +1,12 @@
 /* 24HG Forge Website Styles */
 
 :root {
-    --bg: #0a0a14;
-    --bg-card: #0e0e1c;
-    --bg-elevated: #12122a;
-    --accent: #58a6ff;
-    --accent-hover: #79baff;
-    --accent-dim: #58a6ff20;
+    --bg: #040910;
+    --bg-card: #0a1018;
+    --bg-elevated: #0e1622;
+    --accent: #00e5ff;
+    --accent-hover: #33ecff;
+    --accent-dim: #00e5ff20;
     --text: #c8c8dc;
     --text-dim: #606080;
     --text-bright: #ffffff;
@@ -57,7 +57,7 @@ kbd {
     border-bottom: 1px solid var(--border);
     position: sticky;
     top: 0;
-    background: #0a0a14ee;
+    background: #040910ee;
     backdrop-filter: blur(12px);
     z-index: 100;
 }
@@ -125,7 +125,7 @@ kbd {
     left: -10%;
     width: 120%;
     height: 70%;
-    background: radial-gradient(ellipse at 30% 50%, #58a6ff06 0%, transparent 50%);
+    background: radial-gradient(ellipse at 30% 50%, #00e5ff06 0%, transparent 50%);
     pointer-events: none;
     z-index: 0;
 }
@@ -243,7 +243,7 @@ kbd {
     padding: 1.75rem;
     transition: border-color 0.2s;
 }
-.card:hover { border-color: #58a6ff30; }
+.card:hover { border-color: #00e5ff30; }
 .card h3 { font-size: 1.05rem; color: var(--text-bright); margin-bottom: 0.4rem; }
 .card p { font-size: 0.9rem; color: var(--text); }
 
@@ -304,7 +304,7 @@ kbd {
     position: relative;
     transition: border-color 0.2s;
 }
-.download-card:hover { border-color: #58a6ff30; }
+.download-card:hover { border-color: #00e5ff30; }
 .download-card.featured { border-color: var(--accent); }
 .download-card.disabled { opacity: 0.4; pointer-events: none; }
 .dl-badge {
@@ -390,7 +390,7 @@ footer a:hover { color: var(--accent); }
     padding: 2rem;
     transition: border-color 0.2s;
 }
-.feature-card:hover { border-color: #58a6ff40; }
+.feature-card:hover { border-color: #00e5ff40; }
 .feature-card .icon { font-size: 2rem; margin-bottom: 1rem; }
 .feature-card h3 { font-size: 1.2rem; color: var(--text-bright); margin-bottom: 0.5rem; }
 .feature-card p { font-size: 0.95rem; }
@@ -424,7 +424,7 @@ footer a:hover { color: var(--accent); }
 
 /* ══ Info/Warning Boxes ══ */
 .info-box, .warning-box { padding: 1rem 1.25rem; border-radius: var(--radius); margin: 1rem 0; font-size: 0.95rem; }
-.info-box { background: #58a6ff08; border-left: 3px solid var(--accent); }
+.info-box { background: #00e5ff08; border-left: 3px solid var(--accent); }
 .warning-box { background: #ffcc5008; border-left: 3px solid var(--warning); }
 
 /* ══ Tool Cards (Install page) ══ */
@@ -482,8 +482,8 @@ footer a:hover { color: var(--accent); }
 .roadmap-header h2 { font-size: 1.3rem; color: var(--text-bright); margin: 0; }
 .roadmap-date { margin-left: auto; color: var(--text-dim); font-size: 0.9rem; }
 .roadmap-badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
-.roadmap-badge.done { background: var(--success); color: #0a0a14; }
-.roadmap-badge.planned { background: var(--accent); color: #0a0a14; }
+.roadmap-badge.done { background: var(--success); color: #040910; }
+.roadmap-badge.planned { background: var(--accent); color: #040910; }
 .roadmap-badge.vision { background: #a855f7; color: #fff; }
 .roadmap-items { padding: 1rem 1.5rem; }
 .roadmap-item { padding: 0.5rem 0; display: flex; align-items: center; gap: 0.75rem; color: var(--text); font-size: 0.95rem; }
@@ -521,4 +521,25 @@ footer a:hover { color: var(--accent); }
     .roadmap-header { flex-direction: column; align-items: flex-start; }
     .roadmap-date { margin-left: 0; }
     .download-cards { flex-direction: column; align-items: center; }
+}
+
+/* ── Status Pills ── */
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 20px;
+    font-size: 0.8rem;
+    color: #8899aa;
+    font-weight: 500;
+}
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #555;
+    transition: background 0.3s;
 }

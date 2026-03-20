@@ -395,21 +395,23 @@ ${itemsHTML}
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>24HG Forge Roadmap — What's Coming Next</title>
     <meta name="description" content="24HG Forge development roadmap. See what features are coming to the ultimate Linux gaming OS.">
+    <meta property="og:image" content="https://os.24hgaming.com/og-image.png">
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <link rel="stylesheet" href="style.css">
+    <script async src="https://analytics.24hgaming.com/track" data-website-id="a052da7e-3afe-40b1-9354-071901dd26e4"></script>
 </head>
 <body>
 
 <nav class="nav">
     <a href="index.html" class="nav-logo">24HG Forge</a>
     <div class="nav-links">
-        <a href="index.html">Home</a>
-        <a href="install.html">Install Guide</a>
+        <a href="download.html">Download</a>
+        <a href="features.html">Features</a>
+        <a href="install.html">Install</a>
         <a href="compatibility.html">Compatibility</a>
         <a href="roadmap.html" class="active">Roadmap</a>
         <a href="faq.html">FAQ</a>
-        <a href="https://hub.24hgaming.com">Hub</a>
-        <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+        <a href="https://hub.24hgaming.com" class="btn-nav">Open Hub</a>
     </div>
 </nav>
 
@@ -419,7 +421,7 @@ ${itemsHTML}
 
     <div class="roadmap-current">
         <h2>Current Release: ${escapeHTML(currentVersion)}</h2>
-        <p>53 tools · 88+ servers · 202 files · Built on Bazzite (Fedora Atomic)</p>
+        <p>150+ tools · 89 servers · 20 development waves · Built on Bazzite (Fedora Atomic)</p>
         <a href="download.html" class="btn btn-primary">Download 24HG Forge ${escapeHTML(currentVersion)}</a>
     </div>
 
@@ -436,13 +438,33 @@ ${sections}
 </main>
 
 <footer>
-    <p>
-        24HG Forge is made by <a href="https://24hgaming.com">24 Hour Gaming</a> &middot;
-        <a href="https://discord.gg/ymfEjH6EJN">Discord</a> &middot;
-        <a href="https://hub.24hgaming.com">Hub</a>
-    </p>
-    <p style="margin-top: 0.5rem;">Built on Bazzite / Universal Blue / Fedora Atomic. MIT License.</p>
+    <div class="footer-grid">
+        <div class="footer-col">
+            <h4>24HG Forge</h4>
+            <a href="download.html">Download</a>
+            <a href="install.html">Install Guide</a>
+            <a href="roadmap.html">Roadmap</a>
+            <a href="faq.html">FAQ</a>
+        </div>
+        <div class="footer-col">
+            <h4>Community</h4>
+            <a href="https://hub.24hgaming.com">24HG Hub</a>
+            <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+            <a href="https://24hgaming.com">24hgaming.com</a>
+        </div>
+        <div class="footer-col">
+            <h4>Built on</h4>
+            <a href="https://bazzite.gg">Bazzite</a>
+            <a href="https://universal-blue.org">Universal Blue</a>
+            <a href="https://fedoraproject.org">Fedora</a>
+        </div>
+    </div>
+    <div class="footer-bottom">
+        <p>Made by <a href="https://24hgaming.com">24 Hour Gaming</a> &middot; MIT License</p>
+    </div>
 </footer>
+
+<script>fetch("/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.pathname,referer:document.referrer})}).catch(()=>{})</script>
 
 </body>
 </html>`;
@@ -457,6 +479,63 @@ function escapeHTML(s: string): string {
 app.get("/api/installs", authMiddleware(), (c) => {
   const limit = parseInt(c.req.query("limit") || "100");
   return c.json(getInstallList(limit));
+});
+
+// ── VPN Proxy Endpoints (forward to VPN API) ──
+
+const VPN_API = process.env.VPN_API_URL || "http://10.0.0.1:3860";
+
+async function vpnFetch(path: string, opts: RequestInit = {}) {
+  return fetch(`${VPN_API}${path}`, {
+    ...opts,
+    headers: { "Content-Type": "application/json", ...opts.headers },
+  });
+}
+
+app.get("/api/vpn/health", async (c) => {
+  try {
+    const res = await vpnFetch("/api/vpn/health");
+    return c.json(await res.json(), res.status as any);
+  } catch { return c.json({ error: "VPN API unreachable" }, 502); }
+});
+
+app.get("/api/vpn/status", authMiddleware(true), async (c) => {
+  try {
+    const user = c.get("user" as any) as AuthUser;
+    const res = await vpnFetch("/api/vpn/status", {
+      headers: { Authorization: `Bearer ${c.req.header("Authorization")?.split(" ")[1] || ""}` },
+    });
+    return c.json(await res.json(), res.status as any);
+  } catch { return c.json({ error: "VPN API unreachable" }, 502); }
+});
+
+app.post("/api/vpn/add", authMiddleware(true), async (c) => {
+  try {
+    const { username } = await c.req.json();
+    // Admin-initiated peer creation — generate keys and add
+    const res = await vpnFetch("/api/vpn/admin/add", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${c.req.header("Authorization")?.split(" ")[1] || ""}` },
+      body: JSON.stringify({ username }),
+    });
+    const data = await res.json();
+    if (res.ok) logActivity("vpn_add", `Added VPN peer: ${username} → ${data.assigned_ip}`);
+    return c.json(data, res.status as any);
+  } catch { return c.json({ error: "VPN API unreachable" }, 502); }
+});
+
+app.post("/api/vpn/remove", authMiddleware(true), async (c) => {
+  try {
+    const { username } = await c.req.json();
+    const res = await vpnFetch("/api/vpn/admin/remove", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${c.req.header("Authorization")?.split(" ")[1] || ""}` },
+      body: JSON.stringify({ username }),
+    });
+    const data = await res.json();
+    if (res.ok) logActivity("vpn_remove", `Removed VPN peer: ${username}`);
+    return c.json(data, res.status as any);
+  } catch { return c.json({ error: "VPN API unreachable" }, 502); }
 });
 
 // ── Admin Static Files ──

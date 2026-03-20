@@ -1,0 +1,612 @@
+#!/usr/bin/env python3
+"""
+24HG Forge Desktop Tour — Post-first-boot onboarding overlay.
+
+Shows an 8-step guided tour of key Forge features using zenity dialogs.
+Designed to be Wayland-safe (centered dialogs only, no xdotool/wmctrl).
+
+Usage:
+    forge-tour              Run the tour (skips if already completed)
+    forge-tour --force      Run even if previously completed
+    forge-tour --reset      Clear completion marker and exit
+    forge-tour --step N     Jump to step N (1-8)
+"""
+
+import subprocess
+import os
+import sys
+import json
+import logging
+import argparse
+import textwrap
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+APP_NAME = "24HG Forge Tour"
+CONFIG_DIR = Path.home() / ".config" / "forge"
+MARKER = CONFIG_DIR / "tour-done"
+LOG_FILE = CONFIG_DIR / "tour.log"
+HUB_URL = "https://hub.24hgaming.com"
+DISCORD_URL = "discord.gg/ymfEjH6EJN"
+
+TOTAL_STEPS = 8
+WINDOW_WIDTH = 520
+WINDOW_HEIGHT = 320
+ICON_NAME = "forge-logo"
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def setup_logging():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(LOG_FILE),
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Display helpers
+# ---------------------------------------------------------------------------
+
+def has_display():
+    """Return True if a graphical session is available."""
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def has_zenity():
+    """Return True if zenity is installed."""
+    try:
+        subprocess.run(
+            ["zenity", "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def zenity_info(title: str, text: str, ok_label: str = "OK",
+                extra_buttons: list | None = None,
+                width: int = WINDOW_WIDTH, height: int = WINDOW_HEIGHT) -> str:
+    """
+    Show a zenity --info dialog and return which button was pressed.
+
+    Returns:
+        "ok"    — the OK/Next button
+        "extra:Label" — an --extra-button that was clicked
+        "cancel" — dialog was closed / cancelled
+    """
+    cmd = [
+        "zenity", "--info",
+        "--title", title,
+        "--text", text,
+        "--ok-label", ok_label,
+        "--width", str(width),
+        "--height", str(height),
+        "--icon-name", ICON_NAME,
+        "--no-wrap",
+    ]
+    for btn in (extra_buttons or []):
+        cmd += ["--extra-button", btn]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    stdout = result.stdout.strip()
+
+    # zenity returns 0 for OK, 1 for Cancel, 5 for timeout
+    # extra-button clicks return 1 but print the label to stdout
+    if result.returncode == 0:
+        return "ok"
+    if stdout:
+        return f"extra:{stdout}"
+    return "cancel"
+
+
+def zenity_question(title: str, text: str,
+                    ok_label: str = "Yes", cancel_label: str = "No",
+                    extra_buttons: list | None = None,
+                    width: int = WINDOW_WIDTH, height: int = WINDOW_HEIGHT) -> str:
+    """Show a zenity --question dialog. Returns 'ok', 'cancel', or 'extra:Label'."""
+    cmd = [
+        "zenity", "--question",
+        "--title", title,
+        "--text", text,
+        "--ok-label", ok_label,
+        "--cancel-label", cancel_label,
+        "--width", str(width),
+        "--height", str(height),
+        "--icon-name", ICON_NAME,
+        "--no-wrap",
+    ]
+    for btn in (extra_buttons or []):
+        cmd += ["--extra-button", btn]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    stdout = result.stdout.strip()
+
+    if result.returncode == 0:
+        return "ok"
+    if stdout:
+        return f"extra:{stdout}"
+    return "cancel"
+
+
+# ---------------------------------------------------------------------------
+# Fallback: terminal-based tour
+# ---------------------------------------------------------------------------
+
+def terminal_step(step_num: int, title: str, body: str) -> str:
+    """Render a tour step in the terminal. Returns 'next', 'skip', or 'close'."""
+    hr = "=" * 60
+    progress = f"  Step {step_num} of {TOTAL_STEPS}"
+    print(f"\n{hr}")
+    print(f"  {APP_NAME}{progress}")
+    print(f"{hr}")
+    print(f"\n  {title}\n")
+    for line in body.strip().splitlines():
+        print(f"    {line}")
+    print()
+    while True:
+        choice = input("  [N]ext  [S]kip all  [Q]uit > ").strip().lower()
+        if choice in ("n", "next", ""):
+            return "next"
+        if choice in ("s", "skip"):
+            return "skip"
+        if choice in ("q", "quit", "c", "close"):
+            return "close"
+
+
+# ---------------------------------------------------------------------------
+# Tour content
+# ---------------------------------------------------------------------------
+
+STEPS = [
+    {
+        "title": "Your Hub Widget",
+        "icon": "system-tray",
+        "body": textwrap.dedent("""\
+            <b>The 24HG Hub widget lives in your system tray.</b>
+
+            Click it to see:
+              \u2022  Friends online and their current games
+              \u2022  Server status for all 24HG servers
+              \u2022  Quick actions (launch game, join voice, clip)
+
+            <i>Look for the 24HG icon in the top-right corner
+            of your panel — that's your Hub at a glance.</i>
+
+            \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510
+            \u2502  [ Wi-Fi ] [ Vol ] [<b> 24HG </b>] [ \u23f2 ]  \u2502
+            \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518
+                                  \u2191
+                        <b>Click here!</b>"""),
+        "body_plain": textwrap.dedent("""\
+            The 24HG Hub widget lives in your system tray.
+
+            Click it to see:
+              - Friends online and their current games
+              - Server status for all 24HG servers
+              - Quick actions (launch game, join voice, clip)
+
+            Look for the 24HG icon in the top-right corner
+            of your panel -- that's your Hub at a glance."""),
+    },
+    {
+        "title": "Quick Connect",
+        "icon": "utilities-terminal",
+        "body": textwrap.dedent("""\
+            <b>Forge puts powerful tools at your fingertips.</b>
+
+            Open a terminal and try any command:
+
+              <tt>radio</tt>        \u2014 Stream lo-fi, synthwave, or rock
+              <tt>lan</tt>          \u2014 Find nearby players on your network
+              <tt>clip</tt>         \u2014 Save &amp; manage game clips
+              <tt>rig-score</tt>    \u2014 Benchmark your hardware
+
+            Or use <tt>forge-settings</tt> for a full visual settings panel.
+
+            <i>All commands are available system-wide.
+            Type </i><tt>forge-</tt><i> and press Tab to see them all.</i>"""),
+        "body_plain": textwrap.dedent("""\
+            Forge puts powerful tools at your fingertips.
+
+            Open a terminal and try any command:
+
+              radio        - Stream lo-fi, synthwave, or rock
+              lan          - Find nearby players on your network
+              clip         - Save & manage game clips
+              rig-score    - Benchmark your hardware
+
+            Or use forge-settings for a full visual settings panel.
+
+            All commands are available system-wide.
+            Type forge- and press Tab to see them all."""),
+    },
+    {
+        "title": "Game Clips",
+        "icon": "media-record",
+        "body": textwrap.dedent("""\
+            <b>Capture your best moments instantly.</b>
+
+              <b>F9</b>   \u2014  Save the last 30 seconds as a clip
+              <b>F12</b>  \u2014  Toggle the MangoHud performance overlay
+
+            Clips are saved to <tt>~/Videos/Clips/</tt> and can be
+            browsed with <tt>forge-gallery</tt> or uploaded to the Hub.
+
+            <i>Tip: Use </i><tt>forge-clip --length 60</tt><i> to change
+            the replay buffer to 60 seconds.</i>
+
+            \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510
+            \u2502  F9 = Clip    F12 = Overlay        \u2502
+            \u2502  Saved to ~/Videos/Clips/           \u2502
+            \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518"""),
+        "body_plain": textwrap.dedent("""\
+            Capture your best moments instantly.
+
+              F9   -  Save the last 30 seconds as a clip
+              F12  -  Toggle the MangoHud performance overlay
+
+            Clips are saved to ~/Videos/Clips/ and can be
+            browsed with forge-gallery or uploaded to the Hub.
+
+            Tip: Use forge-clip --length 60 to change
+            the replay buffer to 60 seconds."""),
+    },
+    {
+        "title": "Your Community",
+        "icon": "system-users",
+        "body": textwrap.dedent("""\
+            <b>24 Hour Gaming is better together.</b>
+
+              <tt>voice</tt>          \u2014 Join voice chat with your squad
+              <tt>lan</tt>            \u2014 Discover players on your local network
+              <tt>achievements</tt>   \u2014 Track your gaming milestones
+              <tt>invite</tt>         \u2014 Send a Forge invite to a friend
+
+            <i>The Hub keeps you connected to the 24HG community
+            across all games and servers.</i>
+
+            \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510
+            \u2502  89 game servers   \u2022  Active Discord  \u2502
+            \u2502  Voice chat  \u2022  LAN parties  \u2022  Clips  \u2502
+            \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518"""),
+        "body_plain": textwrap.dedent("""\
+            24 Hour Gaming is better together.
+
+              voice          - Join voice chat with your squad
+              lan            - Discover players on your local network
+              achievements   - Track your gaming milestones
+              invite         - Send a Forge invite to a friend
+
+            The Hub keeps you connected to the 24HG community
+            across all games and servers."""),
+    },
+    {
+        "title": "Smart Gaming OS",
+        "icon": "preferences-system",
+        "body": textwrap.dedent("""\
+            <b>Forge thinks so you don\'t have to.</b>
+
+              <tt>forge-game-ready</tt>    \u2014 Auto-optimize every new game
+              <tt>forge-smart-updates</tt> \u2014 Updates wait until you stop gaming
+              <tt>forge-quick-resume</tt>  \u2014 Save your session, reboot, restore
+
+            <i>Performance profiles apply automatically per game.
+            Hardware Scout monitors your system 24/7.</i>
+
+            \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510
+            \u2502  Install game \u2192 Forge configures it  \u2502
+            \u2502  Proton \u2713  Shaders \u2713  Profile \u2713      \u2502
+            \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518"""),
+        "body_plain": textwrap.dedent("""\
+            Forge thinks so you don\'t have to.
+
+              forge-game-ready    - Auto-optimize every new game
+              forge-smart-updates - Updates wait until you stop gaming
+              forge-quick-resume  - Save your session, reboot, restore
+
+            Performance profiles apply automatically per game.
+            Hardware Scout monitors your system 24/7."""),
+    },
+    {
+        "title": "Hardware Control",
+        "icon": "input-gaming",
+        "body": textwrap.dedent("""\
+            <b>No extra software needed \u2014 it\'s all built in.</b>
+
+              <tt>forge-peripherals</tt>   \u2014 Mouse DPI, RGB lighting, macros
+              <tt>forge-audio-router</tt>  \u2014 Per-app audio routing
+              <tt>forge-dual-gpu</tt>      \u2014 Switch between GPUs
+              <tt>forge-custom-res</tt>    \u2014 Create custom resolutions
+
+            <i>Forge replaces Razer Synapse, Voicemeeter,
+            MSI Afterburner, and Vortex \u2014 out of the box.</i>"""),
+        "body_plain": textwrap.dedent("""\
+            No extra software needed -- it\'s all built in.
+
+              forge-peripherals   - Mouse DPI, RGB lighting, macros
+              forge-audio-router  - Per-app audio routing
+              forge-dual-gpu      - Switch between GPUs
+              forge-custom-res    - Create custom resolutions
+
+            Forge replaces Razer Synapse, Voicemeeter,
+            MSI Afterburner, and Vortex -- out of the box."""),
+    },
+    {
+        "title": "LAN Party Mode",
+        "icon": "network-workgroup",
+        "body": textwrap.dedent("""\
+            <b>Gaming is better with friends nearby.</b>
+
+              <tt>lan-mode</tt>    \u2014 Start LAN party mode
+
+            One command and Forge will:
+              \u2022 Auto-discover other Forge gamers on your network
+              \u2022 Share files and maps instantly
+              \u2022 Let everyone vote on which game to play
+              \u2022 Built-in chat between party members
+
+            <i>Also try: </i><tt>forge-one-click-server</tt><i> to host
+            Minecraft, Terraria, or Valheim for the group.</i>"""),
+        "body_plain": textwrap.dedent("""\
+            Gaming is better with friends nearby.
+
+              lan-mode    - Start LAN party mode
+
+            One command and Forge will:
+              - Auto-discover other Forge gamers on your network
+              - Share files and maps instantly
+              - Let everyone vote on which game to play
+              - Built-in chat between party members
+
+            Also try: forge-one-click-server to host
+            Minecraft, Terraria, or Valheim for the group."""),
+    },
+    {
+        "title": "You're Ready!",
+        "icon": "emblem-default",
+        "body": textwrap.dedent("""\
+            <b>That's it \u2014 you're all set!</b>
+
+            150+ tools at your fingertips. A few essentials:
+
+              <tt>help</tt>               \u2014 See everything Forge can do
+              <tt>forge-settings</tt>     \u2014 Customize everything visually
+              <tt>rescue</tt>             \u2014 Fix things if something breaks
+              <tt>forge-</tt> + Tab       \u2014 Browse all commands
+
+            <b>Join the community:</b>
+              Discord:  <tt>discord.gg/ymfEjH6EJN</tt>
+              Web:      <tt>24hgaming.com</tt>
+
+            <i>Welcome to 24 Hour Gaming. Game on!</i>"""),
+        "body_plain": textwrap.dedent("""\
+            That's it -- you're all set!
+
+            150+ tools at your fingertips. A few essentials:
+
+              help               - See everything Forge can do
+              forge-settings     - Customize everything visually
+              rescue             - Fix things if something breaks
+              forge- + Tab       - Browse all commands
+
+            Join the community:
+              Discord:  discord.gg/ymfEjH6EJN
+              Web:      24hgaming.com
+
+            Welcome to 24 Hour Gaming. Game on!"""),
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Tour runner
+# ---------------------------------------------------------------------------
+
+def mark_complete():
+    """Write the completion marker file."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    MARKER.write_text(json.dumps({
+        "completed": True,
+        "timestamp": __import__("datetime").datetime.now().isoformat(),
+        "version": 1,
+    }))
+    logging.info("Tour marked as complete.")
+
+
+def is_complete() -> bool:
+    """Check if the tour has already been completed."""
+    return MARKER.exists()
+
+
+def run_tour_gui(start_step: int = 1):
+    """Run the full graphical tour using zenity dialogs."""
+    logging.info("Starting GUI tour from step %d", start_step)
+
+    step_idx = start_step - 1  # 0-based
+
+    while 0 <= step_idx < TOTAL_STEPS:
+        step = STEPS[step_idx]
+        step_num = step_idx + 1
+        is_last = (step_num == TOTAL_STEPS)
+
+        # Build title with progress
+        title = f"{APP_NAME} \u2014 Step {step_num} of {TOTAL_STEPS}"
+
+        # Build body with step title header
+        header = f'<span size="x-large"><b>{step["title"]}</b></span>\n\n'
+        body = header + step["body"]
+
+        if is_last:
+            # Final step: special buttons
+            result = zenity_question(
+                title=title,
+                text=body,
+                ok_label="Open Hub",
+                cancel_label="Don't show again",
+                extra_buttons=["Finish"],
+            )
+            if result == "ok":
+                # Open Hub
+                logging.info("User chose to open Hub")
+                try:
+                    subprocess.Popen(
+                        ["xdg-open", HUB_URL],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception as e:
+                    logging.warning("Failed to open Hub URL: %s", e)
+                mark_complete()
+                break
+            elif result == "extra:Finish":
+                logging.info("User finished tour")
+                mark_complete()
+                break
+            else:
+                # "Don't show again" or window closed
+                logging.info("User chose don't show again")
+                mark_complete()
+                break
+        else:
+            # Regular step: Next / Skip / Back
+            extra = []
+            if step_idx > 0:
+                extra.append("Back")
+            extra.append("Skip Tour")
+
+            result = zenity_info(
+                title=title,
+                text=body,
+                ok_label=f"Next ({step_num}/{TOTAL_STEPS})",
+                extra_buttons=extra,
+            )
+
+            if result == "ok":
+                logging.info("Step %d: next", step_num)
+                step_idx += 1
+            elif result == "extra:Back":
+                logging.info("Step %d: back", step_num)
+                step_idx -= 1
+            elif result == "extra:Skip Tour":
+                logging.info("Step %d: skip tour", step_num)
+                mark_complete()
+                break
+            else:
+                # Window closed
+                logging.info("Step %d: closed", step_num)
+                break
+
+    logging.info("Tour ended at step %d", step_idx + 1)
+
+
+def run_tour_terminal(start_step: int = 1):
+    """Run the tour in a terminal fallback mode."""
+    logging.info("Starting terminal tour from step %d", start_step)
+
+    step_idx = start_step - 1
+
+    while 0 <= step_idx < TOTAL_STEPS:
+        step = STEPS[step_idx]
+        step_num = step_idx + 1
+
+        action = terminal_step(step_num, step["title"], step["body_plain"])
+
+        if action == "next":
+            step_idx += 1
+        elif action == "skip":
+            mark_complete()
+            print("\n  Tour skipped. Run `forge-tour --force` to see it again.\n")
+            break
+        elif action == "close":
+            print("\n  Tour closed.\n")
+            break
+
+    if step_idx >= TOTAL_STEPS:
+        mark_complete()
+        print(f"\n  Tour complete! Join us: {DISCORD_URL}\n")
+
+    logging.info("Terminal tour ended at step %d", step_idx + 1)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="forge-tour",
+        description="24HG Forge Desktop Tour — guided onboarding walkthrough",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Run the tour even if previously completed",
+    )
+    parser.add_argument(
+        "--reset", action="store_true",
+        help="Clear the completion marker and exit",
+    )
+    parser.add_argument(
+        "--step", type=int, default=1, choices=range(1, TOTAL_STEPS + 1),
+        metavar="N",
+        help=f"Start at step N (1-{TOTAL_STEPS})",
+    )
+    parser.add_argument(
+        "--terminal", action="store_true",
+        help="Force terminal mode (no GUI)",
+    )
+    return parser.parse_args()
+
+
+def main():
+    setup_logging()
+    args = parse_args()
+
+    # --reset: remove marker and exit
+    if args.reset:
+        if MARKER.exists():
+            MARKER.unlink()
+            print("Tour completion marker removed.")
+            logging.info("Tour marker reset.")
+        else:
+            print("No completion marker found.")
+        return 0
+
+    # Check if already done
+    if is_complete() and not args.force:
+        logging.info("Tour already completed. Use --force to re-run.")
+        return 0
+
+    # Validate step
+    if args.step < 1 or args.step > TOTAL_STEPS:
+        print(f"Error: --step must be between 1 and {TOTAL_STEPS}")
+        return 1
+
+    # Choose GUI or terminal mode
+    use_gui = (not args.terminal) and has_display() and has_zenity()
+
+    if use_gui:
+        logging.info("Using GUI mode (zenity)")
+        run_tour_gui(start_step=args.step)
+    else:
+        if not args.terminal and not has_display():
+            logging.info("No display detected, falling back to terminal")
+        elif not args.terminal and not has_zenity():
+            logging.info("zenity not found, falling back to terminal")
+        run_tour_terminal(start_step=args.step)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

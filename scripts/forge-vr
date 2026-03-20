@@ -1,0 +1,1642 @@
+#!/bin/bash
+# 24HG Forge VR Manager
+# Setup, configure, and manage VR headsets on 24HG Forge.
+# Supports SteamVR, Monado/OpenXR, and ALVR wireless streaming.
+#
+# Usage: forge-vr [setup|status|start|stop|test|performance|normal|audio|room|passthrough|envision|drivers|games] [args...]
+
+set -euo pipefail
+
+ACTION="${1:-status}"
+shift 2>/dev/null || true
+
+# ──────────────────────────────────────────────
+# Paths and constants
+# ──────────────────────────────────────────────
+FORGE_VR_DIR="${HOME}/.config/forge/vr"
+VR_STATE_FILE="${FORGE_VR_DIR}/state.json"
+VR_LOG="${FORGE_VR_DIR}/forge-vr.log"
+UDEV_RULES="/etc/udev/rules.d/99-forge-vr.rules"
+SYSCTL_VR="/etc/sysctl.d/99-forge-vr.conf"
+PIPEWIRE_VR_CONF="${HOME}/.config/pipewire/pipewire.conf.d/99-forge-vr.conf"
+OPENXR_CONF_DIR="${HOME}/.config/openxr/1"
+ALVR_CONFIG_DIR="${HOME}/.config/alvr"
+
+mkdir -p "$FORGE_VR_DIR" "$OPENXR_CONF_DIR"
+
+# ──────────────────────────────────────────────
+# Colors
+# ──────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+info()  { echo -e "${GREEN}[+]${RESET} $*"; }
+warn()  { echo -e "${YELLOW}[!]${RESET} $*"; }
+err()   { echo -e "${RED}[-]${RESET} $*" >&2; }
+head_() { echo -e "\n${BOLD}${CYAN}=== $* ===${RESET}\n"; }
+step()  { echo -e "${BLUE} >> ${RESET}$*"; }
+ok()    { echo -e "${GREEN} ✓  ${RESET}$*"; }
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$VR_LOG"
+}
+
+need_root() {
+    if [[ $EUID -ne 0 ]]; then
+        err "This operation requires root privileges."
+        err "Re-run with: sudo forge-vr $ACTION $*"
+        exit 1
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Known VR headsets — USB VID:PID database
+# ──────────────────────────────────────────────
+declare -A VR_HEADSETS=(
+    # Valve Index
+    ["28de:2101"]="Valve Index HMD"
+    ["28de:2102"]="Valve Index Controllers"
+    ["28de:2300"]="Valve Index Base Station"
+    ["28de:2000"]="Valve Lighthouse"
+    # Meta Quest
+    ["2833:0186"]="Meta Quest 2"
+    ["2833:0182"]="Meta Quest Pro"
+    ["2833:0137"]="Meta Quest 3"
+    ["2833:0183"]="Meta Quest 3S"
+    # HP Reverb
+    ["045e:0659"]="HP Reverb G2 (WMR)"
+    ["045e:06c0"]="HP Reverb G2 v2 (WMR)"
+    # Samsung WMR
+    ["04e8:7310"]="Samsung Odyssey+ (WMR)"
+    # Pico
+    ["2d40:0003"]="Pico 4"
+    ["2d40:0012"]="Pico 4 Enterprise"
+    # Bigscreen
+    ["35bd:0101"]="Bigscreen Beyond"
+    # HTC Vive
+    ["0bb4:2c87"]="HTC Vive"
+    ["0bb4:0309"]="HTC Vive Pro"
+    ["0bb4:030a"]="HTC Vive Pro 2"
+    # Generic WMR
+    ["045e:065b"]="Windows Mixed Reality (Generic)"
+    ["045e:065d"]="Windows Mixed Reality (Acer)"
+    ["045e:0661"]="Windows Mixed Reality (Lenovo)"
+)
+
+# VID:PID to runtime mapping
+declare -A HEADSET_RUNTIME=(
+    ["28de:2101"]="steamvr"
+    ["2833:0186"]="alvr"
+    ["2833:0182"]="alvr"
+    ["2833:0137"]="alvr"
+    ["2833:0183"]="alvr"
+    ["045e:0659"]="monado"
+    ["045e:06c0"]="monado"
+    ["04e8:7310"]="monado"
+    ["2d40:0003"]="alvr"
+    ["2d40:0012"]="alvr"
+    ["35bd:0101"]="steamvr"
+    ["0bb4:2c87"]="steamvr"
+    ["0bb4:0309"]="steamvr"
+    ["0bb4:030a"]="steamvr"
+    ["045e:065b"]="monado"
+    ["045e:065d"]="monado"
+    ["045e:0661"]="monado"
+)
+
+# ──────────────────────────────────────────────
+# Headset detection
+# ──────────────────────────────────────────────
+detect_headset() {
+    local found_vid_pid=""
+    local found_name=""
+
+    if ! command -v lsusb &>/dev/null; then
+        err "lsusb not found. Install usbutils."
+        return 1
+    fi
+
+    while IFS= read -r line; do
+        local vid_pid
+        vid_pid=$(echo "$line" | grep -oP '[0-9a-f]{4}:[0-9a-f]{4}' | head -1) || continue
+        if [[ -n "${VR_HEADSETS[$vid_pid]:-}" ]]; then
+            found_vid_pid="$vid_pid"
+            found_name="${VR_HEADSETS[$vid_pid]}"
+            break
+        fi
+    done < <(lsusb 2>/dev/null)
+
+    if [[ -n "$found_vid_pid" ]]; then
+        echo "$found_vid_pid|$found_name"
+        return 0
+    fi
+    return 1
+}
+
+get_recommended_runtime() {
+    local vid_pid="$1"
+    echo "${HEADSET_RUNTIME[$vid_pid]:-monado}"
+}
+
+# ──────────────────────────────────────────────
+# Runtime detection
+# ──────────────────────────────────────────────
+find_steamvr() {
+    local paths=(
+        "${HOME}/.steam/steam/steamapps/common/SteamVR"
+        "${HOME}/.local/share/Steam/steamapps/common/SteamVR"
+        "${HOME}/.var/app/com.valvesoftware.Steam/.steam/steam/steamapps/common/SteamVR"
+        "${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/SteamVR"
+    )
+    for p in "${paths[@]}"; do
+        if [[ -d "$p" ]]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_monado() {
+    if command -v monado-service &>/dev/null; then
+        echo "system"
+        return 0
+    fi
+    if flatpak list 2>/dev/null | grep -qi monado; then
+        echo "flatpak"
+        return 0
+    fi
+    return 1
+}
+
+find_alvr() {
+    if command -v alvr_dashboard &>/dev/null; then
+        echo "native"
+        return 0
+    fi
+    if flatpak list 2>/dev/null | grep -qi alvr; then
+        echo "flatpak"
+        return 0
+    fi
+    if [[ -x "${HOME}/.local/bin/alvr_dashboard" ]]; then
+        echo "local"
+        return 0
+    fi
+    return 1
+}
+
+is_steamvr_running() {
+    pgrep -f "vrserver" &>/dev/null || pgrep -f "vrmonitor" &>/dev/null
+}
+
+is_monado_running() {
+    pgrep -f "monado-service" &>/dev/null
+}
+
+is_alvr_running() {
+    pgrep -f "alvr_dashboard" &>/dev/null || pgrep -f "alvr_server" &>/dev/null
+}
+
+get_active_runtime() {
+    if is_steamvr_running; then
+        echo "steamvr"
+    elif is_monado_running; then
+        echo "monado"
+    elif is_alvr_running; then
+        echo "alvr"
+    else
+        echo "none"
+    fi
+}
+
+# ──────────────────────────────────────────────
+# State management
+# ──────────────────────────────────────────────
+save_state() {
+    local key="$1" value="$2"
+    local tmp
+    tmp=$(mktemp)
+    if [[ -f "$VR_STATE_FILE" ]]; then
+        if command -v jq &>/dev/null; then
+            jq --arg k "$key" --arg v "$value" '.[$k] = $v' "$VR_STATE_FILE" > "$tmp"
+            mv "$tmp" "$VR_STATE_FILE"
+            return
+        fi
+    fi
+    # Fallback: simple key=value
+    echo "{\"$key\": \"$value\"}" > "$VR_STATE_FILE"
+}
+
+read_state() {
+    local key="$1" default="${2:-}"
+    if [[ -f "$VR_STATE_FILE" ]] && command -v jq &>/dev/null; then
+        local val
+        val=$(jq -r --arg k "$key" '.[$k] // empty' "$VR_STATE_FILE" 2>/dev/null)
+        echo "${val:-$default}"
+    else
+        echo "$default"
+    fi
+}
+
+# ──────────────────────────────────────────────
+# USB permissions / udev rules
+# ──────────────────────────────────────────────
+generate_udev_rules() {
+    cat << 'UDEV_EOF'
+# 24HG Forge VR — udev rules for VR headsets
+# Generated by forge-vr
+
+# Valve Index HMD and controllers
+SUBSYSTEM=="usb", ATTR{idVendor}=="28de", MODE="0666", TAG+="uaccess"
+# Valve Lighthouse / base stations
+SUBSYSTEM=="usb", ATTR{idVendor}=="28de", ATTR{idProduct}=="2300", MODE="0666", TAG+="uaccess"
+
+# Meta Quest (all models)
+SUBSYSTEM=="usb", ATTR{idVendor}=="2833", MODE="0666", TAG+="uaccess"
+
+# HP / Microsoft WMR headsets
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="0659", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="06c0", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="065b", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="065d", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="0661", MODE="0666", TAG+="uaccess"
+
+# Samsung Odyssey+ (WMR)
+SUBSYSTEM=="usb", ATTR{idVendor}=="04e8", ATTR{idProduct}=="7310", MODE="0666", TAG+="uaccess"
+
+# Pico headsets
+SUBSYSTEM=="usb", ATTR{idVendor}=="2d40", MODE="0666", TAG+="uaccess"
+
+# Bigscreen Beyond
+SUBSYSTEM=="usb", ATTR{idVendor}=="35bd", MODE="0666", TAG+="uaccess"
+
+# HTC Vive family
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bb4", MODE="0666", TAG+="uaccess"
+
+# Disable USB autosuspend for VR devices (prevents tracking dropouts)
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="28de", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="2833", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="04e8", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="2d40", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="35bd", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bb4", ATTR{power/autosuspend}="-1"
+UDEV_EOF
+}
+
+install_udev_rules() {
+    need_root
+    head_ "Installing VR udev rules"
+
+    generate_udev_rules > "$UDEV_RULES"
+    ok "Wrote $UDEV_RULES"
+
+    udevadm control --reload-rules 2>/dev/null && udevadm trigger 2>/dev/null
+    ok "Reloaded udev rules"
+    log "Installed udev rules to $UDEV_RULES"
+}
+
+# ──────────────────────────────────────────────
+# sysctl tuning for VR
+# ──────────────────────────────────────────────
+install_sysctl_vr() {
+    need_root
+    head_ "Applying VR kernel parameters"
+
+    cat > "$SYSCTL_VR" << 'EOF'
+# 24HG Forge VR — kernel tuning
+# Increase max memory map areas (VR compositors + Proton games need many)
+vm.max_map_count = 2147483642
+
+# Reduce swappiness for smoother frame pacing
+vm.swappiness = 10
+
+# Allow real-time scheduling for VR compositor
+kernel.sched_rt_runtime_us = -1
+EOF
+
+    sysctl --system &>/dev/null
+    ok "Applied VR sysctl parameters"
+    log "Installed sysctl config to $SYSCTL_VR"
+}
+
+# ──────────────────────────────────────────────
+# Command: setup
+# ──────────────────────────────────────────────
+cmd_setup() {
+    head_ "24HG Forge VR Setup Wizard"
+
+    echo -e "${BOLD}Welcome to Forge VR setup!${RESET}"
+    echo "This wizard will detect your headset and configure the VR runtime."
+    echo ""
+
+    # Step 1: Detect headset
+    step "Scanning USB devices for VR headsets..."
+    local headset_info
+    if headset_info=$(detect_headset); then
+        local vid_pid="${headset_info%%|*}"
+        local headset_name="${headset_info##*|}"
+        ok "Detected: ${BOLD}${headset_name}${RESET}"
+        local recommended
+        recommended=$(get_recommended_runtime "$vid_pid")
+        info "Recommended runtime: ${BOLD}${recommended}${RESET}"
+        save_state "headset" "$headset_name"
+        save_state "vid_pid" "$vid_pid"
+        save_state "runtime" "$recommended"
+    else
+        warn "No VR headset detected via USB."
+        echo ""
+        echo "If using wireless (ALVR), your headset won't appear on USB."
+        echo "Select your headset manually:"
+        echo ""
+        echo "  1) Valve Index"
+        echo "  2) Meta Quest 2/3/Pro (ALVR wireless)"
+        echo "  3) HP Reverb G2 (WMR)"
+        echo "  4) Pico 4 (ALVR wireless)"
+        echo "  5) HTC Vive / Vive Pro"
+        echo "  6) Bigscreen Beyond"
+        echo "  7) Other WMR headset"
+        echo "  8) Other / skip"
+        echo ""
+        read -rp "Choice [1-8]: " choice
+        case "$choice" in
+            1) save_state "headset" "Valve Index"; save_state "runtime" "steamvr" ;;
+            2) save_state "headset" "Meta Quest (ALVR)"; save_state "runtime" "alvr" ;;
+            3) save_state "headset" "HP Reverb G2"; save_state "runtime" "monado" ;;
+            4) save_state "headset" "Pico 4 (ALVR)"; save_state "runtime" "alvr" ;;
+            5) save_state "headset" "HTC Vive"; save_state "runtime" "steamvr" ;;
+            6) save_state "headset" "Bigscreen Beyond"; save_state "runtime" "steamvr" ;;
+            7) save_state "headset" "WMR Headset"; save_state "runtime" "monado" ;;
+            8) save_state "headset" "Unknown"; save_state "runtime" "steamvr" ;;
+            *) err "Invalid choice."; exit 1 ;;
+        esac
+        ok "Set headset to: $(read_state headset)"
+    fi
+
+    local runtime
+    runtime=$(read_state "runtime" "steamvr")
+
+    # Step 2: Check runtime availability
+    echo ""
+    step "Checking VR runtime availability..."
+
+    local steamvr_path="" monado_type="" alvr_type=""
+    steamvr_path=$(find_steamvr 2>/dev/null) && ok "SteamVR found at: $steamvr_path" || warn "SteamVR not installed"
+    monado_type=$(find_monado 2>/dev/null) && ok "Monado found ($monado_type)" || warn "Monado not installed"
+    alvr_type=$(find_alvr 2>/dev/null) && ok "ALVR found ($alvr_type)" || warn "ALVR not installed"
+
+    # Step 3: Install runtime if needed
+    echo ""
+    case "$runtime" in
+        steamvr)
+            if [[ -z "$steamvr_path" ]]; then
+                warn "SteamVR is not installed."
+                echo "Install it from Steam: Library > Tools > SteamVR"
+                echo "Or run: steam steam://install/250820"
+            else
+                ok "SteamVR is ready."
+            fi
+            ;;
+        monado)
+            if [[ -z "$monado_type" ]]; then
+                warn "Monado is not installed."
+                echo "Install options:"
+                echo "  Fedora: sudo dnf install monado"
+                echo "  Flatpak: flatpak install org.freedesktop.Monado"
+                echo "  Envision: https://gitlab.com/gabmus/envision"
+            else
+                ok "Monado is ready."
+                # Set OpenXR runtime
+                setup_openxr_monado
+            fi
+            ;;
+        alvr)
+            if [[ -z "$alvr_type" ]]; then
+                warn "ALVR is not installed."
+                echo "Install options:"
+                echo "  Flatpak: flatpak install com.valvesoftware.Steam.Utility.alvr"
+                echo "  AppImage: https://github.com/alvr-org/ALVR/releases"
+            else
+                ok "ALVR is ready."
+                setup_alvr_firewall
+            fi
+            ;;
+    esac
+
+    # Step 4: udev rules
+    echo ""
+    step "Checking USB permissions..."
+    if [[ -f "$UDEV_RULES" ]]; then
+        ok "VR udev rules already installed."
+    else
+        echo "VR headsets need udev rules for proper USB access."
+        read -rp "Install udev rules now? (requires sudo) [Y/n]: " yn
+        if [[ "${yn,,}" != "n" ]]; then
+            sudo "$0" _install_udev
+        else
+            warn "Skipped udev rules. You may have USB permission issues."
+        fi
+    fi
+
+    # Step 5: sysctl tuning
+    echo ""
+    step "Checking kernel parameters..."
+    local current_mmap
+    current_mmap=$(cat /proc/sys/vm/max_map_count 2>/dev/null || echo "0")
+    if [[ "$current_mmap" -ge 1048576 ]]; then
+        ok "vm.max_map_count is sufficient ($current_mmap)"
+    else
+        warn "vm.max_map_count is low ($current_mmap). VR apps may crash."
+        read -rp "Apply VR kernel tuning? (requires sudo) [Y/n]: " yn
+        if [[ "${yn,,}" != "n" ]]; then
+            sudo "$0" _install_sysctl
+        fi
+    fi
+
+    # Step 6: Check GPU
+    echo ""
+    step "Checking GPU..."
+    if command -v nvidia-smi &>/dev/null; then
+        local gpu_name
+        gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+        ok "NVIDIA GPU: $gpu_name"
+        warn "NVIDIA on Linux has limited VR support. SteamVR works best."
+    elif lspci 2>/dev/null | grep -qi "amd.*radeon\|amd.*navi\|amd.*vega"; then
+        ok "AMD GPU detected — best VR support on Linux."
+    elif lspci 2>/dev/null | grep -qi "intel.*arc\|intel.*iris"; then
+        ok "Intel GPU detected."
+        warn "Intel GPU VR support is experimental."
+    else
+        warn "Could not detect GPU."
+    fi
+
+    # Step 7: Check user groups
+    echo ""
+    step "Checking user groups..."
+    local missing_groups=()
+    id -nG 2>/dev/null | grep -qw "input" || missing_groups+=("input")
+    id -nG 2>/dev/null | grep -qw "video" || missing_groups+=("video")
+    id -nG 2>/dev/null | grep -qw "plugdev" || missing_groups+=("plugdev")
+
+    if [[ ${#missing_groups[@]} -gt 0 ]]; then
+        warn "User not in groups: ${missing_groups[*]}"
+        echo "Add with: sudo usermod -aG ${missing_groups[*]// /,} \$USER"
+        echo "Then log out and back in."
+    else
+        ok "User is in required groups."
+    fi
+
+    # Done
+    echo ""
+    head_ "Setup Complete"
+    echo -e "Headset:  ${BOLD}$(read_state headset 'Unknown')${RESET}"
+    echo -e "Runtime:  ${BOLD}${runtime}${RESET}"
+    echo ""
+    echo "Next steps:"
+    echo "  forge-vr start        — Launch VR runtime"
+    echo "  forge-vr audio        — Configure VR audio"
+    echo "  forge-vr room         — Calibrate play space"
+    echo "  forge-vr performance  — Enable VR performance mode"
+    log "Setup completed. Headset=$(read_state headset), Runtime=$runtime"
+}
+
+setup_openxr_monado() {
+    local monado_manifest="/usr/share/openxr/1/openxr_monado.json"
+    local flatpak_manifest="${HOME}/.local/share/flatpak/app/org.freedesktop.Monado/current/active/files/share/openxr/1/openxr_monado.json"
+
+    local target=""
+    [[ -f "$monado_manifest" ]] && target="$monado_manifest"
+    [[ -f "$flatpak_manifest" ]] && target="$flatpak_manifest"
+
+    if [[ -n "$target" ]]; then
+        local active_runtime="${OPENXR_CONF_DIR}/active_runtime.json"
+        mkdir -p "$OPENXR_CONF_DIR"
+        ln -sf "$target" "$active_runtime" 2>/dev/null || cp "$target" "$active_runtime"
+        ok "Set OpenXR active runtime to Monado"
+        export XR_RUNTIME_JSON="$active_runtime"
+    else
+        warn "Could not find Monado OpenXR manifest."
+    fi
+}
+
+setup_alvr_firewall() {
+    step "Checking ALVR firewall ports..."
+    if command -v firewall-cmd &>/dev/null; then
+        if ! firewall-cmd --query-port=9943/tcp &>/dev/null 2>&1; then
+            echo "ALVR needs ports 9943/tcp and 9944/udp for streaming."
+            read -rp "Open firewall ports? (requires sudo) [Y/n]: " yn
+            if [[ "${yn,,}" != "n" ]]; then
+                sudo firewall-cmd --add-port=9943/tcp --add-port=9944/udp --permanent 2>/dev/null
+                sudo firewall-cmd --reload 2>/dev/null
+                ok "Opened ALVR firewall ports."
+            fi
+        else
+            ok "ALVR firewall ports already open."
+        fi
+    elif command -v ufw &>/dev/null; then
+        if ! ufw status 2>/dev/null | grep -q "9943"; then
+            echo "ALVR needs ports 9943/tcp and 9944/udp."
+            read -rp "Open firewall ports? (requires sudo) [Y/n]: " yn
+            if [[ "${yn,,}" != "n" ]]; then
+                sudo ufw allow 9943/tcp 2>/dev/null
+                sudo ufw allow 9944/udp 2>/dev/null
+                ok "Opened ALVR firewall ports."
+            fi
+        else
+            ok "ALVR firewall ports already open."
+        fi
+    else
+        info "No firewall manager detected — ports should be open."
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: status
+# ──────────────────────────────────────────────
+cmd_status() {
+    head_ "VR Status"
+
+    # Active runtime
+    local runtime
+    runtime=$(get_active_runtime)
+    echo -e "Active runtime:    ${BOLD}${runtime}${RESET}"
+
+    # Configured headset
+    local headset
+    headset=$(read_state "headset" "Not configured")
+    echo -e "Configured headset: ${BOLD}${headset}${RESET}"
+
+    # Connected headset
+    echo -n "Connected headset:  "
+    local headset_info
+    if headset_info=$(detect_headset); then
+        local name="${headset_info##*|}"
+        echo -e "${GREEN}${BOLD}${name}${RESET}"
+    else
+        echo -e "${DIM}None detected${RESET}"
+    fi
+
+    # Runtime installations
+    echo ""
+    echo -e "${BOLD}Installed runtimes:${RESET}"
+    local svr_path="" monado_t="" alvr_t=""
+    if svr_path=$(find_steamvr 2>/dev/null); then
+        echo -e "  SteamVR:  ${GREEN}installed${RESET} ($svr_path)"
+    else
+        echo -e "  SteamVR:  ${DIM}not found${RESET}"
+    fi
+    if monado_t=$(find_monado 2>/dev/null); then
+        echo -e "  Monado:   ${GREEN}installed${RESET} ($monado_t)"
+    else
+        echo -e "  Monado:   ${DIM}not found${RESET}"
+    fi
+    if alvr_t=$(find_alvr 2>/dev/null); then
+        echo -e "  ALVR:     ${GREEN}installed${RESET} ($alvr_t)"
+    else
+        echo -e "  ALVR:     ${DIM}not found${RESET}"
+    fi
+
+    # OpenXR runtime
+    echo ""
+    local xr_json="${XR_RUNTIME_JSON:-${OPENXR_CONF_DIR}/active_runtime.json}"
+    if [[ -f "$xr_json" ]]; then
+        local xr_name
+        xr_name=$(grep -oP '"name"\s*:\s*"\K[^"]+' "$xr_json" 2>/dev/null || echo "unknown")
+        echo -e "OpenXR runtime:    ${BOLD}${xr_name}${RESET} ($xr_json)"
+    else
+        echo -e "OpenXR runtime:    ${DIM}not configured${RESET}"
+    fi
+
+    # System checks
+    echo ""
+    echo -e "${BOLD}System:${RESET}"
+
+    local mmap
+    mmap=$(cat /proc/sys/vm/max_map_count 2>/dev/null || echo "?")
+    local mmap_color="$GREEN"
+    [[ "$mmap" != "?" ]] && [[ "$mmap" -lt 1048576 ]] && mmap_color="$YELLOW"
+    echo -e "  vm.max_map_count: ${mmap_color}${mmap}${RESET}"
+
+    if [[ -f "$UDEV_RULES" ]]; then
+        echo -e "  udev rules:      ${GREEN}installed${RESET}"
+    else
+        echo -e "  udev rules:      ${YELLOW}not installed${RESET} (run: forge-vr setup)"
+    fi
+
+    # GPU info
+    if command -v nvidia-smi &>/dev/null; then
+        local gpu
+        gpu=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | head -1)
+        echo -e "  GPU:              $gpu"
+    elif command -v glxinfo &>/dev/null; then
+        local renderer
+        renderer=$(glxinfo 2>/dev/null | grep "OpenGL renderer" | sed 's/.*: //')
+        echo -e "  GPU:              ${renderer:-unknown}"
+    fi
+
+    # Performance mode
+    local perf_mode
+    perf_mode=$(read_state "performance_mode" "off")
+    if [[ "$perf_mode" == "on" ]]; then
+        echo -e "  Performance mode: ${MAGENTA}ACTIVE${RESET}"
+    else
+        echo -e "  Performance mode: ${DIM}off${RESET}"
+    fi
+
+    # Tracking status (SteamVR)
+    if is_steamvr_running; then
+        echo ""
+        echo -e "${BOLD}Tracking:${RESET}"
+        if [[ -f "${HOME}/.steam/steam/logs/vrserver.txt" ]]; then
+            local tracking_status
+            tracking_status=$(tail -20 "${HOME}/.steam/steam/logs/vrserver.txt" 2>/dev/null | grep -i "tracking" | tail -1)
+            if [[ -n "$tracking_status" ]]; then
+                echo "  $tracking_status"
+            else
+                echo -e "  ${DIM}No tracking info available${RESET}"
+            fi
+        fi
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: start
+# ──────────────────────────────────────────────
+cmd_start() {
+    local runtime="${1:-$(read_state runtime steamvr)}"
+
+    head_ "Starting VR Runtime: $runtime"
+
+    local current
+    current=$(get_active_runtime)
+    if [[ "$current" != "none" ]]; then
+        warn "Runtime '$current' is already running."
+        read -rp "Stop it and start $runtime instead? [Y/n]: " yn
+        if [[ "${yn,,}" != "n" ]]; then
+            cmd_stop
+        else
+            return 0
+        fi
+    fi
+
+    case "$runtime" in
+        steamvr)
+            local svr_path
+            if ! svr_path=$(find_steamvr); then
+                err "SteamVR not found. Install from Steam Library > Tools > SteamVR"
+                exit 1
+            fi
+
+            info "Launching SteamVR..."
+
+            # Try native Steam first, then flatpak
+            if command -v steam &>/dev/null; then
+                steam steam://run/250820 &>/dev/null &
+            elif flatpak list 2>/dev/null | grep -qi "com.valvesoftware.Steam"; then
+                flatpak run com.valvesoftware.Steam steam://run/250820 &>/dev/null &
+            else
+                err "Steam not found. Cannot launch SteamVR."
+                exit 1
+            fi
+
+            step "Waiting for SteamVR to start..."
+            local tries=0
+            while ! is_steamvr_running && [[ $tries -lt 30 ]]; do
+                sleep 1
+                ((tries++))
+            done
+
+            if is_steamvr_running; then
+                ok "SteamVR is running."
+            else
+                warn "SteamVR may still be starting. Check Steam."
+            fi
+            ;;
+
+        monado)
+            if ! find_monado &>/dev/null; then
+                err "Monado not found. Install with: sudo dnf install monado"
+                exit 1
+            fi
+
+            info "Launching Monado..."
+            setup_openxr_monado
+
+            if command -v monado-service &>/dev/null; then
+                monado-service &>/dev/null &
+            else
+                flatpak run org.freedesktop.Monado &>/dev/null &
+            fi
+
+            sleep 2
+            if is_monado_running; then
+                ok "Monado is running."
+            else
+                warn "Monado may have failed to start. Check logs."
+            fi
+            ;;
+
+        alvr)
+            if ! find_alvr &>/dev/null; then
+                err "ALVR not found. Install from https://github.com/alvr-org/ALVR/releases"
+                exit 1
+            fi
+
+            info "Launching ALVR..."
+
+            local alvr_type
+            alvr_type=$(find_alvr)
+            case "$alvr_type" in
+                flatpak)
+                    flatpak run com.valvesoftware.Steam.Utility.alvr &>/dev/null &
+                    ;;
+                local)
+                    "${HOME}/.local/bin/alvr_dashboard" &>/dev/null &
+                    ;;
+                native)
+                    alvr_dashboard &>/dev/null &
+                    ;;
+            esac
+
+            sleep 3
+            if is_alvr_running; then
+                ok "ALVR is running."
+                info "Open the ALVR app on your headset and connect."
+            else
+                warn "ALVR may still be starting."
+            fi
+            ;;
+
+        *)
+            err "Unknown runtime: $runtime"
+            echo "Available: steamvr, monado, alvr"
+            exit 1
+            ;;
+    esac
+
+    save_state "last_runtime" "$runtime"
+    log "Started runtime: $runtime"
+    notify-send -a "24HG Forge" -i "applications-games" "VR Runtime" "$runtime started" 2>/dev/null || true
+}
+
+# ──────────────────────────────────────────────
+# Command: stop
+# ──────────────────────────────────────────────
+cmd_stop() {
+    head_ "Stopping VR Runtime"
+
+    local stopped=false
+
+    if is_steamvr_running; then
+        info "Stopping SteamVR..."
+        pkill -f "vrserver" 2>/dev/null || true
+        pkill -f "vrmonitor" 2>/dev/null || true
+        pkill -f "vrcompositor" 2>/dev/null || true
+        pkill -f "vrdashboard" 2>/dev/null || true
+        stopped=true
+    fi
+
+    if is_monado_running; then
+        info "Stopping Monado..."
+        pkill -f "monado-service" 2>/dev/null || true
+        stopped=true
+    fi
+
+    if is_alvr_running; then
+        info "Stopping ALVR..."
+        pkill -f "alvr_dashboard" 2>/dev/null || true
+        pkill -f "alvr_server" 2>/dev/null || true
+        stopped=true
+    fi
+
+    if $stopped; then
+        sleep 1
+        ok "VR runtime stopped."
+        log "Stopped VR runtime"
+        notify-send -a "24HG Forge" -i "dialog-information" "VR Runtime" "Stopped" 2>/dev/null || true
+    else
+        info "No VR runtime is running."
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: test
+# ──────────────────────────────────────────────
+cmd_test() {
+    head_ "VR Test Scene"
+
+    local runtime
+    runtime=$(get_active_runtime)
+
+    if [[ "$runtime" == "none" ]]; then
+        warn "No VR runtime is running. Starting default runtime first..."
+        cmd_start
+        runtime=$(get_active_runtime)
+    fi
+
+    case "$runtime" in
+        steamvr)
+            info "Launching SteamVR Home test environment..."
+            # SteamVR Home (app id 250820) provides a test environment
+            if command -v steam &>/dev/null; then
+                steam steam://run/250820 &>/dev/null &
+            elif flatpak list 2>/dev/null | grep -qi steam; then
+                flatpak run com.valvesoftware.Steam steam://run/250820 &>/dev/null &
+            fi
+            ok "SteamVR Home should appear in your headset."
+            ;;
+        monado)
+            info "Running Monado test scene..."
+            if command -v monado-gui &>/dev/null; then
+                monado-gui &>/dev/null &
+                ok "Monado GUI launched with test scene."
+            elif command -v openxr-simple-playground &>/dev/null; then
+                openxr-simple-playground &>/dev/null &
+                ok "OpenXR test playground launched."
+            else
+                warn "No Monado test tool found."
+                echo "Install with: sudo dnf install monado-gui"
+                echo "Or try: hello_xr (from openxr-devel package)"
+            fi
+            ;;
+        alvr)
+            info "ALVR test: check the dashboard for the test room."
+            echo "The ALVR lobby environment serves as a test scene."
+            echo "Verify you can see the dashboard in your headset."
+            ;;
+    esac
+
+    echo ""
+    echo "Test checklist:"
+    echo "  [ ] Headset displays content"
+    echo "  [ ] Head tracking responds"
+    echo "  [ ] Controllers are detected"
+    echo "  [ ] Audio plays through headset"
+    echo "  [ ] No dropped frames (check performance overlay)"
+}
+
+# ──────────────────────────────────────────────
+# Command: performance
+# ──────────────────────────────────────────────
+cmd_performance() {
+    head_ "VR Performance Mode"
+
+    info "Activating VR performance optimizations..."
+
+    # CPU governor → performance
+    if [[ -d /sys/devices/system/cpu/cpu0/cpufreq ]]; then
+        local current_gov
+        current_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
+        save_state "prev_governor" "$current_gov"
+
+        if command -v cpupower &>/dev/null; then
+            sudo cpupower frequency-set -g performance &>/dev/null 2>&1 && ok "CPU governor: performance" || warn "Failed to set CPU governor (try sudo)"
+        elif [[ -w /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+            for cpu_dir in /sys/devices/system/cpu/cpu*/cpufreq; do
+                echo "performance" > "$cpu_dir/scaling_governor" 2>/dev/null
+            done
+            ok "CPU governor: performance"
+        else
+            warn "Cannot set CPU governor. Run with sudo or install cpupower."
+        fi
+    fi
+
+    # GPU performance (AMD)
+    if [[ -f /sys/class/drm/card0/device/power_dpm_force_performance_level ]]; then
+        local current_gpu_perf
+        current_gpu_perf=$(cat /sys/class/drm/card0/device/power_dpm_force_performance_level 2>/dev/null || echo "auto")
+        save_state "prev_gpu_perf" "$current_gpu_perf"
+
+        if [[ -w /sys/class/drm/card0/device/power_dpm_force_performance_level ]]; then
+            echo "high" > /sys/class/drm/card0/device/power_dpm_force_performance_level 2>/dev/null
+            ok "AMD GPU: forced high performance"
+        else
+            sudo sh -c 'echo "high" > /sys/class/drm/card0/device/power_dpm_force_performance_level' 2>/dev/null && \
+                ok "AMD GPU: forced high performance" || \
+                warn "Cannot set GPU performance level."
+        fi
+    fi
+
+    # NVIDIA max clocks
+    if command -v nvidia-smi &>/dev/null; then
+        sudo nvidia-smi -pm 1 &>/dev/null 2>&1 || true
+        local max_clocks
+        max_clocks=$(nvidia-smi --query-gpu=clocks.max.graphics,clocks.max.memory --format=csv,noheader 2>/dev/null | head -1)
+        if [[ -n "$max_clocks" ]]; then
+            local max_gfx max_mem
+            max_gfx=$(echo "$max_clocks" | cut -d',' -f1 | tr -d ' MHz')
+            max_mem=$(echo "$max_clocks" | cut -d',' -f2 | tr -d ' MHz')
+            sudo nvidia-smi -lgc "$max_gfx" &>/dev/null 2>&1 && ok "NVIDIA GPU: locked to max clocks" || warn "Could not lock GPU clocks."
+        fi
+    fi
+
+    # Disable desktop compositor
+    local compositor_disabled=false
+    if pgrep -x "kwin_wayland" &>/dev/null || pgrep -x "kwin_x11" &>/dev/null; then
+        if command -v qdbus &>/dev/null; then
+            qdbus org.kde.KWin /Compositor suspend 2>/dev/null && compositor_disabled=true
+        elif command -v qdbus6 &>/dev/null; then
+            qdbus6 org.kde.KWin /Compositor suspend 2>/dev/null && compositor_disabled=true
+        fi
+    elif pgrep -x "picom" &>/dev/null; then
+        pkill picom 2>/dev/null && compositor_disabled=true
+    elif pgrep -x "compton" &>/dev/null; then
+        pkill compton 2>/dev/null && compositor_disabled=true
+    fi
+
+    if $compositor_disabled; then
+        ok "Desktop compositor: suspended"
+        save_state "compositor_was_running" "true"
+    else
+        info "Desktop compositor: not managed (Wayland compositors cannot be suspended)"
+    fi
+
+    # Set VR process priorities
+    if is_steamvr_running; then
+        for proc in vrserver vrcompositor; do
+            local pid
+            pid=$(pgrep -f "$proc" 2>/dev/null | head -1)
+            if [[ -n "$pid" ]]; then
+                sudo renice -10 "$pid" &>/dev/null 2>&1 || renice -5 "$pid" &>/dev/null 2>&1
+                sudo ionice -c 1 -n 0 -p "$pid" &>/dev/null 2>&1 || true
+            fi
+        done
+        ok "VR process priority: elevated"
+    fi
+
+    if is_monado_running; then
+        local pid
+        pid=$(pgrep -f "monado-service" 2>/dev/null | head -1)
+        if [[ -n "$pid" ]]; then
+            sudo renice -10 "$pid" &>/dev/null 2>&1 || renice -5 "$pid" &>/dev/null 2>&1
+            ok "Monado priority: elevated"
+        fi
+    fi
+
+    # Disable screen blanking
+    if command -v xset &>/dev/null && [[ -n "${DISPLAY:-}" ]]; then
+        xset s off -dpms 2>/dev/null
+        ok "Screen blanking: disabled"
+    fi
+
+    save_state "performance_mode" "on"
+    log "Performance mode activated"
+
+    echo ""
+    ok "VR performance mode is ${BOLD}ACTIVE${RESET}."
+    echo "Run '${BOLD}forge-vr normal${RESET}' to restore desktop settings."
+    notify-send -a "24HG Forge" -i "speedometer" "VR Performance" "Performance mode active" 2>/dev/null || true
+}
+
+# ──────────────────────────────────────────────
+# Command: normal
+# ──────────────────────────────────────────────
+cmd_normal() {
+    head_ "Restoring Normal Desktop Mode"
+
+    # Restore CPU governor
+    local prev_gov
+    prev_gov=$(read_state "prev_governor" "powersave")
+    if command -v cpupower &>/dev/null; then
+        sudo cpupower frequency-set -g "$prev_gov" &>/dev/null 2>&1 && ok "CPU governor: $prev_gov" || true
+    elif [[ -d /sys/devices/system/cpu/cpu0/cpufreq ]]; then
+        for cpu_dir in /sys/devices/system/cpu/cpu*/cpufreq; do
+            echo "$prev_gov" > "$cpu_dir/scaling_governor" 2>/dev/null || true
+        done
+        ok "CPU governor: $prev_gov"
+    fi
+
+    # Restore GPU performance level
+    if [[ -f /sys/class/drm/card0/device/power_dpm_force_performance_level ]]; then
+        local prev_gpu
+        prev_gpu=$(read_state "prev_gpu_perf" "auto")
+        if [[ -w /sys/class/drm/card0/device/power_dpm_force_performance_level ]]; then
+            echo "$prev_gpu" > /sys/class/drm/card0/device/power_dpm_force_performance_level 2>/dev/null
+        else
+            sudo sh -c "echo '$prev_gpu' > /sys/class/drm/card0/device/power_dpm_force_performance_level" 2>/dev/null
+        fi
+        ok "AMD GPU: $prev_gpu"
+    fi
+
+    # Unlock NVIDIA clocks
+    if command -v nvidia-smi &>/dev/null; then
+        sudo nvidia-smi -rgc &>/dev/null 2>&1 && ok "NVIDIA GPU: clocks unlocked" || true
+    fi
+
+    # Restore compositor
+    local comp_was_running
+    comp_was_running=$(read_state "compositor_was_running" "false")
+    if [[ "$comp_was_running" == "true" ]]; then
+        if command -v qdbus &>/dev/null; then
+            qdbus org.kde.KWin /Compositor resume 2>/dev/null && ok "Desktop compositor: resumed"
+        elif command -v qdbus6 &>/dev/null; then
+            qdbus6 org.kde.KWin /Compositor resume 2>/dev/null && ok "Desktop compositor: resumed"
+        fi
+    fi
+
+    # Restore screen blanking
+    if command -v xset &>/dev/null && [[ -n "${DISPLAY:-}" ]]; then
+        xset s on +dpms 2>/dev/null
+        ok "Screen blanking: restored"
+    fi
+
+    save_state "performance_mode" "off"
+    log "Normal mode restored"
+
+    ok "Desktop mode restored."
+    notify-send -a "24HG Forge" -i "preferences-desktop" "VR Performance" "Normal mode restored" 2>/dev/null || true
+}
+
+# ──────────────────────────────────────────────
+# Command: audio
+# ──────────────────────────────────────────────
+cmd_audio() {
+    head_ "VR Audio Configuration"
+
+    if ! command -v pactl &>/dev/null && ! command -v wpctl &>/dev/null; then
+        err "PipeWire/PulseAudio tools not found. Install pipewire-pulse."
+        exit 1
+    fi
+
+    local action="${1:-route}"
+
+    case "$action" in
+        route)
+            info "Detecting VR audio devices..."
+
+            # Look for headset audio sinks
+            local vr_sink=""
+            local vr_source=""
+
+            while IFS= read -r line; do
+                local name desc
+                name=$(echo "$line" | awk '{print $2}')
+                desc=$(pactl list sinks 2>/dev/null | grep -A1 "Name: $name" | grep "Description:" | sed 's/.*Description: //')
+                local desc_lower="${desc,,}"
+
+                if echo "$desc_lower" | grep -qiE "index|vive|quest|reverb|pico|alvr|bigscreen|oculus|wmr|headset"; then
+                    vr_sink="$name"
+                    info "Found VR audio output: $desc"
+                fi
+            done < <(pactl list sinks short 2>/dev/null)
+
+            while IFS= read -r line; do
+                local name desc
+                name=$(echo "$line" | awk '{print $2}')
+                desc=$(pactl list sources 2>/dev/null | grep -A1 "Name: $name" | grep "Description:" | sed 's/.*Description: //')
+                local desc_lower="${desc,,}"
+
+                if echo "$desc_lower" | grep -qiE "index|vive|quest|reverb|pico|alvr|bigscreen|oculus|wmr|headset" && \
+                   ! echo "$desc_lower" | grep -q "monitor"; then
+                    vr_source="$name"
+                    info "Found VR microphone: $desc"
+                fi
+            done < <(pactl list sources short 2>/dev/null)
+
+            if [[ -n "$vr_sink" ]]; then
+                step "Routing audio to VR headset..."
+                pactl set-default-sink "$vr_sink" 2>/dev/null
+                # Move existing audio streams
+                pactl list sink-inputs short 2>/dev/null | while read -r si_idx _rest; do
+                    pactl move-sink-input "$si_idx" "$vr_sink" 2>/dev/null || true
+                done
+                ok "Audio output routed to VR headset."
+                save_state "prev_sink" "$(pactl get-default-sink 2>/dev/null || echo "")"
+            else
+                warn "No VR audio device found."
+                echo "Available audio outputs:"
+                pactl list sinks short 2>/dev/null | while read -r idx name _rest; do
+                    local desc
+                    desc=$(pactl list sinks 2>/dev/null | grep -A1 "Name: $name" | grep "Description:" | sed 's/.*Description: //')
+                    echo "  $desc"
+                    echo "    $name"
+                done
+                echo ""
+                read -rp "Enter sink name to use (or press Enter to skip): " manual_sink
+                if [[ -n "$manual_sink" ]]; then
+                    pactl set-default-sink "$manual_sink" 2>/dev/null
+                    ok "Audio routed to: $manual_sink"
+                fi
+            fi
+
+            if [[ -n "$vr_source" ]]; then
+                step "Setting VR microphone as default input..."
+                pactl set-default-source "$vr_source" 2>/dev/null
+                ok "Microphone set to VR headset."
+            fi
+
+            # Create PipeWire loopback for monitoring (hear VR audio on desktop speakers too)
+            echo ""
+            read -rp "Create audio loopback for desktop monitoring? [y/N]: " yn
+            if [[ "${yn,,}" == "y" ]]; then
+                cmd_audio_loopback
+            fi
+            ;;
+
+        restore)
+            info "Restoring desktop audio..."
+            local prev
+            prev=$(read_state "prev_sink" "")
+            if [[ -n "$prev" ]]; then
+                pactl set-default-sink "$prev" 2>/dev/null
+                ok "Audio restored to: $prev"
+            else
+                warn "No previous audio device saved. Set manually with: forge-audio switch <name>"
+            fi
+
+            # Remove loopback
+            pactl list modules short 2>/dev/null | grep "module-loopback" | grep "forge_vr" | while read -r mod_id _rest; do
+                pactl unload-module "$mod_id" 2>/dev/null || true
+            done
+            ok "Removed VR audio loopback."
+            ;;
+
+        *)
+            echo "Usage: forge-vr audio [route|restore]"
+            echo "  route   — Route audio to VR headset"
+            echo "  restore — Restore desktop audio"
+            ;;
+    esac
+
+    log "Audio command: $action"
+}
+
+cmd_audio_loopback() {
+    step "Creating PipeWire loopback for desktop monitoring..."
+
+    # Create a loopback from VR sink monitor to desktop speakers
+    local desktop_sink
+    desktop_sink=$(read_state "prev_sink" "")
+    if [[ -z "$desktop_sink" ]]; then
+        desktop_sink=$(pactl get-default-sink 2>/dev/null || echo "")
+    fi
+
+    if [[ -n "$desktop_sink" ]]; then
+        # Use PipeWire's module-loopback
+        pactl load-module module-loopback \
+            source="$(pactl get-default-sink 2>/dev/null).monitor" \
+            sink="$desktop_sink" \
+            latency_msec=50 \
+            sink_input_properties="media.name=forge_vr_loopback" 2>/dev/null && \
+            ok "Audio loopback active (VR audio mirrored to desktop speakers)." || \
+            warn "Failed to create loopback. PipeWire module-loopback may not be available."
+    else
+        warn "Cannot create loopback — no desktop sink identified."
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: room
+# ──────────────────────────────────────────────
+cmd_room() {
+    head_ "Room Calibration"
+
+    local runtime
+    runtime=$(get_active_runtime)
+
+    case "$runtime" in
+        steamvr)
+            info "Launching SteamVR Room Setup..."
+            echo ""
+            echo "Instructions:"
+            echo "  1. Put on your headset"
+            echo "  2. SteamVR Room Setup will guide you through:"
+            echo "     - Standing or room-scale selection"
+            echo "     - Floor height calibration"
+            echo "     - Play area boundary tracing"
+            echo "  3. Follow the on-screen prompts"
+            echo ""
+
+            # Launch SteamVR room setup
+            local svr_path
+            svr_path=$(find_steamvr 2>/dev/null || echo "")
+            if [[ -n "$svr_path" && -f "$svr_path/bin/linux64/steamvr_room_setup" ]]; then
+                "$svr_path/bin/linux64/steamvr_room_setup" &>/dev/null &
+                ok "Room setup launched."
+            else
+                # Try via Steam
+                if command -v steam &>/dev/null; then
+                    steam steam://run/250820//roomsetup &>/dev/null &
+                fi
+                info "If room setup didn't launch, open SteamVR menu > Room Setup."
+            fi
+            ;;
+
+        monado)
+            info "Monado Room Calibration"
+            echo ""
+            echo "Monado uses a simpler calibration process:"
+            echo ""
+            echo "  1. Place headset on a flat surface facing forward"
+            echo "  2. Press Enter to set the center point"
+
+            read -rp "Ready? Press Enter to calibrate center... "
+
+            if command -v monado-ctl &>/dev/null; then
+                monado-ctl recenter 2>/dev/null && ok "Recentered Monado tracking." || warn "monado-ctl recenter failed."
+            else
+                warn "monado-ctl not found. Set tracking origin manually in the Monado config."
+            fi
+
+            echo ""
+            echo "For room boundary setup with Monado, use Envision:"
+            echo "  forge-vr envision"
+            ;;
+
+        alvr)
+            info "ALVR Room Setup"
+            echo ""
+            echo "Room setup for ALVR is done on the headset:"
+            echo "  1. Open the Quest/Pico guardian setup on the headset"
+            echo "  2. Draw your play area boundary"
+            echo "  3. ALVR will use the headset's guardian data"
+            echo ""
+            echo "To recenter in ALVR:"
+            echo "  - Use the ALVR dashboard > Settings > Headset > Recenter"
+            ;;
+
+        none)
+            warn "No VR runtime is running."
+            echo "Start a runtime first: forge-vr start"
+            ;;
+    esac
+
+    log "Room calibration: $runtime"
+}
+
+# ──────────────────────────────────────────────
+# Command: passthrough
+# ──────────────────────────────────────────────
+cmd_passthrough() {
+    local toggle="${1:-}"
+
+    head_ "Camera Passthrough"
+
+    if [[ -z "$toggle" ]]; then
+        echo "Usage: forge-vr passthrough on|off"
+        exit 1
+    fi
+
+    local runtime
+    runtime=$(get_active_runtime)
+
+    case "$runtime" in
+        steamvr)
+            if [[ "$toggle" == "on" ]]; then
+                info "Enabling SteamVR passthrough camera..."
+                # SteamVR passthrough via settings
+                local steamvr_settings="${HOME}/.steam/steam/config/steamvr.vrsettings"
+                if [[ -f "$steamvr_settings" ]] && command -v jq &>/dev/null; then
+                    local tmp
+                    tmp=$(mktemp)
+                    jq '.camera.enableCamera = true | .camera.enableCameraForCollisionBounds = true | .camera.enableCameraForRoomView = true' \
+                        "$steamvr_settings" > "$tmp" && mv "$tmp" "$steamvr_settings"
+                    ok "SteamVR camera passthrough enabled."
+                    info "Double-tap the headset or press the system button to toggle."
+                else
+                    warn "Cannot modify SteamVR settings. Enable passthrough in SteamVR Settings > Camera."
+                fi
+            else
+                info "Disabling SteamVR passthrough camera..."
+                local steamvr_settings="${HOME}/.steam/steam/config/steamvr.vrsettings"
+                if [[ -f "$steamvr_settings" ]] && command -v jq &>/dev/null; then
+                    local tmp
+                    tmp=$(mktemp)
+                    jq '.camera.enableCamera = false' "$steamvr_settings" > "$tmp" && mv "$tmp" "$steamvr_settings"
+                    ok "SteamVR camera passthrough disabled."
+                fi
+            fi
+            ;;
+        alvr)
+            if [[ "$toggle" == "on" ]]; then
+                info "Passthrough on Quest/Pico is handled by the headset OS."
+                echo "Double-tap the side of the headset to toggle passthrough."
+            else
+                echo "Double-tap the side of the headset to toggle passthrough off."
+            fi
+            ;;
+        monado)
+            warn "Passthrough is not widely supported in Monado yet."
+            echo "Check your headset's native passthrough controls."
+            ;;
+        none)
+            err "No VR runtime is running."
+            ;;
+    esac
+
+    log "Passthrough: $toggle ($runtime)"
+}
+
+# ──────────────────────────────────────────────
+# Command: envision
+# ──────────────────────────────────────────────
+cmd_envision() {
+    head_ "Envision (Monado GUI)"
+
+    if command -v envision &>/dev/null; then
+        info "Launching Envision..."
+        envision &>/dev/null &
+        ok "Envision started."
+    elif flatpak list 2>/dev/null | grep -qi envision; then
+        info "Launching Envision (Flatpak)..."
+        flatpak run org.gabmus.envision &>/dev/null &
+        ok "Envision started."
+    else
+        warn "Envision is not installed."
+        echo ""
+        echo "Envision is a GUI tool for managing Monado/OpenXR on Linux."
+        echo ""
+        echo "Install options:"
+        echo "  Flatpak: flatpak install flathub org.gabmus.envision"
+        echo "  Source:  https://gitlab.com/gabmus/envision"
+        echo ""
+        echo "Envision includes:"
+        echo "  - Monado runtime management"
+        echo "  - WiVRn and ALVR server integration"
+        echo "  - OpenXR layer configuration"
+        echo "  - Headset calibration tools"
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: drivers
+# ──────────────────────────────────────────────
+cmd_drivers() {
+    head_ "VR Driver Check"
+
+    echo -e "${BOLD}GPU Drivers:${RESET}"
+    if command -v nvidia-smi &>/dev/null; then
+        local nv_version
+        nv_version=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+        ok "NVIDIA driver: $nv_version"
+
+        # Check for VR-relevant driver features
+        if [[ -f /usr/lib64/libnvidia-vulkan-producer.so ]] || [[ -f /usr/lib/x86_64-linux-gnu/libnvidia-vulkan-producer.so ]]; then
+            ok "NVIDIA Vulkan producer layer: present"
+        else
+            warn "NVIDIA Vulkan producer layer: not found (may affect SteamVR)"
+        fi
+    elif [[ -d /sys/class/drm/card0/device/driver ]]; then
+        local drv
+        drv=$(basename "$(readlink /sys/class/drm/card0/device/driver 2>/dev/null)" 2>/dev/null || echo "unknown")
+        ok "GPU driver: $drv"
+        if [[ "$drv" == "amdgpu" ]]; then
+            ok "AMD GPU — best Linux VR support."
+        fi
+    else
+        warn "Could not detect GPU driver."
+    fi
+
+    echo ""
+    echo -e "${BOLD}Vulkan:${RESET}"
+    if command -v vulkaninfo &>/dev/null; then
+        local vk_dev
+        vk_dev=$(vulkaninfo --summary 2>/dev/null | grep "deviceName" | head -1 | sed 's/.*= //')
+        local vk_api
+        vk_api=$(vulkaninfo --summary 2>/dev/null | grep "apiVersion" | head -1 | sed 's/.*= //')
+        if [[ -n "$vk_dev" ]]; then
+            ok "Vulkan device: $vk_dev (API $vk_api)"
+        else
+            warn "Vulkan: could not query device."
+        fi
+    else
+        warn "vulkaninfo not found. Install vulkan-tools."
+    fi
+
+    echo ""
+    echo -e "${BOLD}OpenXR:${RESET}"
+    local xr_json="${XR_RUNTIME_JSON:-${OPENXR_CONF_DIR}/active_runtime.json}"
+    if [[ -f "$xr_json" ]]; then
+        local xr_name
+        xr_name=$(grep -oP '"name"\s*:\s*"\K[^"]+' "$xr_json" 2>/dev/null || echo "unknown")
+        ok "Active OpenXR runtime: $xr_name"
+    else
+        warn "No OpenXR runtime configured."
+    fi
+
+    echo ""
+    echo -e "${BOLD}USB Permissions:${RESET}"
+    if [[ -f "$UDEV_RULES" ]]; then
+        ok "VR udev rules installed."
+    else
+        warn "VR udev rules not installed. Run: forge-vr setup"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Required Packages:${RESET}"
+    local packages=("libusb" "vulkan-loader" "openxr-loader" "pipewire" "pipewire-pulse")
+    for pkg in "${packages[@]}"; do
+        if ldconfig -p 2>/dev/null | grep -qi "$pkg" || rpm -q "$pkg" &>/dev/null 2>&1 || dpkg -l "$pkg" &>/dev/null 2>&1; then
+            echo -e "  ${GREEN}[ok]${RESET} $pkg"
+        else
+            echo -e "  ${YELLOW}[??]${RESET} $pkg (may not be installed)"
+        fi
+    done
+
+    echo ""
+    echo -e "${BOLD}Kernel:${RESET}"
+    local mmap
+    mmap=$(cat /proc/sys/vm/max_map_count 2>/dev/null || echo "?")
+    if [[ "$mmap" != "?" ]] && [[ "$mmap" -ge 1048576 ]]; then
+        ok "vm.max_map_count: $mmap"
+    else
+        warn "vm.max_map_count: $mmap (should be >= 1048576 for VR)"
+    fi
+
+    local sched_rt
+    sched_rt=$(cat /proc/sys/kernel/sched_rt_runtime_us 2>/dev/null || echo "?")
+    if [[ "$sched_rt" == "-1" ]]; then
+        ok "Real-time scheduling: unrestricted"
+    else
+        info "Real-time scheduling: limited ($sched_rt us). VR compositors may benefit from -1."
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: games
+# ──────────────────────────────────────────────
+cmd_games() {
+    head_ "VR-Compatible Games"
+
+    local vr_games_found=0
+
+    # Check Steam VR games
+    local steam_dirs=(
+        "${HOME}/.steam/steam/steamapps"
+        "${HOME}/.local/share/Steam/steamapps"
+        "${HOME}/.var/app/com.valvesoftware.Steam/.steam/steam/steamapps"
+        "${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps"
+    )
+
+    # Known VR game App IDs and names
+    declare -A VR_APPIDS=(
+        ["250820"]="SteamVR"
+        ["611660"]="Half-Life: Alyx"
+        ["546560"]="Half-Life: Alyx (Tools)"
+        ["438100"]="VRChat"
+        ["823500"]="Gorilla Tag"
+        ["418650"]="Space Pirate Trainer"
+        ["327140"]="Tilt Brush"
+        ["617830"]="SUPERHOT VR"
+        ["834910"]="BONEWORKS"
+        ["629730"]="Blade & Sorcery"
+        ["1073390"]="Beat Saber Multiplayer"
+        ["620980"]="Beat Saber"
+        ["275850"]="No Man's Sky"
+        ["442080"]="Star Trek: Bridge Crew"
+        ["753640"]="Outer Wilds"
+        ["552440"]="Pavlov VR"
+        ["555160"]="Phasmophobia"
+        ["218620"]="PAYDAY 2"
+        ["304050"]="Elite Dangerous"
+        ["227300"]="Euro Truck Simulator 2"
+        ["270880"]="American Truck Simulator"
+        ["233610"]="Distance"
+        ["211820"]="Starbound"
+        ["469990"]="Moss"
+        ["1079800"]="BONELAB"
+        ["1057690"]="Pistol Whip"
+        ["1635730"]="Resident Evil Village VR"
+        ["868020"]="Walkabout Mini Golf"
+        ["330770"]="Assetto Corsa"
+        ["244210"]="Assetto Corsa"
+        ["365960"]="iRacing"
+        ["564310"]="VTOL VR"
+        ["2317230"]="Underdogs"
+    )
+
+    echo -e "${BOLD}Scanning Steam libraries...${RESET}"
+    echo ""
+
+    for steam_dir in "${steam_dirs[@]}"; do
+        if [[ -d "$steam_dir" ]]; then
+            # Check all library folders
+            local lib_folders=("$steam_dir")
+            if [[ -f "$steam_dir/libraryfolders.vdf" ]]; then
+                while IFS= read -r lf_path; do
+                    [[ -d "$lf_path/steamapps" ]] && lib_folders+=("$lf_path/steamapps")
+                done < <(grep -oP '"path"\s+"\K[^"]+' "$steam_dir/libraryfolders.vdf" 2>/dev/null)
+            fi
+
+            for lib in "${lib_folders[@]}"; do
+                for manifest in "$lib"/appmanifest_*.acf; do
+                    [[ -f "$manifest" ]] || continue
+                    local appid
+                    appid=$(grep -oP '"appid"\s+"\K[^"]+' "$manifest" 2>/dev/null)
+                    local name
+                    name=$(grep -oP '"name"\s+"\K[^"]+' "$manifest" 2>/dev/null)
+
+                    if [[ -n "${VR_APPIDS[$appid]:-}" ]]; then
+                        echo -e "  ${GREEN}[VR]${RESET} ${name:-${VR_APPIDS[$appid]}} (AppID: $appid)"
+                        ((vr_games_found++))
+                    fi
+                done
+            done
+        fi
+    done
+
+    if [[ $vr_games_found -eq 0 ]]; then
+        echo -e "  ${DIM}No known VR games found in Steam libraries.${RESET}"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Total VR games found: ${vr_games_found}${RESET}"
+
+    echo ""
+    echo -e "${BOLD}Popular VR games to install:${RESET}"
+    echo "  Half-Life: Alyx         steam://install/611660"
+    echo "  Beat Saber              steam://install/620980"
+    echo "  BONEWORKS               steam://install/834910"
+    echo "  VRChat                  steam://install/438100"
+    echo "  Pavlov VR               steam://install/552440"
+    echo "  Blade & Sorcery         steam://install/629730"
+    echo "  BONELAB                 steam://install/1079800"
+    echo "  Gorilla Tag             steam://install/823500"
+    echo "  Walkabout Mini Golf     steam://install/868020"
+    echo "  VTOL VR                 steam://install/564310"
+}
+
+# ──────────────────────────────────────────────
+# Internal commands (for sudo delegation)
+# ──────────────────────────────────────────────
+cmd_internal() {
+    case "$1" in
+        _install_udev)  install_udev_rules ;;
+        _install_sysctl) install_sysctl_vr ;;
+        *) err "Unknown internal command: $1" ;;
+    esac
+}
+
+# ──────────────────────────────────────────────
+# Usage / help
+# ──────────────────────────────────────────────
+cmd_help() {
+    echo -e "${BOLD}${CYAN}forge-vr${RESET} — 24HG Forge VR Manager"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET} forge-vr <command> [args]"
+    echo ""
+    echo -e "${BOLD}Commands:${RESET}"
+    echo "  setup                 First-time VR setup wizard"
+    echo "  status                Show VR runtime status, connected headset, tracking"
+    echo "  start [runtime]       Start VR runtime (steamvr, monado, alvr)"
+    echo "  stop                  Stop VR runtime"
+    echo "  test                  Run VR test scene"
+    echo "  performance           Switch to VR performance mode"
+    echo "  normal                Switch back to normal desktop mode"
+    echo "  audio [route|restore] Configure VR audio routing"
+    echo "  room                  Room calibration helper"
+    echo "  passthrough on|off    Toggle camera passthrough"
+    echo "  envision              Launch Envision (Monado GUI)"
+    echo "  drivers               Check and install VR drivers"
+    echo "  games                 List VR-compatible installed games"
+    echo ""
+    echo -e "${BOLD}Supported headsets:${RESET}"
+    echo "  Valve Index            (SteamVR native)"
+    echo "  Meta Quest 2/3/Pro     (ALVR wireless or USB link)"
+    echo "  HP Reverb G2           (Monado/OpenXR)"
+    echo "  Pico 4                 (ALVR wireless)"
+    echo "  HTC Vive family        (SteamVR native)"
+    echo "  Bigscreen Beyond       (SteamVR native)"
+    echo "  Any WMR headset        (Monado/OpenXR)"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  forge-vr setup                  # First-time configuration"
+    echo "  forge-vr start steamvr          # Launch SteamVR"
+    echo "  forge-vr performance            # Enable VR perf mode"
+    echo "  forge-vr audio route            # Route audio to headset"
+    echo "  forge-vr passthrough on         # Enable camera passthrough"
+}
+
+# ──────────────────────────────────────────────
+# Main dispatch
+# ──────────────────────────────────────────────
+case "$ACTION" in
+    setup)            cmd_setup ;;
+    status)           cmd_status ;;
+    start)            cmd_start "$@" ;;
+    stop)             cmd_stop ;;
+    test)             cmd_test ;;
+    performance)      cmd_performance ;;
+    normal)           cmd_normal ;;
+    audio)            cmd_audio "$@" ;;
+    room)             cmd_room ;;
+    passthrough)      cmd_passthrough "$@" ;;
+    envision)         cmd_envision ;;
+    drivers)          cmd_drivers ;;
+    games)            cmd_games ;;
+    _install_udev)    cmd_internal "_install_udev" ;;
+    _install_sysctl)  cmd_internal "_install_sysctl" ;;
+    help|--help|-h)   cmd_help ;;
+    *)
+        err "Unknown command: $ACTION"
+        echo "Run 'forge-vr help' for usage."
+        exit 1
+        ;;
+esac

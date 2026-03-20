@@ -1,0 +1,1603 @@
+#!/bin/bash
+# 24HG Forge Settings — Unified graphical settings panel for 24HG Forge Linux
+# Wraps all forge-* tool configurations into a single GUI application.
+#
+# Usage: forge-settings [category]
+#   No args      — Open the main settings panel
+#   performance  — Jump directly to Performance settings
+#   network      — Jump directly to Network settings
+#   audio        — Jump directly to Audio & Voice settings
+#   recording    — Jump directly to Recording & Streaming settings
+#   display      — Jump directly to Display settings
+#   gaming       — Jump directly to Gaming settings
+#   cloud        — Jump directly to Cloud & Sync settings
+#   community    — Jump directly to Community settings
+#   updates      — Jump directly to Updates settings
+#   about        — Jump directly to About panel
+#   reset        — Reset all settings to defaults
+
+set -euo pipefail
+
+# ─── Version & Identity ────────────────────────────────────────────────────
+readonly VERSION="1.0.0"
+readonly APP_NAME="forge-settings"
+readonly APP_TITLE="24HG Forge Settings"
+
+# ─── Paths ─────────────────────────────────────────────────────────────────
+readonly CONFIG_DIR="${HOME}/.config/forge"
+readonly MASTER_CONF="${CONFIG_DIR}/settings.conf"
+readonly HUB_TOKEN_FILE="${CONFIG_DIR}/hub-token"
+readonly LOG_TAG="forge-settings"
+readonly ICON_PATH="/usr/share/icons/hicolor/128x128/apps/forge-settings.png"
+readonly FALLBACK_ICON="preferences-system"
+
+mkdir -p "$CONFIG_DIR"
+
+# ─── GUI Backend Detection ─────────────────────────────────────────────────
+# Try yad first (richer widgets), then zenity, then kdialog
+GUI=""
+detect_gui() {
+    if command -v yad &>/dev/null; then
+        GUI="yad"
+    elif command -v zenity &>/dev/null; then
+        GUI="zenity"
+    elif command -v kdialog &>/dev/null; then
+        GUI="kdialog"
+    else
+        echo "ERROR: No GUI toolkit found. Install yad, zenity, or kdialog." >&2
+        exit 1
+    fi
+}
+
+# ─── Logging ───────────────────────────────────────────────────────────────
+log() { logger -t "$LOG_TAG" "$*" 2>/dev/null || true; }
+
+# ─── Notification Helper ──────────────────────────────────────────────────
+notify() {
+    local summary="$1"
+    local body="${2:-}"
+    if command -v notify-send &>/dev/null; then
+        notify-send -a "$APP_TITLE" -i "$FALLBACK_ICON" "$summary" "$body" 2>/dev/null || true
+    fi
+    log "$summary: $body"
+}
+
+# ─── Config Helpers ────────────────────────────────────────────────────────
+# Read a value from a bash-style config file; return default if missing
+cfg_read() {
+    local file="$1" key="$2" default="${3:-}"
+    if [[ -f "$file" ]]; then
+        local val
+        val=$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d'=' -f2-)
+        if [[ -n "$val" ]]; then
+            echo "$val"
+            return
+        fi
+    fi
+    echo "$default"
+}
+
+# Write a key=value to a config file (updates in place or appends)
+cfg_write() {
+    local file="$1" key="$2" value="$3"
+    mkdir -p "$(dirname "$file")"
+    if [[ -f "$file" ]] && grep -qE "^${key}=" "$file" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+    else
+        echo "${key}=${value}" >> "$file"
+    fi
+}
+
+# Read a JSON field using python (widely available on Fedora/Bazzite)
+json_read() {
+    local file="$1" field="$2" default="${3:-}"
+    if [[ -f "$file" ]] && command -v python3 &>/dev/null; then
+        python3 -c "
+import json, sys
+try:
+    d = json.load(open('$file'))
+    v = d
+    for k in '$field'.split('.'):
+        v = v[k]
+    print(v)
+except:
+    print('$default')
+" 2>/dev/null
+    else
+        echo "$default"
+    fi
+}
+
+# ─── GUI Abstractions ─────────────────────────────────────────────────────
+# These wrap yad/zenity/kdialog differences into a consistent interface.
+
+# Show an info message dialog
+gui_info() {
+    local title="$1" text="$2"
+    case "$GUI" in
+        yad)     yad --title="$title" --text="$text" --button="OK:0" --center --width=450 --window-icon="$FALLBACK_ICON" 2>/dev/null ;;
+        zenity)  zenity --info --title="$title" --text="$text" --width=450 2>/dev/null ;;
+        kdialog) kdialog --title "$title" --msgbox "$text" 2>/dev/null ;;
+    esac
+}
+
+# Show a warning dialog
+gui_warning() {
+    local title="$1" text="$2"
+    case "$GUI" in
+        yad)     yad --title="$title" --text="$text" --image="dialog-warning" --button="OK:0" --center --width=450 --window-icon="$FALLBACK_ICON" 2>/dev/null ;;
+        zenity)  zenity --warning --title="$title" --text="$text" --width=450 2>/dev/null ;;
+        kdialog) kdialog --title "$title" --sorry "$text" 2>/dev/null ;;
+    esac
+}
+
+# Show a question dialog (returns 0 for yes, 1 for no)
+gui_question() {
+    local title="$1" text="$2"
+    case "$GUI" in
+        yad)     yad --title="$title" --text="$text" --image="dialog-question" --button="No:1" --button="Yes:0" --center --width=400 --window-icon="$FALLBACK_ICON" 2>/dev/null ;;
+        zenity)  zenity --question --title="$title" --text="$text" --width=400 2>/dev/null ;;
+        kdialog) kdialog --title "$title" --yesno "$text" 2>/dev/null ;;
+    esac
+}
+
+# Show a list dialog and return the selected item
+# Args: title, column_header, item1, item2, ...
+gui_list() {
+    local title="$1" col="$2"
+    shift 2
+    case "$GUI" in
+        yad)
+            printf '%s\n' "$@" | yad --list --title="$title" --column="$col" \
+                --center --width=500 --height=500 --print-column=1 --separator="" \
+                --window-icon="$FALLBACK_ICON" 2>/dev/null
+            ;;
+        zenity)
+            zenity --list --title="$title" --column="$col" "$@" \
+                --width=500 --height=500 2>/dev/null
+            ;;
+        kdialog)
+            local items=()
+            local i=1
+            for item in "$@"; do
+                items+=("$i" "$item")
+                ((i++))
+            done
+            local sel
+            sel=$(kdialog --title "$title" --menu "Select:" "${items[@]}" 2>/dev/null) || return 1
+            # Convert index back to item name
+            local idx=1
+            for item in "$@"; do
+                if [[ "$idx" == "$sel" ]]; then
+                    echo "$item"
+                    return 0
+                fi
+                ((idx++))
+            done
+            ;;
+    esac
+}
+
+# Show a combo box (dropdown) and return selected value
+gui_combo() {
+    local title="$1" text="$2" current="$3"
+    shift 3
+    local items=("$@")
+    case "$GUI" in
+        yad)
+            local combo_str
+            combo_str=$(IFS='!'; echo "${items[*]}")
+            yad --title="$title" --form --field="$text:CB" "$combo_str" \
+                --center --width=450 --window-icon="$FALLBACK_ICON" 2>/dev/null | cut -d'|' -f1
+            ;;
+        zenity)
+            zenity --list --title="$title" --text="$text" --column="Option" \
+                "${items[@]}" --width=400 --height=350 2>/dev/null
+            ;;
+        kdialog)
+            local kitems=()
+            local i=1
+            for item in "${items[@]}"; do
+                kitems+=("$i" "$item")
+                ((i++))
+            done
+            local sel
+            sel=$(kdialog --title "$title" --menu "$text" "${kitems[@]}" 2>/dev/null) || return 1
+            echo "${items[$((sel - 1))]}"
+            ;;
+    esac
+}
+
+# Show a form with multiple fields (yad-native; simulated for zenity/kdialog)
+# Args: title, field_spec1, field_spec2, ...
+# field_spec format: "Label:TYPE:default" where TYPE is TXT, CB, CHK, NUM, etc.
+gui_form() {
+    local title="$1"
+    shift
+    local fields=("$@")
+
+    case "$GUI" in
+        yad)
+            local args=(--title="$title" --form --center --width=550 --window-icon="$FALLBACK_ICON")
+            for f in "${fields[@]}"; do
+                local label type default
+                label=$(echo "$f" | cut -d':' -f1)
+                type=$(echo "$f" | cut -d':' -f2)
+                default=$(echo "$f" | cut -d':' -f3-)
+                case "$type" in
+                    TXT) args+=(--field="$label") args+=("$default") ;;
+                    CB)  args+=(--field="$label:CB") args+=("$default") ;;
+                    CHK) args+=(--field="$label:CHK") args+=("$default") ;;
+                    NUM) args+=(--field="$label:NUM") args+=("$default") ;;
+                    RO)  args+=(--field="$label:RO") args+=("$default") ;;
+                    LBL) args+=(--field="$label:LBL") args+=("") ;;
+                esac
+            done
+            yad "${args[@]}" 2>/dev/null
+            ;;
+        zenity)
+            # Zenity has limited form support; use --forms
+            local args=(--forms --title="$title" --width=500)
+            local defaults=()
+            for f in "${fields[@]}"; do
+                local label type default
+                label=$(echo "$f" | cut -d':' -f1)
+                type=$(echo "$f" | cut -d':' -f2)
+                default=$(echo "$f" | cut -d':' -f3-)
+                case "$type" in
+                    TXT|RO|NUM) args+=(--add-entry="$label") ;;
+                    CB)  args+=(--add-combo="$label" --combo-values="$(echo "$default" | tr '!' '|')") ;;
+                    CHK) args+=(--add-entry="$label (true/false)") ;;
+                    LBL) args+=(--add-entry="$label") ;;
+                esac
+                defaults+=("$default")
+            done
+            zenity "${args[@]}" 2>/dev/null
+            ;;
+        kdialog)
+            # kdialog: simulate with sequential input boxes
+            local result=""
+            for f in "${fields[@]}"; do
+                local label type default
+                label=$(echo "$f" | cut -d':' -f1)
+                type=$(echo "$f" | cut -d':' -f2)
+                default=$(echo "$f" | cut -d':' -f3-)
+                local val
+                case "$type" in
+                    CHK)
+                        if kdialog --title "$title" --yesno "Enable $label?" 2>/dev/null; then
+                            val="TRUE"
+                        else
+                            val="FALSE"
+                        fi
+                        ;;
+                    LBL|RO)
+                        val="$default"
+                        ;;
+                    *)
+                        val=$(kdialog --title "$title" --inputbox "$label" "$default" 2>/dev/null) || val="$default"
+                        ;;
+                esac
+                result+="${val}|"
+            done
+            echo "$result"
+            ;;
+    esac
+}
+
+# Show a text info dialog (scrollable text)
+gui_textinfo() {
+    local title="$1" text="$2"
+    case "$GUI" in
+        yad)     echo "$text" | yad --text-info --title="$title" --center --width=600 --height=450 --window-icon="$FALLBACK_ICON" 2>/dev/null ;;
+        zenity)  echo "$text" | zenity --text-info --title="$title" --width=600 --height=450 2>/dev/null ;;
+        kdialog) kdialog --title "$title" --textbox <(echo "$text") 600 450 2>/dev/null ;;
+    esac
+}
+
+# Show a progress pulse dialog while a command runs
+gui_progress() {
+    local title="$1" text="$2"
+    shift 2
+    case "$GUI" in
+        yad)     "$@" 2>&1 | yad --progress --pulsate --title="$title" --text="$text" --auto-close --center --width=400 --window-icon="$FALLBACK_ICON" --no-buttons 2>/dev/null ;;
+        zenity)  "$@" 2>&1 | zenity --progress --pulsate --title="$title" --text="$text" --auto-close --width=400 --no-cancel 2>/dev/null ;;
+        kdialog)
+            local dbus_ref
+            dbus_ref=$(kdialog --title "$title" --progressbar "$text" 0 2>/dev/null)
+            "$@" 2>&1 || true
+            qdbus $dbus_ref close 2>/dev/null || true
+            ;;
+    esac
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Category 1: Performance
+# ═══════════════════════════════════════════════════════════════════════════
+panel_performance() {
+    while true; do
+        # Read current state
+        local current_profile
+        current_profile=$(forge-performance status 2>/dev/null | grep -oE '(gaming|balanced|powersave)' | head -1 || echo "unknown")
+
+        local mangohud_enabled="FALSE"
+        local mangohud_pos="top-left"
+        if [[ -f "${CONFIG_DIR}/mangohud.conf" ]]; then
+            mangohud_enabled="TRUE"
+            mangohud_pos=$(cfg_read "${CONFIG_DIR}/mangohud.conf" "position" "top-left")
+        elif [[ -f "${HOME}/.config/MangoHud/MangoHud.conf" ]]; then
+            mangohud_enabled="TRUE"
+            mangohud_pos=$(grep -oP 'position=\K.*' "${HOME}/.config/MangoHud/MangoHud.conf" 2>/dev/null || echo "top-left")
+        fi
+
+        local compositor="enabled"
+        if command -v qdbus &>/dev/null; then
+            local comp_active
+            comp_active=$(qdbus org.kde.KWin /Compositor org.kde.kwin.Compositing.active 2>/dev/null || echo "true")
+            [[ "$comp_active" == "false" ]] && compositor="disabled"
+        fi
+
+        local cpu_gov="unknown"
+        if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+            cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
+        elif command -v powerprofilesctl &>/dev/null; then
+            cpu_gov=$(powerprofilesctl get 2>/dev/null || echo "unknown")
+        fi
+
+        local result
+        result=$(gui_form "Performance Settings" \
+            "Performance Profile:CB:${current_profile}!gaming!balanced!powersave" \
+            "MangoHud Overlay:CHK:${mangohud_enabled}" \
+            "MangoHud Position:CB:${mangohud_pos}!top-left!top-right!bottom-left!bottom-right!top-center!bottom-center" \
+            "Compositor:CB:${compositor}!enabled!disabled" \
+            "CPU Governor (read-only):RO:${cpu_gov}" \
+        ) || return 0
+
+        [[ -z "$result" ]] && return 0
+
+        IFS='|' read -r new_profile new_mangohud new_mangohud_pos new_compositor _ <<< "$result"
+
+        # Apply performance profile
+        new_profile=$(echo "$new_profile" | tr -d '[:space:]')
+        if [[ -n "$new_profile" && "$new_profile" != "$current_profile" ]]; then
+            forge-performance "$new_profile" &>/dev/null &
+            notify "Performance" "Switched to ${new_profile} profile"
+        fi
+
+        # Apply MangoHud toggle
+        local mangohud_conf_dir="${HOME}/.config/MangoHud"
+        mkdir -p "$mangohud_conf_dir"
+        if [[ "$new_mangohud" == "TRUE" ]]; then
+            cfg_write "${CONFIG_DIR}/mangohud.conf" "enabled" "true"
+            cfg_write "${CONFIG_DIR}/mangohud.conf" "position" "$new_mangohud_pos"
+            # Write MangoHud native config
+            cat > "${mangohud_conf_dir}/MangoHud.conf" <<MHEOF
+# Generated by forge-settings
+position=${new_mangohud_pos}
+fps
+gpu_stats
+gpu_temp
+cpu_stats
+cpu_temp
+ram
+vram
+frame_timing
+MHEOF
+            notify "MangoHud" "Overlay enabled at ${new_mangohud_pos}"
+        else
+            cfg_write "${CONFIG_DIR}/mangohud.conf" "enabled" "false"
+            [[ -f "${mangohud_conf_dir}/MangoHud.conf" ]] && rm -f "${mangohud_conf_dir}/MangoHud.conf"
+            notify "MangoHud" "Overlay disabled"
+        fi
+
+        # Apply compositor toggle
+        new_compositor=$(echo "$new_compositor" | tr -d '[:space:]')
+        if [[ "$new_compositor" != "$compositor" ]] && command -v qdbus &>/dev/null; then
+            if [[ "$new_compositor" == "disabled" ]]; then
+                qdbus org.kde.KWin /Compositor suspend 2>/dev/null || true
+                notify "Compositor" "Suspended for lower latency"
+            else
+                qdbus org.kde.KWin /Compositor resume 2>/dev/null || true
+                notify "Compositor" "Resumed"
+            fi
+        fi
+
+        log "Performance settings applied: profile=${new_profile}, mangohud=${new_mangohud}, compositor=${new_compositor}"
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Category 2: Network
+# ═══════════════════════════════════════════════════════════════════════════
+panel_network() {
+    while true; do
+        # Gather current state
+        local vpn_status="disconnected"
+        if command -v forge-vpn &>/dev/null; then
+            vpn_status=$(forge-vpn status 2>/dev/null | grep -oE '(connected|disconnected)' | head -1 || echo "disconnected")
+        fi
+        if ip link show wg-24hg &>/dev/null 2>&1; then
+            vpn_status="connected"
+        fi
+
+        local current_dns
+        current_dns=$(grep -m1 'nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' || echo "system default")
+
+        local firewall_profile="default"
+        if command -v firewall-cmd &>/dev/null; then
+            firewall_profile=$(firewall-cmd --get-active-zones 2>/dev/null | head -1 || echo "default")
+        fi
+
+        local selection
+        selection=$(gui_list "Network Settings" "Setting" \
+            "VPN Status: ${vpn_status}" \
+            "VPN Join" \
+            "VPN Leave" \
+            "DNS: ${current_dns}" \
+            "Change DNS" \
+            "Run Ping Optimizer" \
+            "Firewall Profile: ${firewall_profile}" \
+            "Back to Main Menu" \
+        ) || return 0
+
+        case "$selection" in
+            "VPN Join")
+                if command -v forge-vpn &>/dev/null; then
+                    local vpn_out
+                    vpn_out=$(forge-vpn join 2>&1) || true
+                    notify "VPN" "Join requested"
+                    gui_info "VPN" "$vpn_out"
+                else
+                    gui_warning "VPN" "forge-vpn is not installed."
+                fi
+                ;;
+            "VPN Leave")
+                if command -v forge-vpn &>/dev/null; then
+                    forge-vpn leave &>/dev/null || true
+                    notify "VPN" "Disconnected from 24HG VPN"
+                fi
+                ;;
+            "Change DNS")
+                local dns_choice
+                dns_choice=$(gui_combo "DNS Settings" "Select DNS provider:" "$current_dns" \
+                    "System Default" \
+                    "Cloudflare (1.1.1.1)" \
+                    "Google (8.8.8.8)" \
+                    "Quad9 (9.9.9.9)" \
+                    "NextDNS (45.90.28.0)" \
+                ) || continue
+
+                local dns_ip=""
+                case "$dns_choice" in
+                    *Cloudflare*) dns_ip="1.1.1.1" ;;
+                    *Google*)     dns_ip="8.8.8.8" ;;
+                    *Quad9*)      dns_ip="9.9.9.9" ;;
+                    *NextDNS*)    dns_ip="45.90.28.0" ;;
+                    *)            dns_ip="" ;;
+                esac
+
+                if [[ -n "$dns_ip" ]]; then
+                    # Use systemd-resolved if available, otherwise resolvconf
+                    if command -v resolvectl &>/dev/null; then
+                        local iface
+                        iface=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
+                        if [[ -n "$iface" ]]; then
+                            pkexec resolvectl dns "$iface" "$dns_ip" 2>/dev/null || true
+                            notify "DNS" "Set DNS to ${dns_choice} on ${iface}"
+                        fi
+                    else
+                        notify "DNS" "Manual DNS change requires systemd-resolved."
+                    fi
+                    cfg_write "$MASTER_CONF" "DNS_SERVER" "$dns_ip"
+                else
+                    notify "DNS" "Reset to system default"
+                    cfg_write "$MASTER_CONF" "DNS_SERVER" "auto"
+                fi
+                ;;
+            "Run Ping Optimizer")
+                if command -v forge-ping-optimizer &>/dev/null; then
+                    local ping_out
+                    ping_out=$(forge-ping-optimizer run 2>&1 | head -30) || true
+                    gui_textinfo "Ping Optimizer Results" "$ping_out"
+                    notify "Network" "Ping optimization complete"
+                else
+                    gui_warning "Ping Optimizer" "forge-ping-optimizer is not installed."
+                fi
+                ;;
+            "Back to Main Menu"|"") return 0 ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Category 3: Audio & Voice
+# ═══════════════════════════════════════════════════════════════════════════
+panel_audio() {
+    while true; do
+        # Gather current audio state
+        local default_sink="unknown"
+        local default_source="unknown"
+        if command -v pactl &>/dev/null; then
+            default_sink=$(pactl get-default-sink 2>/dev/null || echo "unknown")
+            default_source=$(pactl get-default-source 2>/dev/null || echo "unknown")
+        elif command -v wpctl &>/dev/null; then
+            default_sink=$(wpctl status 2>/dev/null | grep -A1 'Sinks:' | tail -1 | sed 's/.*\. //' | cut -d'[' -f1 | xargs || echo "unknown")
+        fi
+
+        local ptt_key
+        ptt_key=$(cfg_read "${CONFIG_DIR}/voice.conf" "PTT_KEY" "F10")
+
+        local volume
+        volume=$(cfg_read "${CONFIG_DIR}/voice.conf" "INPUT_VOLUME" "80")
+
+        local radio_station
+        radio_station=$(cfg_read "${CONFIG_DIR}/radio.conf" "DEFAULT_STATION" "lofi-gaming")
+
+        local auto_duck
+        auto_duck=$(cfg_read "${CONFIG_DIR}/radio.conf" "AUTO_DUCK" "yes")
+
+        local result
+        result=$(gui_form "Audio & Voice Settings" \
+            "Default Output (read-only):RO:${default_sink}" \
+            "Default Input (read-only):RO:${default_source}" \
+            "Voice PTT Key:TXT:${ptt_key}" \
+            "Voice Input Volume (0-100):NUM:${volume}" \
+            "Radio Default Station:CB:${radio_station}!lofi-gaming!synthwave!edm!metal!chill!24hg" \
+            "Game Audio Ducking:CHK:$([ "$auto_duck" = "yes" ] && echo "TRUE" || echo "FALSE")" \
+        ) || return 0
+
+        [[ -z "$result" ]] && return 0
+
+        IFS='|' read -r _ _ new_ptt new_volume new_station new_duck <<< "$result"
+
+        # Apply voice settings
+        new_ptt=$(echo "$new_ptt" | tr -d '[:space:]')
+        new_volume=$(echo "$new_volume" | grep -oE '[0-9]+' | head -1 || echo "80")
+        if [[ -n "$new_ptt" ]]; then
+            cfg_write "${CONFIG_DIR}/voice.conf" "PTT_KEY" "$new_ptt"
+        fi
+        cfg_write "${CONFIG_DIR}/voice.conf" "INPUT_VOLUME" "$new_volume"
+
+        # Apply radio settings
+        new_station=$(echo "$new_station" | tr -d '[:space:]')
+        if [[ -n "$new_station" ]]; then
+            cfg_write "${CONFIG_DIR}/radio.conf" "DEFAULT_STATION" "$new_station"
+        fi
+
+        if [[ "$new_duck" == "TRUE" ]]; then
+            cfg_write "${CONFIG_DIR}/radio.conf" "AUTO_DUCK" "yes"
+        else
+            cfg_write "${CONFIG_DIR}/radio.conf" "AUTO_DUCK" "no"
+        fi
+
+        # If forge-voice is running, tell it to reload
+        if command -v forge-voice &>/dev/null && [[ -f /tmp/forge-voice/voice.pid ]]; then
+            local vpid
+            vpid=$(cat /tmp/forge-voice/voice.pid 2>/dev/null || echo "")
+            if [[ -n "$vpid" ]] && kill -0 "$vpid" 2>/dev/null; then
+                forge-voice ptt-bind "$new_ptt" &>/dev/null || true
+                forge-voice volume "$new_volume" &>/dev/null || true
+            fi
+        fi
+
+        notify "Audio & Voice" "Settings saved (PTT: ${new_ptt}, Volume: ${new_volume}%, Station: ${new_station})"
+        log "Audio settings applied: ptt=${new_ptt}, vol=${new_volume}, station=${new_station}, duck=${new_duck}"
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Category 4: Recording & Streaming
+# ═══════════════════════════════════════════════════════════════════════════
+panel_recording() {
+    while true; do
+        # Current clip settings
+        local clip_quality
+        clip_quality=$(cfg_read "${CONFIG_DIR}/clip.conf" "QUALITY" "high")
+
+        local replay_duration
+        replay_duration=$(cfg_read "${CONFIG_DIR}/clip.conf" "REPLAY_DURATION" "60")
+
+        local replay_running="no"
+        if [[ -f /tmp/forge-replay-buffer.pid ]]; then
+            local rpid
+            rpid=$(cat /tmp/forge-replay-buffer.pid 2>/dev/null || echo "")
+            [[ -n "$rpid" ]] && kill -0 "$rpid" 2>/dev/null && replay_running="yes"
+        fi
+
+        # Sunshine status
+        local sunshine_status="not running"
+        if pgrep -x sunshine &>/dev/null || systemctl --user is-active sunshine.service &>/dev/null 2>&1; then
+            sunshine_status="running"
+        fi
+
+        # OBS status
+        local obs_status="not running"
+        if pgrep -f "obs-studio\|obs " &>/dev/null; then
+            obs_status="running"
+        fi
+
+        # Screenshot format
+        local screenshot_format="png"
+        local screenshot_dir="${HOME}/Pictures/24HG Forge Screenshots"
+        if [[ -f "${CONFIG_DIR}/screenshot.conf" ]]; then
+            screenshot_format=$(cfg_read "${CONFIG_DIR}/screenshot.conf" "FORMAT" "png")
+            screenshot_dir=$(cfg_read "${CONFIG_DIR}/screenshot.conf" "DIRECTORY" "$screenshot_dir")
+        fi
+
+        local result
+        result=$(gui_form "Recording & Streaming" \
+            "Clip Quality:CB:${clip_quality}!high!medium!low" \
+            "Replay Buffer Duration (s):NUM:${replay_duration}" \
+            "Replay Buffer Active:RO:${replay_running}" \
+            "Sunshine Status:RO:${sunshine_status}" \
+            "OBS Status:RO:${obs_status}" \
+            "Screenshot Format:CB:${screenshot_format}!png!jpg!webp" \
+            "Screenshot Directory:TXT:${screenshot_dir}" \
+        ) || return 0
+
+        [[ -z "$result" ]] && return 0
+
+        IFS='|' read -r new_quality new_replay_dur _ _ _ new_ss_fmt new_ss_dir <<< "$result"
+
+        # Apply clip config
+        new_quality=$(echo "$new_quality" | tr -d '[:space:]')
+        new_replay_dur=$(echo "$new_replay_dur" | grep -oE '[0-9]+' | head -1 || echo "60")
+        cfg_write "${CONFIG_DIR}/clip.conf" "QUALITY" "$new_quality"
+        cfg_write "${CONFIG_DIR}/clip.conf" "REPLAY_DURATION" "$new_replay_dur"
+
+        # Apply screenshot config
+        new_ss_fmt=$(echo "$new_ss_fmt" | tr -d '[:space:]')
+        new_ss_dir=$(echo "$new_ss_dir" | sed 's/|//g')
+        mkdir -p "${CONFIG_DIR}"
+        cfg_write "${CONFIG_DIR}/screenshot.conf" "FORMAT" "$new_ss_fmt"
+        cfg_write "${CONFIG_DIR}/screenshot.conf" "DIRECTORY" "$new_ss_dir"
+        mkdir -p "$new_ss_dir" 2>/dev/null || true
+
+        # Offer to toggle replay buffer
+        if [[ "$replay_running" == "no" ]]; then
+            if gui_question "Replay Buffer" "Start the replay buffer now? (${new_replay_dur}s, ${new_quality} quality)"; then
+                if command -v forge-clip &>/dev/null; then
+                    forge-clip replay start &>/dev/null &
+                    notify "Recording" "Replay buffer started (${new_replay_dur}s)"
+                fi
+            fi
+        fi
+
+        # Offer Sunshine setup
+        if [[ "$sunshine_status" == "not running" ]]; then
+            if gui_question "Sunshine" "Would you like to run the Sunshine setup wizard?"; then
+                if command -v forge-sunshine-setup &>/dev/null; then
+                    forge-sunshine-setup &>/dev/null &
+                fi
+            fi
+        fi
+
+        notify "Recording" "Settings saved (${new_quality} quality, ${new_replay_dur}s buffer)"
+        log "Recording settings: quality=${new_quality}, replay=${new_replay_dur}s, ss_fmt=${new_ss_fmt}"
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Category 5: Display
+# ═══════════════════════════════════════════════════════════════════════════
+panel_display() {
+    while true; do
+        # HDR state
+        local hdr_state="off"
+        if [[ -f "${CONFIG_DIR}/hdr/state" ]]; then
+            hdr_state=$(cat "${CONFIG_DIR}/hdr/state" 2>/dev/null | grep -oE '(on|off)' | head -1 || echo "off")
+        fi
+
+        # Current resolution
+        local current_res="unknown"
+        local current_refresh="unknown"
+        if command -v xrandr &>/dev/null && [[ -n "${DISPLAY:-}" ]]; then
+            local mode_line
+            mode_line=$(xrandr 2>/dev/null | grep '\*' | head -1 | xargs || echo "")
+            current_res=$(echo "$mode_line" | awk '{print $1}' || echo "unknown")
+            current_refresh=$(echo "$mode_line" | grep -oP '[\d.]+\*' | tr -d '*' || echo "unknown")
+        elif command -v kscreen-doctor &>/dev/null; then
+            local kinfo
+            kinfo=$(kscreen-doctor --outputs 2>/dev/null | grep -A2 'Output' | head -5 || echo "")
+            current_res=$(echo "$kinfo" | grep -oP '\d+x\d+' | head -1 || echo "unknown")
+            current_refresh=$(echo "$kinfo" | grep -oP '@\K[\d.]+' | head -1 || echo "unknown")
+        fi
+
+        # Night light
+        local nightlight_status="off"
+        if command -v forge-nightlight &>/dev/null; then
+            nightlight_status=$(forge-nightlight status 2>/dev/null | grep -oEi '(on|off|active|inactive)' | head -1 || echo "off")
+        fi
+
+        # Live wallpaper
+        local lwp_status="inactive"
+        if [[ -f /tmp/forge-live-wallpaper.pid ]]; then
+            local lwpid
+            lwpid=$(cat /tmp/forge-live-wallpaper.pid 2>/dev/null || echo "")
+            [[ -n "$lwpid" ]] && kill -0 "$lwpid" 2>/dev/null && lwp_status="active"
+        fi
+
+        # Cursor theme
+        local cursor_theme
+        cursor_theme=$(cfg_read "${HOME}/.config/gtk-3.0/settings.ini" "gtk-cursor-theme-name" "default")
+        [[ "$cursor_theme" == "default" ]] && cursor_theme=$(gsettings get org.gnome.desktop.interface cursor-theme 2>/dev/null | tr -d "'" || echo "default")
+
+        local selection
+        selection=$(gui_list "Display Settings" "Setting" \
+            "HDR: ${hdr_state}" \
+            "Resolution: ${current_res} @ ${current_refresh}Hz" \
+            "Night Light: ${nightlight_status}" \
+            "Live Wallpaper: ${lwp_status}" \
+            "Cursor Theme: ${cursor_theme}" \
+            "Back to Main Menu" \
+        ) || return 0
+
+        case "$selection" in
+            HDR*)
+                if [[ "$hdr_state" == "off" ]]; then
+                    if gui_question "HDR" "Enable HDR? This requires a compatible display and Plasma 6."; then
+                        if command -v forge-hdr &>/dev/null; then
+                            local hdr_out
+                            hdr_out=$(forge-hdr enable 2>&1 | head -20) || true
+                            gui_info "HDR" "$hdr_out"
+                            notify "Display" "HDR enabled"
+                        else
+                            gui_warning "HDR" "forge-hdr is not installed."
+                        fi
+                    fi
+                else
+                    if gui_question "HDR" "Disable HDR?"; then
+                        forge-hdr disable 2>&1 || true
+                        notify "Display" "HDR disabled"
+                    fi
+                fi
+                ;;
+            Resolution*)
+                if command -v forge-display &>/dev/null; then
+                    # Gather available modes
+                    local modes_raw
+                    modes_raw=$(forge-display list-modes 2>/dev/null || xrandr 2>/dev/null | grep -E '^\s+[0-9]+x[0-9]+' | awk '{print $1}' | sort -u || echo "")
+                    if [[ -n "$modes_raw" ]]; then
+                        local -a mode_arr
+                        mapfile -t mode_arr <<< "$modes_raw"
+                        local chosen
+                        chosen=$(gui_list "Select Resolution" "Mode" "${mode_arr[@]}" "Cancel") || continue
+                        if [[ -n "$chosen" && "$chosen" != "Cancel" ]]; then
+                            forge-display set-mode "$chosen" 2>/dev/null || true
+                            notify "Display" "Resolution changed to ${chosen}"
+                        fi
+                    else
+                        gui_info "Display" "Could not detect available display modes."
+                    fi
+                else
+                    gui_warning "Display" "forge-display is not installed."
+                fi
+                ;;
+            "Night Light"*)
+                local nl_result
+                nl_result=$(gui_form "Night Light Settings" \
+                    "Night Light:CB:$([ "$nightlight_status" = "off" ] || [ "$nightlight_status" = "inactive" ] && echo "off" || echo "on")!on!off" \
+                    "Color Temperature (K):NUM:4500" \
+                ) || continue
+
+                [[ -z "$nl_result" ]] && continue
+
+                IFS='|' read -r nl_toggle nl_temp <<< "$nl_result"
+                nl_toggle=$(echo "$nl_toggle" | tr -d '[:space:]')
+                nl_temp=$(echo "$nl_temp" | grep -oE '[0-9]+' | head -1 || echo "4500")
+
+                if command -v forge-nightlight &>/dev/null; then
+                    if [[ "$nl_toggle" == "on" ]]; then
+                        forge-nightlight on 2>/dev/null || true
+                        forge-nightlight temp "$nl_temp" 2>/dev/null || true
+                        notify "Night Light" "Enabled at ${nl_temp}K"
+                    else
+                        forge-nightlight off 2>/dev/null || true
+                        notify "Night Light" "Disabled"
+                    fi
+                fi
+                ;;
+            "Live Wallpaper"*)
+                if [[ "$lwp_status" == "active" ]]; then
+                    if gui_question "Live Wallpaper" "Stop the live wallpaper daemon?"; then
+                        if command -v forge-live-wallpaper &>/dev/null; then
+                            forge-live-wallpaper stop 2>/dev/null || true
+                            notify "Display" "Live wallpaper stopped"
+                        fi
+                    fi
+                else
+                    local wp_themes=("forge-dark" "forge-neon" "forge-circuit" "forge-minimal")
+                    local wp_choice
+                    wp_choice=$(gui_list "Live Wallpaper Theme" "Theme" "${wp_themes[@]}" "Cancel") || continue
+                    if [[ -n "$wp_choice" && "$wp_choice" != "Cancel" ]]; then
+                        if command -v forge-live-wallpaper &>/dev/null; then
+                            forge-live-wallpaper start --theme "$wp_choice" &>/dev/null &
+                            notify "Display" "Live wallpaper started: ${wp_choice}"
+                        fi
+                    fi
+                fi
+                ;;
+            "Cursor Theme"*)
+                local cursor_result
+                cursor_result=$(gui_combo "Cursor Theme" "Select cursor theme:" "$cursor_theme" \
+                    "default" "Adwaita" "breeze_cursors" "Bibata-Modern-Classic" "Bibata-Modern-Ice" \
+                ) || continue
+                if [[ -n "$cursor_result" ]]; then
+                    # Apply via gsettings (GNOME/GTK) and Plasma
+                    gsettings set org.gnome.desktop.interface cursor-theme "$cursor_result" 2>/dev/null || true
+                    if command -v kwriteconfig5 &>/dev/null; then
+                        kwriteconfig5 --file kcminputrc --group Mouse --key cursorTheme "$cursor_result" 2>/dev/null || true
+                    elif command -v kwriteconfig6 &>/dev/null; then
+                        kwriteconfig6 --file kcminputrc --group Mouse --key cursorTheme "$cursor_result" 2>/dev/null || true
+                    fi
+                    notify "Display" "Cursor theme set to ${cursor_result}"
+                fi
+                ;;
+            "Back to Main Menu"|"") return 0 ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Category 6: Gaming
+# ═══════════════════════════════════════════════════════════════════════════
+panel_gaming() {
+    while true; do
+        # Current Proton version
+        local proton_ver="system default"
+        local proton_conf="${CONFIG_DIR}/proton.conf"
+        if [[ -f "$proton_conf" ]]; then
+            proton_ver=$(cfg_read "$proton_conf" "DEFAULT_VERSION" "system default")
+        fi
+
+        # Shader cache info
+        local shader_cache_size="unknown"
+        if command -v forge-shader-cache &>/dev/null; then
+            shader_cache_size=$(forge-shader-cache size 2>/dev/null | tail -1 || echo "unknown")
+        fi
+
+        # RetroArch installed?
+        local retroarch_status="not installed"
+        if flatpak list 2>/dev/null | grep -qi retroarch || command -v retroarch &>/dev/null; then
+            retroarch_status="installed"
+        fi
+
+        # Game profiles count
+        local profile_count=0
+        if [[ -d "${CONFIG_DIR}/game-profiles" ]]; then
+            profile_count=$(find "${CONFIG_DIR}/game-profiles" -name '*.json' 2>/dev/null | wc -l)
+        fi
+
+        local selection
+        selection=$(gui_list "Gaming Settings" "Setting" \
+            "Default Proton: ${proton_ver}" \
+            "Shader Cache: ${shader_cache_size}" \
+            "Clean Shader Cache" \
+            "RetroArch: ${retroarch_status}" \
+            "Game Profiles (${profile_count} configured)" \
+            "Back to Main Menu" \
+        ) || return 0
+
+        case "$selection" in
+            "Default Proton"*)
+                # List available Proton versions
+                local -a proton_versions=("system default")
+                local steam_dir="${HOME}/.local/share/Steam"
+                [[ ! -d "$steam_dir" ]] && steam_dir="${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+                if [[ -d "$steam_dir/compatibilitytools.d" ]]; then
+                    while IFS= read -r -d '' d; do
+                        proton_versions+=("$(basename "$d")")
+                    done < <(find "$steam_dir/compatibilitytools.d" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null)
+                fi
+                # Add standard Proton from Steam
+                local steam_common="$steam_dir/steamapps/common"
+                if [[ -d "$steam_common" ]]; then
+                    while IFS= read -r -d '' d; do
+                        local bname
+                        bname=$(basename "$d")
+                        [[ "$bname" == Proton* ]] && proton_versions+=("$bname")
+                    done < <(find "$steam_common" -maxdepth 1 -mindepth 1 -name 'Proton*' -type d -print0 2>/dev/null)
+                fi
+
+                local chosen
+                chosen=$(gui_list "Select Default Proton" "Version" "${proton_versions[@]}") || continue
+                if [[ -n "$chosen" ]]; then
+                    mkdir -p "$(dirname "$proton_conf")"
+                    cfg_write "$proton_conf" "DEFAULT_VERSION" "$chosen"
+                    notify "Gaming" "Default Proton set to ${chosen}"
+                fi
+                ;;
+            "Shader Cache"*|"Clean Shader Cache")
+                if [[ "$selection" == "Clean Shader Cache" ]]; then
+                    if gui_question "Shader Cache" "Clean all shader caches? Games may stutter on first launch."; then
+                        if command -v forge-shader-cache &>/dev/null; then
+                            local clean_out
+                            clean_out=$(forge-shader-cache clean 2>&1) || true
+                            gui_info "Shader Cache" "$clean_out"
+                            notify "Gaming" "Shader cache cleaned"
+                        fi
+                    fi
+                else
+                    if command -v forge-shader-cache &>/dev/null; then
+                        local status_out
+                        status_out=$(forge-shader-cache status 2>&1 | head -30) || true
+                        gui_textinfo "Shader Cache Status" "$status_out"
+                    fi
+                fi
+                ;;
+            RetroArch*)
+                if [[ "$retroarch_status" == "installed" ]]; then
+                    gui_info "RetroArch" "RetroArch is installed and ready.\n\nUse 'forge-retro' to manage cores and ROMs."
+                else
+                    if gui_question "RetroArch" "RetroArch is not installed. Install it via Flatpak?"; then
+                        flatpak install -y flathub org.libretro.RetroArch &>/dev/null &
+                        notify "Gaming" "RetroArch installation started"
+                    fi
+                fi
+                ;;
+            "Game Profiles"*)
+                if command -v forge-game-profiles &>/dev/null; then
+                    local profiles_out
+                    profiles_out=$(forge-game-profiles list 2>&1 | head -40) || true
+                    if [[ -z "$profiles_out" || "$profiles_out" == *"No profiles"* ]]; then
+                        gui_info "Game Profiles" "No game profiles configured yet.\n\nUse 'forge-game-profiles create' to create one."
+                    else
+                        gui_textinfo "Game Profiles" "$profiles_out"
+                    fi
+                else
+                    gui_warning "Game Profiles" "forge-game-profiles is not installed."
+                fi
+                ;;
+            "Back to Main Menu"|"") return 0 ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Category 7: Cloud & Sync
+# ═══════════════════════════════════════════════════════════════════════════
+panel_cloud() {
+    while true; do
+        # Cloud saves state
+        local cloud_enabled="no"
+        local cloud_game_count=0
+        local cloud_conf="${CONFIG_DIR}/cloud-saves.json"
+        if [[ -f "$cloud_conf" ]]; then
+            cloud_enabled=$(json_read "$cloud_conf" "enabled" "false")
+            [[ "$cloud_enabled" == "true" ]] && cloud_enabled="yes" || cloud_enabled="no"
+            cloud_game_count=$(json_read "$cloud_conf" "game_count" "0")
+        fi
+
+        # Achievement sync
+        local ach_status="unknown"
+        if [[ -f "${CONFIG_DIR}/achievements.json" ]]; then
+            ach_status="configured"
+            local ach_count
+            ach_count=$(json_read "${CONFIG_DIR}/achievements.json" "unlocked_count" "0")
+            ach_status="${ach_count} unlocked"
+        fi
+
+        # Gallery auto-upload
+        local gallery_auto="no"
+        if [[ -f "${CONFIG_DIR}/gallery.conf" ]]; then
+            gallery_auto=$(cfg_read "${CONFIG_DIR}/gallery.conf" "AUTO_UPLOAD" "no")
+        fi
+
+        local selection
+        selection=$(gui_list "Cloud & Sync" "Setting" \
+            "Cloud Saves: ${cloud_enabled} (${cloud_game_count} games)" \
+            "Toggle Cloud Saves" \
+            "List Synced Games" \
+            "Achievement Sync: ${ach_status}" \
+            "Gallery Auto-Upload: ${gallery_auto}" \
+            "Toggle Gallery Upload" \
+            "Back to Main Menu" \
+        ) || return 0
+
+        case "$selection" in
+            "Toggle Cloud Saves")
+                if [[ "$cloud_enabled" == "yes" ]]; then
+                    if gui_question "Cloud Saves" "Disable cloud saves? Your saves will remain on the server but won't auto-sync."; then
+                        if command -v forge-cloud-saves &>/dev/null; then
+                            forge-cloud-saves disable 2>/dev/null || true
+                        fi
+                        notify "Cloud" "Cloud saves disabled"
+                    fi
+                else
+                    if [[ ! -f "$HUB_TOKEN_FILE" ]]; then
+                        gui_warning "Cloud Saves" "You need to log in to the 24HG Hub first.\nRun: forge-hub-bridge login"
+                    else
+                        if command -v forge-cloud-saves &>/dev/null; then
+                            forge-cloud-saves enable 2>/dev/null || true
+                            notify "Cloud" "Cloud saves enabled"
+                        fi
+                    fi
+                fi
+                ;;
+            "List Synced Games")
+                if command -v forge-cloud-saves &>/dev/null; then
+                    local games_out
+                    games_out=$(forge-cloud-saves list 2>&1 | head -40) || true
+                    if [[ -z "$games_out" ]]; then
+                        gui_info "Cloud Saves" "No games are currently synced."
+                    else
+                        gui_textinfo "Synced Games" "$games_out"
+                    fi
+                fi
+                ;;
+            "Achievement Sync"*)
+                if command -v forge-achievements &>/dev/null; then
+                    local ach_out
+                    ach_out=$(forge-achievements list 2>&1 | head -50) || true
+                    gui_textinfo "Achievements" "$ach_out"
+                else
+                    gui_info "Achievements" "Achievement tracking is running in the background.\n\nUse 'forge-achievements' for details."
+                fi
+                ;;
+            "Toggle Gallery Upload")
+                if [[ "$gallery_auto" == "yes" ]]; then
+                    cfg_write "${CONFIG_DIR}/gallery.conf" "AUTO_UPLOAD" "no"
+                    notify "Gallery" "Auto-upload disabled"
+                else
+                    if [[ ! -f "$HUB_TOKEN_FILE" ]]; then
+                        gui_warning "Gallery" "You need to log in to the 24HG Hub first.\nRun: forge-hub-bridge login"
+                    else
+                        cfg_write "${CONFIG_DIR}/gallery.conf" "AUTO_UPLOAD" "yes"
+                        notify "Gallery" "Auto-upload enabled"
+                    fi
+                fi
+                ;;
+            "Back to Main Menu"|"") return 0 ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Category 8: Community
+# ═══════════════════════════════════════════════════════════════════════════
+panel_community() {
+    while true; do
+        # Hub login status
+        local hub_status="not logged in"
+        local hub_user=""
+        if [[ -f "$HUB_TOKEN_FILE" ]]; then
+            hub_status="logged in"
+            # Try to extract username from token or cached profile
+            if [[ -f "${HOME}/.cache/forge/hub-state.json" ]]; then
+                hub_user=$(json_read "${HOME}/.cache/forge/hub-state.json" "username" "")
+                [[ -n "$hub_user" ]] && hub_status="logged in as ${hub_user}"
+            fi
+        fi
+
+        # VPN status
+        local vpn_status="disconnected"
+        if ip link show wg-24hg &>/dev/null 2>&1; then
+            vpn_status="connected"
+        fi
+
+        # LAN party announce
+        local lan_announce="off"
+        if [[ -f /tmp/forge-lan-party.pid ]]; then
+            local lpid
+            lpid=$(cat /tmp/forge-lan-party.pid 2>/dev/null || echo "")
+            [[ -n "$lpid" ]] && kill -0 "$lpid" 2>/dev/null && lan_announce="broadcasting"
+        fi
+
+        # Invite code
+        local invite_code="none"
+        if [[ -f "${CONFIG_DIR}/invite-code" ]]; then
+            invite_code=$(cat "${CONFIG_DIR}/invite-code" 2>/dev/null || echo "none")
+        fi
+
+        local selection
+        selection=$(gui_list "Community Settings" "Setting" \
+            "Hub: ${hub_status}" \
+            "Hub Login" \
+            "Hub Logout" \
+            "VPN: ${vpn_status}" \
+            "LAN Party Announce: ${lan_announce}" \
+            "Toggle LAN Announce" \
+            "Invite Code: ${invite_code}" \
+            "Generate Invite Code" \
+            "Back to Main Menu" \
+        ) || return 0
+
+        case "$selection" in
+            "Hub Login")
+                if [[ -f "$HUB_TOKEN_FILE" ]]; then
+                    gui_info "Hub" "Already logged in.\n\nStatus: ${hub_status}"
+                else
+                    if command -v forge-hub-bridge &>/dev/null; then
+                        # Open hub login in browser
+                        local login_url="https://hub.24hgaming.com/login?app=forge"
+                        if command -v xdg-open &>/dev/null; then
+                            xdg-open "$login_url" &>/dev/null &
+                        fi
+                        gui_info "Hub Login" "A browser window has been opened.\n\nAfter logging in, your token will be saved automatically.\n\nAlternatively, run: forge-hub-bridge login"
+                    fi
+                fi
+                ;;
+            "Hub Logout")
+                if [[ -f "$HUB_TOKEN_FILE" ]]; then
+                    if gui_question "Hub Logout" "Log out of the 24HG Hub? Cloud saves and sync will be paused."; then
+                        rm -f "$HUB_TOKEN_FILE"
+                        rm -f "${HOME}/.cache/forge/hub-state.json"
+                        notify "Hub" "Logged out of 24HG Hub"
+                    fi
+                else
+                    gui_info "Hub" "Not currently logged in."
+                fi
+                ;;
+            "Toggle LAN Announce")
+                if [[ "$lan_announce" == "broadcasting" ]]; then
+                    if command -v forge-lan-party &>/dev/null; then
+                        forge-lan-party stop 2>/dev/null || true
+                        notify "LAN Party" "Stopped broadcasting"
+                    fi
+                else
+                    if command -v forge-lan-party &>/dev/null; then
+                        forge-lan-party announce &>/dev/null &
+                        notify "LAN Party" "Started broadcasting on local network"
+                    else
+                        gui_warning "LAN Party" "forge-lan-party is not installed."
+                    fi
+                fi
+                ;;
+            "Generate Invite Code")
+                if [[ ! -f "$HUB_TOKEN_FILE" ]]; then
+                    gui_warning "Invite" "You need to log in to the 24HG Hub first."
+                else
+                    if command -v forge-invite &>/dev/null; then
+                        local code_out
+                        code_out=$(forge-invite generate 2>&1) || true
+                        gui_info "Invite Code" "$code_out"
+                        notify "Invite" "New invite code generated"
+                    else
+                        gui_warning "Invite" "forge-invite is not installed."
+                    fi
+                fi
+                ;;
+            "Invite Code"*)
+                if [[ "$invite_code" != "none" ]]; then
+                    # Copy to clipboard
+                    if command -v wl-copy &>/dev/null; then
+                        echo -n "$invite_code" | wl-copy 2>/dev/null
+                        notify "Invite" "Code copied to clipboard: ${invite_code}"
+                    elif command -v xclip &>/dev/null; then
+                        echo -n "$invite_code" | xclip -selection clipboard 2>/dev/null
+                        notify "Invite" "Code copied to clipboard: ${invite_code}"
+                    else
+                        gui_info "Invite Code" "Your invite code: ${invite_code}"
+                    fi
+                fi
+                ;;
+            "Back to Main Menu"|"") return 0 ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Category 9: Updates
+# ═══════════════════════════════════════════════════════════════════════════
+panel_updates() {
+    while true; do
+        # Current OS version
+        local os_version
+        os_version=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo "24HG Forge")
+        local build_id
+        build_id=$(grep BUILD_ID /etc/os-release 2>/dev/null | cut -d'=' -f2 | tr -d '"' || echo "unknown")
+
+        # Update channel
+        local update_channel
+        update_channel=$(cfg_read "$MASTER_CONF" "UPDATE_CHANNEL" "stable")
+
+        # Auto-update
+        local auto_update
+        auto_update=$(cfg_read "$MASTER_CONF" "AUTO_UPDATE" "yes")
+
+        # Check if an update is staged
+        local staged_update="none"
+        if command -v rpm-ostree &>/dev/null; then
+            local ostree_status
+            ostree_status=$(rpm-ostree status 2>/dev/null | head -20 || echo "")
+            if echo "$ostree_status" | grep -q "pending"; then
+                staged_update="pending (reboot to apply)"
+            fi
+        fi
+
+        # Deployment count for rollback
+        local deployments=1
+        if command -v rpm-ostree &>/dev/null; then
+            deployments=$(rpm-ostree status 2>/dev/null | grep -c 'Commit:' || echo "1")
+        fi
+
+        local selection
+        selection=$(gui_list "Updates" "Setting" \
+            "OS: ${os_version}" \
+            "Build: ${build_id}" \
+            "Staged Update: ${staged_update}" \
+            "Update Channel: ${update_channel}" \
+            "Change Update Channel" \
+            "Auto-Update: ${auto_update}" \
+            "Toggle Auto-Update" \
+            "Check for Updates" \
+            "Rollback to Previous Version" \
+            "Back to Main Menu" \
+        ) || return 0
+
+        case "$selection" in
+            "Change Update Channel")
+                local new_channel
+                new_channel=$(gui_combo "Update Channel" "Select update channel:" "$update_channel" \
+                    "stable" "beta" \
+                ) || continue
+                if [[ -n "$new_channel" ]]; then
+                    cfg_write "$MASTER_CONF" "UPDATE_CHANNEL" "$new_channel"
+                    # Update the ostree remote if possible
+                    if command -v ostree &>/dev/null; then
+                        local remote_url="ghcr.io/24hgaming/forge:${new_channel}"
+                        ostree remote modify 24hg-forge --url="$remote_url" 2>/dev/null || true
+                    fi
+                    notify "Updates" "Update channel changed to ${new_channel}"
+                fi
+                ;;
+            "Toggle Auto-Update")
+                if [[ "$auto_update" == "yes" ]]; then
+                    cfg_write "$MASTER_CONF" "AUTO_UPDATE" "no"
+                    systemctl --user disable forge-auto-update.timer 2>/dev/null || true
+                    notify "Updates" "Auto-update disabled"
+                else
+                    cfg_write "$MASTER_CONF" "AUTO_UPDATE" "yes"
+                    systemctl --user enable --now forge-auto-update.timer 2>/dev/null || true
+                    notify "Updates" "Auto-update enabled"
+                fi
+                ;;
+            "Check for Updates")
+                if command -v rpm-ostree &>/dev/null; then
+                    local check_out
+                    check_out=$(rpm-ostree upgrade --check 2>&1 | head -20) || true
+                    if echo "$check_out" | grep -qi "no updates"; then
+                        gui_info "Updates" "Your system is up to date."
+                    else
+                        if gui_question "Update Available" "An update is available.\n\n${check_out}\n\nStage it for next reboot?"; then
+                            rpm-ostree upgrade 2>&1 | head -5 || true
+                            notify "Updates" "Update staged. Reboot to apply."
+                            gui_info "Updates" "Update has been staged.\n\nReboot your system to apply the update."
+                        fi
+                    fi
+                else
+                    gui_info "Updates" "rpm-ostree is not available on this system."
+                fi
+                ;;
+            "Rollback to Previous Version")
+                if [[ "$deployments" -lt 2 ]]; then
+                    gui_info "Rollback" "No previous deployment available to rollback to."
+                else
+                    if gui_question "Rollback" "Roll back to the previous OS version?\n\nThis will take effect on the next reboot."; then
+                        if command -v rpm-ostree &>/dev/null; then
+                            rpm-ostree rollback 2>&1 || true
+                            notify "Updates" "Rollback staged. Reboot to apply."
+                            gui_info "Rollback" "Rollback has been staged.\n\nReboot your system to return to the previous version."
+                        fi
+                    fi
+                fi
+                ;;
+            "Back to Main Menu"|"") return 0 ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Category 10: About
+# ═══════════════════════════════════════════════════════════════════════════
+panel_about() {
+    # Gather system information (same data as forge-neofetch)
+    local os_name
+    os_name=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo "24HG Forge")
+    local kernel
+    kernel=$(uname -r 2>/dev/null || echo "unknown")
+    local uptime
+    uptime=$(uptime -p 2>/dev/null | sed 's/up //' || echo "unknown")
+    local cpu
+    cpu=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | sed 's/^ //;s/(R)//g;s/(TM)//g;s/CPU //g' || echo "unknown")
+    local cpu_cores
+    cpu_cores=$(nproc 2>/dev/null || echo "?")
+    local gpu
+    gpu=$(lspci 2>/dev/null | grep -E "VGA|3D|Display" | head -1 | sed 's/.*: //' | cut -c1-60 || echo "unknown")
+    local mem_total
+    mem_total=$(free -m 2>/dev/null | awk '/^Mem:/ {print $2}' || echo "?")
+    local mem_used
+    mem_used=$(free -m 2>/dev/null | awk '/^Mem:/ {print $3}' || echo "?")
+    local disk_info
+    disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 "/" $2 " (" $5 ")"}' || echo "unknown")
+    local de
+    de="${XDG_CURRENT_DESKTOP:-Unknown}"
+    local rpms
+    rpms=$(rpm -qa 2>/dev/null | wc -l || echo "0")
+    local flatpaks
+    flatpaks=$(flatpak list 2>/dev/null | wc -l || echo "0")
+
+    # Rig score
+    local rig_score="not benchmarked"
+    if [[ -f "${CONFIG_DIR}/rig-score.json" ]]; then
+        rig_score=$(json_read "${CONFIG_DIR}/rig-score.json" "total_score" "not benchmarked")
+        [[ "$rig_score" != "not benchmarked" ]] && rig_score="${rig_score} pts"
+    fi
+
+    local info_text
+    info_text=$(cat <<INFOEOF
+24HG Forge Settings v${VERSION}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+System Information
+  OS:           ${os_name}
+  Kernel:       ${kernel}
+  Desktop:      ${de}
+  Uptime:       ${uptime}
+
+Hardware
+  CPU:          ${cpu} (${cpu_cores} cores)
+  GPU:          ${gpu}
+  Memory:       ${mem_used}MiB / ${mem_total}MiB
+  Disk:         ${disk_info}
+
+Software
+  Packages:     ${rpms} (rpm) + ${flatpaks} (flatpak)
+  Rig Score:    ${rig_score}
+
+24 Hour Gaming
+  Website:      24hgaming.com
+  Hub:          hub.24hgaming.com
+  Discord:      discord.gg/ymfEjH6EJN
+  Servers:      88+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Built with love for the gaming community.
+INFOEOF
+)
+
+    gui_textinfo "About 24HG Forge" "$info_text"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Reset All Settings
+# ═══════════════════════════════════════════════════════════════════════════
+action_reset_all() {
+    if ! gui_question "Reset All Settings" "This will reset ALL Forge settings to their defaults.\n\nYour game saves, screenshots, and Hub account will NOT be affected.\n\nAre you sure?"; then
+        return 0
+    fi
+
+    # Second confirmation
+    if ! gui_question "Confirm Reset" "This action cannot be undone.\n\nProceed with reset?"; then
+        return 0
+    fi
+
+    # Backup current configs
+    local backup_dir="${CONFIG_DIR}/backup-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$backup_dir"
+
+    # List of config files to reset
+    local configs_to_reset=(
+        "settings.conf"
+        "mangohud.conf"
+        "voice.conf"
+        "radio.conf"
+        "clip.conf"
+        "screenshot.conf"
+        "stream.conf"
+        "proton.conf"
+        "gallery.conf"
+        "live-wallpaper.conf"
+        "ping-optimizer.conf"
+        "retro.conf"
+    )
+
+    for conf in "${configs_to_reset[@]}"; do
+        local conf_path="${CONFIG_DIR}/${conf}"
+        if [[ -f "$conf_path" ]]; then
+            cp "$conf_path" "$backup_dir/" 2>/dev/null || true
+            rm -f "$conf_path"
+        fi
+    done
+
+    # Reset MangoHud
+    rm -f "${HOME}/.config/MangoHud/MangoHud.conf" 2>/dev/null || true
+
+    # Reset performance to balanced
+    if command -v forge-performance &>/dev/null; then
+        forge-performance balanced &>/dev/null || true
+    fi
+
+    # Resume compositor
+    if command -v qdbus &>/dev/null; then
+        qdbus org.kde.KWin /Compositor resume 2>/dev/null || true
+    fi
+
+    # Turn off night light
+    if command -v forge-nightlight &>/dev/null; then
+        forge-nightlight off 2>/dev/null || true
+    fi
+
+    notify "Settings Reset" "All settings restored to defaults. Backup saved to ${backup_dir}"
+    gui_info "Reset Complete" "All settings have been reset to defaults.\n\nA backup of your previous settings was saved to:\n${backup_dir}"
+    log "All settings reset. Backup at ${backup_dir}"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Main Menu
+# ═══════════════════════════════════════════════════════════════════════════
+main_menu() {
+    while true; do
+        local categories=(
+            "Performance"
+            "Network"
+            "Audio & Voice"
+            "Recording & Streaming"
+            "Display"
+            "Gaming"
+            "Cloud & Sync"
+            "Community"
+            "Updates"
+            "About"
+            "---"
+            "Reset All Settings"
+            "Quit"
+        )
+
+        local selection
+        case "$GUI" in
+            yad)
+                selection=$(yad --list --title="$APP_TITLE" \
+                    --column="Category" \
+                    --column="Description" \
+                    "Performance"         "Profiles, MangoHud, compositor, CPU governor" \
+                    "Network"             "VPN, DNS, ping optimizer, firewall" \
+                    "Audio & Voice"       "Audio device, PTT key, radio, ducking" \
+                    "Recording & Streaming" "Clips, replay buffer, Sunshine, OBS, screenshots" \
+                    "Display"             "HDR, resolution, night light, wallpaper, cursor" \
+                    "Gaming"              "Proton, shader cache, RetroArch, game profiles" \
+                    "Cloud & Sync"        "Cloud saves, achievements, gallery upload" \
+                    "Community"           "Hub login, VPN, LAN party, invite codes" \
+                    "Updates"             "OS version, update channel, rollback" \
+                    "About"               "System info, rig score, links" \
+                    "---"                 "─────────────────────────────────────" \
+                    "Reset All Settings"  "Restore all settings to defaults" \
+                    --center --width=600 --height=550 \
+                    --print-column=1 --separator="" \
+                    --window-icon="$FALLBACK_ICON" \
+                    --button="Quit:1" --button="Open:0" \
+                    2>/dev/null) || break
+                ;;
+            zenity)
+                selection=$(zenity --list --title="$APP_TITLE" \
+                    --column="Category" --column="Description" \
+                    "Performance"         "Profiles, MangoHud, compositor, CPU governor" \
+                    "Network"             "VPN, DNS, ping optimizer, firewall" \
+                    "Audio & Voice"       "Audio device, PTT key, radio, ducking" \
+                    "Recording & Streaming" "Clips, replay buffer, Sunshine, OBS, screenshots" \
+                    "Display"             "HDR, resolution, night light, wallpaper, cursor" \
+                    "Gaming"              "Proton, shader cache, RetroArch, game profiles" \
+                    "Cloud & Sync"        "Cloud saves, achievements, gallery upload" \
+                    "Community"           "Hub login, VPN, LAN party, invite codes" \
+                    "Updates"             "OS version, update channel, rollback" \
+                    "About"               "System info, rig score, links" \
+                    "---"                 "─────────────────────────────────────" \
+                    "Reset All Settings"  "Restore all settings to defaults" \
+                    --width=600 --height=550 \
+                    2>/dev/null) || break
+                ;;
+            kdialog)
+                selection=$(kdialog --title "$APP_TITLE" --menu "Select a category:" \
+                    "Performance"           "Performance — Profiles, MangoHud, compositor" \
+                    "Network"               "Network — VPN, DNS, ping optimizer" \
+                    "Audio & Voice"         "Audio & Voice — PTT key, radio, ducking" \
+                    "Recording & Streaming" "Recording — Clips, replay buffer, OBS" \
+                    "Display"               "Display — HDR, resolution, night light" \
+                    "Gaming"                "Gaming — Proton, shaders, RetroArch" \
+                    "Cloud & Sync"          "Cloud & Sync — Saves, achievements, gallery" \
+                    "Community"             "Community — Hub, VPN, LAN party, invites" \
+                    "Updates"               "Updates — OS version, channel, rollback" \
+                    "About"                 "About — System info, rig score" \
+                    "Reset All Settings"    "Reset — Restore all defaults" \
+                    2>/dev/null) || break
+                ;;
+        esac
+
+        # Trim whitespace
+        selection=$(echo "$selection" | xargs)
+
+        case "$selection" in
+            "Performance")            panel_performance ;;
+            "Network")                panel_network ;;
+            "Audio & Voice")          panel_audio ;;
+            "Audio"*)                 panel_audio ;;
+            "Recording & Streaming")  panel_recording ;;
+            "Recording"*)             panel_recording ;;
+            "Display")                panel_display ;;
+            "Gaming")                 panel_gaming ;;
+            "Cloud & Sync")           panel_cloud ;;
+            "Cloud"*)                 panel_cloud ;;
+            "Community")              panel_community ;;
+            "Updates")                panel_updates ;;
+            "About")                  panel_about ;;
+            "Reset All Settings")     action_reset_all ;;
+            "---"|"Quit"|"")          break ;;
+            *)                        continue ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Direct Category Jump
+# ═══════════════════════════════════════════════════════════════════════════
+jump_to_category() {
+    local category="$1"
+    case "$category" in
+        performance)  panel_performance ;;
+        network)      panel_network ;;
+        audio)        panel_audio ;;
+        recording)    panel_recording ;;
+        display)      panel_display ;;
+        gaming)       panel_gaming ;;
+        cloud)        panel_cloud ;;
+        community)    panel_community ;;
+        updates)      panel_updates ;;
+        about)        panel_about ;;
+        reset)        action_reset_all ;;
+        *)
+            echo "Unknown category: $category" >&2
+            echo "Available: performance, network, audio, recording, display, gaming, cloud, community, updates, about, reset" >&2
+            exit 1
+            ;;
+    esac
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Entry Point
+# ═══════════════════════════════════════════════════════════════════════════
+main() {
+    detect_gui
+
+    local category="${1:-}"
+
+    if [[ -n "$category" ]]; then
+        case "$category" in
+            -h|--help)
+                cat <<'HELPEOF'
+24HG Forge Settings — Unified configuration panel
+
+Usage: forge-settings [category]
+
+Categories:
+  performance    Performance profiles, MangoHud, compositor, CPU governor
+  network        VPN, DNS, ping optimizer, firewall
+  audio          Audio device, voice PTT, radio, game ducking
+  recording      Clips, replay buffer, Sunshine, OBS, screenshots
+  display        HDR, resolution, night light, wallpaper, cursor
+  gaming         Proton version, shader cache, RetroArch, game profiles
+  cloud          Cloud saves, achievements, gallery auto-upload
+  community      Hub login, VPN status, LAN party, invite codes
+  updates        OS version, update channel, auto-update, rollback
+  about          System info, rig score, uptime, links
+  reset          Reset all settings to defaults
+
+No arguments opens the main settings panel.
+
+Requires: yad (preferred), zenity, or kdialog
+HELPEOF
+                exit 0
+                ;;
+            -v|--version)
+                echo "$APP_NAME $VERSION"
+                exit 0
+                ;;
+            *)
+                jump_to_category "$category"
+                ;;
+        esac
+    else
+        main_menu
+    fi
+}
+
+main "$@"

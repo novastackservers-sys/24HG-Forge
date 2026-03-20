@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Status — 24HG</title>
+    <meta name="description" content="Live system status for 24HG services, game servers, and infrastructure.">
+    <link rel="icon" href="favicon.ico" type="image/x-icon">
+    <link rel="stylesheet" href="style.css">
+    <script async src="https://analytics.24hgaming.com/track" data-website-id="a052da7e-3afe-40b1-9354-071901dd26e4"></script>
+    <style>
+        .status-hero { text-align: center; padding: 4rem 2rem 2rem; }
+        .status-hero h1 { font-size: 2rem; color: var(--text-bright); margin-bottom: 0.5rem; }
+        .status-hero p { color: var(--text-dim); font-size: 0.95rem; }
+
+        .status-banner {
+            max-width: 800px; margin: 0 auto 2rem; padding: 1.2rem 2rem;
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+            display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;
+        }
+        .status-banner-left { display: flex; align-items: center; gap: 12px; }
+        .status-dot-lg {
+            width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
+            animation: pulse-dot 2s ease-in-out infinite;
+        }
+        @keyframes pulse-dot { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+        .status-banner-text { font-size: 1.1rem; font-weight: 600; }
+        .uptime-badge { text-align: center; }
+        .uptime-label { display: block; font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.1em; }
+        .uptime-value { font-size: 1.4rem; font-weight: 700; color: var(--accent); }
+
+        .services-grid {
+            max-width: 800px; margin: 0 auto 2.5rem; display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 1rem;
+        }
+        .svc-card {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 1.2rem; position: relative; overflow: hidden;
+            transition: transform 0.2s, border-color 0.2s;
+        }
+        .svc-card:hover { transform: translateY(-2px); }
+        .svc-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+        .svc-icon { font-size: 1.2rem; }
+        .svc-name { font-size: 0.9rem; font-weight: 600; color: var(--text-bright); }
+        .svc-body { display: flex; flex-direction: column; gap: 8px; }
+        .svc-status-row { display: flex; align-items: center; gap: 8px; }
+        .svc-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+        .svc-status-text { font-size: 0.85rem; font-weight: 600; }
+        .svc-latency {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 4px 10px; background: var(--bg); border-radius: 6px;
+        }
+        .svc-latency-label { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+        .svc-latency-val { font-size: 0.85rem; font-weight: 700; }
+        .svc-accent { position: absolute; bottom: 0; left: 0; right: 0; height: 2px; }
+
+        .cat-group { max-width: 800px; margin: 0 auto 1.5rem; }
+        .cat-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 0 4px; }
+        .cat-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .cat-label { font-size: 0.8rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+        .cat-count { font-size: 0.75rem; color: var(--text-dim); }
+
+        .status-section { max-width: 800px; margin: 0 auto 2.5rem; padding: 0 1rem; }
+        .status-section h2 { font-size: 1.1rem; font-weight: 600; color: var(--text-bright); margin-bottom: 1rem; display: flex; align-items: center; gap: 10px; }
+        .section-sub { font-size: 0.75rem; color: var(--text-dim); font-weight: 400; }
+
+        /* Uptime bars */
+        .uptime-chart {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.2rem;
+        }
+        .uptime-bars { display: flex; gap: 2px; align-items: flex-end; height: 32px; }
+        .uptime-bar {
+            flex: 1; height: 100%; border-radius: 2px; opacity: 0.7; cursor: pointer;
+            transition: opacity 0.15s; min-width: 3px;
+        }
+        .uptime-bar:hover { opacity: 1; }
+        .uptime-range { display: flex; justify-content: space-between; margin-top: 8px; font-size: 0.7rem; color: var(--text-dim); }
+        .uptime-legend { display: flex; gap: 16px; justify-content: center; margin-top: 10px; }
+        .uptime-legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; color: var(--text-dim); }
+        .uptime-legend-dot { width: 10px; height: 10px; border-radius: 2px; opacity: 0.8; }
+
+        /* Response time chart */
+        .rt-chart {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 1.2rem; overflow: hidden;
+        }
+        .rt-stats { display: flex; gap: 24px; justify-content: center; margin-bottom: 12px; flex-wrap: wrap; }
+        .rt-stat { display: flex; align-items: center; gap: 8px; }
+        .rt-stat-line { width: 10px; height: 3px; border-radius: 2px; }
+        .rt-stat-label { font-size: 0.7rem; color: var(--text-dim); letter-spacing: 0.1em; }
+        .rt-stat-val { font-size: 0.85rem; font-weight: 700; }
+
+        /* Game servers */
+        .gs-panel {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.2rem;
+        }
+        .gs-game { margin-bottom: 12px; }
+        .gs-game-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.85rem; font-weight: 600; color: var(--text-bright); }
+        .gs-game-count { font-size: 0.75rem; color: var(--text-dim); font-weight: 400; }
+        .gs-dots { display: flex; gap: 4px; flex-wrap: wrap; }
+        .gs-dot {
+            width: 10px; height: 10px; border-radius: 2px; opacity: 0.8; cursor: pointer;
+            transition: opacity 0.15s, transform 0.15s;
+        }
+        .gs-dot:hover { opacity: 1; transform: scale(1.4); }
+
+        /* Incidents */
+        .no-incidents {
+            background: var(--bg-card); border: 1px solid #50c87833; border-radius: var(--radius);
+            padding: 1.5rem 2rem; text-align: center; color: var(--success); font-size: 0.9rem;
+        }
+        .incident-card {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 1rem 1.2rem; margin-bottom: 10px;
+        }
+        .incident-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+        .incident-date { font-size: 0.75rem; color: var(--text-dim); }
+        .incident-badge { font-size: 0.65rem; font-weight: 700; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.08em; }
+        .incident-title { font-size: 0.95rem; font-weight: 600; color: var(--text-bright); margin-bottom: 4px; }
+        .incident-desc { font-size: 0.8rem; color: var(--text-dim); line-height: 1.5; }
+
+        /* Maintenance */
+        .maint-card {
+            background: rgba(255,204,80,0.06); border: 1px solid rgba(255,204,80,0.2);
+            border-radius: var(--radius); padding: 1rem 1.2rem; margin-bottom: 10px;
+        }
+        .maint-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+        .maint-title { font-weight: 700; font-size: 0.95rem; color: var(--warning); }
+        .maint-badge { font-size: 0.65rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; }
+        .maint-desc { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 4px; }
+        .maint-time { font-size: 0.75rem; color: var(--text-dim); }
+
+        .status-footer {
+            max-width: 800px; margin: 0 auto; padding: 1.5rem 1rem; border-top: 1px solid var(--border);
+            display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+            font-size: 0.75rem; color: var(--text-dim);
+        }
+
+        /* Tooltip */
+        .tooltip {
+            position: fixed; z-index: 999; background: var(--bg-elevated); border: 1px solid var(--border);
+            border-radius: 6px; padding: 6px 10px; font-size: 0.75rem; color: var(--text);
+            pointer-events: none; white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<nav class="nav">
+    <a href="index.html" class="nav-logo">24HG Forge</a>
+    <div class="nav-links">
+        <a href="download.html">Download</a>
+        <a href="features.html">Features</a>
+        <a href="install.html">Install</a>
+        <a href="compatibility.html">Compatibility</a>
+        <a href="roadmap.html">Roadmap</a>
+        <a href="faq.html">FAQ</a>
+        <a href="status.html" class="active">Status</a>
+        <a href="https://hub.24hgaming.com" class="btn-nav">Open Hub</a>
+    </div>
+</nav>
+
+<!-- Hero -->
+<div class="status-hero">
+    <h1>System Status</h1>
+    <p>Live health of all 24HG services, game servers, and infrastructure.</p>
+</div>
+
+<!-- Overall Banner -->
+<div class="status-banner" id="banner">
+    <div class="status-banner-left">
+        <div class="status-dot-lg" id="banner-dot" style="background:#00e5ff;"></div>
+        <span class="status-banner-text" id="banner-text" style="color:#00e5ff;">Checking systems...</span>
+    </div>
+    <div class="uptime-badge">
+        <span class="uptime-label">Uptime</span>
+        <span class="uptime-value" id="banner-uptime">--</span>
+    </div>
+</div>
+
+<!-- Service Cards (grouped by category) -->
+<div id="services-container"></div>
+
+<!-- Uptime History -->
+<div class="status-section">
+    <h2>Uptime History <span class="section-sub" id="uptime-pct"></span></h2>
+    <div class="uptime-chart">
+        <div class="uptime-bars" id="uptime-bars"></div>
+        <div class="uptime-range"><span id="uptime-start"></span><span id="uptime-end"></span></div>
+        <div class="uptime-legend">
+            <div class="uptime-legend-item"><div class="uptime-legend-dot" style="background:var(--success);"></div> Up</div>
+            <div class="uptime-legend-item"><div class="uptime-legend-dot" style="background:var(--warning);"></div> Degraded</div>
+            <div class="uptime-legend-item"><div class="uptime-legend-dot" style="background:var(--danger);"></div> Down</div>
+        </div>
+    </div>
+</div>
+
+<!-- Response Times -->
+<div class="status-section">
+    <h2>Response Times <span class="section-sub">(Last 24h)</span></h2>
+    <div class="rt-chart">
+        <div class="rt-stats" id="rt-stats"></div>
+        <svg id="rt-svg" viewBox="0 0 760 180" style="width:100%;height:auto;max-height:200px;"></svg>
+    </div>
+</div>
+
+<!-- Game Servers -->
+<div class="status-section" id="gs-section" style="display:none;">
+    <h2>Game Servers <span class="section-sub" id="gs-summary"></span></h2>
+    <div class="gs-panel" id="gs-panel"></div>
+</div>
+
+<!-- Maintenance -->
+<div class="status-section" id="maint-section" style="display:none;">
+    <h2>Scheduled Maintenance</h2>
+    <div id="maint-list"></div>
+</div>
+
+<!-- Incidents -->
+<div class="status-section">
+    <h2>Incident History <span class="section-sub">(Last 7 days)</span></h2>
+    <div id="incident-list">
+        <div class="no-incidents">No incidents reported in the last 7 days.</div>
+    </div>
+</div>
+
+<!-- Footer -->
+<div class="status-footer">
+    <span id="last-checked">Auto-refreshes every 30s</span>
+    <span><a href="index.html">Back to 24HG Forge</a> &middot; <a href="https://hub.24hgaming.com/status">Detailed status on Hub</a></span>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+var API = 'https://api.24hgaming.com';
+var SVC_ICONS = {
+  'API Server': '\uD83D\uDDA5\uFE0F', 'Database': '\uD83D\uDCBE', 'Redis': '\u26A1',
+  'LiveKit (Voice)': '\uD83C\uDFA4', 'Mail (SMTP)': '\u2709\uFE0F', 'Discovery VPN': '\uD83C\uDF10',
+  'Hub Website': '\uD83C\uDFE0', 'Chat Platform': '\uD83D\uDCAC', 'Desktop App': '\uD83D\uDDA5\uFE0F',
+  'Mobile App': '\uD83D\uDCF1', 'Developer Portal': '\uD83D\uDCBB', "No Man's Land": '\uD83C\uDFAE',
+  'Game Panel': '\uD83C\uDF9B\uFE0F', 'FastDL (CDN)': '\uD83D\uDCE6', 'Grafana': '\uD83D\uDCCA',
+  'Uptime Kuma': '\uD83D\uDCDF', 'Analytics (Umami)': '\uD83D\uDCC8', 'Vaultwarden': '\uD83D\uDD12',
+  'PrivateBin': '\uD83D\uDCCB', 'Rallly (Polls)': '\uD83D\uDDF3\uFE0F',
+  'HubOS Website': '\uD83D\uDCE1', '24hgaming.com': '\uD83C\uDF0D'
+};
+var COLORS = { operational: '#50c878', degraded: '#ffcc50', major_outage: '#ff5555' };
+var LABELS = { operational: 'Operational', degraded: 'Degraded', major_outage: 'Major Outage' };
+var CAT_LABELS = {
+  core: 'Core Infrastructure', community: 'Community Services',
+  communication: 'Voice & Communication', gaming: 'Gaming Infrastructure',
+  monitoring: 'Monitoring & Analytics', tools: 'Tools & Services', websites: 'Websites'
+};
+var CAT_ORDER = ['core', 'community', 'communication', 'gaming', 'monitoring', 'tools', 'websites'];
+
+function getIcon(name) {
+  if (name.indexOf('Game Servers') === 0) return '\uD83C\uDFAE';
+  return SVC_ICONS[name] || '\u2699\uFE0F';
+}
+
+function fmtLat(ms) { return ms == null ? '--' : ms < 1 ? '<1ms' : ms + 'ms'; }
+
+function latColor(ms) {
+  if (ms == null) return 'var(--text-dim)';
+  return ms < 50 ? 'var(--success)' : ms < 200 ? 'var(--warning)' : 'var(--danger)';
+}
+
+// ── Services ──
+function loadStatus() {
+  fetch(API + '/health/status').then(function(r){ return r.json(); }).then(function(d) {
+    var c = COLORS[d.status] || '#50c878';
+    document.getElementById('banner-dot').style.background = c;
+    document.getElementById('banner-dot').style.boxShadow = '0 0 12px ' + c + '88';
+    document.getElementById('banner-text').style.color = c;
+    document.getElementById('banner-text').textContent =
+      d.status === 'operational' ? 'All Systems Operational' :
+      d.status === 'degraded' ? 'Some Systems Degraded' : 'Major Service Outage';
+    document.getElementById('banner-uptime').textContent = (d.uptime || 99.9) + '%';
+    document.getElementById('banner').style.borderColor = c + '33';
+
+    var container = document.getElementById('services-container');
+    container.innerHTML = '';
+
+    // Group by category
+    var grouped = {};
+    (d.services || []).forEach(function(svc) {
+      var cat = svc.category || 'core';
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(svc);
+    });
+
+    // Render in order
+    var cats = CAT_ORDER.filter(function(c){ return grouped[c] && grouped[c].length; });
+    Object.keys(grouped).forEach(function(c) { if (cats.indexOf(c) === -1) cats.push(c); });
+
+    cats.forEach(function(cat) {
+      var svcs = grouped[cat];
+      var allOk = svcs.every(function(s){ return s.status === 'operational'; });
+      var anyDown = svcs.some(function(s){ return s.status === 'major_outage'; });
+      var catColor = anyDown ? '#ff5555' : allOk ? '#50c878' : '#ffcc50';
+      var upCount = svcs.filter(function(s){ return s.status === 'operational'; }).length;
+
+      var group = document.createElement('div');
+      group.className = 'cat-group';
+      group.innerHTML = '<div class="cat-header">' +
+        '<div class="cat-dot" style="background:' + catColor + ';box-shadow:0 0 8px ' + catColor + '66;"></div>' +
+        '<span class="cat-label">' + (CAT_LABELS[cat] || cat) + '</span>' +
+        '<span class="cat-count">' + upCount + '/' + svcs.length + ' up</span></div>';
+
+      var grid = document.createElement('div');
+      grid.className = 'services-grid';
+
+      svcs.forEach(function(svc) {
+        var sc = COLORS[svc.status] || '#50c878';
+        var card = document.createElement('div');
+        card.className = 'svc-card';
+        card.style.borderColor = sc + '33';
+        card.innerHTML =
+          '<div class="svc-header"><span class="svc-icon">' + getIcon(svc.name) + '</span><span class="svc-name">' + svc.name + '</span></div>' +
+          '<div class="svc-body">' +
+            '<div class="svc-status-row"><div class="svc-dot" style="background:' + sc + ';box-shadow:0 0 8px ' + sc + '66;"></div>' +
+            '<span class="svc-status-text" style="color:' + sc + ';">' + (LABELS[svc.status] || svc.status) + '</span></div>' +
+            '<div class="svc-latency"><span class="svc-latency-label">Response</span><span class="svc-latency-val" style="color:' + latColor(svc.latency) + ';">' + fmtLat(svc.latency) + '</span></div>' +
+          '</div>' +
+          '<div class="svc-accent" style="background:linear-gradient(90deg,transparent,' + sc + ',transparent);"></div>';
+        grid.appendChild(card);
+      });
+
+      group.appendChild(grid);
+      container.appendChild(group);
+    });
+
+    document.getElementById('last-checked').textContent = 'Last checked: ' + new Date().toLocaleTimeString() + ' \u2014 auto-refreshes every 30s';
+  }).catch(function() {
+    document.getElementById('banner-dot').style.background = 'var(--danger)';
+    document.getElementById('banner-text').style.color = 'var(--danger)';
+    document.getElementById('banner-text').textContent = 'Unable to reach API';
+  });
+}
+
+// ── Uptime History ──
+function loadUptime() {
+  fetch(API + '/status/uptime-history').then(function(r){ return r.json(); }).then(function(d) {
+    var days = d.days || [];
+    if (!days.length) return;
+    var bars = document.getElementById('uptime-bars');
+    bars.innerHTML = '';
+    var upCount = days.filter(function(x){ return x.status === 'up'; }).length;
+    var pct = Math.round(upCount / days.length * 1000) / 10;
+    document.getElementById('uptime-pct').textContent = '(' + days.length + '-day \u00B7 ' + pct + '%)';
+    document.getElementById('uptime-start').textContent = days[0].date;
+    document.getElementById('uptime-end').textContent = days[days.length - 1].date;
+
+    days.forEach(function(day) {
+      var bar = document.createElement('div');
+      bar.className = 'uptime-bar';
+      bar.style.background = day.status === 'up' ? 'var(--success)' : day.status === 'degraded' ? 'var(--warning)' : 'var(--danger)';
+      bar.title = day.date + ' \u2014 ' + day.status.toUpperCase();
+      bars.appendChild(bar);
+    });
+  }).catch(function(){});
+}
+
+// ── Response Times ──
+function loadResponseTimes() {
+  fetch(API + '/status/response-times').then(function(r){ return r.json(); }).then(function(d) {
+    var pts = d.points || [];
+    if (pts.length < 2) return;
+
+    var avgSum = 0, p95Sum = 0, p99Sum = 0;
+    pts.forEach(function(p) { avgSum += p.avg; p95Sum += p.p95; p99Sum += p.p99; });
+    var avgVal = Math.round(avgSum / pts.length);
+    var p95Val = Math.round(p95Sum / pts.length);
+    var p99Val = Math.round(p99Sum / pts.length);
+
+    document.getElementById('rt-stats').innerHTML =
+      [{ l: 'AVG', v: avgVal, c: 'var(--accent)' }, { l: 'P95', v: p95Val, c: 'var(--warning)' }, { l: 'P99', v: p99Val, c: 'var(--danger)' }]
+        .map(function(s) {
+          return '<div class="rt-stat"><div class="rt-stat-line" style="background:' + s.c + ';"></div>' +
+            '<span class="rt-stat-label">' + s.l + '</span><span class="rt-stat-val" style="color:' + s.c + ';">' + s.v + 'ms</span></div>';
+        }).join('');
+
+    var W = 760, H = 180, PAD = 40;
+    var chartW = W - PAD * 2, chartH = H - PAD * 1.5;
+    var allVals = [];
+    pts.forEach(function(p) { allVals.push(p.avg, p.p95, p.p99); });
+    var maxVal = Math.max.apply(null, allVals.concat([10]));
+
+    function toX(i) { return PAD + (i / (pts.length - 1)) * chartW; }
+    function toY(v) { return PAD / 2 + chartH - (v / maxVal) * chartH; }
+    function makeLine(key) {
+      return pts.map(function(p, i) { return (i === 0 ? 'M' : 'L') + toX(i) + ',' + toY(p[key]); }).join(' ');
+    }
+
+    var svg = document.getElementById('rt-svg');
+    var html = '<defs><linearGradient id="avgGrad" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0%" stop-color="var(--accent)"/><stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>';
+
+    // Grid
+    [0, 0.25, 0.5, 0.75, 1].forEach(function(pct) {
+      var y = toY(pct * maxVal);
+      html += '<line x1="' + PAD + '" y1="' + y + '" x2="' + (W - PAD) + '" y2="' + y + '" stroke="var(--border)" stroke-width="1"/>';
+      html += '<text x="' + (PAD - 4) + '" y="' + (y + 3) + '" fill="var(--text-dim)" font-size="9" text-anchor="end">' + Math.round(pct * maxVal) + 'ms</text>';
+    });
+
+    // Lines
+    html += '<path d="' + makeLine('p99') + '" fill="none" stroke="var(--danger)" stroke-width="1.5" opacity="0.5"/>';
+    html += '<path d="' + makeLine('p95') + '" fill="none" stroke="var(--warning)" stroke-width="1.5" opacity="0.6"/>';
+    html += '<path d="' + makeLine('avg') + '" fill="none" stroke="var(--accent)" stroke-width="2"/>';
+    html += '<path d="' + makeLine('avg') + ' L' + toX(pts.length - 1) + ',' + (H - PAD / 2) + ' L' + toX(0) + ',' + (H - PAD / 2) + ' Z" fill="url(#avgGrad)" opacity="0.15"/>';
+
+    // X-axis labels
+    var step = Math.ceil(pts.length / 6);
+    pts.forEach(function(p, i) {
+      if (i % step === 0) {
+        var t = new Date(p.timestamp);
+        html += '<text x="' + toX(i) + '" y="' + (H - 2) + '" fill="var(--text-dim)" font-size="9" text-anchor="middle">' +
+          t.getHours().toString().padStart(2, '0') + ':' + t.getMinutes().toString().padStart(2, '0') + '</text>';
+      }
+    });
+
+    svg.innerHTML = html;
+  }).catch(function(){});
+}
+
+// ── Game Servers ──
+function loadServers() {
+  fetch(API + '/status/servers').then(function(r){ return r.json(); }).then(function(d) {
+    var servers = d.servers || [];
+    var summary = d.summary || {};
+    if (!servers.length) return;
+
+    document.getElementById('gs-section').style.display = '';
+    document.getElementById('gs-summary').textContent = '(' + summary.online + '/' + summary.total + ' online \u00B7 ' + summary.players + ' players)';
+
+    var games = {};
+    servers.forEach(function(s) {
+      if (!games[s.game]) games[s.game] = [];
+      games[s.game].push(s);
+    });
+
+    var panel = document.getElementById('gs-panel');
+    panel.innerHTML = '';
+    Object.keys(games).sort().forEach(function(game) {
+      var gs = games[game];
+      var online = gs.filter(function(s){ return s.status === 'online'; }).length;
+      var div = document.createElement('div');
+      div.className = 'gs-game';
+      var header = '<div class="gs-game-header">' + game + ' <span class="gs-game-count">' + online + '/' + gs.length + '</span></div>';
+      var dots = '<div class="gs-dots">';
+      gs.forEach(function(s) {
+        var c = s.status === 'online' ? 'var(--success)' : 'var(--danger)';
+        dots += '<div class="gs-dot" style="background:' + c + ';box-shadow:0 0 4px ' + c + '66;" ' +
+          'data-tip="' + s.name + ' \u2014 ' + (s.map || 'N/A') + ' (' + (s.players || 0) + '/' + (s.max_players || 0) + ')"></div>';
+      });
+      dots += '</div>';
+      div.innerHTML = header + dots;
+      panel.appendChild(div);
+    });
+
+    // Tooltips for dots
+    var tip = document.getElementById('tooltip');
+    panel.addEventListener('mouseover', function(e) {
+      if (e.target.dataset.tip) {
+        tip.textContent = e.target.dataset.tip;
+        tip.style.display = 'block';
+      }
+    });
+    panel.addEventListener('mousemove', function(e) {
+      tip.style.left = (e.clientX + 12) + 'px';
+      tip.style.top = (e.clientY - 30) + 'px';
+    });
+    panel.addEventListener('mouseout', function(e) {
+      if (e.target.dataset.tip) tip.style.display = 'none';
+    });
+  }).catch(function(){});
+}
+
+// ── Maintenance ──
+function loadMaintenance() {
+  fetch(API + '/health/maintenance').then(function(r){ return r.json(); }).then(function(d) {
+    var windows = d.windows || [];
+    if (!windows.length) return;
+    document.getElementById('maint-section').style.display = '';
+    var list = document.getElementById('maint-list');
+    list.innerHTML = '';
+    windows.forEach(function(mw) {
+      var active = mw.status === 'active';
+      var card = document.createElement('div');
+      card.className = 'maint-card';
+      card.innerHTML =
+        '<div class="maint-header"><span class="maint-title">' + mw.title + '</span>' +
+        '<span class="maint-badge" style="background:' + (active ? 'rgba(80,200,120,0.15);color:var(--success)' : 'rgba(255,204,80,0.15);color:var(--warning)') + ';">' + mw.status + '</span></div>' +
+        (mw.description ? '<div class="maint-desc">' + mw.description + '</div>' : '') +
+        '<div class="maint-time">' + (mw.server_name || 'All servers') + ' \u00B7 ' + new Date(mw.scheduled_start).toLocaleString() + ' - ' + new Date(mw.scheduled_end).toLocaleString() + '</div>';
+      list.appendChild(card);
+    });
+  }).catch(function(){});
+}
+
+// ── Incidents ──
+function loadIncidents() {
+  fetch(API + '/health/incidents').then(function(r){ return r.json(); }).then(function(d) {
+    var incidents = d.incidents || [];
+    if (!incidents.length) return;
+    var list = document.getElementById('incident-list');
+    list.innerHTML = '';
+    incidents.forEach(function(inc) {
+      var card = document.createElement('div');
+      card.className = 'incident-card';
+      var date = inc.resolved_at ? new Date(inc.resolved_at).toISOString().slice(0, 10) : new Date(inc.started_at).toISOString().slice(0, 10);
+      card.innerHTML =
+        '<div class="incident-header"><span class="incident-date">' + date + '</span>' +
+        '<span class="incident-badge" style="background:rgba(80,200,120,0.15);color:var(--success);border:1px solid rgba(80,200,120,0.3);">RESOLVED</span></div>' +
+        '<div class="incident-title">' + (inc.title || 'Incident') + '</div>' +
+        '<div class="incident-desc">' + (inc.message || '') + '</div>';
+      list.appendChild(card);
+    });
+  }).catch(function(){});
+}
+
+// ── Init ──
+loadStatus();
+loadUptime();
+loadResponseTimes();
+loadServers();
+loadMaintenance();
+loadIncidents();
+setInterval(loadStatus, 30000);
+setInterval(loadServers, 30000);
+</script>
+
+<script>fetch("/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.pathname,referer:document.referrer})}).catch(function(){})</script>
+</body>
+</html>

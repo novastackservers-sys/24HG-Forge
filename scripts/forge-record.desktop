@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Forge Screen Recorder
+Comment=Per-game screen recording with GPU acceleration
+Exec=forge-record status
+Icon=forge-logo
+Terminal=true
+Type=Application
+Categories=Game;AudioVideo;Recorder;
+Keywords=record;screen;capture;game;video;

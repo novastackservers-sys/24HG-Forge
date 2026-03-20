@@ -1,0 +1,762 @@
+#!/bin/bash
+# 24HG Forge Input Latency Analyzer & Optimizer
+# Measure and reduce input latency for competitive gaming.
+# Covers the full pipeline: USB polling, CPU governor, compositor,
+# mouse acceleration, display refresh, and kernel tweaks.
+#
+# Usage: forge-input-lag [status|measure|optimize|compositor|polling|mouse-accel|benchmark|reset]
+
+set -euo pipefail
+
+ACTION="${1:-status}"
+SHIFT_ARGS=1
+
+CONFIG_DIR="$HOME/.config/forge/input-lag"
+STATE_FILE="$CONFIG_DIR/state.json"
+BASELINE_FILE="$CONFIG_DIR/baseline.json"
+MANGOHUD_LOG_DIR="$HOME/.local/share/MangoHud"
+
+mkdir -p "$CONFIG_DIR"
+
+# --- Colors ---
+BOLD='\033[1m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+RED='\033[31m'
+CYAN='\033[36m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+header() { echo -e "\n${BOLD}${CYAN}=== $1 ===${RESET}"; }
+info()   { echo -e "  ${GREEN}*${RESET} $1"; }
+warn()   { echo -e "  ${YELLOW}!${RESET} $1"; }
+err()    { echo -e "  ${RED}x${RESET} $1"; }
+dim()    { echo -e "  ${DIM}$1${RESET}"; }
+
+need_root() {
+    if [[ $EUID -ne 0 ]]; then
+        err "This action requires root. Re-running with sudo..."
+        exec sudo "$0" "$@"
+    fi
+}
+
+# --- State helpers ---
+save_state() {
+    local key="$1" value="$2"
+    local tmp
+    if [[ -f "$STATE_FILE" ]]; then
+        tmp=$(jq --arg k "$key" --arg v "$value" '.[$k] = $v' "$STATE_FILE")
+    else
+        tmp=$(jq -n --arg k "$key" --arg v "$value" '{($k): $v}')
+    fi
+    echo "$tmp" > "$STATE_FILE"
+}
+
+get_state() {
+    local key="$1" default="${2:-}"
+    if [[ -f "$STATE_FILE" ]]; then
+        local val
+        val=$(jq -r --arg k "$key" '.[$k] // empty' "$STATE_FILE")
+        echo "${val:-$default}"
+    else
+        echo "$default"
+    fi
+}
+
+# --- Detect helpers ---
+detect_compositor() {
+    if pgrep -x gamescope > /dev/null 2>&1; then
+        echo "gamescope"
+    elif [[ -n "${WAYLAND_DISPLAY:-}" ]] && pgrep -x kwin_wayland > /dev/null 2>&1; then
+        echo "kwin_wayland"
+    elif pgrep -x kwin_x11 > /dev/null 2>&1; then
+        echo "kwin_x11"
+    elif pgrep -x picom > /dev/null 2>&1; then
+        echo "picom"
+    else
+        echo "none"
+    fi
+}
+
+detect_compositor_status() {
+    local comp
+    comp=$(detect_compositor)
+    case "$comp" in
+        kwin_x11)
+            if command -v qdbus > /dev/null 2>&1; then
+                local active
+                active=$(qdbus org.kde.KWin /Compositor active 2>/dev/null || echo "unknown")
+                echo "$comp ($active)"
+            else
+                echo "$comp (qdbus unavailable)"
+            fi
+            ;;
+        kwin_wayland) echo "$comp (always composited)" ;;
+        gamescope)    echo "$comp (low-latency compositor)" ;;
+        *)            echo "$comp" ;;
+    esac
+}
+
+detect_cpu_governor() {
+    local gov_path="/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+    if [[ -f "$gov_path" ]]; then
+        cat "$gov_path"
+    else
+        echo "unknown"
+    fi
+}
+
+detect_polling_rate() {
+    local rate
+    rate=$(cat /sys/module/usbhid/parameters/mousepoll 2>/dev/null || echo "")
+    if [[ -n "$rate" && "$rate" -gt 0 ]]; then
+        echo "$((1000 / rate))Hz (interval: ${rate}ms)"
+    else
+        echo "unknown"
+    fi
+}
+
+detect_mouse_accel() {
+    if command -v xinput > /dev/null 2>&1; then
+        local devices
+        devices=$(xinput list --name-only 2>/dev/null | grep -i mouse | head -3)
+        if [[ -z "$devices" ]]; then
+            echo "no mouse detected via xinput"
+            return
+        fi
+        while IFS= read -r dev; do
+            local profile
+            profile=$(xinput list-props "$dev" 2>/dev/null | grep "libinput Accel Profile Enabled" | head -1 | sed 's/.*:\s*//')
+            if [[ "$profile" == "0, 1" ]]; then
+                echo "$dev: flat (no acceleration)"
+            elif [[ "$profile" == "1, 0" ]]; then
+                echo "$dev: adaptive (acceleration ON)"
+            else
+                echo "$dev: ${profile:-unknown}"
+            fi
+        done <<< "$devices"
+    elif command -v libinput > /dev/null 2>&1; then
+        echo "use libinput debug-events to check (xinput unavailable)"
+    else
+        echo "detection unavailable (no xinput or libinput)"
+    fi
+}
+
+detect_display_info() {
+    if command -v xrandr > /dev/null 2>&1; then
+        local current
+        current=$(xrandr 2>/dev/null | grep '\*' | head -1 | awk '{print $1, $2}' | sed 's/\*//')
+        echo "${current:-unknown}"
+    elif command -v wlr-randr > /dev/null 2>&1; then
+        wlr-randr 2>/dev/null | grep "current" | head -1 | awk '{print $1, "@", $3}'
+    else
+        echo "unknown (no xrandr/wlr-randr)"
+    fi
+}
+
+detect_vrr_status() {
+    # Check for VRR/FreeSync via sysfs
+    local vrr="unknown"
+    for card in /sys/class/drm/card*-*/vrr_capable; do
+        if [[ -f "$card" ]]; then
+            local capable
+            capable=$(cat "$card")
+            local connector
+            connector=$(basename "$(dirname "$card")")
+            if [[ "$capable" == "1" ]]; then
+                # Check if enabled
+                local enabled_path
+                enabled_path="$(dirname "$card")/vrr_enabled"
+                if [[ -f "$enabled_path" ]]; then
+                    local enabled
+                    enabled=$(cat "$enabled_path")
+                    vrr="$connector: capable=yes enabled=$([ "$enabled" == "1" ] && echo yes || echo no)"
+                else
+                    vrr="$connector: capable=yes"
+                fi
+            else
+                vrr="$connector: not capable"
+            fi
+        fi
+    done
+    echo "$vrr"
+}
+
+detect_cstate_status() {
+    local max_disabled="none"
+    for state_dir in /sys/devices/system/cpu/cpu0/cpuidle/state*/disable; do
+        if [[ -f "$state_dir" ]]; then
+            local val
+            val=$(cat "$state_dir")
+            local name
+            name=$(basename "$(dirname "$state_dir")")
+            if [[ "$val" == "1" ]]; then
+                max_disabled="$name+"
+            fi
+        fi
+    done
+    echo "$max_disabled"
+}
+
+detect_preempt() {
+    if [[ -f /sys/kernel/debug/sched/preempt ]]; then
+        cat /sys/kernel/debug/sched/preempt 2>/dev/null
+    elif grep -q "PREEMPT" /proc/version 2>/dev/null; then
+        echo "preempt (from kernel version string)"
+    else
+        echo "unknown"
+    fi
+}
+
+# ===========================
+# COMMANDS
+# ===========================
+
+cmd_status() {
+    header "Input Latency Status"
+
+    echo -e "\n  ${BOLD}Compositor${RESET}"
+    info "$(detect_compositor_status)"
+
+    echo -e "\n  ${BOLD}CPU Governor${RESET}"
+    info "$(detect_cpu_governor)"
+
+    echo -e "\n  ${BOLD}C-States Disabled${RESET}"
+    info "$(detect_cstate_status)"
+
+    echo -e "\n  ${BOLD}USB Mouse Polling${RESET}"
+    info "$(detect_polling_rate)"
+
+    echo -e "\n  ${BOLD}Mouse Acceleration${RESET}"
+    detect_mouse_accel | while IFS= read -r line; do info "$line"; done
+
+    echo -e "\n  ${BOLD}Display${RESET}"
+    info "$(detect_display_info)"
+
+    echo -e "\n  ${BOLD}VRR/FreeSync${RESET}"
+    info "$(detect_vrr_status)"
+
+    echo -e "\n  ${BOLD}Kernel Preempt${RESET}"
+    info "$(detect_preempt)"
+
+    echo ""
+}
+
+cmd_measure() {
+    header "Latency Measurement"
+
+    # Render latency from MangoHUD frametime logs
+    echo -e "\n  ${BOLD}Render Latency (MangoHUD)${RESET}"
+    local latest_log=""
+    if [[ -d "$MANGOHUD_LOG_DIR" ]]; then
+        latest_log=$(find "$MANGOHUD_LOG_DIR" -name "*.csv" -type f -printf '%T@ %p\n' 2>/dev/null \
+            | sort -rn | head -1 | cut -d' ' -f2-)
+    fi
+
+    if [[ -n "$latest_log" && -f "$latest_log" ]]; then
+        info "Log: $(basename "$latest_log")"
+        # Parse frametime column (typically column 12 or named "frametime")
+        local header_line
+        header_line=$(head -1 "$latest_log")
+        local ft_col
+        ft_col=$(echo "$header_line" | tr ',' '\n' | grep -n -i "frametime" | head -1 | cut -d: -f1)
+        if [[ -n "$ft_col" ]]; then
+            local avg p99 p999 samples
+            # Extract frametimes, skip header, compute stats with awk
+            samples=$(tail -n +2 "$latest_log" | wc -l)
+            avg=$(tail -n +2 "$latest_log" | cut -d',' -f"$ft_col" | awk '{s+=$1; n++} END{if(n>0) printf "%.2f", s/n; else print "N/A"}')
+            p99=$(tail -n +2 "$latest_log" | cut -d',' -f"$ft_col" | sort -n | awk -v p=0.99 'NR==1{n=0} {a[n++]=$1} END{idx=int(p*n); printf "%.2f", a[idx]}')
+            p999=$(tail -n +2 "$latest_log" | cut -d',' -f"$ft_col" | sort -n | awk -v p=0.999 'NR==1{n=0} {a[n++]=$1} END{idx=int(p*n); printf "%.2f", a[idx]}')
+            info "Samples: $samples"
+            info "Avg frametime:  ${avg}ms"
+            info "P99 frametime:  ${p99}ms"
+            info "P999 frametime: ${p999}ms"
+        else
+            warn "Could not find frametime column in log"
+        fi
+    else
+        warn "No MangoHUD frametime logs found"
+        dim "Enable with: MANGOHUD_LOG=1 mangohud <game>"
+    fi
+
+    # Estimate total pipeline
+    echo -e "\n  ${BOLD}Estimated Input Pipeline${RESET}"
+    local usb_ms="1.0"
+    local poll_val
+    poll_val=$(cat /sys/module/usbhid/parameters/mousepoll 2>/dev/null || echo "8")
+    if [[ "$poll_val" -gt 0 ]]; then
+        usb_ms="$poll_val"
+    fi
+    info "USB polling interval: ${usb_ms}ms"
+
+    local display_ms="6.9"
+    local refresh_rate
+    refresh_rate=$(xrandr 2>/dev/null | grep '\*' | head -1 | awk '{print $2}' | tr -d '*+' || echo "")
+    if [[ -n "$refresh_rate" ]]; then
+        display_ms=$(awk "BEGIN{printf \"%.1f\", 1000/$refresh_rate}")
+        info "Display frame time:  ${display_ms}ms (${refresh_rate}Hz)"
+    else
+        info "Display frame time:  ~${display_ms}ms (assumed 144Hz)"
+    fi
+
+    local render_ms="${avg:-8.0}"
+    info "Render frametime:    ${render_ms}ms"
+
+    local total
+    total=$(awk "BEGIN{printf \"%.1f\", $usb_ms + $render_ms + $display_ms}")
+    echo -e "\n  ${BOLD}Estimated total:     ${YELLOW}${total}ms${RESET}"
+    dim "(USB + render + display scan-out; excludes game engine + driver overhead)"
+
+    # Save measurement for benchmark comparison
+    local ts
+    ts=$(date +%s)
+    jq -n \
+        --arg ts "$ts" \
+        --arg usb "$usb_ms" \
+        --arg render "$render_ms" \
+        --arg display "$display_ms" \
+        --arg total "$total" \
+        '{timestamp: $ts, usb_ms: $usb, render_ms: $render, display_ms: $display, total_ms: $total}' \
+        > "$CONFIG_DIR/last-measure.json"
+
+    echo ""
+}
+
+cmd_compositor() {
+    local toggle="${2:-}"
+    local comp
+    comp=$(detect_compositor)
+
+    header "Compositor Control"
+
+    if [[ "$comp" == "gamescope" ]]; then
+        info "Gamescope is active (low-latency compositor, no toggle needed)"
+        return
+    fi
+
+    if [[ "$comp" == "kwin_wayland" ]]; then
+        warn "KWin Wayland compositor cannot be disabled (use Gamescope for lower latency)"
+        return
+    fi
+
+    if [[ "$comp" == "kwin_x11" ]]; then
+        if ! command -v qdbus > /dev/null 2>&1; then
+            err "qdbus not found; cannot control KWin compositor"
+            return 1
+        fi
+        case "$toggle" in
+            off)
+                qdbus org.kde.KWin /Compositor suspend 2>/dev/null
+                save_state "compositor_was" "on"
+                info "KWin compositor suspended"
+                ;;
+            on)
+                qdbus org.kde.KWin /Compositor resume 2>/dev/null
+                info "KWin compositor resumed"
+                ;;
+            *)
+                local active
+                active=$(qdbus org.kde.KWin /Compositor active 2>/dev/null || echo "unknown")
+                info "KWin compositor active: $active"
+                dim "Usage: forge-input-lag compositor [on|off]"
+                ;;
+        esac
+        return
+    fi
+
+    if [[ "$comp" == "picom" ]]; then
+        case "$toggle" in
+            off)
+                killall picom 2>/dev/null && info "picom killed" || warn "picom not running"
+                save_state "compositor_was" "picom"
+                ;;
+            on)
+                picom --daemon 2>/dev/null &
+                info "picom started"
+                ;;
+            *)
+                info "picom is running"
+                dim "Usage: forge-input-lag compositor [on|off]"
+                ;;
+        esac
+        return
+    fi
+
+    info "No supported compositor detected"
+}
+
+cmd_polling() {
+    local rate="${2:-}"
+
+    header "USB Mouse Polling Rate"
+    info "Current: $(detect_polling_rate)"
+
+    if [[ -z "$rate" ]]; then
+        dim "Usage: forge-input-lag polling [250|500|1000]"
+        return
+    fi
+
+    need_root "$@"
+
+    local interval
+    case "$rate" in
+        250)  interval=4 ;;
+        500)  interval=2 ;;
+        1000) interval=1 ;;
+        *)    err "Supported rates: 250, 500, 1000 (Hz)"; return 1 ;;
+    esac
+
+    # Save current for reset
+    local current
+    current=$(cat /sys/module/usbhid/parameters/mousepoll 2>/dev/null || echo "")
+    [[ -n "$current" ]] && save_state "original_mousepoll" "$current"
+
+    # Apply via module parameter
+    if [[ -f /sys/module/usbhid/parameters/mousepoll ]]; then
+        echo "$interval" > /sys/module/usbhid/parameters/mousepoll 2>/dev/null || true
+    fi
+
+    # Persist via modprobe config
+    echo "options usbhid mousepoll=$interval" > /etc/modprobe.d/forge-usbhid.conf 2>/dev/null || true
+
+    info "Set polling rate to ${rate}Hz (interval: ${interval}ms)"
+    warn "Some mice need replug or reboot to take effect"
+    echo ""
+}
+
+cmd_mouse_accel() {
+    local toggle="${2:-}"
+
+    header "Mouse Acceleration"
+
+    if [[ -z "$toggle" ]]; then
+        detect_mouse_accel | while IFS= read -r line; do info "$line"; done
+        dim "Usage: forge-input-lag mouse-accel [on|off]"
+        return
+    fi
+
+    if ! command -v xinput > /dev/null 2>&1; then
+        err "xinput not available; set in desktop environment settings instead"
+        return 1
+    fi
+
+    local devices
+    devices=$(xinput list --id-only 2>/dev/null)
+    local count=0
+
+    for id in $devices; do
+        # Check if device has the accel profile property
+        if xinput list-props "$id" 2>/dev/null | grep -q "libinput Accel Profile Enabled"; then
+            local name
+            name=$(xinput list --name-only "$id" 2>/dev/null | head -1)
+            case "$toggle" in
+                off)
+                    xinput set-prop "$id" "libinput Accel Profile Enabled" 0 1 2>/dev/null || true
+                    info "$name: acceleration disabled (flat profile)"
+                    ;;
+                on)
+                    xinput set-prop "$id" "libinput Accel Profile Enabled" 1 0 2>/dev/null || true
+                    info "$name: acceleration enabled (adaptive profile)"
+                    ;;
+            esac
+            ((count++)) || true
+        fi
+    done
+
+    if [[ $count -eq 0 ]]; then
+        warn "No devices with libinput acceleration profile found"
+    fi
+
+    # Persist via libinput quirks
+    if [[ "$toggle" == "off" ]]; then
+        mkdir -p "$CONFIG_DIR"
+        cat > "$CONFIG_DIR/40-forge-no-accel.conf" << 'XCONF'
+Section "InputClass"
+    Identifier "Forge no mouse acceleration"
+    MatchIsPointer "yes"
+    Option "AccelProfile" "flat"
+    Option "AccelSpeed" "0"
+EndSection
+XCONF
+        dim "Xorg config saved to $CONFIG_DIR/40-forge-no-accel.conf"
+        dim "Copy to /etc/X11/xorg.conf.d/ to persist across reboots"
+    fi
+    echo ""
+}
+
+cmd_optimize() {
+    header "Applying Low-Latency Optimizations"
+    need_root "$@"
+
+    # 1. CPU governor
+    echo -e "\n  ${BOLD}[1/6] CPU Performance Governor${RESET}"
+    local orig_gov
+    orig_gov=$(detect_cpu_governor)
+    save_state "original_governor" "$orig_gov"
+    for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        echo "performance" > "$cpu" 2>/dev/null || true
+    done
+    info "Set all CPUs to performance governor (was: $orig_gov)"
+
+    # 2. Disable C-states (except C0)
+    echo -e "\n  ${BOLD}[2/6] Disable CPU C-States${RESET}"
+    local cstate_count=0
+    for state_dir in /sys/devices/system/cpu/cpu*/cpuidle/state[1-9]*/disable; do
+        if [[ -f "$state_dir" ]]; then
+            echo 1 > "$state_dir" 2>/dev/null || true
+            ((cstate_count++)) || true
+        fi
+    done
+    save_state "cstates_disabled" "yes"
+    info "Disabled $cstate_count C-state entries across all CPUs"
+
+    # 3. Compositor
+    echo -e "\n  ${BOLD}[3/6] Compositor${RESET}"
+    local comp
+    comp=$(detect_compositor)
+    if [[ "$comp" == "kwin_x11" ]] && command -v qdbus > /dev/null 2>&1; then
+        qdbus org.kde.KWin /Compositor suspend 2>/dev/null && info "KWin compositor suspended" || warn "Could not suspend compositor"
+        save_state "compositor_was" "on"
+    elif [[ "$comp" == "gamescope" ]]; then
+        info "Gamescope active (already low-latency)"
+    else
+        dim "No compositor action needed ($comp)"
+    fi
+
+    # 4. USB polling rate
+    echo -e "\n  ${BOLD}[4/6] USB Polling Rate${RESET}"
+    local orig_poll
+    orig_poll=$(cat /sys/module/usbhid/parameters/mousepoll 2>/dev/null || echo "")
+    if [[ -n "$orig_poll" ]]; then
+        save_state "original_mousepoll" "$orig_poll"
+        echo 1 > /sys/module/usbhid/parameters/mousepoll 2>/dev/null || true
+        echo "options usbhid mousepoll=1" > /etc/modprobe.d/forge-usbhid.conf 2>/dev/null || true
+        info "Set 1000Hz polling (was: interval ${orig_poll}ms)"
+    else
+        dim "usbhid mousepoll parameter not available"
+    fi
+
+    # 5. Kernel tweaks
+    echo -e "\n  ${BOLD}[5/6] Kernel Tweaks${RESET}"
+    # Reduce scheduler latency
+    if [[ -f /proc/sys/kernel/sched_min_granularity_ns ]]; then
+        save_state "original_sched_gran" "$(cat /proc/sys/kernel/sched_min_granularity_ns)"
+        echo 500000 > /proc/sys/kernel/sched_min_granularity_ns 2>/dev/null || true
+        info "Reduced scheduler granularity"
+    fi
+    if [[ -f /proc/sys/kernel/sched_wakeup_granularity_ns ]]; then
+        save_state "original_sched_wake" "$(cat /proc/sys/kernel/sched_wakeup_granularity_ns)"
+        echo 500000 > /proc/sys/kernel/sched_wakeup_granularity_ns 2>/dev/null || true
+        info "Reduced wakeup granularity"
+    fi
+    # Set IRQ affinity for USB to CPU 0 (keep USB on a dedicated core)
+    local usb_irqs
+    usb_irqs=$(grep -i "usb\|xhci" /proc/interrupts 2>/dev/null | awk '{print $1}' | tr -d ':')
+    for irq in $usb_irqs; do
+        echo 1 > /proc/irq/"$irq"/smp_affinity 2>/dev/null || true
+    done
+    local nirqs
+    nirqs=$(echo "$usb_irqs" | wc -w)
+    info "Pinned $nirqs USB IRQs to CPU 0"
+
+    # 6. Mouse acceleration
+    echo -e "\n  ${BOLD}[6/6] Mouse Acceleration${RESET}"
+    if command -v xinput > /dev/null 2>&1; then
+        local did_any=0
+        for id in $(xinput list --id-only 2>/dev/null); do
+            if xinput list-props "$id" 2>/dev/null | grep -q "libinput Accel Profile Enabled"; then
+                xinput set-prop "$id" "libinput Accel Profile Enabled" 0 1 2>/dev/null || true
+                ((did_any++)) || true
+            fi
+        done
+        info "Disabled acceleration on $did_any input devices"
+    else
+        dim "xinput unavailable, skipping"
+    fi
+
+    save_state "optimized" "yes"
+    save_state "optimized_at" "$(date -Iseconds)"
+
+    echo -e "\n${BOLD}${GREEN}  All optimizations applied.${RESET}"
+    dim "Run 'forge-input-lag reset' to undo all changes."
+    echo ""
+}
+
+cmd_benchmark() {
+    header "Input Latency Benchmark"
+    info "Running before/after comparison..."
+
+    # Capture baseline measurement
+    echo -e "\n  ${BOLD}Phase 1: Baseline Measurement${RESET}"
+    cmd_measure 2>/dev/null
+    if [[ -f "$CONFIG_DIR/last-measure.json" ]]; then
+        cp "$CONFIG_DIR/last-measure.json" "$BASELINE_FILE"
+        local base_total
+        base_total=$(jq -r '.total_ms' "$BASELINE_FILE")
+        info "Baseline total: ${base_total}ms"
+    else
+        warn "Could not capture baseline measurement"
+    fi
+
+    # Apply optimizations
+    echo -e "\n  ${BOLD}Phase 2: Apply Optimizations${RESET}"
+    cmd_optimize > /dev/null 2>&1 || {
+        warn "Some optimizations require root. Run: sudo forge-input-lag benchmark"
+    }
+    info "Optimizations applied"
+
+    # Post-optimization measurement
+    echo -e "\n  ${BOLD}Phase 3: Optimized Measurement${RESET}"
+    sleep 1
+    cmd_measure 2>/dev/null
+
+    # Compare
+    echo -e "\n  ${BOLD}Results Comparison${RESET}"
+    if [[ -f "$BASELINE_FILE" && -f "$CONFIG_DIR/last-measure.json" ]]; then
+        local before after diff pct
+        before=$(jq -r '.total_ms' "$BASELINE_FILE")
+        after=$(jq -r '.total_ms' "$CONFIG_DIR/last-measure.json")
+        diff=$(awk "BEGIN{printf \"%.1f\", $before - $after}")
+        pct=$(awk "BEGIN{if($before>0) printf \"%.1f\", ($before - $after) / $before * 100; else print 0}")
+
+        echo -e "  Before: ${YELLOW}${before}ms${RESET}"
+        echo -e "  After:  ${GREEN}${after}ms${RESET}"
+        echo -e "  Saved:  ${BOLD}${GREEN}${diff}ms (${pct}%)${RESET}"
+
+        # Save benchmark results
+        jq -n \
+            --arg before "$before" \
+            --arg after "$after" \
+            --arg diff "$diff" \
+            --arg pct "$pct" \
+            --arg ts "$(date -Iseconds)" \
+            '{timestamp: $ts, before_ms: $before, after_ms: $after, saved_ms: $diff, saved_pct: $pct}' \
+            > "$CONFIG_DIR/benchmark-result.json"
+        dim "Results saved to $CONFIG_DIR/benchmark-result.json"
+    else
+        warn "Insufficient data for comparison"
+    fi
+    echo ""
+}
+
+cmd_reset() {
+    header "Resetting Latency Optimizations"
+    need_root "$@"
+
+    # CPU governor
+    local orig_gov
+    orig_gov=$(get_state "original_governor" "schedutil")
+    for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        echo "$orig_gov" > "$cpu" 2>/dev/null || true
+    done
+    info "CPU governor restored to $orig_gov"
+
+    # C-states
+    for state_dir in /sys/devices/system/cpu/cpu*/cpuidle/state[1-9]*/disable; do
+        if [[ -f "$state_dir" ]]; then
+            echo 0 > "$state_dir" 2>/dev/null || true
+        fi
+    done
+    info "C-states re-enabled"
+
+    # Compositor
+    local comp_was
+    comp_was=$(get_state "compositor_was" "")
+    if [[ "$comp_was" == "on" ]]; then
+        if command -v qdbus > /dev/null 2>&1; then
+            qdbus org.kde.KWin /Compositor resume 2>/dev/null || true
+            info "KWin compositor resumed"
+        fi
+    elif [[ "$comp_was" == "picom" ]]; then
+        picom --daemon 2>/dev/null &
+        info "picom restarted"
+    fi
+
+    # USB polling
+    local orig_poll
+    orig_poll=$(get_state "original_mousepoll" "")
+    if [[ -n "$orig_poll" ]]; then
+        echo "$orig_poll" > /sys/module/usbhid/parameters/mousepoll 2>/dev/null || true
+        rm -f /etc/modprobe.d/forge-usbhid.conf 2>/dev/null || true
+        info "USB polling restored to interval ${orig_poll}ms"
+    fi
+
+    # Scheduler
+    local orig_gran
+    orig_gran=$(get_state "original_sched_gran" "")
+    if [[ -n "$orig_gran" ]]; then
+        echo "$orig_gran" > /proc/sys/kernel/sched_min_granularity_ns 2>/dev/null || true
+    fi
+    local orig_wake
+    orig_wake=$(get_state "original_sched_wake" "")
+    if [[ -n "$orig_wake" ]]; then
+        echo "$orig_wake" > /proc/sys/kernel/sched_wakeup_granularity_ns 2>/dev/null || true
+    fi
+    info "Scheduler parameters restored"
+
+    # Clear USB IRQ pinning (reset to all CPUs)
+    local usb_irqs
+    usb_irqs=$(grep -i "usb\|xhci" /proc/interrupts 2>/dev/null | awk '{print $1}' | tr -d ':')
+    for irq in $usb_irqs; do
+        local ncpus
+        ncpus=$(nproc)
+        local mask
+        mask=$(printf '%x' $(( (1 << ncpus) - 1 )))
+        echo "$mask" > /proc/irq/"$irq"/smp_affinity 2>/dev/null || true
+    done
+    info "USB IRQ affinity reset to all CPUs"
+
+    # Mouse acceleration (restore adaptive)
+    if command -v xinput > /dev/null 2>&1; then
+        for id in $(xinput list --id-only 2>/dev/null); do
+            if xinput list-props "$id" 2>/dev/null | grep -q "libinput Accel Profile Enabled"; then
+                xinput set-prop "$id" "libinput Accel Profile Enabled" 1 0 2>/dev/null || true
+            fi
+        done
+        info "Mouse acceleration restored (adaptive profile)"
+    fi
+
+    # Clear state
+    save_state "optimized" "no"
+    save_state "reset_at" "$(date -Iseconds)"
+
+    echo -e "\n${BOLD}${GREEN}  All optimizations reverted.${RESET}"
+    echo ""
+}
+
+show_help() {
+    echo -e "${BOLD}24HG Forge Input Latency Analyzer${RESET}"
+    echo ""
+    echo "Usage: forge-input-lag <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  status              Show current latency-related settings"
+    echo "  measure             Run latency measurement"
+    echo "  optimize            Apply all low-latency optimizations (requires root)"
+    echo "  compositor [on|off] Toggle desktop compositor"
+    echo "  polling [rate]      Set USB polling rate (250/500/1000 Hz)"
+    echo "  mouse-accel [on|off] Toggle mouse acceleration"
+    echo "  benchmark           Full before/after latency test"
+    echo "  reset               Undo all latency tweaks (requires root)"
+    echo ""
+    echo "Config: $CONFIG_DIR"
+    echo ""
+}
+
+# --- Main dispatch ---
+case "$ACTION" in
+    status)      cmd_status ;;
+    measure)     cmd_measure ;;
+    optimize)    cmd_optimize ;;
+    compositor)  cmd_compositor "$@" ;;
+    polling)     cmd_polling "$@" ;;
+    mouse-accel) cmd_mouse_accel "$@" ;;
+    benchmark)   cmd_benchmark ;;
+    reset)       cmd_reset ;;
+    help|--help|-h) show_help ;;
+    *)
+        err "Unknown command: $ACTION"
+        show_help
+        exit 1
+        ;;
+esac

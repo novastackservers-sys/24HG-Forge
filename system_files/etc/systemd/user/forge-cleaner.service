@@ -1,0 +1,6 @@
+[Unit]
+Description=24HG Forge Cleaner — Clean gaming junk files
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/forge-cleaner clean

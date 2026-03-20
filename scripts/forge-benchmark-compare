@@ -18,7 +18,7 @@ DATA_DIR="${HOME}/.local/share/forge/benchmarks"
 HISTORY_FILE="${DATA_DIR}/history.json"
 MANGOHUD_DIR="${DATA_DIR}/mangohud_logs"
 SHARE_DIR="${DATA_DIR}/cards"
-HUBOS_URL="https://os.24hgaming.com"
+FORGE_URL="https://os.24hgaming.com"
 HUB_API="https://hub.24hgaming.com/api"
 QUICK_DURATION=30
 
@@ -1507,7 +1507,7 @@ cmd_upload() {
     }
 
     success "Benchmark data uploaded to your 24HG Forge Hub profile!"
-    info "View at: ${HUBOS_URL}/profile/benchmarks"
+    info "View at: ${FORGE_URL}/profile/benchmarks"
 }
 
 # ── GUI Mode ──────────────────────────────────────────────────────────────────

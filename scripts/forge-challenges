@@ -1,0 +1,717 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Forge Challenges — Weekly gaming challenges for the 24HG community
+#
+# Usage: forge-challenges <command> [args]
+#   list               Show this week's challenges (default)
+#   active             Show your active/in-progress challenges
+#   accept <id>        Accept a challenge
+#   progress <id>      Check progress on a specific challenge
+#   submit <id> [proof] Submit challenge completion (optional screenshot/clip path)
+#   leaderboard        Show challenge leaderboard (most completed)
+#   history            Show past challenges and your results
+#   badges             Show earned challenge badges
+#   suggest <desc>     Suggest a community challenge
+#   daemon             Auto-track progress for trackable challenges
+#   help               Show this help
+
+# ── Colors ──────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    BOLD="\033[1m" DIM="\033[2m" RESET="\033[0m"
+    RED="\033[31m" GREEN="\033[32m" YELLOW="\033[33m" BLUE="\033[34m"
+    MAGENTA="\033[35m" CYAN="\033[36m" WHITE="\033[37m"
+    GOLD="\033[38;5;220m" ORANGE="\033[38;5;208m" GRAY="\033[38;5;242m"
+    PURPLE="\033[38;5;141m"
+else
+    BOLD="" DIM="" RESET="" RED="" GREEN="" YELLOW="" BLUE=""
+    MAGENTA="" CYAN="" WHITE="" GOLD="" ORANGE="" GRAY="" PURPLE=""
+fi
+
+# ── Paths & Configuration ──────────────────────────────────────────────────
+CONFIG_DIR="${HOME}/.config/forge"
+DATA_DIR="${HOME}/.local/share/forge"
+CACHE_DIR="${HOME}/.cache/forge"
+CHALLENGES_FILE="${DATA_DIR}/challenges.json"
+BADGES_FILE="${DATA_DIR}/challenge-badges.json"
+HISTORY_FILE="${DATA_DIR}/challenge-history.json"
+HUB_TOKEN_FILE="${CONFIG_DIR}/hub-token"
+GAME_TIMER_FILE="${DATA_DIR}/game-timer.json"
+VOICE_LOG_DIR="/tmp/forge-voice"
+CLIP_DIR="${HOME}/Videos/24HG Clips"
+PERF_LOG_DIR="${DATA_DIR}/perf-logs"
+RETRO_HISTORY="${CONFIG_DIR}/play-history.json"
+PID_FILE="/tmp/forge-challenges-daemon.pid"
+LOG_TAG="forge-challenges"
+HUB_API="https://hub.24hgaming.com/api/forge/challenges"
+
+# Type display metadata — color|icon
+declare -A TYPE_META=(
+    ["playtime"]="${BLUE}|[TIME]" ["game-specific"]="${CYAN}|[GAME]"
+    ["social"]="${MAGENTA}|[CHAT]" ["community"]="${PURPLE}|[HUB ]"
+    ["performance"]="${ORANGE}|[PERF]" ["exploration"]="${GREEN}|[EXPL]"
+    ["manual"]="${YELLOW}|[GOAL]"
+)
+
+# Badge tier thresholds (name -> count) and colors
+TIER_ORDER=(Bronze Silver Gold Diamond Legend)
+declare -A TIER_THRESH=([Bronze]=5 [Silver]=15 [Gold]=30 [Diamond]=50 [Legend]=100)
+declare -A TIER_COLORS=([Bronze]="${ORANGE}" [Silver]="${WHITE}" [Gold]="${GOLD}" [Diamond]="${CYAN}" [Legend]="${PURPLE}")
+declare -A TIER_ART=([Bronze]=".-B-." [Silver]="[=S=]" [Gold]="{*G*}" [Diamond]="<+D+>" [Legend]="{*L*}")
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+log() { logger -t "${LOG_TAG}" "$*" 2>/dev/null || true; }
+info()    { echo -e "  ${CYAN}${BOLD}[INFO]${RESET}  $*"; }
+success() { echo -e "  ${GREEN}${BOLD}[  OK]${RESET}  $*"; }
+warn()    { echo -e "  ${YELLOW}${BOLD}[WARN]${RESET}  $*"; }
+error()   { echo -e "  ${RED}${BOLD}[ ERR]${RESET}  $*" >&2; }
+die() { error "$*"; exit 1; }
+
+banner() {
+    echo -e "${GOLD}${BOLD}"
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║       Forge Weekly Challenges            ║"
+    echo "  ║          24 Hour Gaming                  ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo -e "${RESET}"
+}
+
+ensure_dirs() { mkdir -p "${CONFIG_DIR}" "${DATA_DIR}" "${CACHE_DIR}"; }
+
+ensure_file() {
+    local file="$1" default="$2"
+    ensure_dirs
+    [[ -f "${file}" ]] || echo "${default}" > "${file}"
+}
+
+ensure_challenges_file() {
+    ensure_file "${CHALLENGES_FILE}" '{"accepted":[],"completed":[],"week_cache":null,"week_id":"","last_sync":"","total_completed":0,"suggestions":[]}'
+}
+ensure_badges_file() {
+    ensure_file "${BADGES_FILE}" '{"earned":[],"tier":"None","total_challenges":0,"special":[]}'
+}
+ensure_history_file() {
+    ensure_file "${HISTORY_FILE}" '{"weeks":[]}'
+}
+
+state_get() { jq -r "$1" "${CHALLENGES_FILE}" 2>/dev/null || echo ""; }
+state_set() { local t; t=$(jq "$@" "${CHALLENGES_FILE}"); echo "${t}" > "${CHALLENGES_FILE}"; }
+
+get_hub_token() { [[ -f "${HUB_TOKEN_FILE}" ]] && cat "${HUB_TOKEN_FILE}" || echo ""; }
+current_week_id() { date +"%G-W%V"; }
+week_start_epoch() { date -d "$(date +%G-W%V-1)" +%s 2>/dev/null || date +%s; }
+week_end_epoch() { echo $(( $(week_start_epoch) + 6 * 86400 + 86399 )); }
+days_remaining() { local d=$(( ($(week_end_epoch) - $(date +%s)) / 86400 )); (( d < 0 )) && d=0; echo "${d}"; }
+
+type_color() { echo "${TYPE_META[${1}]:-${GRAY}|[????]}" | cut -d'|' -f1; }
+type_icon()  { echo "${TYPE_META[${1}]:-${GRAY}|[????]}" | cut -d'|' -f2; }
+
+# ── Hub API ────────────────────────────────────────────────────────────────
+hub_request() {
+    local method="$1" endpoint="$2" data="${3:-}"
+    local token; token=$(get_hub_token)
+    [[ -z "${token}" ]] && return 1
+    local args=(-s -S --max-time 10 -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -H "Accept: application/json")
+    if [[ "${method}" == "GET" ]]; then
+        curl "${args[@]}" "${HUB_API}${endpoint}" 2>/dev/null
+    else
+        [[ -n "${data}" ]] && args+=(-d "${data}")
+        curl "${args[@]}" -X POST "${HUB_API}${endpoint}" 2>/dev/null
+    fi
+}
+
+hub_upload_proof() {
+    local token; token=$(get_hub_token); [[ -z "${token}" ]] && return 1
+    curl -s -S --max-time 30 -H "Authorization: Bearer ${token}" -X POST \
+        -F "proof=@${2}" "${HUB_API}/${1}/submit" 2>/dev/null
+}
+
+# ── Progress Bar ───────────────────────────────────────────────────────────
+progress_bar() {
+    local cur=$1 tot=$2 w=${3:-30} filled=0 ratio=0
+    (( tot > 0 )) && { ratio=$(( cur * 100 / tot )); filled=$(( w * cur / tot )); }
+    (( filled > w )) && filled=${w}
+    local color; if (( ratio >= 100 )); then color="${GOLD}"; elif (( ratio >= 70 )); then color="${GREEN}"; elif (( ratio >= 40 )); then color="${YELLOW}"; else color="${CYAN}"; fi
+    local bf="" be=""
+    for (( i=0; i<filled; i++ )); do bf+="█"; done
+    for (( i=filled; i<w; i++ )); do be+="░"; done
+    printf "%b%s%b%s%b %d/%d" "${color}" "${bf}" "${DIM}" "${be}" "${RESET}" "${cur}" "${tot}"
+}
+
+# ── Fallback Challenges ───────────────────────────────────────────────────
+generate_fallback_challenges() {
+    local wid; wid=$(current_week_id)
+    cat << CEOF
+[
+  {"id":"ch-${wid}-01","title":"Marathon Runner","description":"Play games for 10 hours this week","type":"playtime","target":600,"unit":"minutes","reward_points":50,"auto_track":true,"week_id":"${wid}"},
+  {"id":"ch-${wid}-02","title":"Genre Hopper","description":"Play 3 different games this week","type":"game-specific","target":3,"unit":"games","reward_points":30,"auto_track":true,"week_id":"${wid}"},
+  {"id":"ch-${wid}-03","title":"Social Butterfly","description":"Join 3 voice chat sessions this week","type":"social","target":3,"unit":"sessions","reward_points":40,"auto_track":true,"week_id":"${wid}"},
+  {"id":"ch-${wid}-04","title":"Content Creator","description":"Share 5 clips to the Hub","type":"community","target":5,"unit":"clips","reward_points":45,"auto_track":true,"week_id":"${wid}"},
+  {"id":"ch-${wid}-05","title":"Smooth Operator","description":"Achieve 144 FPS average in any game","type":"performance","target":144,"unit":"fps","reward_points":35,"auto_track":true,"week_id":"${wid}"},
+  {"id":"ch-${wid}-06","title":"Retro Explorer","description":"Play a retro game using forge-retro","type":"exploration","target":1,"unit":"games","reward_points":25,"auto_track":true,"week_id":"${wid}"},
+  {"id":"ch-${wid}-07","title":"Victory Lap","description":"Win a match in any competitive game (screenshot required)","type":"manual","target":1,"unit":"wins","reward_points":60,"auto_track":false,"week_id":"${wid}"}
+]
+CEOF
+}
+
+# ── Fetch Challenges ──────────────────────────────────────────────────────
+fetch_weekly_challenges() {
+    ensure_challenges_file
+    local wid; wid=$(current_week_id)
+    # Return cache if current week
+    if [[ "$(state_get '.week_id')" == "${wid}" ]]; then
+        local cache; cache=$(state_get '.week_cache')
+        if [[ "${cache}" != "null" && -n "${cache}" ]]; then
+            echo "${cache}" | jq '.challenges // .' 2>/dev/null; return 0
+        fi
+    fi
+    # Try Hub API
+    local resp
+    if resp=$(hub_request GET "/current" 2>/dev/null) && [[ -n "${resp}" ]]; then
+        local valid; valid=$(echo "${resp}" | jq -r '.challenges // empty' 2>/dev/null)
+        if [[ -n "${valid}" ]]; then
+            state_set --arg wid "${wid}" --argjson wc "${resp}" '.week_id = $wid | .week_cache = $wc'
+            echo "${resp}" | jq '.challenges'; return 0
+        fi
+    fi
+    # Fallback
+    local fb; fb=$(generate_fallback_challenges)
+    local wr; wr=$(echo "${fb}" | jq '{challenges: .}')
+    state_set --arg wid "${wid}" --argjson wc "${wr}" '.week_id = $wid | .week_cache = $wc'
+    echo "${fb}"
+}
+
+# ── Auto-Tracking Data Sources ────────────────────────────────────────────
+get_weekly_playtime() {
+    [[ ! -f "${GAME_TIMER_FILE}" ]] && { echo 0; return; }
+    local start; start=$(week_start_epoch)
+    jq --arg s "${start}" '[.sessions//[]|.[]|select((.start//0)>=($s|tonumber))|((.end//(.start+0))-.start)/60]|add//0|floor' \
+        "${GAME_TIMER_FILE}" 2>/dev/null || echo 0
+}
+
+get_weekly_unique_games() {
+    [[ ! -f "${GAME_TIMER_FILE}" ]] && { echo 0; return; }
+    local start; start=$(week_start_epoch)
+    jq --arg s "${start}" '[.sessions//[]|.[]|select((.start//0)>=($s|tonumber))|.game//.name//"unknown"]|unique|length' \
+        "${GAME_TIMER_FILE}" 2>/dev/null || echo 0
+}
+
+get_weekly_voice_sessions() {
+    [[ ! -d "${VOICE_LOG_DIR}" ]] && { echo 0; return; }
+    local sd; sd=$(date -d "$(date +%G-W%V-1)" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+    local count=0
+    for f in "${VOICE_LOG_DIR}"/session-*.log; do
+        [[ -f "${f}" ]] || continue
+        local fd; fd=$(date -r "${f}" +%Y-%m-%d 2>/dev/null || continue)
+        [[ "${fd}" > "${sd}" || "${fd}" == "${sd}" ]] && count=$(( count + 1 ))
+    done; echo "${count}"
+}
+
+get_weekly_clip_count() {
+    [[ ! -d "${CLIP_DIR}" ]] && { echo 0; return; }
+    local sd; sd=$(date -d "$(date +%G-W%V-1)" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+    local count=0
+    for f in "${CLIP_DIR}"/*.mp4 "${CLIP_DIR}"/*.mkv "${CLIP_DIR}"/*.webm; do
+        [[ -f "${f}" ]] || continue
+        local fd; fd=$(date -r "${f}" +%Y-%m-%d 2>/dev/null || continue)
+        [[ "${fd}" > "${sd}" || "${fd}" == "${sd}" ]] && count=$(( count + 1 ))
+    done; echo "${count}"
+}
+
+get_weekly_peak_fps() {
+    [[ ! -d "${PERF_LOG_DIR}" ]] && { echo 0; return; }
+    local sd; sd=$(date -d "$(date +%G-W%V-1)" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+    local peak=0
+    for f in "${PERF_LOG_DIR}"/*.json; do
+        [[ -f "${f}" ]] || continue
+        local fd; fd=$(date -r "${f}" +%Y-%m-%d 2>/dev/null || continue)
+        if [[ "${fd}" > "${sd}" || "${fd}" == "${sd}" ]]; then
+            local avg; avg=$(jq -r '.avg_fps//0|floor' "${f}" 2>/dev/null || echo 0)
+            (( avg > peak )) && peak=${avg}
+        fi
+    done; echo "${peak}"
+}
+
+get_weekly_retro_plays() {
+    [[ ! -f "${RETRO_HISTORY}" ]] && { echo 0; return; }
+    local start; start=$(week_start_epoch)
+    jq --arg s "${start}" '[.[]|select((.timestamp//0)>=($s|tonumber))]|length' \
+        "${RETRO_HISTORY}" 2>/dev/null || echo 0
+}
+
+resolve_auto_progress() {
+    case "$1" in
+        playtime)      get_weekly_playtime ;;
+        game-specific) get_weekly_unique_games ;;
+        social)        get_weekly_voice_sessions ;;
+        community)     get_weekly_clip_count ;;
+        performance)   get_weekly_peak_fps ;;
+        exploration)   get_weekly_retro_plays ;;
+        *)             echo 0 ;;
+    esac
+}
+
+# ── Command: list ──────────────────────────────────────────────────────────
+cmd_list() {
+    ensure_challenges_file; banner
+    local wid; wid=$(current_week_id)
+    local remaining; remaining=$(days_remaining)
+
+    echo -e "  ${BOLD}Week:${RESET} ${CYAN}${wid}${RESET}    ${DIM}${remaining} day(s) remaining${RESET}"
+
+    # Show quick stats summary
+    local total_accepted total_completed
+    total_accepted=$(state_get '.accepted // []' | jq '[.[] | select(.status != "completed")] | length' 2>/dev/null || echo 0)
+    total_completed=$(state_get '.accepted // []' | jq '[.[] | select(.status == "completed")] | length' 2>/dev/null || echo 0)
+    if (( total_accepted > 0 || total_completed > 0 )); then
+        echo -e "  ${DIM}Active: ${total_accepted}  |  Completed: ${total_completed}${RESET}"
+    fi
+    echo ""
+    local challenges; challenges=$(fetch_weekly_challenges)
+    [[ -z "${challenges}" || "${challenges}" == "null" ]] && { warn "No challenges available."; return; }
+    local count; count=$(echo "${challenges}" | jq 'length' 2>/dev/null || echo 0)
+    echo -e "  ${BOLD}${count} challenges available:${RESET}\n"
+    local accepted; accepted=$(state_get '.accepted // []')
+    echo "${challenges}" | jq -c '.[]' 2>/dev/null | while IFS= read -r ch; do
+        local id title desc ctype target unit pts atrack
+        id=$(echo "${ch}" | jq -r '.id'); title=$(echo "${ch}" | jq -r '.title')
+        desc=$(echo "${ch}" | jq -r '.description'); ctype=$(echo "${ch}" | jq -r '.type')
+        target=$(echo "${ch}" | jq -r '.target'); unit=$(echo "${ch}" | jq -r '.unit')
+        pts=$(echo "${ch}" | jq -r '.reward_points'); atrack=$(echo "${ch}" | jq -r '.auto_track')
+        local marker=""
+        if echo "${accepted}" | jq -e --arg id "${id}" '.[]|select(.id==$id)' &>/dev/null; then
+            local st; st=$(echo "${accepted}" | jq -r --arg id "${id}" '[.[]|select(.id==$id)][0].status//"active"')
+            [[ "${st}" == "completed" ]] && marker="${GREEN}${BOLD} [DONE]${RESET}" || marker="${YELLOW}${BOLD} [ACTIVE]${RESET}"
+        fi
+        local tl; [[ "${atrack}" == "true" ]] && tl="${DIM}(auto-tracked)${RESET}" || tl="${DIM}(manual proof)${RESET}"
+        printf "  %b%b%s%b  %b%b%s%b%b  +%s pts\n" "$(type_color "${ctype}")" "${BOLD}" "$(type_icon "${ctype}")" "${RESET}" "${WHITE}" "${BOLD}" "${title}" "${RESET}" "${marker}" "${pts}"
+        printf "       %b%s%b\n" "${GRAY}" "${desc}" "${RESET}"
+        printf "       %bID: %s%b  %bTarget: %s %s%b  %s\n\n" "${DIM}" "${id}" "${RESET}" "${DIM}" "${target}" "${unit}" "${RESET}" "${tl}"
+    done
+    echo -e "  ${DIM}────────────────────────────────────────────────${RESET}"
+    echo -e "  ${DIM}Use ${RESET}${CYAN}forge challenges accept <id>${RESET}${DIM} to start a challenge.${RESET}"
+    echo -e "  ${DIM}Use ${RESET}${CYAN}forge challenges active${RESET}${DIM} to see your accepted challenges.${RESET}"
+    echo -e "  ${DIM}Use ${RESET}${CYAN}forge challenges badges${RESET}${DIM} to view your badge progress.${RESET}"
+    echo ""
+}
+
+# ── Command: active ────────────────────────────────────────────────────────
+cmd_active() {
+    ensure_challenges_file; banner
+    local accepted; accepted=$(state_get '.accepted // []')
+    local count; count=$(echo "${accepted}" | jq '[.[]|select(.status!="completed")]|length' 2>/dev/null || echo 0)
+    (( count == 0 )) && { info "No active challenges. Use ${CYAN}forge challenges list${RESET} to browse."; return; }
+    echo -e "  ${BOLD}${count} active challenge(s):${RESET}\n"
+    echo "${accepted}" | jq -c '.[]|select(.status!="completed")' 2>/dev/null | while IFS= read -r ch; do
+        local id title ctype target unit progress
+        id=$(echo "${ch}" | jq -r '.id'); title=$(echo "${ch}" | jq -r '.title')
+        ctype=$(echo "${ch}" | jq -r '.type//"manual"'); target=$(echo "${ch}" | jq -r '.target//1')
+        unit=$(echo "${ch}" | jq -r '.unit//"units"'); progress=$(echo "${ch}" | jq -r '.progress//0')
+        printf "  %b%b%s%b  %b%b%s%b\n" "$(type_color "${ctype}")" "${BOLD}" "$(type_icon "${ctype}")" "${RESET}" "${WHITE}" "${BOLD}" "${title}" "${RESET}"
+        printf "       %bID: %s%b\n       " "${DIM}" "${id}" "${RESET}"
+        progress_bar "${progress}" "${target}" 25; printf " %s\n\n" "${unit}"
+    done
+}
+
+# ── Command: accept ───────────────────────────────────────────────────────
+cmd_accept() {
+    local cid="${1:-}"; [[ -z "${cid}" ]] && die "Usage: forge challenges accept <challenge-id>"
+    ensure_challenges_file
+    local already; already=$(state_get '.accepted//[]' | jq --arg id "${cid}" '[.[]|select(.id==$id)]|length')
+    (( already > 0 )) && { warn "Challenge ${cid} is already accepted."; return; }
+    local challenges; challenges=$(fetch_weekly_challenges)
+    local match; match=$(echo "${challenges}" | jq --arg id "${cid}" '[.[]|select(.id==$id)][0]//empty' 2>/dev/null)
+    [[ -z "${match}" ]] && die "Challenge '${cid}' not found in this week's challenges."
+    local title ctype target unit pts atrack now
+    title=$(echo "${match}" | jq -r '.title'); ctype=$(echo "${match}" | jq -r '.type')
+    target=$(echo "${match}" | jq -r '.target'); unit=$(echo "${match}" | jq -r '.unit')
+    pts=$(echo "${match}" | jq -r '.reward_points'); atrack=$(echo "${match}" | jq -r '.auto_track')
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local entry; entry=$(jq -n --arg id "${cid}" --arg title "${title}" --arg type "${ctype}" \
+        --argjson target "${target}" --arg unit "${unit}" --argjson pts "${pts}" \
+        --argjson auto "${atrack}" --arg ts "${now}" \
+        '{id:$id,title:$title,type:$type,target:$target,unit:$unit,reward_points:$pts,auto_track:$auto,accepted_at:$ts,progress:0,status:"active"}')
+    state_set --argjson e "${entry}" '.accepted += [$e]'
+    hub_request POST "/${cid}/accept" '{}' &>/dev/null || true
+    echo -e "\n  ${GREEN}${BOLD}Challenge accepted!${RESET}\n"
+    printf "  %b%b%s%b  +%s pts on completion\n" "${WHITE}" "${BOLD}" "${title}" "${RESET}" "${pts}"
+    [[ "${atrack}" == "true" ]] && echo -e "  ${DIM}Progress will be tracked automatically.${RESET}" \
+        || echo -e "  ${DIM}Submit proof with:${RESET} ${CYAN}forge challenges submit ${cid} <screenshot>${RESET}"
+    echo -e "  ${DIM}Target: ${target} ${unit}${RESET}"
+    echo ""
+    log "Accepted challenge: ${cid} (${title})"
+}
+
+# ── Command: progress ─────────────────────────────────────────────────────
+cmd_progress() {
+    local cid="${1:-}"; [[ -z "${cid}" ]] && die "Usage: forge challenges progress <challenge-id>"
+    ensure_challenges_file
+    local entry; entry=$(state_get '.accepted//[]' | jq --arg id "${cid}" '[.[]|select(.id==$id)][0]//empty')
+    [[ -z "${entry}" ]] && die "Challenge '${cid}' is not in your active challenges."
+    local title ctype target unit progress atrack status aat
+    title=$(echo "${entry}" | jq -r '.title'); ctype=$(echo "${entry}" | jq -r '.type//"manual"')
+    target=$(echo "${entry}" | jq -r '.target//1'); unit=$(echo "${entry}" | jq -r '.unit//"units"')
+    progress=$(echo "${entry}" | jq -r '.progress//0'); atrack=$(echo "${entry}" | jq -r '.auto_track//false')
+    status=$(echo "${entry}" | jq -r '.status//"active"'); aat=$(echo "${entry}" | jq -r '.accepted_at//"unknown"')
+    if [[ "${atrack}" == "true" && "${status}" != "completed" ]]; then
+        progress=$(resolve_auto_progress "${ctype}" "${target}")
+        state_set --arg id "${cid}" --argjson p "${progress}" '.accepted=[.accepted[]|if .id==$id then .progress=$p else . end]'
+    fi
+    echo ""
+    printf "  %b%b%s%b  %b%b%s%b\n" "$(type_color "${ctype}")" "${BOLD}" "$(type_icon "${ctype}")" "${RESET}" "${WHITE}" "${BOLD}" "${title}" "${RESET}"
+    echo -e "  ${DIM}ID: ${cid}  |  Type: ${ctype}  |  Accepted: ${aat}${RESET}\n"
+    printf "  Progress: "; progress_bar "${progress}" "${target}" 30; printf " %s\n\n" "${unit}"
+    if [[ "${status}" == "completed" ]]; then echo -e "  ${GREEN}${BOLD}COMPLETED${RESET}"
+    elif (( target > 0 && progress >= target )); then echo -e "  ${GOLD}${BOLD}Target reached!${RESET} Submit with: ${CYAN}forge challenges submit ${cid}${RESET}"
+    elif [[ "${atrack}" == "true" ]]; then echo -e "  ${DIM}Auto-tracked -- progress updates hourly via daemon.${RESET}"
+    else echo -e "  ${DIM}Manual challenge -- submit proof when completed.${RESET}"; fi
+    echo ""
+}
+
+# ── Command: submit ────────────────────────────────────────────────────────
+cmd_submit() {
+    local cid="${1:-}" proof="${2:-}"
+    [[ -z "${cid}" ]] && die "Usage: forge challenges submit <challenge-id> [proof-file]"
+    ensure_challenges_file
+    local entry; entry=$(state_get '.accepted//[]' | jq --arg id "${cid}" '[.[]|select(.id==$id)][0]//empty')
+    [[ -z "${entry}" ]] && die "Challenge '${cid}' is not in your active challenges."
+    local title target progress atrack status ctype pts
+    title=$(echo "${entry}" | jq -r '.title'); target=$(echo "${entry}" | jq -r '.target//1')
+    progress=$(echo "${entry}" | jq -r '.progress//0'); atrack=$(echo "${entry}" | jq -r '.auto_track//false')
+    status=$(echo "${entry}" | jq -r '.status//"active"'); ctype=$(echo "${entry}" | jq -r '.type//"manual"')
+    pts=$(echo "${entry}" | jq -r '.reward_points//0')
+    [[ "${status}" == "completed" ]] && { warn "'${title}' is already completed."; return; }
+    if [[ "${atrack}" == "true" ]]; then
+        progress=$(resolve_auto_progress "${ctype}" "${target}")
+        (( progress < target )) && { warn "Progress (${progress}/${target}) not at target yet."; return 1; }
+    fi
+    [[ "${atrack}" != "true" && -z "${proof}" ]] && die "Manual challenges require proof. Usage: forge challenges submit ${cid} /path/to/screenshot.png"
+    [[ -n "${proof}" && ! -f "${proof}" ]] && die "Proof file not found: ${proof}"
+    local now; now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    state_set --arg id "${cid}" --arg ts "${now}" --argjson t "${target}" \
+        '.accepted=[.accepted[]|if .id==$id then .status="completed"|.progress=$t|.completed_at=$ts else . end]|.completed+=[$id]|.total_completed=(.total_completed+1)'
+    # Submit to Hub
+    local hub_ok="false"
+    if [[ -n "${proof}" ]]; then
+        hub_upload_proof "${cid}" "${proof}" &>/dev/null && hub_ok="true"
+    else
+        hub_request POST "/${cid}/submit" "$(jq -n --arg id "${cid}" --arg ts "${now}" '{challenge_id:$id,completed_at:$ts}')" &>/dev/null && hub_ok="true"
+    fi
+    update_badges
+
+    # Celebration display
+    local total_done
+    total_done=$(state_get '.total_completed // 0')
+
+    echo ""
+    echo -e "  ${GOLD}${BOLD}════════════════════════════════════════════════${RESET}"
+    echo -e "  ${GOLD}${BOLD}         CHALLENGE COMPLETED!                   ${RESET}"
+    echo -e "  ${GOLD}${BOLD}════════════════════════════════════════════════${RESET}"
+    echo ""
+    echo -e "  ${WHITE}${BOLD}${title}${RESET}"
+    echo -e "  ${YELLOW}+${pts} Hub Points${RESET}"
+    echo ""
+    if [[ -n "${proof}" ]]; then
+        echo -e "  ${DIM}Proof: ${proof}${RESET}"
+    fi
+    if [[ "${hub_ok}" == "true" ]]; then
+        echo -e "  ${GREEN}Synced to Hub${RESET}"
+    else
+        echo -e "  ${DIM}Hub sync pending (will retry on next daemon run)${RESET}"
+    fi
+    echo ""
+    echo -e "  ${DIM}Total challenges completed: ${total_done}${RESET}"
+
+    # Show progress toward next badge tier
+    local next_tier="" next_thresh=0
+    for name in Bronze Silver Gold Diamond Legend; do
+        if (( total_done < TIER_THRESH[${name}] )); then
+            next_tier="${name}"
+            next_thresh=${TIER_THRESH[${name}]}
+            break
+        fi
+    done
+    if [[ -n "${next_tier}" ]]; then
+        local remaining_for_tier=$(( next_thresh - total_done ))
+        echo -e "  ${DIM}${remaining_for_tier} more for ${TIER_COLORS[${next_tier}]}${next_tier}${RESET}${DIM} badge tier${RESET}"
+    else
+        echo -e "  ${PURPLE}${BOLD}You've reached Legend tier!${RESET}"
+    fi
+
+    echo -e "  ${GOLD}${BOLD}════════════════════════════════════════════════${RESET}"
+    echo ""
+    log "Completed: ${cid} (${title}) +${pts}pts"
+    command -v notify-send &>/dev/null && notify-send -i forge-logo "Challenge Completed!" "${title} -- +${pts} Hub Points" 2>/dev/null || true
+    command -v forge-notify &>/dev/null && forge-notify send --title "Challenge Completed" --body "${title} -- +${pts} Hub Points" --urgency normal 2>/dev/null || true
+}
+
+# ── Command: leaderboard ──────────────────────────────────────────────────
+cmd_leaderboard() {
+    banner; echo -e "  ${BOLD}Challenge Leaderboard${RESET}\n  ${DIM}Most challenges completed this week${RESET}\n"
+    local resp
+    if resp=$(hub_request GET "/leaderboard" 2>/dev/null) && [[ -n "${resp}" ]]; then
+        local entries; entries=$(echo "${resp}" | jq -r '.entries//[]' 2>/dev/null)
+        local count; count=$(echo "${entries}" | jq 'length' 2>/dev/null || echo 0)
+        (( count == 0 )) && { info "Leaderboard is empty. Be the first!"; return; }
+        echo -e "  ${BOLD}${DIM}Rank  Player                Completed   Points${RESET}"
+        echo -e "  ${DIM}──────────────────────────────────────────────────${RESET}"
+        local rank=1
+        echo "${entries}" | jq -c '.[]' 2>/dev/null | head -20 | while IFS= read -r row; do
+            local name completed pts rcolor medal
+            name=$(echo "${row}" | jq -r '.username//"Unknown"')
+            completed=$(echo "${row}" | jq -r '.completed//0')
+            pts=$(echo "${row}" | jq -r '.points//0')
+            case ${rank} in 1) rcolor="${GOLD}" medal="[1st]";; 2) rcolor="${WHITE}" medal="[2nd]";; 3) rcolor="${ORANGE}" medal="[3rd]";; *) rcolor="${GRAY}" medal="$(printf '#%-2d ' ${rank})";; esac
+            printf "  %b%-6s%-22s%-12s%s%b\n" "${rcolor}" "${medal}" "${name}" "${completed}" "${pts}" "${RESET}"
+            rank=$(( rank + 1 ))
+        done
+    else
+        echo -e "  ${DIM}(Hub offline -- showing local stats)${RESET}\n"
+        echo -e "  ${WHITE}${BOLD}Your completions:${RESET} $(state_get '.total_completed//0')"
+    fi; echo ""
+}
+
+# ── Command: history ──────────────────────────────────────────────────────
+cmd_history() {
+    ensure_challenges_file; ensure_history_file; banner
+    echo -e "  ${BOLD}Challenge History${RESET}\n"
+    local completed; completed=$(state_get '.accepted//[]' | jq '[.[]|select(.status=="completed")]')
+    local cc; cc=$(echo "${completed}" | jq 'length' 2>/dev/null || echo 0)
+    if (( cc > 0 )); then
+        echo -e "  ${GREEN}${BOLD}This Week:${RESET}"
+        echo "${completed}" | jq -c '.[]' 2>/dev/null | while IFS= read -r ch; do
+            printf "    %b[DONE]%b  %-30s  %b+%s pts%b  %b%s%b\n" "${GREEN}" "${RESET}" \
+                "$(echo "${ch}" | jq -r '.title')" "${YELLOW}" "$(echo "${ch}" | jq -r '.reward_points//0')" "${RESET}" \
+                "${DIM}" "$(echo "${ch}" | jq -r '.completed_at//"N/A"')" "${RESET}"
+        done; echo ""
+    fi
+    local weeks; weeks=$(jq -r '.weeks//[]' "${HISTORY_FILE}" 2>/dev/null)
+    local wc; wc=$(echo "${weeks}" | jq 'length' 2>/dev/null || echo 0)
+    if (( wc > 0 )); then
+        echo "${weeks}" | jq -c '.[]|select(.completed|length>0)' 2>/dev/null | sort -r | head -10 | while IFS= read -r week; do
+            local wid tc tp
+            wid=$(echo "${week}" | jq -r '.week_id'); tc=$(echo "${week}" | jq -r '.completed|length')
+            tp=$(echo "${week}" | jq -r '[.completed[].reward_points//0]|add//0')
+            echo -e "  ${CYAN}${BOLD}${wid}:${RESET} ${tc} completed, ${YELLOW}+${tp} pts${RESET}"
+            echo "${week}" | jq -c '.completed[]' 2>/dev/null | while IFS= read -r ch; do
+                printf "    ${DIM}%-40s${RESET}\n" "$(echo "${ch}" | jq -r '.title//"Unknown"')"
+            done
+        done
+    elif (( cc == 0 )); then info "No challenge history yet."; fi
+    echo ""
+}
+
+# ── Badge System ──────────────────────────────────────────────────────────
+update_badges() {
+    ensure_badges_file; ensure_challenges_file
+    local total; total=$(state_get '.total_completed//0')
+    local tmp; tmp=$(jq --argjson t "${total}" '.total_challenges=$t' "${BADGES_FILE}"); echo "${tmp}" > "${BADGES_FILE}"
+    local new_tier="None"
+    for name in Legend Diamond Gold Silver Bronze; do
+        (( total >= TIER_THRESH[${name}] )) && { new_tier="${name}"; break; }
+    done
+    local old_tier; old_tier=$(jq -r '.tier//"None"' "${BADGES_FILE}")
+    if [[ "${new_tier}" != "${old_tier}" && "${new_tier}" != "None" ]]; then
+        tmp=$(jq --arg tier "${new_tier}" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.tier=$tier|.earned+=[{"badge":($tier+" Challenger"),"earned_at":$ts,"type":"tier"}]' "${BADGES_FILE}")
+        echo "${tmp}" > "${BADGES_FILE}"
+        local tc="${TIER_COLORS[${new_tier}]:-${WHITE}}"
+        echo -e "\n  ${tc}${BOLD}════════════════════════════════════════${RESET}"
+        echo -e "  ${tc}${BOLD}    NEW BADGE TIER: ${new_tier}!${RESET}"
+        echo -e "  ${tc}${BOLD}════════════════════════════════════════${RESET}\n"
+        log "Badge tier: ${new_tier} (${total} completed)"
+        command -v notify-send &>/dev/null && notify-send -i forge-logo "Badge Tier Upgraded!" "${new_tier} Challenger" 2>/dev/null || true
+    fi
+}
+
+cmd_badges() {
+    ensure_badges_file; banner
+    local total tier; total=$(jq -r '.total_challenges//0' "${BADGES_FILE}"); tier=$(jq -r '.tier//"None"' "${BADGES_FILE}")
+    echo -e "  ${BOLD}Challenge Badges${RESET}\n"
+    echo -e "  ${BOLD}Current Tier:${RESET} ${TIER_COLORS[${tier}]:-${GRAY}}${BOLD}${tier}${RESET}"
+    echo -e "  ${BOLD}Total Completed:${RESET} ${total}\n"
+    echo -e "  ${BOLD}Tier Progress:${RESET}\n"
+    for tn in "${TIER_ORDER[@]}"; do
+        local thresh="${TIER_THRESH[${tn}]}"
+        local tc="${TIER_COLORS[${tn}]:-${GRAY}}"
+        local art="${TIER_ART[${tn}]:-[???]}"
+        local si
+        if (( total >= thresh )); then
+            si="${GREEN}${BOLD}[EARNED]${RESET}"
+        else
+            si="${DIM}[${total}/${thresh}]${RESET}"
+        fi
+        printf "    %b%b%-7s%b  %b%-10s%b %s  " "${tc}" "${BOLD}" "${art}" "${RESET}" "${tc}" "${tn}" "${RESET}" "${si}"
+        if (( total < thresh )); then
+            progress_bar "${total}" "${thresh}" 15
+        fi
+        echo ""
+    done
+    echo ""
+    local earned; earned=$(jq -r '.earned//[]' "${BADGES_FILE}")
+    local ec; ec=$(echo "${earned}" | jq 'length' 2>/dev/null || echo 0)
+    if (( ec > 0 )); then
+        echo -e "  ${BOLD}Earned Badges:${RESET}\n"
+        echo "${earned}" | jq -c '.[]' 2>/dev/null | while IFS= read -r b; do
+            local bt; bt=$(echo "${b}" | jq -r '.type//"tier"')
+            local bc; [[ "${bt}" == "special" ]] && bc="${PURPLE}" || bc="${GOLD}"
+            printf "    %b*%b %b%-30s%b  %b%s%b\n" "${bc}" "${RESET}" "${WHITE}${BOLD}" \
+                "$(echo "${b}" | jq -r '.badge')" "${RESET}" "${DIM}" "$(echo "${b}" | jq -r '.earned_at//"N/A"')" "${RESET}"
+        done
+    fi
+    # Hub special badges
+    local hb
+    if hb=$(hub_request GET "/badges" 2>/dev/null) && [[ -n "${hb}" ]]; then
+        local specials; specials=$(echo "${hb}" | jq -r '.special//[]' 2>/dev/null)
+        local sc; sc=$(echo "${specials}" | jq 'length' 2>/dev/null || echo 0)
+        if (( sc > 0 )); then
+            echo -e "\n  ${PURPLE}${BOLD}Special Event Badges:${RESET}\n"
+            echo "${specials}" | jq -c '.[]' 2>/dev/null | while IFS= read -r b; do
+                printf "    %b*%b %b%-30s%b  %b%s%b\n" "${PURPLE}" "${RESET}" "${WHITE}${BOLD}" \
+                    "$(echo "${b}" | jq -r '.name')" "${RESET}" "${DIM}" "$(echo "${b}" | jq -r '.description//""')" "${RESET}"
+            done
+        fi
+    fi; echo ""
+}
+
+# ── Command: suggest ──────────────────────────────────────────────────────
+cmd_suggest() {
+    local desc="$*"; [[ -z "${desc}" ]] && die "Usage: forge challenges suggest <challenge description>"
+    ensure_challenges_file
+    local now; now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    state_set --arg d "${desc}" --arg ts "${now}" '.suggestions+=[{"description":$d,"suggested_at":$ts,"status":"pending"}]'
+    local hub_ok="false"
+    hub_request POST "/suggest" "$(jq -n --arg d "${desc}" '{description:$d}')" &>/dev/null && hub_ok="true"
+    echo ""; success "Challenge suggestion submitted!"
+    echo -e "  ${DIM}\"${desc}\"${RESET}"
+    [[ "${hub_ok}" == "true" ]] && echo -e "  ${GREEN}Sent to 24HG for review.${RESET}" || echo -e "  ${DIM}Saved locally. Will sync when online.${RESET}"
+    echo ""; log "Suggestion: ${desc}"
+}
+
+# ── Command: daemon ───────────────────────────────────────────────────────
+archive_week_if_needed() {
+    ensure_challenges_file; ensure_history_file
+    local stored; stored=$(state_get '.week_id')
+    local current; current=$(current_week_id)
+    if [[ -n "${stored}" && "${stored}" != "${current}" && "${stored}" != "null" ]]; then
+        local accepted; accepted=$(state_get '.accepted//[]')
+        local completed; completed=$(echo "${accepted}" | jq '[.[]|select(.status=="completed")]')
+        local ae; ae=$(jq -n --arg wid "${stored}" --argjson c "${completed}" '{week_id:$wid,completed:$c}')
+        local tmp; tmp=$(jq --argjson e "${ae}" '.weeks+=[$e]' "${HISTORY_FILE}"); echo "${tmp}" > "${HISTORY_FILE}"
+        state_set '.accepted=[]|.completed=[]|.week_cache=null'
+        state_set --arg wid "${current}" '.week_id=$wid'
+        log "Archived ${stored}, starting ${current}"
+    fi
+}
+
+daemon_tick() {
+    ensure_challenges_file; archive_week_if_needed
+    fetch_weekly_challenges > /dev/null 2>&1
+    local accepted; accepted=$(state_get '.accepted//[]')
+    local ac; ac=$(echo "${accepted}" | jq '[.[]|select(.status!="completed" and .auto_track==true)]|length' 2>/dev/null || echo 0)
+    (( ac == 0 )) && return 0
+    echo "${accepted}" | jq -c '.[]|select(.status!="completed" and .auto_track==true)' 2>/dev/null | while IFS= read -r ch; do
+        local id ctype target title pts
+        id=$(echo "${ch}" | jq -r '.id'); ctype=$(echo "${ch}" | jq -r '.type//"manual"')
+        target=$(echo "${ch}" | jq -r '.target//1')
+        local progress; progress=$(resolve_auto_progress "${ctype}" "${target}")
+        state_set --arg id "${id}" --argjson p "${progress}" '.accepted=[.accepted[]|if .id==$id then .progress=$p else . end]'
+        hub_request POST "/${id}/progress" "$(jq -n --argjson p "${progress}" '{progress:$p}')" &>/dev/null || true
+        if (( progress >= target )); then
+            title=$(echo "${ch}" | jq -r '.title'); pts=$(echo "${ch}" | jq -r '.reward_points//0')
+            local now; now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            state_set --arg id "${id}" --arg ts "${now}" --argjson t "${target}" \
+                '.accepted=[.accepted[]|if .id==$id then .status="completed"|.progress=$t|.completed_at=$ts else . end]|.completed+=[$id]|.total_completed=(.total_completed+1)'
+            hub_request POST "/${id}/submit" "$(jq -n --arg id "${id}" --arg ts "${now}" '{challenge_id:$id,completed_at:$ts,auto:true}')" &>/dev/null || true
+            update_badges; log "Auto-completed: ${id} (${title}) +${pts}pts"
+            command -v notify-send &>/dev/null && notify-send -i forge-logo "Challenge Completed!" "${title} -- +${pts} Hub Points" 2>/dev/null || true
+            command -v forge-notify &>/dev/null && forge-notify send --title "Challenge Completed" --body "${title} -- +${pts} Hub Points" --urgency normal 2>/dev/null || true
+        fi
+    done
+}
+
+cmd_daemon() {
+    # --once flag: run a single tick and exit (used by systemd timer)
+    if [[ "${1:-}" == "--once" ]]; then
+        log "Running single challenge check (timer mode)"
+        daemon_tick
+        return 0
+    fi
+
+    # Foreground daemon mode with hourly loop
+    if [[ -f "${PID_FILE}" ]]; then
+        local old; old=$(cat "${PID_FILE}" 2>/dev/null || echo "")
+        [[ -n "${old}" ]] && kill -0 "${old}" 2>/dev/null && die "Daemon already running (PID ${old})."
+        rm -f "${PID_FILE}"
+    fi
+    echo $$ > "${PID_FILE}"; log "Daemon started (PID $$)"
+    echo -e "  ${GREEN}${BOLD}Challenge tracker daemon started${RESET} (PID $$)"
+    echo -e "  ${DIM}Checking progress every hour. Ctrl+C to stop.${RESET}"
+    trap 'rm -f "${PID_FILE}"; log "Daemon stopped"; exit 0' INT TERM
+    while true; do daemon_tick; sleep 3600; done
+}
+
+# ── Command: help ─────────────────────────────────────────────────────────
+cmd_help() {
+    banner
+    echo -e "  ${BOLD}Usage:${RESET} forge challenges ${CYAN}<command>${RESET} [args]\n"
+    echo -e "  ${BOLD}Commands:${RESET}"
+    local -a cmds=("list|Show this week's challenges (default)" "active|Show active/in-progress challenges"
+        "accept <id>|Accept a challenge" "progress <id>|Check progress on a challenge"
+        "submit <id> [proof]|Submit completion (optional proof file)" "leaderboard|Show challenge leaderboard"
+        "history|Show past challenges and results" "badges|Show earned challenge badges"
+        "suggest <desc>|Suggest a community challenge" "daemon|Auto-track progress (runs hourly)" "help|Show this help")
+    for c in "${cmds[@]}"; do printf "    ${CYAN}%-22s${RESET} %s\n" "${c%%|*}" "${c#*|}"; done
+    echo -e "\n  ${BOLD}Challenge Types:${RESET}"
+    printf "    ${BLUE}%-18s${RESET} %s\n" "[TIME] Playtime" "Play X hours (auto-tracked)"
+    printf "    ${CYAN}%-18s${RESET} %s\n" "[GAME] Game" "Play X different games (auto-tracked)"
+    printf "    ${MAGENTA}%-18s${RESET} %s\n" "[CHAT] Social" "Join voice sessions (auto-tracked)"
+    printf "    ${PURPLE}%-18s${RESET} %s\n" "[HUB ] Community" "Share clips to Hub (auto-tracked)"
+    printf "    ${ORANGE}%-18s${RESET} %s\n" "[PERF] Performance" "Hit FPS targets (auto-tracked)"
+    printf "    ${GREEN}%-18s${RESET} %s\n" "[EXPL] Exploration" "Try retro games (auto-tracked)"
+    printf "    ${YELLOW}%-18s${RESET} %s\n" "[GOAL] Manual" "Requires screenshot/clip proof"
+    echo -e "\n  ${BOLD}Badge Tiers:${RESET}"
+    printf "    ${ORANGE}%-12s${RESET} %s\n" "Bronze" "Complete 5 challenges"
+    printf "    ${WHITE}%-12s${RESET} %s\n" "Silver" "Complete 15 challenges"
+    printf "    ${GOLD}%-12s${RESET} %s\n" "Gold" "Complete 30 challenges"
+    printf "    ${CYAN}%-12s${RESET} %s\n" "Diamond" "Complete 50 challenges"
+    printf "    ${PURPLE}%-12s${RESET} %s\n" "Legend" "Complete 100 challenges"
+    echo -e "\n  ${BOLD}Daemon Mode:${RESET}"
+    echo -e "    Run ${CYAN}forge challenges daemon${RESET} to start tracking in the foreground,"
+    echo -e "    or enable the systemd timer for background hourly checks:"
+    echo -e "    ${DIM}  systemctl --user enable --now forge-challenges.timer${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Data Files:${RESET}"
+    echo -e "    ${DIM}Challenges:  ${CHALLENGES_FILE}${RESET}"
+    echo -e "    ${DIM}Badges:      ${BADGES_FILE}${RESET}"
+    echo -e "    ${DIM}History:     ${HISTORY_FILE}${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Hub API:${RESET}"
+    echo -e "    ${DIM}GET  /api/forge/challenges/current     This week's challenges${RESET}"
+    echo -e "    ${DIM}POST /api/forge/challenges/<id>/accept  Accept a challenge${RESET}"
+    echo -e "    ${DIM}POST /api/forge/challenges/<id>/progress Update progress${RESET}"
+    echo -e "    ${DIM}POST /api/forge/challenges/<id>/submit  Submit completion${RESET}"
+    echo -e "    ${DIM}GET  /api/forge/challenges/leaderboard  Leaderboard${RESET}"
+    echo -e "    ${DIM}GET  /api/forge/challenges/badges       User badges${RESET}"
+    echo ""
+    echo -e "  ${DIM}v1.0.0 -- Part of 24HG Forge -- https://24hgaming.com${RESET}\n"
+}
+
+# ── Main Dispatch ─────────────────────────────────────────────────────────
+main() {
+    local cmd="${1:-list}"; shift 2>/dev/null || true
+    case "${cmd}" in
+        list|ls|"")        cmd_list ;;
+        active|status)     cmd_active ;;
+        accept|join)       cmd_accept "$@" ;;
+        progress|check)    cmd_progress "$@" ;;
+        submit|complete)   cmd_submit "$@" ;;
+        leaderboard|lb)    cmd_leaderboard ;;
+        history|past)      cmd_history ;;
+        badges|badge)      cmd_badges ;;
+        suggest|idea)      cmd_suggest "$@" ;;
+        daemon|watch)      cmd_daemon "$@" ;;
+        help|-h|--help)    cmd_help ;;
+        *) error "Unknown command: ${cmd}"; echo -e "  Run ${CYAN}forge challenges help${RESET} for usage."; exit 1 ;;
+    esac
+}
+main "$@"

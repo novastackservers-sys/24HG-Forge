@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Stream This PC
+Comment=Set up game streaming to phones, tablets, and other devices
+Exec=forge-sunshine-setup
+Icon=forge-logo
+Terminal=true
+Type=Application
+Categories=Game;

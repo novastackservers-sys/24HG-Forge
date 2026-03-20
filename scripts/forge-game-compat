@@ -1,0 +1,708 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Forge Game Compat — Community-sourced game compatibility database
+
+# ── Colors & Symbols ──────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'; CYAN='\033[0;36m'; WHITE='\033[1;37m'; GRAY='\033[0;90m'
+BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
+
+# Rating symbols (terminal-safe, no emoji)
+SYM_PLATINUM="[P]"
+SYM_GOLD="[G]"
+SYM_SILVER="[S]"
+SYM_BRONZE="[B]"
+SYM_BORKED="[X]"
+
+# ── Config ─────────────────────────────────────────────────────────────
+API_BASE="https://hub.24hgaming.com/api/game-compat"
+TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/24hg/hub-token"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/forge-game-compat"
+STEAM_ROOT="${STEAM_ROOT:-$HOME/.local/share/Steam}"
+LUTRIS_DB="${LUTRIS_DB:-$HOME/.local/share/lutris/pga.db}"
+HEROIC_CACHE="${HEROIC_CACHE:-$HOME/.config/heroic/store_cache}"
+POLL_INTERVAL=5
+
+mkdir -p "$CACHE_DIR"
+
+# ── Helpers ────────────────────────────────────────────────────────────
+log() { logger -t forge-compat "$*"; }
+
+info()  { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+ok()    { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+err()   { echo -e "${RED}[ERR]${RESET}   $*" >&2; }
+hdr()   { echo -e "\n${BOLD}${MAGENTA}── $* ──${RESET}"; }
+
+die() { err "$*"; log "ERROR: $*"; exit 1; }
+
+get_token() {
+    if [[ -f "$TOKEN_FILE" ]]; then
+        cat "$TOKEN_FILE"
+    else
+        die "Hub token not found at $TOKEN_FILE. Run 'forge-hub-bridge login' first."
+    fi
+}
+
+rating_color() {
+    case "${1,,}" in
+        platinum) echo -ne "${GREEN}"  ;;
+        gold)     echo -ne "${YELLOW}" ;;
+        silver)   echo -ne "${CYAN}"   ;;
+        bronze)   echo -ne "${MAGENTA}";;
+        borked)   echo -ne "${RED}"    ;;
+        *)        echo -ne "${GRAY}"   ;;
+    esac
+}
+
+rating_symbol() {
+    case "${1,,}" in
+        platinum) echo -n "$SYM_PLATINUM" ;;
+        gold)     echo -n "$SYM_GOLD"     ;;
+        silver)   echo -n "$SYM_SILVER"   ;;
+        bronze)   echo -n "$SYM_BRONZE"   ;;
+        borked)   echo -n "$SYM_BORKED"   ;;
+        *)        echo -n "[?]"           ;;
+    esac
+}
+
+rating_label() {
+    local r="${1,,}"
+    local col
+    col="$(rating_color "$r")"
+    local sym
+    sym="$(rating_symbol "$r")"
+    echo -e "${col}${sym} ${r^}${RESET}"
+}
+
+validate_rating() {
+    local r="${1,,}"
+    case "$r" in
+        platinum|gold|silver|bronze|borked) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Get GPU model
+detect_gpu() {
+    if command -v lspci &>/dev/null; then
+        lspci 2>/dev/null | grep -i 'vga\|3d\|display' | head -1 | sed 's/.*: //' || echo "unknown"
+    else
+        echo "unknown"
+    fi
+}
+
+# Get GPU driver version
+detect_driver() {
+    if [[ -f /proc/driver/nvidia/version ]]; then
+        grep -oP 'Kernel Module\s+\K[\d.]+' /proc/driver/nvidia/version 2>/dev/null || echo "unknown"
+    elif command -v glxinfo &>/dev/null; then
+        glxinfo 2>/dev/null | grep "OpenGL version" | head -1 | sed 's/.*: //' || echo "unknown"
+    else
+        echo "unknown"
+    fi
+}
+
+# Get active Proton version
+detect_proton() {
+    local proton_dir="$STEAM_ROOT/compatibilitytools.d"
+    if [[ -d "$proton_dir" ]]; then
+        ls -1t "$proton_dir" 2>/dev/null | head -1 || echo "unknown"
+    elif [[ -d "$STEAM_ROOT/steamapps/common" ]]; then
+        ls -1d "$STEAM_ROOT/steamapps/common/Proton"* 2>/dev/null | sort -V | tail -1 | xargs basename 2>/dev/null || echo "unknown"
+    else
+        echo "unknown"
+    fi
+}
+
+api_get() {
+    local endpoint="$1"
+    local token
+    token="$(get_token)"
+    curl -sf --max-time 15 \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" \
+        "${API_BASE}${endpoint}" 2>/dev/null
+}
+
+api_post() {
+    local endpoint="$1"
+    local body="$2"
+    local token
+    token="$(get_token)"
+    curl -sf --max-time 15 \
+        -X POST \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -d "$body" \
+        "${API_BASE}${endpoint}" 2>/dev/null
+}
+
+# ── Pretty table rendering ────────────────────────────────────────────
+print_table_header() {
+    printf "${BOLD}${WHITE}%-6s  %-40s  %-10s  %-8s  %s${RESET}\n" \
+        "RATE" "GAME" "REPORTS" "MEDIAN" "TREND"
+    printf "${DIM}%-6s  %-40s  %-10s  %-8s  %s${RESET}\n" \
+        "------" "----------------------------------------" "----------" "--------" "-----"
+}
+
+print_game_row() {
+    local rating="$1" game="$2" reports="$3" median="$4" trend="${5:-}"
+    local col sym
+    col="$(rating_color "$rating")"
+    sym="$(rating_symbol "$rating")"
+    printf "${col}%-6s${RESET}  %-40s  %-10s  %-8s  %s\n" \
+        "$sym" "$game" "$reports" "$median" "$trend"
+}
+
+print_rating_bar() {
+    local label="$1" count="$2" total="$3"
+    local pct=0
+    if (( total > 0 )); then
+        pct=$(( count * 100 / total ))
+    fi
+    local bar_len=$(( pct / 2 ))
+    local col
+    col="$(rating_color "$label")"
+    local bar=""
+    for (( i=0; i<bar_len; i++ )); do bar+="█"; done
+    printf "  ${col}%-10s${RESET} %3d  ${col}%s${RESET}\n" "${label^}" "$count" "$bar"
+}
+
+# ── Commands ───────────────────────────────────────────────────────────
+
+cmd_check() {
+    local game="${1:?Usage: forge-game-compat check <game>}"
+    hdr "Checking compatibility: $game"
+    log "Checking compat for game: $game"
+
+    local encoded
+    encoded="$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$game'''))" 2>/dev/null || echo "$game")"
+
+    local resp
+    resp="$(api_get "/check?game=$encoded")" || {
+        err "Failed to fetch compatibility data for '$game'."
+        err "The API may be unreachable or the game not found."
+        log "API check failed for: $game"
+        return 1
+    }
+
+    # Parse response
+    local name rating_summary total_reports tips_count
+    name="$(echo "$resp" | jq -r '.name // "Unknown"')"
+    total_reports="$(echo "$resp" | jq -r '.total_reports // 0')"
+    tips_count="$(echo "$resp" | jq -r '.tips | length // 0')"
+
+    echo -e "\n  ${BOLD}${WHITE}$name${RESET}"
+    local appid
+    appid="$(echo "$resp" | jq -r '.steam_app_id // empty')"
+    if [[ -n "$appid" ]]; then
+        echo -e "  ${DIM}Steam App ID: $appid${RESET}"
+    fi
+    echo -e "  ${DIM}Reports: $total_reports${RESET}\n"
+
+    # Rating distribution
+    echo -e "  ${BOLD}Rating Distribution:${RESET}"
+    local plat gold silver bronze borked
+    plat="$(echo "$resp" | jq -r '.ratings.platinum // 0')"
+    gold="$(echo "$resp" | jq -r '.ratings.gold // 0')"
+    silver="$(echo "$resp" | jq -r '.ratings.silver // 0')"
+    bronze="$(echo "$resp" | jq -r '.ratings.bronze // 0')"
+    borked="$(echo "$resp" | jq -r '.ratings.borked // 0')"
+
+    print_rating_bar "platinum" "$plat" "$total_reports"
+    print_rating_bar "gold" "$gold" "$total_reports"
+    print_rating_bar "silver" "$silver" "$total_reports"
+    print_rating_bar "bronze" "$bronze" "$total_reports"
+    print_rating_bar "borked" "$borked" "$total_reports"
+
+    # Median rating
+    local median
+    median="$(echo "$resp" | jq -r '.median_rating // "unknown"')"
+    echo -e "\n  ${BOLD}Median Rating:${RESET} $(rating_label "$median")"
+
+    # Top tips preview
+    if (( tips_count > 0 )); then
+        echo -e "\n  ${BOLD}Top Tips:${RESET}"
+        echo "$resp" | jq -r '.tips[:3][] | "    - \(.text)"' 2>/dev/null
+        if (( tips_count > 3 )); then
+            echo -e "    ${DIM}...and $((tips_count - 3)) more (use 'forge-game-compat tips $game')${RESET}"
+        fi
+    fi
+
+    echo ""
+    log "Check complete for $game — median: $median, reports: $total_reports"
+}
+
+cmd_report() {
+    local game="${1:?Usage: forge-game-compat report <game> <rating>}"
+    local rating="${2:?Usage: forge-game-compat report <game> <rating>}"
+
+    validate_rating "$rating" || die "Invalid rating '$rating'. Must be: platinum, gold, silver, bronze, borked"
+
+    hdr "Reporting compatibility: $game"
+
+    # Gather system info
+    local gpu driver proton
+    gpu="$(detect_gpu)"
+    driver="$(detect_driver)"
+    proton="$(detect_proton)"
+
+    info "Detected system info:"
+    echo -e "  ${DIM}GPU:    ${RESET}$gpu"
+    echo -e "  ${DIM}Driver: ${RESET}$driver"
+    echo -e "  ${DIM}Proton: ${RESET}$proton"
+    echo ""
+
+    # Optional notes
+    local notes=""
+    if [[ -t 0 ]]; then
+        echo -e "${CYAN}Add notes (optional, press Enter to skip):${RESET}"
+        read -r notes
+    fi
+
+    # Try to detect Steam app ID
+    local appid=""
+    if [[ -f "$STEAM_ROOT/steamapps/libraryfolders.vdf" ]]; then
+        # Search for game in library
+        appid="$(grep -B5 -i "$(echo "$game" | head -c 30)" "$STEAM_ROOT/steamapps/"appmanifest_*.acf 2>/dev/null \
+            | grep '"appid"' | head -1 | grep -oP '"\K\d+' || echo "")"
+    fi
+
+    # Build JSON payload
+    local body
+    body="$(jq -n \
+        --arg game "$game" \
+        --arg rating "${rating,,}" \
+        --arg gpu "$gpu" \
+        --arg driver "$driver" \
+        --arg proton "$proton" \
+        --arg notes "$notes" \
+        --arg appid "$appid" \
+        '{
+            game: $game,
+            rating: $rating,
+            gpu: $gpu,
+            driver_version: $driver,
+            proton_version: $proton,
+            notes: $notes,
+            steam_app_id: (if $appid == "" then null else ($appid | tonumber) end)
+        }'
+    )"
+
+    info "Submitting report..."
+    local resp
+    resp="$(api_post "/report" "$body")" || {
+        err "Failed to submit report. Check your connection and hub-token."
+        log "Report submission failed for: $game"
+        return 1
+    }
+
+    local status
+    status="$(echo "$resp" | jq -r '.status // "unknown"')"
+    if [[ "$status" == "ok" || "$status" == "success" || "$status" == "created" ]]; then
+        ok "Report submitted! $(rating_label "$rating") for ${BOLD}$game${RESET}"
+        log "Report submitted: $game = $rating"
+    else
+        local msg
+        msg="$(echo "$resp" | jq -r '.message // .error // "Unknown error"')"
+        err "Server responded: $msg"
+        log "Report error: $msg"
+        return 1
+    fi
+}
+
+cmd_scan() {
+    hdr "Scanning installed games"
+    log "Starting game scan"
+
+    local -a app_ids=()
+    local -a game_sources=()
+
+    # ── Steam ──
+    local steam_lib="$STEAM_ROOT/steamapps/libraryfolders.vdf"
+    if [[ -f "$steam_lib" ]]; then
+        info "Scanning Steam library..."
+        # Parse libraryfolders.vdf for app IDs
+        local lib_paths=()
+        while IFS= read -r lpath; do
+            lib_paths+=("$lpath")
+        done < <(grep -oP '"path"\s+"\K[^"]+' "$steam_lib" 2>/dev/null)
+
+        for lpath in "${lib_paths[@]}"; do
+            local apps_dir="$lpath/steamapps"
+            if [[ -d "$apps_dir" ]]; then
+                for manifest in "$apps_dir"/appmanifest_*.acf; do
+                    [[ -f "$manifest" ]] || continue
+                    local aid
+                    aid="$(grep -oP '"appid"\s+"\K\d+' "$manifest" 2>/dev/null || true)"
+                    local aname
+                    aname="$(grep -oP '"name"\s+"\K[^"]+' "$manifest" 2>/dev/null || true)"
+                    if [[ -n "$aid" ]]; then
+                        app_ids+=("$aid")
+                        game_sources+=("steam:$aid:$aname")
+                    fi
+                done
+            fi
+        done
+        ok "Found ${#app_ids[@]} Steam games"
+    else
+        warn "Steam library not found at $steam_lib"
+    fi
+
+    # ── Lutris ──
+    local lutris_count=0
+    if [[ -f "$LUTRIS_DB" ]] && command -v sqlite3 &>/dev/null; then
+        info "Scanning Lutris database..."
+        while IFS='|' read -r lname lslug; do
+            game_sources+=("lutris::$lname")
+            (( lutris_count++ ))
+        done < <(sqlite3 "$LUTRIS_DB" "SELECT name, slug FROM games WHERE installed=1;" 2>/dev/null || true)
+        ok "Found $lutris_count Lutris games"
+    else
+        warn "Lutris database not found or sqlite3 unavailable"
+    fi
+
+    # ── Heroic ──
+    local heroic_count=0
+    if [[ -d "$HEROIC_CACHE" ]]; then
+        info "Scanning Heroic Games Launcher..."
+        for store_file in "$HEROIC_CACHE"/*.json; do
+            [[ -f "$store_file" ]] || continue
+            while IFS= read -r hname; do
+                game_sources+=("heroic::$hname")
+                (( heroic_count++ ))
+            done < <(jq -r '.[].title // .[].app_name // empty' "$store_file" 2>/dev/null || true)
+        done
+        ok "Found $heroic_count Heroic games"
+    else
+        warn "Heroic cache not found at $HEROIC_CACHE"
+    fi
+
+    local total=${#game_sources[@]}
+    if (( total == 0 )); then
+        warn "No installed games detected."
+        return 0
+    fi
+
+    info "Total games found: $total"
+    echo ""
+
+    # Batch check via API using Steam app IDs
+    if (( ${#app_ids[@]} > 0 )); then
+        info "Fetching compatibility data from hub..."
+        local ids_csv
+        ids_csv="$(IFS=,; echo "${app_ids[*]}")"
+        local resp
+        resp="$(api_get "/scan?app_ids=$ids_csv")" || {
+            warn "API batch check failed. Showing detected games without compat data."
+            resp=""
+        }
+
+        if [[ -n "$resp" ]]; then
+            echo ""
+            print_table_header
+            echo "$resp" | jq -r '.games[] | "\(.rating)\t\(.name)\t\(.total_reports)\t\(.median_rating)\t\(.trend // "")"' 2>/dev/null | \
+            while IFS=$'\t' read -r r_rating r_name r_reports r_median r_trend; do
+                print_game_row "$r_rating" "$r_name" "$r_reports" "$r_median" "$r_trend"
+            done
+            echo ""
+        fi
+    fi
+
+    # Show non-Steam games
+    local non_steam=()
+    for src in "${game_sources[@]}"; do
+        local prefix="${src%%:*}"
+        if [[ "$prefix" != "steam" ]]; then
+            local gname="${src##*:}"
+            non_steam+=("$gname")
+        fi
+    done
+
+    if (( ${#non_steam[@]} > 0 )); then
+        hdr "Non-Steam Games (check individually)"
+        for gname in "${non_steam[@]}"; do
+            echo -e "  ${DIM}-${RESET} $gname"
+        done
+        echo ""
+    fi
+
+    log "Scan complete: $total games found"
+}
+
+cmd_list() {
+    local rating="${1:-}"
+    local page="${2:-1}"
+
+    if [[ -n "$rating" ]]; then
+        validate_rating "$rating" || die "Invalid rating '$rating'. Must be: platinum, gold, silver, bronze, borked"
+        hdr "Games rated: $(rating_label "$rating")"
+    else
+        hdr "All rated games"
+    fi
+
+    log "Listing games: rating=${rating:-all} page=$page"
+
+    local endpoint="/list?page=$page"
+    if [[ -n "$rating" ]]; then
+        endpoint+="&rating=${rating,,}"
+    fi
+
+    local resp
+    resp="$(api_get "$endpoint")" || {
+        err "Failed to fetch game list."
+        return 1
+    }
+
+    local total_pages total_games
+    total_pages="$(echo "$resp" | jq -r '.total_pages // 1')"
+    total_games="$(echo "$resp" | jq -r '.total_games // 0')"
+
+    echo -e "  ${DIM}Page $page of $total_pages ($total_games games total)${RESET}\n"
+
+    print_table_header
+    echo "$resp" | jq -r '.games[] | "\(.median_rating)\t\(.name)\t\(.total_reports)\t\(.median_rating)\t\(.trend // "")"' 2>/dev/null | \
+    while IFS=$'\t' read -r r_rating r_name r_reports r_median r_trend; do
+        print_game_row "$r_rating" "$r_name" "$r_reports" "$r_median" "$r_trend"
+    done
+    echo ""
+
+    if (( page < total_pages )); then
+        local filter_arg=""
+        [[ -n "$rating" ]] && filter_arg=" $rating"
+        echo -e "  ${DIM}Next page: forge-game-compat list${filter_arg} $((page + 1))${RESET}"
+    fi
+}
+
+cmd_tips() {
+    local game="${1:?Usage: forge-game-compat tips <game>}"
+    hdr "Community tips: $game"
+    log "Fetching tips for: $game"
+
+    local encoded
+    encoded="$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$game'''))" 2>/dev/null || echo "$game")"
+
+    local resp
+    resp="$(api_get "/check?game=$encoded")" || {
+        err "Failed to fetch data for '$game'."
+        return 1
+    }
+
+    local name
+    name="$(echo "$resp" | jq -r '.name // "Unknown"')"
+    local median
+    median="$(echo "$resp" | jq -r '.median_rating // "unknown"')"
+    echo -e "\n  ${BOLD}${WHITE}$name${RESET}  $(rating_label "$median")\n"
+
+    local tips_count
+    tips_count="$(echo "$resp" | jq -r '.tips | length // 0')"
+
+    if (( tips_count == 0 )); then
+        warn "No community tips yet for this game."
+        echo -e "  ${DIM}Be the first to add tips: forge-game-compat report \"$game\" <rating>${RESET}"
+        return 0
+    fi
+
+    local i=0
+    while (( i < tips_count )); do
+        local tip_text tip_author tip_date tip_votes tip_rating
+        tip_text="$(echo "$resp" | jq -r ".tips[$i].text // \"\"")"
+        tip_author="$(echo "$resp" | jq -r ".tips[$i].author // \"anonymous\"")"
+        tip_date="$(echo "$resp" | jq -r ".tips[$i].date // \"\"")"
+        tip_votes="$(echo "$resp" | jq -r ".tips[$i].votes // 0")"
+        tip_rating="$(echo "$resp" | jq -r ".tips[$i].rating // \"unknown\"")"
+
+        local col
+        col="$(rating_color "$tip_rating")"
+        local sym
+        sym="$(rating_symbol "$tip_rating")"
+
+        echo -e "  ${BOLD}$((i+1)).${RESET} ${col}${sym}${RESET} ${WHITE}$tip_text${RESET}"
+        echo -e "     ${DIM}by $tip_author | $tip_date | +$tip_votes votes | rated: ${tip_rating^}${RESET}"
+        echo ""
+        (( i++ ))
+    done
+
+    log "Tips displayed for $game: $tips_count tips"
+}
+
+cmd_auto_report() {
+    hdr "Auto-Report Mode"
+    info "Monitoring for running games..."
+    info "When a game exits, you'll be prompted to rate it."
+    echo -e "  ${DIM}Press Ctrl+C to stop monitoring.${RESET}\n"
+    log "Auto-report mode started"
+
+    # Known game process patterns
+    declare -A KNOWN_GAMES=(
+        ["hl2_linux"]="Half-Life 2"
+        ["csgo_linux64"]="Counter-Strike: Global Offensive"
+        ["cs2"]="Counter-Strike 2"
+        ["dota2"]="Dota 2"
+        ["tf_linux64"]="Team Fortress 2"
+        ["RustClient"]="Rust"
+        ["valheim.x86_64"]="Valheim"
+        ["factorio"]="Factorio"
+        ["Terraria.bin.x86_64"]="Terraria"
+        ["StardewValley"]="Stardew Valley"
+        ["DeadCells"]="Dead Cells"
+        ["HollowKnight"]="Hollow Knight"
+        ["Cyberpunk2077"]="Cyberpunk 2077"
+        ["bg3.exe"]="Baldur's Gate 3"
+        ["eldenring.exe"]="Elden Ring"
+        ["GTA5.exe"]="Grand Theft Auto V"
+        ["witcher3.exe"]="The Witcher 3"
+    )
+
+    # Also detect any Steam game via Proton
+    local tracked_pid=""
+    local tracked_game=""
+
+    while true; do
+        # Check if tracked game has exited
+        if [[ -n "$tracked_pid" ]] && ! kill -0 "$tracked_pid" 2>/dev/null; then
+            info "Game exited: ${BOLD}$tracked_game${RESET}"
+            log "Game exited: $tracked_game (PID $tracked_pid)"
+
+            local user_rating=""
+            # Try zenity first, fall back to terminal
+            if command -v zenity &>/dev/null && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+                user_rating="$(zenity --list \
+                    --title="Rate Your Experience" \
+                    --text="How did <b>$tracked_game</b> run?" \
+                    --column="Rating" --column="Description" \
+                    "platinum" "Runs perfectly, no tweaks needed" \
+                    "gold" "Runs well, minor tweaks" \
+                    "silver" "Playable with workarounds" \
+                    "bronze" "Starts but has significant issues" \
+                    "borked" "Doesn't work" \
+                    --width=450 --height=350 2>/dev/null || true)"
+            fi
+
+            # Terminal fallback
+            if [[ -z "$user_rating" ]] && [[ -t 0 ]]; then
+                echo ""
+                echo -e "${BOLD}Rate your experience with ${WHITE}$tracked_game${RESET}${BOLD}:${RESET}"
+                echo -e "  ${GREEN}1)${RESET} Platinum — Runs perfectly, no tweaks needed"
+                echo -e "  ${YELLOW}2)${RESET} Gold     — Runs well, minor tweaks"
+                echo -e "  ${CYAN}3)${RESET} Silver   — Playable with workarounds"
+                echo -e "  ${MAGENTA}4)${RESET} Bronze   — Starts but has significant issues"
+                echo -e "  ${RED}5)${RESET} Borked   — Doesn't work"
+                echo -e "  ${DIM}s) Skip${RESET}"
+                echo ""
+                read -rp "Choice [1-5/s]: " choice
+                case "$choice" in
+                    1) user_rating="platinum" ;;
+                    2) user_rating="gold"     ;;
+                    3) user_rating="silver"   ;;
+                    4) user_rating="bronze"   ;;
+                    5) user_rating="borked"   ;;
+                    *) user_rating=""          ;;
+                esac
+            fi
+
+            if [[ -n "$user_rating" ]]; then
+                cmd_report "$tracked_game" "$user_rating"
+            else
+                info "Skipped rating for $tracked_game."
+            fi
+
+            tracked_pid=""
+            tracked_game=""
+            echo ""
+            info "Resuming monitoring..."
+        fi
+
+        # If not tracking, look for a game process
+        if [[ -z "$tracked_pid" ]]; then
+            for proc_name in "${!KNOWN_GAMES[@]}"; do
+                local pid
+                pid="$(pgrep -x "$proc_name" 2>/dev/null | head -1 || true)"
+                if [[ -n "$pid" ]]; then
+                    tracked_pid="$pid"
+                    tracked_game="${KNOWN_GAMES[$proc_name]}"
+                    ok "Detected running game: ${BOLD}$tracked_game${RESET} (PID $tracked_pid)"
+                    log "Detected game: $tracked_game (PID $tracked_pid)"
+                    break
+                fi
+            done
+
+            # Check for Proton/Wine game processes
+            if [[ -z "$tracked_pid" ]]; then
+                local wine_pid wine_exe
+                wine_pid="$(pgrep -f 'proton waitforexitandrun' 2>/dev/null | head -1 || true)"
+                if [[ -n "$wine_pid" ]]; then
+                    wine_exe="$(tr '\0' ' ' < "/proc/$wine_pid/cmdline" 2>/dev/null | grep -oP '[^/]+\.exe' | head -1 || echo "")"
+                    if [[ -n "$wine_exe" ]]; then
+                        tracked_pid="$wine_pid"
+                        tracked_game="${wine_exe%.exe}"
+                        ok "Detected Proton game: ${BOLD}$tracked_game${RESET} (PID $tracked_pid)"
+                        log "Detected Proton game: $tracked_game (PID $tracked_pid)"
+                    fi
+                fi
+            fi
+        fi
+
+        sleep "$POLL_INTERVAL"
+    done
+}
+
+# ── Usage ──────────────────────────────────────────────────────────────
+usage() {
+    echo -e "${BOLD}${MAGENTA}24HG Forge Game Compat${RESET} — Community-sourced game compatibility database"
+    echo ""
+    echo -e "${BOLD}USAGE:${RESET}"
+    echo -e "  forge-game-compat ${GREEN}<command>${RESET} [arguments]"
+    echo ""
+    echo -e "${BOLD}COMMANDS:${RESET}"
+    echo -e "  ${GREEN}check${RESET} <game>             Check compatibility status for a game"
+    echo -e "  ${GREEN}report${RESET} <game> <rating>   Report your experience"
+    echo -e "  ${GREEN}scan${RESET}                     Auto-detect installed games and show compat status"
+    echo -e "  ${GREEN}list${RESET} [rating] [page]     List games by rating"
+    echo -e "  ${GREEN}tips${RESET} <game>              Show community tips/fixes for a game"
+    echo -e "  ${GREEN}auto-report${RESET}              Monitor for games, prompt rating when they exit"
+    echo ""
+    echo -e "${BOLD}RATINGS:${RESET}"
+    echo -e "  $(rating_label platinum)   Runs perfectly, no tweaks needed"
+    echo -e "  $(rating_label gold)       Runs well, minor tweaks"
+    echo -e "  $(rating_label silver)     Playable with workarounds"
+    echo -e "  $(rating_label bronze)     Starts but has significant issues"
+    echo -e "  $(rating_label borked)     Doesn't work"
+    echo ""
+    echo -e "${BOLD}EXAMPLES:${RESET}"
+    echo -e "  ${DIM}forge-game-compat check \"Elden Ring\"${RESET}"
+    echo -e "  ${DIM}forge-game-compat report \"Cyberpunk 2077\" gold${RESET}"
+    echo -e "  ${DIM}forge-game-compat scan${RESET}"
+    echo -e "  ${DIM}forge-game-compat list platinum${RESET}"
+    echo -e "  ${DIM}forge-game-compat tips \"Baldur's Gate 3\"${RESET}"
+    echo -e "  ${DIM}forge-game-compat auto-report${RESET}"
+    echo ""
+}
+
+# ── Main ───────────────────────────────────────────────────────────────
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        check)       cmd_check "$@"       ;;
+        report)      cmd_report "$@"      ;;
+        scan)        cmd_scan             ;;
+        list)        cmd_list "$@"        ;;
+        tips)        cmd_tips "$@"        ;;
+        auto-report) cmd_auto_report      ;;
+        help|--help|-h|"")
+            usage
+            ;;
+        *)
+            err "Unknown command: $cmd"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

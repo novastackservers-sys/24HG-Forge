@@ -1,0 +1,1592 @@
+#!/bin/bash
+# 24HG Forge Game Backup — Full game installation backup and restore
+# Backs up game files, Proton prefixes, saves, configs, shader cache,
+# and controller profiles. Supports incremental, scheduled, and
+# portable backups with zstd compression.
+#
+# Usage: forge-game-backup <command> [args...]
+# See:   forge-game-backup help
+
+set -euo pipefail
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+VERSION="1.0.0"
+BACKUP_DIR="${HOME}/.local/share/forge/game-backups"
+CONFIG_DIR="${HOME}/.config/forge"
+SCHEDULE_DIR="${CONFIG_DIR}/backup-schedules"
+CLOUD_SAVES_DB="${CONFIG_DIR}/cloud-saves.json"
+CONTROLLER_DIR="${CONFIG_DIR}/controllers"
+LOG_TAG="forge-game-backup"
+
+STEAM_NATIVE="${HOME}/.local/share/Steam"
+STEAM_FLATPAK="${HOME}/.var/app/com.valvesoftware.Steam/data/Steam"
+LUTRIS_DB="${HOME}/.local/share/lutris/pga.db"
+LUTRIS_GAMES="${HOME}/Games"
+HEROIC_CONFIG="${HOME}/.config/heroic/GamesConfig"
+HEROIC_LIBRARY="${HOME}/.config/heroic/store_cache"
+
+ZSTD_LEVEL="${FORGE_BACKUP_ZSTD_LEVEL:-3}"
+DEFAULT_KEEP=3
+CHECKSUM_ALGO="sha256"
+
+# ─── Colors & Output ────────────────────────────────────────────────────────
+
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+BLUE="\033[34m"
+MAGENTA="\033[35m"
+CYAN="\033[36m"
+WHITE="\033[97m"
+BOLD="\033[1m"
+DIM="\033[2m"
+RESET="\033[0m"
+
+ICON_OK="✔"
+ICON_FAIL="✘"
+ICON_ARROW="→"
+ICON_WARN="⚠"
+ICON_BACKUP="📦"
+ICON_GAME="🎮"
+ICON_DISK="💾"
+ICON_CLOCK="⏱"
+
+log()  { logger -t "$LOG_TAG" "$*" 2>/dev/null || true; }
+info() { printf "${CYAN}${BOLD}%s${RESET} %s\n" "$ICON_BACKUP" "$*"; log "INFO: $*"; }
+ok()   { printf "${GREEN}${BOLD}%s${RESET} %s\n" "$ICON_OK" "$*"; log "OK: $*"; }
+warn() { printf "${YELLOW}${BOLD}%s${RESET} %s\n" "$ICON_WARN" "$*"; log "WARN: $*"; }
+err()  { printf "${RED}${BOLD}%s${RESET} %s\n" "$ICON_FAIL" "$*" >&2; log "ERROR: $*"; }
+dim()  { printf "${DIM}  %s${RESET}\n" "$*"; }
+head_() { printf "\n${BOLD}${CYAN}=== %s ===${RESET}\n\n" "$*"; }
+
+progress_bar() {
+    local current=$1 total=$2 width=30
+    [[ $total -eq 0 ]] && return
+    local pct=$(( current * 100 / total ))
+    local filled=$(( current * width / total ))
+    local empty=$(( width - filled ))
+    printf "\r  ${CYAN}["
+    [[ $filled -gt 0 ]] && printf "%0.s█" $(seq 1 "$filled")
+    [[ $empty -gt 0 ]]  && printf "%0.s░" $(seq 1 "$empty")
+    printf "]${RESET} %3d%%" "$pct"
+    [[ $current -eq $total ]] && echo
+}
+
+human_size() {
+    local bytes=$1
+    if (( bytes >= 1073741824 )); then
+        printf "%.1f GB" "$(echo "scale=1; $bytes / 1073741824" | bc)"
+    elif (( bytes >= 1048576 )); then
+        printf "%.1f MB" "$(echo "scale=1; $bytes / 1048576" | bc)"
+    elif (( bytes >= 1024 )); then
+        printf "%.1f KB" "$(echo "scale=1; $bytes / 1024" | bc)"
+    else
+        printf "%d B" "$bytes"
+    fi
+}
+
+human_duration() {
+    local secs=$1
+    if (( secs >= 3600 )); then
+        printf "%dh %dm %ds" $((secs/3600)) $((secs%3600/60)) $((secs%60))
+    elif (( secs >= 60 )); then
+        printf "%dm %ds" $((secs/60)) $((secs%60))
+    else
+        printf "%ds" "$secs"
+    fi
+}
+
+notify() {
+    local title="$1" body="$2" icon="${3:-dialog-information}"
+    if command -v notify-send &>/dev/null; then
+        notify-send -a "Forge Game Backup" -i "$icon" "$title" "$body" 2>/dev/null || true
+    fi
+}
+
+require_cmd() {
+    for cmd in "$@"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            err "Required command not found: $cmd"
+            err "Install it with: sudo dnf install $cmd"
+            exit 1
+        fi
+    done
+}
+
+# ─── Initialization ─────────────────────────────────────────────────────────
+
+init_dirs() {
+    mkdir -p "$BACKUP_DIR" "$CONFIG_DIR" "$SCHEDULE_DIR"
+}
+
+# ─── Steam Detection ────────────────────────────────────────────────────────
+
+get_steam_root() {
+    if [[ -d "$STEAM_NATIVE" ]]; then
+        echo "$STEAM_NATIVE"
+    elif [[ -d "$STEAM_FLATPAK" ]]; then
+        echo "$STEAM_FLATPAK"
+    else
+        echo ""
+    fi
+}
+
+# Parse Steam libraryfolders.vdf for all library paths
+get_steam_libraries() {
+    local steam_root
+    steam_root="$(get_steam_root)"
+    [[ -z "$steam_root" ]] && return
+
+    local vdf="${steam_root}/steamapps/libraryfolders.vdf"
+    [[ -f "$vdf" ]] || return
+
+    # Extract "path" values from the VDF
+    while IFS= read -r line; do
+        if [[ "$line" =~ \"path\"[[:space:]]+\"(.+)\" ]]; then
+            local libpath="${BASH_REMATCH[1]}"
+            [[ -d "$libpath/steamapps" ]] && echo "$libpath"
+        fi
+    done < "$vdf"
+
+    # Always include the root
+    [[ -d "${steam_root}/steamapps" ]] && echo "$steam_root"
+}
+
+# Get installed Steam games: "appid|name|install_dir|library_path"
+get_steam_games() {
+    local libraries
+    libraries="$(get_steam_libraries)"
+    [[ -z "$libraries" ]] && return
+
+    while IFS= read -r libpath; do
+        local manifests="${libpath}/steamapps"
+        for acf in "${manifests}"/appmanifest_*.acf; do
+            [[ -f "$acf" ]] || continue
+            local appid="" name="" installdir=""
+            while IFS= read -r line; do
+                if [[ "$line" =~ \"appid\"[[:space:]]+\"([^\"]+)\" ]]; then
+                    appid="${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ \"name\"[[:space:]]+\"([^\"]+)\" ]]; then
+                    name="${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ \"installdir\"[[:space:]]+\"([^\"]+)\" ]]; then
+                    installdir="${BASH_REMATCH[1]}"
+                fi
+            done < "$acf"
+            [[ -n "$appid" && -n "$name" && -n "$installdir" ]] && \
+                echo "steam|${appid}|${name}|${manifests}/common/${installdir}|${libpath}"
+        done
+    done <<< "$libraries"
+}
+
+# ─── Lutris Detection ───────────────────────────────────────────────────────
+
+get_lutris_games() {
+    [[ -f "$LUTRIS_DB" ]] || return
+    command -v sqlite3 &>/dev/null || return
+
+    sqlite3 "$LUTRIS_DB" "SELECT slug, name, directory FROM games WHERE installed = 1;" 2>/dev/null | \
+    while IFS='|' read -r slug name directory; do
+        [[ -n "$slug" && -n "$name" ]] || continue
+        local gamedir="${directory:-${LUTRIS_GAMES}/${slug}}"
+        echo "lutris|${slug}|${name}|${gamedir}|"
+    done
+}
+
+# ─── Heroic Detection ───────────────────────────────────────────────────────
+
+get_heroic_games() {
+    [[ -d "$HEROIC_CONFIG" ]] || return
+    command -v jq &>/dev/null || return
+
+    for cfg in "${HEROIC_CONFIG}"/*.json; do
+        [[ -f "$cfg" ]] || continue
+        local appname title install_path
+        appname="$(basename "$cfg" .json)"
+        # Try to get title from Heroic library cache
+        title="$appname"
+        if [[ -f "${HEROIC_LIBRARY}/heroic_library.json" ]]; then
+            local t
+            t="$(jq -r ".library[] | select(.app_name == \"$appname\") | .title // empty" \
+                "${HEROIC_LIBRARY}/heroic_library.json" 2>/dev/null)"
+            [[ -n "$t" ]] && title="$t"
+        fi
+        install_path="$(jq -r '.install_path // .winePrefix // empty' "$cfg" 2>/dev/null)"
+        [[ -n "$install_path" && -d "$install_path" ]] && \
+            echo "heroic|${appname}|${title}|${install_path}|"
+    done
+}
+
+# ─── Unified Game List ──────────────────────────────────────────────────────
+
+# Returns: "source|id|name|gamedir|extra"
+get_all_games() {
+    get_steam_games
+    get_lutris_games
+    get_heroic_games
+}
+
+# Normalize game identifier for filenames
+normalize_name() {
+    local name="$1"
+    echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//'
+}
+
+# Find a game by fuzzy match on name or ID
+find_game() {
+    local query="$1"
+    local query_lower
+    query_lower="$(echo "$query" | tr '[:upper:]' '[:lower:]')"
+
+    local exact_match="" partial_match=""
+    while IFS='|' read -r source gid name gamedir extra; do
+        [[ -z "$source" ]] && continue
+        local name_lower
+        name_lower="$(echo "$name" | tr '[:upper:]' '[:lower:]')"
+        local norm
+        norm="$(normalize_name "$name")"
+        local gid_lower
+        gid_lower="$(echo "$gid" | tr '[:upper:]' '[:lower:]')"
+
+        # Exact matches
+        if [[ "$gid_lower" == "$query_lower" || "$norm" == "$query_lower" || "$name_lower" == "$query_lower" ]]; then
+            exact_match="${source}|${gid}|${name}|${gamedir}|${extra}"
+            break
+        fi
+        # Partial match
+        if [[ "$name_lower" == *"$query_lower"* || "$gid_lower" == *"$query_lower"* ]]; then
+            partial_match="${source}|${gid}|${name}|${gamedir}|${extra}"
+        fi
+    done < <(get_all_games)
+
+    if [[ -n "$exact_match" ]]; then
+        echo "$exact_match"
+    elif [[ -n "$partial_match" ]]; then
+        echo "$partial_match"
+    fi
+}
+
+# ─── Backup Paths Collection ────────────────────────────────────────────────
+
+# Collect all paths to back up for a game
+collect_backup_paths() {
+    local source="$1" gid="$2" name="$3" gamedir="$4" extra="$5"
+    local include_shaders="${6:-false}"
+    local paths=()
+
+    # 1. Game files
+    if [[ -d "$gamedir" ]]; then
+        paths+=("$gamedir")
+    fi
+
+    # 2. Proton/Wine prefix (Steam)
+    if [[ "$source" == "steam" ]]; then
+        local steam_root="$extra"
+        local compat="${steam_root}/steamapps/compatdata/${gid}"
+        if [[ -d "$compat" ]]; then
+            paths+=("$compat")
+        fi
+        # Also grab the appmanifest
+        local manifest="${steam_root}/steamapps/appmanifest_${gid}.acf"
+        if [[ -f "$manifest" ]]; then
+            paths+=("$manifest")
+        fi
+    fi
+
+    # 3. Save files from cloud-saves database
+    if [[ -f "$CLOUD_SAVES_DB" ]] && command -v jq &>/dev/null; then
+        local save_paths
+        save_paths="$(jq -r ".games[\"$gid\"].paths[]? // empty" "$CLOUD_SAVES_DB" 2>/dev/null)"
+        while IFS= read -r sp; do
+            # Expand ~ and env vars
+            sp="${sp/#\~/$HOME}"
+            [[ -e "$sp" ]] && paths+=("$sp")
+        done <<< "$save_paths"
+    fi
+
+    # 4. Game-specific config files (common locations)
+    local config_candidates=(
+        "${HOME}/.config/unity3d"
+        "${HOME}/.local/share/Paradox Interactive"
+        "${HOME}/.local/share/feral-interactive"
+        "${HOME}/.local/share/aspyr-media"
+    )
+    for cc in "${config_candidates[@]}"; do
+        if [[ -d "$cc" ]]; then
+            # Only include if directory name matches game name loosely
+            local norm
+            norm="$(normalize_name "$name")"
+            while IFS= read -r d; do
+                local dn
+                dn="$(normalize_name "$(basename "$d")")"
+                if [[ "$dn" == *"$norm"* || "$norm" == *"$dn"* ]]; then
+                    paths+=("$d")
+                fi
+            done < <(find "$cc" -maxdepth 1 -mindepth 1 -type d 2>/dev/null)
+        fi
+    done
+
+    # 5. Shader cache (optional)
+    if [[ "$include_shaders" == "true" && "$source" == "steam" ]]; then
+        local shader_cache="${extra}/steamapps/shadercache/${gid}"
+        [[ -d "$shader_cache" ]] && paths+=("$shader_cache")
+    fi
+
+    # 6. Controller profiles
+    if [[ -d "$CONTROLLER_DIR" ]]; then
+        local norm
+        norm="$(normalize_name "$name")"
+        for prof in "${CONTROLLER_DIR}"/*"${norm}"* "${CONTROLLER_DIR}"/*"${gid}"*; do
+            [[ -e "$prof" ]] && paths+=("$prof")
+        done
+    fi
+
+    # Deduplicate
+    printf '%s\n' "${paths[@]}" | sort -u
+}
+
+# ─── Size Calculation ────────────────────────────────────────────────────────
+
+calculate_size() {
+    local total=0
+    while IFS= read -r path; do
+        [[ -e "$path" ]] || continue
+        local sz
+        sz="$(du -sb "$path" 2>/dev/null | cut -f1)"
+        total=$((total + sz))
+    done
+    echo "$total"
+}
+
+get_available_space() {
+    local dir="$1"
+    df --output=avail -B1 "$dir" 2>/dev/null | tail -1 | tr -d ' '
+}
+
+# ─── Backup Creation ────────────────────────────────────────────────────────
+
+do_backup() {
+    local game_query="$1"
+    local include_shaders="${2:-false}"
+    local incremental="${3:-false}"
+
+    local game_info
+    game_info="$(find_game "$game_query")"
+    if [[ -z "$game_info" ]]; then
+        err "Game not found: $game_query"
+        err "Run 'forge-game-backup list' to see installed games"
+        return 1
+    fi
+
+    local source gid name gamedir extra
+    IFS='|' read -r source gid name gamedir extra <<< "$game_info"
+    local norm
+    norm="$(normalize_name "$name")"
+    local timestamp
+    timestamp="$(date +%Y%m%d-%H%M%S)"
+    local archive_name="${norm}-${timestamp}.tar.zst"
+    local archive_path="${BACKUP_DIR}/${archive_name}"
+    local meta_path="${BACKUP_DIR}/${norm}-${timestamp}.json"
+
+    head_ "Backing up: ${name}"
+    dim "Source: ${source} | ID: ${gid}"
+    dim "Install: ${gamedir}"
+    echo
+
+    # Collect paths
+    info "Collecting backup paths..."
+    local paths_file
+    paths_file="$(mktemp)"
+    trap "rm -f '$paths_file'" RETURN
+
+    collect_backup_paths "$source" "$gid" "$name" "$gamedir" "$extra" "$include_shaders" > "$paths_file"
+
+    local path_count
+    path_count="$(wc -l < "$paths_file")"
+    if [[ $path_count -eq 0 ]]; then
+        err "No files found to back up"
+        return 1
+    fi
+
+    # Calculate size
+    info "Calculating backup size..."
+    local total_size
+    total_size="$(calculate_size < "$paths_file")"
+    dim "Total source size: $(human_size "$total_size")"
+
+    # Check available space (compressed will be smaller, but check raw as safety margin)
+    local avail
+    avail="$(get_available_space "$BACKUP_DIR")"
+    local estimated_compressed=$(( total_size / 3 ))  # zstd typically 3:1
+    if (( estimated_compressed > avail )); then
+        err "Not enough disk space!"
+        err "Estimated backup: $(human_size "$estimated_compressed")"
+        err "Available space:  $(human_size "$avail")"
+        return 1
+    fi
+    dim "Estimated compressed: ~$(human_size "$estimated_compressed")"
+    dim "Available space: $(human_size "$avail")"
+    echo
+
+    # Count files for progress
+    local file_count=0
+    while IFS= read -r p; do
+        if [[ -d "$p" ]]; then
+            local c
+            c="$(find "$p" -type f 2>/dev/null | wc -l)"
+            file_count=$((file_count + c))
+        elif [[ -f "$p" ]]; then
+            file_count=$((file_count + 1))
+        fi
+    done < "$paths_file"
+
+    # Incremental backup (rsync-based)
+    if [[ "$incremental" == "true" ]]; then
+        info "Creating incremental backup..."
+        local incr_dir="${BACKUP_DIR}/.incremental/${norm}"
+        mkdir -p "$incr_dir"
+
+        while IFS= read -r p; do
+            [[ -e "$p" ]] || continue
+            rsync -a --link-dest="$incr_dir" "$p" "${incr_dir}/" 2>/dev/null || \
+                rsync -a "$p" "${incr_dir}/" 2>/dev/null
+        done < "$paths_file"
+
+        # Now archive the incremental dir
+        info "Compressing incremental snapshot..."
+        tar -I "zstd -${ZSTD_LEVEL} -T0" -cf "$archive_path" \
+            -C "${BACKUP_DIR}/.incremental" "$norm" 2>/dev/null
+    else
+        # Full backup: create tar with zstd compression
+        info "Creating compressed backup..."
+        local start_time
+        start_time="$(date +%s)"
+
+        # Build tar arguments from paths file
+        local tar_args=()
+        while IFS= read -r p; do
+            [[ -e "$p" ]] || continue
+            tar_args+=("$p")
+        done < "$paths_file"
+
+        # Create archive with progress via pv if available
+        if command -v pv &>/dev/null; then
+            tar -cf - "${tar_args[@]}" 2>/dev/null | \
+                pv -s "$total_size" -N "Compressing" -pterb | \
+                zstd -"${ZSTD_LEVEL}" -T0 -o "$archive_path" 2>/dev/null
+        else
+            # Fallback: compress in background, show manual progress
+            tar -I "zstd -${ZSTD_LEVEL} -T0" -cf "$archive_path" "${tar_args[@]}" 2>/dev/null &
+            local tar_pid=$!
+
+            while kill -0 "$tar_pid" 2>/dev/null; do
+                if [[ -f "$archive_path" ]]; then
+                    local current_size
+                    current_size="$(stat -c%s "$archive_path" 2>/dev/null || echo 0)"
+                    # Estimate progress based on compression ratio
+                    local est_progress=$(( current_size * 3 * 100 / (total_size + 1) ))
+                    [[ $est_progress -gt 99 ]] && est_progress=99
+                    progress_bar "$est_progress" 100
+                fi
+                sleep 1
+            done
+            wait "$tar_pid" || { err "Compression failed"; rm -f "$archive_path"; return 1; }
+            progress_bar 100 100
+        fi
+
+        local end_time
+        end_time="$(date +%s)"
+        local duration=$((end_time - start_time))
+        dim "Compression took $(human_duration "$duration")"
+    fi
+
+    # Calculate checksum
+    info "Calculating checksum..."
+    local checksum
+    checksum="$("${CHECKSUM_ALGO}sum" "$archive_path" | cut -d' ' -f1)"
+
+    # Get actual archive size
+    local archive_size
+    archive_size="$(stat -c%s "$archive_path" 2>/dev/null || echo 0)"
+
+    # Detect Proton version
+    local proton_version="none"
+    if [[ "$source" == "steam" && -d "${extra}/steamapps/compatdata/${gid}" ]]; then
+        local version_file="${extra}/steamapps/compatdata/${gid}/version"
+        if [[ -f "$version_file" ]]; then
+            proton_version="$(cat "$version_file")"
+        fi
+    fi
+
+    # Write metadata
+    cat > "$meta_path" <<METAEOF
+{
+    "version": "${VERSION}",
+    "game_name": $(printf '%s' "$name" | jq -Rs .),
+    "game_id": $(printf '%s' "$gid" | jq -Rs .),
+    "source": "${source}",
+    "normalized_name": "${norm}",
+    "archive": "${archive_name}",
+    "date": "$(date -Is)",
+    "timestamp": "${timestamp}",
+    "original_size": ${total_size},
+    "archive_size": ${archive_size},
+    "file_count": ${file_count},
+    "compression": "zstd-${ZSTD_LEVEL}",
+    "checksum_algo": "${CHECKSUM_ALGO}",
+    "checksum": "${checksum}",
+    "proton_version": $(printf '%s' "$proton_version" | jq -Rs .),
+    "incremental": ${incremental},
+    "include_shaders": ${include_shaders},
+    "gamedir": $(printf '%s' "$gamedir" | jq -Rs .),
+    "paths": $(while IFS= read -r p; do echo "$p"; done < "$paths_file" | jq -R . | jq -s .)
+}
+METAEOF
+
+    echo
+    ok "Backup complete: ${archive_name}"
+    dim "Size: $(human_size "$archive_size") ($(human_size "$total_size") uncompressed)"
+    dim "Ratio: $(echo "scale=1; $total_size / ($archive_size + 1)" | bc):1"
+    dim "Files: ${file_count}"
+    dim "Checksum: ${checksum:0:16}..."
+    dim "Location: ${archive_path}"
+
+    notify "Backup Complete" "${name}: $(human_size "$archive_size")" "drive-harddisk"
+    return 0
+}
+
+# ─── List Installed Games ───────────────────────────────────────────────────
+
+cmd_list() {
+    head_ "Installed Games"
+
+    local count=0
+    local fmt="${BOLD}%-8s${RESET} %-40s ${DIM}%-12s${RESET} %s\n"
+
+    printf "$fmt" "SOURCE" "NAME" "ID" "INSTALL PATH"
+    printf "%-8s %-40s %-12s %s\n" "------" "----" "--" "------------"
+
+    while IFS='|' read -r source gid name gamedir extra; do
+        [[ -z "$source" ]] && continue
+        local size_str="?"
+        if [[ -d "$gamedir" ]]; then
+            local sz
+            sz="$(du -sb "$gamedir" 2>/dev/null | cut -f1 || echo 0)"
+            size_str="$(human_size "$sz")"
+        fi
+        printf "%-8s %-40s %-12s %s ${DIM}(%s)${RESET}\n" \
+            "$source" "${name:0:40}" "$gid" "${gamedir:0:50}" "$size_str"
+        count=$((count + 1))
+    done < <(get_all_games)
+
+    echo
+    if [[ $count -eq 0 ]]; then
+        warn "No installed games detected"
+        dim "Checked: Steam, Lutris, Heroic Games Launcher"
+    else
+        dim "${count} games found"
+    fi
+}
+
+# ─── Backup a Single Game ───────────────────────────────────────────────────
+
+cmd_backup() {
+    local game="${1:-}"
+    if [[ -z "$game" ]]; then
+        err "Usage: forge-game-backup backup <game> [--shaders] [--incremental]"
+        return 1
+    fi
+    shift
+
+    local shaders="false" incremental="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --shaders)     shaders="true" ;;
+            --incremental) incremental="true" ;;
+            *) warn "Unknown option: $1" ;;
+        esac
+        shift
+    done
+
+    do_backup "$game" "$shaders" "$incremental"
+}
+
+# ─── Backup All Games ───────────────────────────────────────────────────────
+
+cmd_backup_all() {
+    head_ "Backing Up All Games"
+
+    local games=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && games+=("$line")
+    done < <(get_all_games)
+
+    if [[ ${#games[@]} -eq 0 ]]; then
+        warn "No games to back up"
+        return 1
+    fi
+
+    local total=${#games[@]}
+    local success=0 failed=0
+
+    info "Found ${total} games to back up"
+    echo
+
+    for entry in "${games[@]}"; do
+        local source gid name gamedir extra
+        IFS='|' read -r source gid name gamedir extra <<< "$entry"
+        local norm
+        norm="$(normalize_name "$name")"
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        if do_backup "$norm" "false" "false"; then
+            success=$((success + 1))
+        else
+            failed=$((failed + 1))
+        fi
+        echo
+    done
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ok "Backup complete: ${success} succeeded, ${failed} failed out of ${total}"
+}
+
+# ─── List Backups ────────────────────────────────────────────────────────────
+
+cmd_backups() {
+    head_ "Available Backups"
+
+    local total_bytes=0
+    local count=0
+    local fmt="${BOLD}%-35s${RESET} %-20s %-10s %-10s %s\n"
+
+    printf "$fmt" "BACKUP" "DATE" "SIZE" "ORIGINAL" "GAME"
+    printf "%-35s %-20s %-10s %-10s %s\n" "------" "----" "----" "--------" "----"
+
+    for meta in "${BACKUP_DIR}"/*.json; do
+        [[ -f "$meta" ]] || continue
+
+        local game_name archive date archive_size original_size checksum
+        game_name="$(jq -r '.game_name // "unknown"' "$meta" 2>/dev/null)"
+        archive="$(jq -r '.archive // ""' "$meta" 2>/dev/null)"
+        date="$(jq -r '.date // ""' "$meta" 2>/dev/null)"
+        archive_size="$(jq -r '.archive_size // 0' "$meta" 2>/dev/null)"
+        original_size="$(jq -r '.original_size // 0' "$meta" 2>/dev/null)"
+
+        [[ -z "$archive" ]] && continue
+
+        local date_short="${date:0:19}"
+        date_short="${date_short//T/ }"
+
+        local archive_base
+        archive_base="$(basename "$meta" .json)"
+
+        # Check if archive file exists
+        local status_icon="$ICON_OK"
+        if [[ ! -f "${BACKUP_DIR}/${archive}" ]]; then
+            status_icon="$ICON_FAIL"
+        fi
+
+        printf "%-35s %-20s %-10s %-10s %s %s\n" \
+            "${archive_base:0:35}" \
+            "${date_short}" \
+            "$(human_size "$archive_size")" \
+            "$(human_size "$original_size")" \
+            "$game_name" \
+            "$status_icon"
+
+        total_bytes=$((total_bytes + archive_size))
+        count=$((count + 1))
+    done
+
+    echo
+    if [[ $count -eq 0 ]]; then
+        warn "No backups found"
+        dim "Create one with: forge-game-backup backup <game>"
+    else
+        local avail
+        avail="$(get_available_space "$BACKUP_DIR")"
+        dim "${count} backups | Total: $(human_size "$total_bytes") | Free: $(human_size "$avail")"
+    fi
+}
+
+# ─── Restore ─────────────────────────────────────────────────────────────────
+
+cmd_restore() {
+    local game_query="${1:-}"
+    local specific_backup="${2:-}"
+
+    if [[ -z "$game_query" ]]; then
+        err "Usage: forge-game-backup restore <game> [backup-name]"
+        return 1
+    fi
+
+    # Find the backup metadata
+    local meta_file=""
+    local norm_query
+    norm_query="$(normalize_name "$game_query")"
+
+    if [[ -n "$specific_backup" ]]; then
+        # Exact backup name specified
+        for ext in ".json" ""; do
+            local candidate="${BACKUP_DIR}/${specific_backup}${ext}"
+            [[ -f "$candidate" ]] && { meta_file="$candidate"; break; }
+        done
+    else
+        # Find most recent backup for the game
+        local latest_time=0
+        for meta in "${BACKUP_DIR}"/*.json; do
+            [[ -f "$meta" ]] || continue
+            local m_name m_id m_norm
+            m_name="$(jq -r '.game_name // ""' "$meta" 2>/dev/null)"
+            m_id="$(jq -r '.game_id // ""' "$meta" 2>/dev/null)"
+            m_norm="$(jq -r '.normalized_name // ""' "$meta" 2>/dev/null)"
+
+            local match="false"
+            [[ "$m_norm" == "$norm_query" ]] && match="true"
+            [[ "$(echo "$m_name" | tr '[:upper:]' '[:lower:]')" == *"$(echo "$game_query" | tr '[:upper:]' '[:lower:]')"* ]] && match="true"
+            [[ "$m_id" == "$game_query" ]] && match="true"
+
+            if [[ "$match" == "true" ]]; then
+                local mtime
+                mtime="$(stat -c%Y "$meta" 2>/dev/null || echo 0)"
+                if (( mtime > latest_time )); then
+                    latest_time=$mtime
+                    meta_file="$meta"
+                fi
+            fi
+        done
+    fi
+
+    if [[ -z "$meta_file" || ! -f "$meta_file" ]]; then
+        err "No backup found for: $game_query"
+        dim "Run 'forge-game-backup backups' to see available backups"
+        return 1
+    fi
+
+    # Read metadata
+    local game_name archive checksum checksum_algo gamedir
+    game_name="$(jq -r '.game_name' "$meta_file")"
+    archive="$(jq -r '.archive' "$meta_file")"
+    checksum="$(jq -r '.checksum' "$meta_file")"
+    checksum_algo="$(jq -r '.checksum_algo // "sha256"' "$meta_file")"
+    gamedir="$(jq -r '.gamedir // ""' "$meta_file")"
+    local archive_path="${BACKUP_DIR}/${archive}"
+
+    if [[ ! -f "$archive_path" ]]; then
+        err "Archive file missing: ${archive}"
+        return 1
+    fi
+
+    head_ "Restoring: ${game_name}"
+    dim "Archive: ${archive}"
+    dim "From: $(jq -r '.date' "$meta_file")"
+    echo
+
+    # Verify checksum before restore
+    info "Verifying backup integrity..."
+    local actual_checksum
+    actual_checksum="$("${checksum_algo}sum" "$archive_path" | cut -d' ' -f1)"
+    if [[ "$actual_checksum" != "$checksum" ]]; then
+        err "Checksum mismatch! Backup may be corrupted"
+        err "Expected: ${checksum}"
+        err "Got:      ${actual_checksum}"
+        return 1
+    fi
+    ok "Checksum verified"
+
+    # Confirm before overwriting
+    if [[ -t 0 ]]; then
+        printf "\n${YELLOW}${BOLD}This will overwrite existing game files. Continue? [y/N]${RESET} "
+        read -r confirm
+        if [[ "$confirm" != [yY] && "$confirm" != [yY][eE][sS] ]]; then
+            warn "Restore cancelled"
+            return 0
+        fi
+    fi
+
+    # Extract
+    info "Extracting backup..."
+    local start_time
+    start_time="$(date +%s)"
+
+    if command -v pv &>/dev/null; then
+        pv -N "Extracting" "$archive_path" | \
+            zstd -d | tar -xf - -C / 2>/dev/null
+    else
+        tar -I "zstd -d" -xf "$archive_path" -C / 2>/dev/null &
+        local tar_pid=$!
+        local archive_size
+        archive_size="$(stat -c%s "$archive_path")"
+
+        while kill -0 "$tar_pid" 2>/dev/null; do
+            printf "\r  ${CYAN}Extracting...${RESET}"
+            sleep 1
+        done
+        wait "$tar_pid" || { err "Extraction failed"; return 1; }
+        echo
+    fi
+
+    local end_time
+    end_time="$(date +%s)"
+    local duration=$((end_time - start_time))
+
+    # Update Steam manifest if applicable
+    local source
+    source="$(jq -r '.source' "$meta_file")"
+    if [[ "$source" == "steam" ]]; then
+        local gid
+        gid="$(jq -r '.game_id' "$meta_file")"
+        dim "Steam app ${gid} manifest restored (restart Steam to detect)"
+    fi
+
+    echo
+    ok "Restore complete in $(human_duration "$duration")"
+    dim "Game: ${game_name}"
+    dim "Files restored to original locations"
+    notify "Restore Complete" "${game_name}" "drive-harddisk"
+}
+
+# ─── Verify Backup ──────────────────────────────────────────────────────────
+
+cmd_verify() {
+    local backup_name="${1:-}"
+    if [[ -z "$backup_name" ]]; then
+        err "Usage: forge-game-backup verify <backup-name>"
+        return 1
+    fi
+
+    # Find metadata
+    local meta_file=""
+    for candidate in "${BACKUP_DIR}/${backup_name}.json" "${BACKUP_DIR}/${backup_name}"; do
+        [[ -f "$candidate" ]] && { meta_file="$candidate"; break; }
+    done
+
+    # Also try partial match
+    if [[ -z "$meta_file" ]]; then
+        for meta in "${BACKUP_DIR}"/*.json; do
+            [[ -f "$meta" ]] || continue
+            local base
+            base="$(basename "$meta" .json)"
+            if [[ "$base" == *"$backup_name"* ]]; then
+                meta_file="$meta"
+                break
+            fi
+        done
+    fi
+
+    if [[ -z "$meta_file" || ! -f "$meta_file" ]]; then
+        err "Backup not found: $backup_name"
+        return 1
+    fi
+
+    local game_name archive checksum checksum_algo file_count
+    game_name="$(jq -r '.game_name' "$meta_file")"
+    archive="$(jq -r '.archive' "$meta_file")"
+    checksum="$(jq -r '.checksum' "$meta_file")"
+    checksum_algo="$(jq -r '.checksum_algo // "sha256"' "$meta_file")"
+    file_count="$(jq -r '.file_count // "?"' "$meta_file")"
+
+    head_ "Verifying: ${game_name}"
+
+    local archive_path="${BACKUP_DIR}/${archive}"
+    if [[ ! -f "$archive_path" ]]; then
+        err "Archive file missing: ${archive}"
+        return 1
+    fi
+
+    # Checksum
+    info "Verifying checksum (${checksum_algo})..."
+    local actual
+    actual="$("${checksum_algo}sum" "$archive_path" | cut -d' ' -f1)"
+    if [[ "$actual" == "$checksum" ]]; then
+        ok "Checksum matches"
+    else
+        err "Checksum MISMATCH"
+        err "Expected: ${checksum}"
+        err "Actual:   ${actual}"
+        return 1
+    fi
+
+    # Test archive integrity
+    info "Testing archive integrity..."
+    if zstd -t "$archive_path" 2>/dev/null; then
+        ok "Archive integrity OK"
+    else
+        err "Archive is corrupted"
+        return 1
+    fi
+
+    # List contents
+    info "Counting archive contents..."
+    local actual_files
+    actual_files="$(tar -I "zstd -d" -tf "$archive_path" 2>/dev/null | wc -l)"
+    dim "Archive contains ${actual_files} entries (expected ~${file_count} files)"
+
+    echo
+    ok "Backup verified successfully"
+    dim "Archive: ${archive}"
+    dim "Size: $(human_size "$(stat -c%s "$archive_path")")"
+}
+
+# ─── Delete Backup ───────────────────────────────────────────────────────────
+
+cmd_delete() {
+    local backup_name="${1:-}"
+    if [[ -z "$backup_name" ]]; then
+        err "Usage: forge-game-backup delete <backup-name>"
+        return 1
+    fi
+
+    # Find matching files
+    local meta_file="" archive_file=""
+    for meta in "${BACKUP_DIR}"/*.json; do
+        [[ -f "$meta" ]] || continue
+        local base
+        base="$(basename "$meta" .json)"
+        if [[ "$base" == "$backup_name" || "$base" == *"$backup_name"* ]]; then
+            meta_file="$meta"
+            local archive
+            archive="$(jq -r '.archive // ""' "$meta" 2>/dev/null)"
+            [[ -n "$archive" ]] && archive_file="${BACKUP_DIR}/${archive}"
+            break
+        fi
+    done
+
+    if [[ -z "$meta_file" ]]; then
+        err "Backup not found: $backup_name"
+        return 1
+    fi
+
+    local game_name
+    game_name="$(jq -r '.game_name // "unknown"' "$meta_file" 2>/dev/null)"
+    local freed=0
+
+    if [[ -n "$archive_file" && -f "$archive_file" ]]; then
+        freed="$(stat -c%s "$archive_file" 2>/dev/null || echo 0)"
+    fi
+
+    # Confirm
+    if [[ -t 0 ]]; then
+        printf "${YELLOW}Delete backup of ${game_name}? ($(human_size "$freed")) [y/N]${RESET} "
+        read -r confirm
+        if [[ "$confirm" != [yY] && "$confirm" != [yY][eE][sS] ]]; then
+            warn "Delete cancelled"
+            return 0
+        fi
+    fi
+
+    [[ -n "$archive_file" && -f "$archive_file" ]] && rm -f "$archive_file"
+    rm -f "$meta_file"
+
+    ok "Deleted backup: $(basename "$meta_file" .json)"
+    dim "Freed $(human_size "$freed")"
+}
+
+# ─── Export Backup ───────────────────────────────────────────────────────────
+
+cmd_export() {
+    local game_query="${1:-}"
+    local destination="${2:-}"
+
+    if [[ -z "$game_query" || -z "$destination" ]]; then
+        err "Usage: forge-game-backup export <game> <destination>"
+        return 1
+    fi
+
+    # Find most recent backup for the game
+    local norm_query
+    norm_query="$(normalize_name "$game_query")"
+    local meta_file="" latest_time=0
+
+    for meta in "${BACKUP_DIR}"/*.json; do
+        [[ -f "$meta" ]] || continue
+        local m_norm
+        m_norm="$(jq -r '.normalized_name // ""' "$meta" 2>/dev/null)"
+        if [[ "$m_norm" == "$norm_query" ]]; then
+            local mtime
+            mtime="$(stat -c%Y "$meta" 2>/dev/null || echo 0)"
+            if (( mtime > latest_time )); then
+                latest_time=$mtime
+                meta_file="$meta"
+            fi
+        fi
+    done
+
+    if [[ -z "$meta_file" ]]; then
+        err "No backup found for: $game_query"
+        return 1
+    fi
+
+    local archive game_name
+    archive="$(jq -r '.archive' "$meta_file")"
+    game_name="$(jq -r '.game_name' "$meta_file")"
+    local archive_path="${BACKUP_DIR}/${archive}"
+
+    if [[ ! -f "$archive_path" ]]; then
+        err "Archive file missing: ${archive}"
+        return 1
+    fi
+
+    # Create destination directory
+    mkdir -p "$destination"
+
+    head_ "Exporting: ${game_name}"
+    dim "Destination: ${destination}"
+
+    # Check space
+    local archive_size
+    archive_size="$(stat -c%s "$archive_path")"
+    local meta_size
+    meta_size="$(stat -c%s "$meta_file")"
+    local total_export=$((archive_size + meta_size))
+    local dest_avail
+    dest_avail="$(get_available_space "$destination")"
+
+    if (( total_export > dest_avail )); then
+        err "Not enough space at destination"
+        err "Need: $(human_size "$total_export") | Available: $(human_size "$dest_avail")"
+        return 1
+    fi
+
+    # Copy files
+    info "Copying archive ($(human_size "$archive_size"))..."
+    if command -v pv &>/dev/null; then
+        pv -N "Exporting" "$archive_path" > "${destination}/${archive}"
+    else
+        cp --reflink=auto "$archive_path" "${destination}/${archive}"
+    fi
+    cp "$meta_file" "${destination}/$(basename "$meta_file")"
+
+    ok "Export complete"
+    dim "Archive: ${destination}/${archive}"
+    dim "Metadata: ${destination}/$(basename "$meta_file")"
+}
+
+# ─── Import Backup ──────────────────────────────────────────────────────────
+
+cmd_import() {
+    local source_path="${1:-}"
+
+    if [[ -z "$source_path" ]]; then
+        err "Usage: forge-game-backup import <path>"
+        err "  <path> can be a .tar.zst archive or directory containing backups"
+        return 1
+    fi
+
+    head_ "Importing Backup"
+
+    local imported=0
+
+    if [[ -d "$source_path" ]]; then
+        # Import all backups from directory
+        for archive in "${source_path}"/*.tar.zst; do
+            [[ -f "$archive" ]] || continue
+            local base
+            base="$(basename "$archive" .tar.zst)"
+            local meta="${source_path}/${base}.json"
+
+            info "Importing: $(basename "$archive")"
+
+            if [[ -f "${BACKUP_DIR}/$(basename "$archive")" ]]; then
+                warn "Already exists, skipping: $(basename "$archive")"
+                continue
+            fi
+
+            cp --reflink=auto "$archive" "${BACKUP_DIR}/"
+            [[ -f "$meta" ]] && cp "$meta" "${BACKUP_DIR}/"
+
+            # If no metadata, create minimal metadata
+            if [[ ! -f "$meta" ]]; then
+                local checksum
+                checksum="$("${CHECKSUM_ALGO}sum" "${BACKUP_DIR}/$(basename "$archive")" | cut -d' ' -f1)"
+                local asize
+                asize="$(stat -c%s "${BACKUP_DIR}/$(basename "$archive")")"
+                cat > "${BACKUP_DIR}/${base}.json" <<IMEOF
+{
+    "version": "${VERSION}",
+    "game_name": "${base%%-[0-9]*}",
+    "game_id": "unknown",
+    "source": "imported",
+    "normalized_name": "${base%%-[0-9]*}",
+    "archive": "$(basename "$archive")",
+    "date": "$(date -Is)",
+    "timestamp": "$(date +%Y%m%d-%H%M%S)",
+    "original_size": 0,
+    "archive_size": ${asize},
+    "file_count": 0,
+    "compression": "zstd",
+    "checksum_algo": "${CHECKSUM_ALGO}",
+    "checksum": "${checksum}",
+    "proton_version": "unknown",
+    "incremental": false,
+    "include_shaders": false,
+    "gamedir": "",
+    "paths": []
+}
+IMEOF
+            fi
+
+            imported=$((imported + 1))
+            ok "Imported: $(basename "$archive")"
+        done
+    elif [[ -f "$source_path" && "$source_path" == *.tar.zst ]]; then
+        local base
+        base="$(basename "$source_path" .tar.zst)"
+
+        if [[ -f "${BACKUP_DIR}/$(basename "$source_path")" ]]; then
+            warn "Backup already exists: $(basename "$source_path")"
+            return 0
+        fi
+
+        info "Importing: $(basename "$source_path")"
+        cp --reflink=auto "$source_path" "${BACKUP_DIR}/"
+
+        # Look for metadata alongside
+        local meta_src="${source_path%.tar.zst}.json"
+        if [[ -f "$meta_src" ]]; then
+            cp "$meta_src" "${BACKUP_DIR}/"
+        else
+            local checksum
+            checksum="$("${CHECKSUM_ALGO}sum" "${BACKUP_DIR}/$(basename "$source_path")" | cut -d' ' -f1)"
+            local asize
+            asize="$(stat -c%s "${BACKUP_DIR}/$(basename "$source_path")")"
+            cat > "${BACKUP_DIR}/${base}.json" <<IMEOF2
+{
+    "version": "${VERSION}",
+    "game_name": "${base%%-[0-9]*}",
+    "game_id": "unknown",
+    "source": "imported",
+    "normalized_name": "${base%%-[0-9]*}",
+    "archive": "$(basename "$source_path")",
+    "date": "$(date -Is)",
+    "timestamp": "$(date +%Y%m%d-%H%M%S)",
+    "original_size": 0,
+    "archive_size": ${asize},
+    "file_count": 0,
+    "compression": "zstd",
+    "checksum_algo": "${CHECKSUM_ALGO}",
+    "checksum": "${checksum}",
+    "proton_version": "unknown",
+    "incremental": false,
+    "include_shaders": false,
+    "gamedir": "",
+    "paths": []
+}
+IMEOF2
+        fi
+
+        imported=1
+        ok "Imported: $(basename "$source_path")"
+    else
+        err "Invalid source: must be a .tar.zst file or directory"
+        return 1
+    fi
+
+    echo
+    ok "Imported ${imported} backup(s)"
+}
+
+# ─── Schedule ────────────────────────────────────────────────────────────────
+
+cmd_schedule() {
+    local game_query="${1:-}"
+    local interval="${2:-}"
+
+    if [[ -z "$game_query" ]]; then
+        # List current schedules
+        head_ "Backup Schedules"
+
+        local count=0
+        for sched in "${SCHEDULE_DIR}"/*.json; do
+            [[ -f "$sched" ]] || continue
+            local s_name s_interval s_enabled
+            s_name="$(jq -r '.game_name // "unknown"' "$sched")"
+            s_interval="$(jq -r '.interval // "manual"' "$sched")"
+            s_enabled="$(jq -r '.enabled // false' "$sched")"
+            local status_icon="$ICON_OK"
+            [[ "$s_enabled" != "true" ]] && status_icon="$ICON_FAIL"
+            printf "  %s %-30s %s\n" "$status_icon" "$s_name" "$s_interval"
+            count=$((count + 1))
+        done
+
+        if [[ $count -eq 0 ]]; then
+            dim "No scheduled backups"
+            dim "Set one with: forge-game-backup schedule <game> <daily|weekly|manual>"
+        fi
+        return 0
+    fi
+
+    if [[ -z "$interval" ]]; then
+        err "Usage: forge-game-backup schedule <game> <daily|weekly|manual>"
+        return 1
+    fi
+
+    case "$interval" in
+        daily|weekly|manual) ;;
+        disable)
+            local norm
+            norm="$(normalize_name "$game_query")"
+            local sched_file="${SCHEDULE_DIR}/${norm}.json"
+            if [[ -f "$sched_file" ]]; then
+                jq '.enabled = false' "$sched_file" > "${sched_file}.tmp" && \
+                    mv "${sched_file}.tmp" "$sched_file"
+                ok "Disabled schedule for: $game_query"
+                remove_systemd_timer "$norm"
+            else
+                warn "No schedule found for: $game_query"
+            fi
+            return 0
+            ;;
+        *)
+            err "Invalid interval: $interval (use daily, weekly, manual, or disable)"
+            return 1
+            ;;
+    esac
+
+    # Find the game
+    local game_info
+    game_info="$(find_game "$game_query")"
+    if [[ -z "$game_info" ]]; then
+        err "Game not found: $game_query"
+        return 1
+    fi
+
+    local source gid name gamedir extra
+    IFS='|' read -r source gid name gamedir extra <<< "$game_info"
+    local norm
+    norm="$(normalize_name "$name")"
+
+    # Save schedule config
+    cat > "${SCHEDULE_DIR}/${norm}.json" <<SCHEDEOF
+{
+    "game_name": $(printf '%s' "$name" | jq -Rs .),
+    "game_id": $(printf '%s' "$gid" | jq -Rs .),
+    "source": "${source}",
+    "normalized_name": "${norm}",
+    "interval": "${interval}",
+    "enabled": true,
+    "created": "$(date -Is)"
+}
+SCHEDEOF
+
+    # Create systemd timer if not manual
+    if [[ "$interval" != "manual" ]]; then
+        install_systemd_timer "$norm" "$name" "$interval"
+        ok "Scheduled ${interval} backup for: ${name}"
+    else
+        ok "Set manual backup reminder for: ${name}"
+    fi
+}
+
+install_systemd_timer() {
+    local norm="$1" name="$2" interval="$3"
+    local timer_dir="${HOME}/.config/systemd/user"
+    mkdir -p "$timer_dir"
+
+    local calendar=""
+    case "$interval" in
+        daily)  calendar="*-*-* 03:00:00" ;;
+        weekly) calendar="Sun *-*-* 03:00:00" ;;
+    esac
+
+    # Service unit
+    cat > "${timer_dir}/forge-backup-${norm}.service" <<SVCEOF
+[Unit]
+Description=Forge Game Backup: ${name}
+
+[Service]
+Type=oneshot
+ExecStart=$(command -v forge-game-backup || echo /usr/bin/forge-game-backup) backup ${norm}
+Environment=HOME=${HOME}
+SVCEOF
+
+    # Timer unit
+    cat > "${timer_dir}/forge-backup-${norm}.timer" <<TMREOF
+[Unit]
+Description=Forge Game Backup Timer: ${name}
+
+[Timer]
+OnCalendar=${calendar}
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target
+TMREOF
+
+    # Enable the timer
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable --now "forge-backup-${norm}.timer" 2>/dev/null || \
+        warn "Could not enable systemd timer (not running under systemd?)"
+}
+
+remove_systemd_timer() {
+    local norm="$1"
+    local timer_dir="${HOME}/.config/systemd/user"
+    systemctl --user disable --now "forge-backup-${norm}.timer" 2>/dev/null || true
+    rm -f "${timer_dir}/forge-backup-${norm}.service" "${timer_dir}/forge-backup-${norm}.timer"
+    systemctl --user daemon-reload 2>/dev/null || true
+}
+
+# ─── Clean Old Backups ───────────────────────────────────────────────────────
+
+cmd_clean() {
+    local keep="${1:-$DEFAULT_KEEP}"
+    head_ "Cleaning Old Backups (keeping ${keep} per game)"
+
+    # Group backups by game
+    declare -A game_backups
+    for meta in "${BACKUP_DIR}"/*.json; do
+        [[ -f "$meta" ]] || continue
+        local norm
+        norm="$(jq -r '.normalized_name // "unknown"' "$meta" 2>/dev/null)"
+        game_backups["$norm"]+="${meta}"$'\n'
+    done
+
+    local total_freed=0
+    local total_deleted=0
+
+    for norm in "${!game_backups[@]}"; do
+        local metas=()
+        while IFS= read -r m; do
+            [[ -n "$m" ]] && metas+=("$m")
+        done <<< "${game_backups[$norm]}"
+
+        local count=${#metas[@]}
+        if (( count <= keep )); then
+            continue
+        fi
+
+        # Sort by modification time (newest first) and remove oldest
+        local sorted=()
+        while IFS= read -r m; do
+            [[ -n "$m" ]] && sorted+=("$m")
+        done < <(for m in "${metas[@]}"; do
+            echo "$(stat -c%Y "$m" 2>/dev/null || echo 0) $m"
+        done | sort -rn | awk '{print $2}')
+
+        local remove_count=$((count - keep))
+        local game_name
+        game_name="$(jq -r '.game_name // "unknown"' "${sorted[0]}" 2>/dev/null)"
+        info "${game_name}: removing ${remove_count} old backup(s), keeping ${keep}"
+
+        for (( i = keep; i < ${#sorted[@]}; i++ )); do
+            local m="${sorted[$i]}"
+            local archive
+            archive="$(jq -r '.archive // ""' "$m" 2>/dev/null)"
+            local archive_path="${BACKUP_DIR}/${archive}"
+            local freed=0
+
+            if [[ -n "$archive" && -f "$archive_path" ]]; then
+                freed="$(stat -c%s "$archive_path" 2>/dev/null || echo 0)"
+                rm -f "$archive_path"
+            fi
+            rm -f "$m"
+
+            total_freed=$((total_freed + freed))
+            total_deleted=$((total_deleted + 1))
+            dim "Removed: $(basename "$m" .json)"
+        done
+    done
+
+    # Clean up orphaned incremental data
+    local incr_dir="${BACKUP_DIR}/.incremental"
+    if [[ -d "$incr_dir" ]]; then
+        for d in "${incr_dir}"/*/; do
+            [[ -d "$d" ]] || continue
+            local dname
+            dname="$(basename "$d")"
+            # Check if any backup still references this
+            local has_ref="false"
+            for meta in "${BACKUP_DIR}"/*.json; do
+                [[ -f "$meta" ]] || continue
+                local m_norm
+                m_norm="$(jq -r '.normalized_name // ""' "$meta" 2>/dev/null)"
+                if [[ "$m_norm" == "$dname" ]]; then
+                    has_ref="true"
+                    break
+                fi
+            done
+            if [[ "$has_ref" == "false" ]]; then
+                local sz
+                sz="$(du -sb "$d" 2>/dev/null | cut -f1 || echo 0)"
+                rm -rf "$d"
+                total_freed=$((total_freed + sz))
+                dim "Removed orphaned incremental: ${dname}"
+            fi
+        done
+    fi
+
+    echo
+    if [[ $total_deleted -eq 0 ]]; then
+        ok "Nothing to clean (all games have <= ${keep} backups)"
+    else
+        ok "Cleaned ${total_deleted} backup(s), freed $(human_size "$total_freed")"
+    fi
+}
+
+# ─── Deduplication ───────────────────────────────────────────────────────────
+
+deduplicate_backups() {
+    head_ "Deduplicating Backups"
+    info "Scanning for identical files across backups..."
+
+    # This works on the incremental storage, hardlinking identical files
+    local incr_dir="${BACKUP_DIR}/.incremental"
+    if [[ ! -d "$incr_dir" ]]; then
+        dim "No incremental backups to deduplicate"
+        return 0
+    fi
+
+    if command -v jdupes &>/dev/null; then
+        local before_size
+        before_size="$(du -sb "$incr_dir" 2>/dev/null | cut -f1 || echo 0)"
+
+        jdupes -rL "$incr_dir" 2>/dev/null
+
+        local after_size
+        after_size="$(du -sb "$incr_dir" 2>/dev/null | cut -f1 || echo 0)"
+        local saved=$((before_size - after_size))
+
+        if (( saved > 0 )); then
+            ok "Saved $(human_size "$saved") via deduplication"
+        else
+            dim "No duplicate files found"
+        fi
+    elif command -v hardlink &>/dev/null; then
+        hardlink -v "$incr_dir" 2>/dev/null
+        ok "Deduplication complete (hardlink)"
+    else
+        warn "Install 'jdupes' or 'hardlink' for deduplication support"
+        dim "sudo dnf install jdupes"
+    fi
+}
+
+# ─── Help ────────────────────────────────────────────────────────────────────
+
+cmd_help() {
+    cat <<'HELPEOF'
+
+  ╔══════════════════════════════════════════════════╗
+  ║   24HG Forge Game Backup                        ║
+  ║   Full game installation backup & restore       ║
+  ╚══════════════════════════════════════════════════╝
+
+  USAGE
+    forge-game-backup <command> [arguments]
+
+  COMMANDS
+    list                          List installed games that can be backed up
+    backup <game> [options]       Backup a game installation
+      --shaders                   Include shader cache (can be large)
+      --incremental               Incremental backup (rsync-based, only changes)
+    backup-all                    Backup all installed games
+    restore <game> [backup]       Restore from backup (latest or specific)
+    backups                       List all available backups with sizes/dates
+    delete <backup>               Delete a backup
+    verify <backup>               Verify backup integrity (checksum + archive)
+    export <game> <destination>   Export backup to external path
+    import <path>                 Import backup from .tar.zst or directory
+    schedule <game> <interval>    Schedule auto-backup (daily/weekly/manual/disable)
+    schedule                      List current schedules
+    clean [keep]                  Remove old backups, keep N per game (default: 3)
+    dedup                         Deduplicate files across incremental backups
+    help                          Show this help
+
+  WHAT GETS BACKED UP
+    - Game files (Steam, Lutris, Heroic)
+    - Proton/Wine prefix (compatdata)
+    - Save files (via forge-cloud-saves paths)
+    - Game-specific config files
+    - Controller profiles (from forge-controllers)
+    - Shader cache (optional, with --shaders)
+
+  BACKUP FORMAT
+    - Compressed tar archives with zstd (fast, good ratio)
+    - Stored in: ~/.local/share/forge/game-backups/
+    - Naming: <game>-<YYYYMMDD-HHMMSS>.tar.zst
+    - Metadata JSON alongside each archive
+    - SHA-256 checksum verification
+
+  ENVIRONMENT
+    FORGE_BACKUP_ZSTD_LEVEL   Compression level 1-19 (default: 3)
+
+  EXAMPLES
+    forge-game-backup list
+    forge-game-backup backup "Cyberpunk 2077"
+    forge-game-backup backup rust --shaders --incremental
+    forge-game-backup restore "Cyberpunk 2077"
+    forge-game-backup export elden-ring /mnt/usb/backups
+    forge-game-backup schedule "Baldur's Gate 3" weekly
+    forge-game-backup clean 5
+
+HELPEOF
+}
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+main() {
+    local command="${1:-help}"
+    shift 2>/dev/null || true
+
+    init_dirs
+
+    case "$command" in
+        list)
+            cmd_list
+            ;;
+        backup)
+            require_cmd tar zstd jq
+            cmd_backup "$@"
+            ;;
+        backup-all)
+            require_cmd tar zstd jq
+            cmd_backup_all
+            ;;
+        restore)
+            require_cmd tar zstd jq
+            cmd_restore "$@"
+            ;;
+        backups|list-backups)
+            cmd_backups
+            ;;
+        delete|rm|remove)
+            cmd_delete "$@"
+            ;;
+        verify|check)
+            require_cmd zstd jq
+            cmd_verify "$@"
+            ;;
+        export)
+            require_cmd jq
+            cmd_export "$@"
+            ;;
+        import)
+            cmd_import "$@"
+            ;;
+        schedule)
+            cmd_schedule "$@"
+            ;;
+        clean|prune)
+            require_cmd jq
+            cmd_clean "$@"
+            ;;
+        dedup|deduplicate)
+            deduplicate_backups
+            ;;
+        help|-h|--help)
+            cmd_help
+            ;;
+        version|-v|--version)
+            echo "forge-game-backup ${VERSION}"
+            ;;
+        *)
+            err "Unknown command: ${command}"
+            dim "Run 'forge-game-backup help' for usage"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

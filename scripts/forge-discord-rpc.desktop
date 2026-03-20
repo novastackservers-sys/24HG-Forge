@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=24HG Forge Discord RPC
+Comment=Show gaming activity in Discord Rich Presence
+Exec=forge-discord-rpc start
+Icon=forge-logo
+Terminal=false
+Categories=Game;Utility;
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
+StartupNotify=false
+NoDisplay=true

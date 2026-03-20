@@ -1,0 +1,12 @@
+[Unit]
+Description=24HG Forge Game Ready — Auto-optimize new game installs
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/forge-game-ready watch
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

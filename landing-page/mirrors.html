@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mirrors — 24HG Forge</title>
+    <meta name="description" content="Download 24HG Forge from the fastest mirror near you. Community-hosted mirrors worldwide.">
+    <meta property="og:title" content="24HG Forge Mirrors">
+    <meta property="og:description" content="Choose the fastest download mirror for 24HG Forge.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://os.24hgaming.com/mirrors.html">
+    <link rel="icon" href="favicon.ico" type="image/x-icon">
+    <link rel="apple-touch-icon" href="logo-192.png">
+    <meta property="og:image" content="https://os.24hgaming.com/og-image.png">
+    <link rel="stylesheet" href="style.css">
+    <script async src="https://analytics.24hgaming.com/track" data-website-id="a052da7e-3afe-40b1-9354-071901dd26e4"></script>
+    <style>
+        /* Mirror-specific styles */
+        .mirror-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1.5rem;
+        }
+
+        .mirror-table th,
+        .mirror-table td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .mirror-table th {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+        }
+
+        .mirror-table tr:hover {
+            background: var(--bg-card);
+        }
+
+        .mirror-name {
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+
+        .mirror-sponsor {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+        }
+
+        .mirror-country {
+            white-space: nowrap;
+        }
+
+        .country-flag {
+            display: inline-block;
+            width: 1.4em;
+            text-align: center;
+            margin-right: 0.3em;
+            font-size: 1.1em;
+        }
+
+        .mirror-status {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .status-online  { background: #50c87820; color: #50c878; }
+        .status-degraded { background: #ffcc5020; color: #ffcc50; }
+        .status-offline  { background: #ff555520; color: #ff5555; }
+        .status-testing  { background: #00e5ff20; color: #00e5ff; }
+
+        .mirror-latency {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.9rem;
+        }
+
+        .latency-good    { color: #50c878; }
+        .latency-ok      { color: #ffcc50; }
+        .latency-slow    { color: #ff5555; }
+
+        .speed-bar {
+            display: inline-block;
+            height: 8px;
+            border-radius: 4px;
+            background: var(--border);
+            width: 80px;
+            overflow: hidden;
+            vertical-align: middle;
+            margin-left: 0.5rem;
+        }
+
+        .speed-bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            background: var(--accent);
+            transition: width 0.5s ease;
+        }
+
+        .mirror-actions {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .btn-sm {
+            display: inline-block;
+            padding: 4px 12px;
+            font-size: 0.8rem;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text);
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+
+        .btn-sm:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .btn-sm.active {
+            border-color: var(--accent);
+            background: var(--accent-dim);
+            color: var(--accent);
+        }
+
+        /* Auto-select banner */
+        .auto-banner {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem 2rem;
+            margin-bottom: 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .auto-banner-text h3 {
+            color: var(--text-bright);
+            margin-bottom: 0.25rem;
+        }
+
+        .auto-banner-text p {
+            color: var(--text-dim);
+            font-size: 0.9rem;
+        }
+
+        .auto-result {
+            display: none;
+            padding: 1rem 1.5rem;
+            background: var(--bg-elevated);
+            border: 1px solid var(--accent-dim);
+            border-radius: var(--radius);
+            margin-bottom: 2rem;
+        }
+
+        .auto-result.visible {
+            display: block;
+        }
+
+        .auto-result .best-mirror {
+            color: var(--accent);
+            font-weight: 700;
+            font-size: 1.1rem;
+        }
+
+        /* Loading state */
+        .loading-row td {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-dim);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .loading-dots {
+            animation: pulse 1.5s infinite;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .mirror-table th:nth-child(4),
+            .mirror-table td:nth-child(4),
+            .mirror-table th:nth-child(5),
+            .mirror-table td:nth-child(5) {
+                display: none;
+            }
+
+            .auto-banner {
+                flex-direction: column;
+                text-align: center;
+            }
+        }
+
+        /* Host CTA */
+        .host-cta {
+            margin-top: 3rem;
+            padding: 2rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            text-align: center;
+        }
+
+        .host-cta h3 {
+            color: var(--text-bright);
+            margin-bottom: 0.5rem;
+        }
+
+        .host-cta p {
+            color: var(--text-dim);
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+
+<nav class="nav">
+    <a href="index.html" class="nav-logo">24HG Forge</a>
+    <div class="nav-links">
+        <a href="download.html">Download</a>
+        <a href="features.html">Features</a>
+        <a href="install.html">Install</a>
+        <a href="compatibility.html">Compatibility</a>
+        <a href="roadmap.html">Roadmap</a>
+        <a href="faq.html">FAQ</a>
+        <a href="status.html">Status</a>
+        <a href="https://hub.24hgaming.com" class="btn-nav">Open Hub</a>
+    </div>
+</nav>
+
+<section class="hero">
+    <h1>Download Mirrors</h1>
+    <p>Pick the fastest mirror near you, or let us choose automatically.</p>
+</section>
+
+<main class="page">
+
+    <!-- Auto-select banner -->
+    <div class="auto-banner">
+        <div class="auto-banner-text">
+            <h3>Find the fastest mirror</h3>
+            <p>We will test all mirrors and redirect you to the quickest one.</p>
+        </div>
+        <button class="btn btn-primary" id="btn-auto" onclick="autoSelect()">
+            Auto-Select Fastest
+        </button>
+    </div>
+
+    <!-- Auto-select result -->
+    <div class="auto-result" id="auto-result">
+        <span class="best-mirror" id="best-mirror-name"></span>
+        <span id="best-mirror-latency" style="color: var(--text-dim); margin-left: 0.5rem;"></span>
+        <br>
+        <a href="#" id="best-mirror-link" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">
+            Download from this mirror
+        </a>
+    </div>
+
+    <!-- Mirror table -->
+    <h2>All Mirrors</h2>
+    <p class="subtitle">Click "Test" to measure speed from your location, or "Download" to grab the ISO.</p>
+
+    <table class="mirror-table" id="mirror-table">
+        <thead>
+            <tr>
+                <th>Mirror</th>
+                <th>Location</th>
+                <th>Status</th>
+                <th>Latency</th>
+                <th>Speed</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="mirror-tbody">
+            <tr class="loading-row">
+                <td colspan="6"><span class="loading-dots">Loading mirrors...</span></td>
+            </tr>
+        </tbody>
+    </table>
+
+    <!-- Host a mirror CTA -->
+    <div class="host-cta">
+        <h3>Want to host a mirror?</h3>
+        <p>Help the community by hosting a 24HG Forge mirror. We provide rsync access and setup instructions.</p>
+        <a href="https://github.com/24hgaming/forge-os/issues" class="btn btn-primary">Become a Mirror Host</a>
+    </div>
+
+</main>
+
+<footer>
+    <div class="footer-grid">
+        <div class="footer-col">
+            <h4>24HG Forge</h4>
+            <a href="download.html">Download</a>
+            <a href="install.html">Install Guide</a>
+            <a href="roadmap.html">Roadmap</a>
+            <a href="faq.html">FAQ</a>
+        <a href="status.html">Status</a>
+        </div>
+        <div class="footer-col">
+            <h4>Community</h4>
+            <a href="https://hub.24hgaming.com">24HG Hub</a>
+            <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+            <a href="https://24hgaming.com">24hgaming.com</a>
+        </div>
+        <div class="footer-col">
+            <h4>Built on</h4>
+            <a href="https://bazzite.gg">Bazzite</a>
+            <a href="https://universal-blue.org">Universal Blue</a>
+            <a href="https://fedoraproject.org">Fedora</a>
+        </div>
+    </div>
+    <div class="footer-bottom">
+        <p>Made by <a href="https://24hgaming.com">24 Hour Gaming</a> &middot; MIT License</p>
+    </div>
+</footer>
+
+<script>
+(function() {
+    'use strict';
+
+    const API_BASE = 'https://os.24hgaming.com/api';
+    const ISO_FILENAME = 'forge-desktop-v2.5.iso';
+    let mirrors = [];
+
+    // Country code to flag emoji
+    function countryFlag(code) {
+        if (!code || code.length !== 2) return '';
+        const upper = code.toUpperCase();
+        const c1 = 0x1F1E6 + upper.charCodeAt(0) - 65;
+        const c2 = 0x1F1E6 + upper.charCodeAt(1) - 65;
+        return String.fromCodePoint(c1, c2);
+    }
+
+    // Latency class
+    function latencyClass(ms) {
+        if (ms < 0) return 'latency-slow';
+        if (ms <= 150) return 'latency-good';
+        if (ms <= 400) return 'latency-ok';
+        return 'latency-slow';
+    }
+
+    // Status badge
+    function statusBadge(status) {
+        const cls = {
+            'active': 'status-online',
+            'online': 'status-online',
+            'up': 'status-online',
+            'degraded': 'status-degraded',
+            'slow': 'status-degraded',
+            'offline': 'status-offline',
+            'down': 'status-offline'
+        };
+        return `<span class="mirror-status ${cls[status] || 'status-testing'}">${status || 'unknown'}</span>`;
+    }
+
+    // Render mirror row
+    function renderRow(m) {
+        const flag = countryFlag(m.country);
+        return `
+            <tr id="mirror-${m.id}">
+                <td>
+                    <div class="mirror-name">${escapeHtml(m.name)}</div>
+                    ${m.sponsor ? `<div class="mirror-sponsor">${escapeHtml(m.sponsor)}</div>` : ''}
+                </td>
+                <td class="mirror-country">
+                    <span class="country-flag">${flag}</span>
+                    ${escapeHtml(m.country_name || m.country || '')}
+                </td>
+                <td>${statusBadge(m.status)}</td>
+                <td class="mirror-latency" id="latency-${m.id}">--</td>
+                <td id="speed-${m.id}">
+                    <div class="speed-bar"><div class="speed-bar-fill" id="bar-${m.id}" style="width: 0%"></div></div>
+                </td>
+                <td class="mirror-actions">
+                    <button class="btn-sm" onclick="testMirror('${m.id}')">Test</button>
+                    <a class="btn-sm" href="${m.url}/iso/${ISO_FILENAME}">Download</a>
+                </td>
+            </tr>`;
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    // Fetch and render mirrors
+    async function loadMirrors() {
+        try {
+            const resp = await fetch(`${API_BASE}/mirrors`);
+            const data = await resp.json();
+            mirrors = data.mirrors || [];
+        } catch (e) {
+            // Fallback static mirrors for when API is unavailable
+            mirrors = [
+                { id: 'cdn', name: 'Official CDN', url: 'https://cdn.24hgaming.com', country: 'US', country_name: 'United States', sponsor: '24HG', status: 'active' },
+                { id: 'eu1', name: 'Europe (Frankfurt)', url: 'https://eu.mirror.24hgaming.com', country: 'DE', country_name: 'Germany', sponsor: '24HG', status: 'active' },
+                { id: 'ap1', name: 'Asia Pacific (Tokyo)', url: 'https://ap.mirror.24hgaming.com', country: 'JP', country_name: 'Japan', sponsor: '24HG', status: 'active' }
+            ];
+        }
+
+        const tbody = document.getElementById('mirror-tbody');
+        if (mirrors.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:2rem; color:var(--text-dim);">No mirrors available. Use the official download page.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = mirrors.map(renderRow).join('');
+    }
+
+    // Test a single mirror
+    window.testMirror = async function(id) {
+        const mirror = mirrors.find(m => m.id === id);
+        if (!mirror) return;
+
+        const latencyEl = document.getElementById(`latency-${id}`);
+        const barEl = document.getElementById(`bar-${id}`);
+
+        latencyEl.textContent = 'testing...';
+        latencyEl.className = 'mirror-latency status-testing';
+
+        try {
+            const start = performance.now();
+            await fetch(mirror.url + '/iso/SHA256SUMS', {
+                method: 'HEAD',
+                mode: 'no-cors',
+                cache: 'no-store'
+            });
+            const elapsed = Math.round(performance.now() - start);
+
+            latencyEl.textContent = elapsed + 'ms';
+            latencyEl.className = 'mirror-latency ' + latencyClass(elapsed);
+
+            // Update speed bar (scale: 0ms = 100%, 1000ms+ = ~5%)
+            const pct = Math.max(5, Math.min(100, 100 - (elapsed / 10)));
+            barEl.style.width = pct + '%';
+
+            mirror._latency = elapsed;
+        } catch (e) {
+            latencyEl.textContent = 'error';
+            latencyEl.className = 'mirror-latency latency-slow';
+            mirror._latency = -1;
+        }
+    };
+
+    // Auto-select fastest
+    window.autoSelect = async function() {
+        const btn = document.getElementById('btn-auto');
+        btn.textContent = 'Testing...';
+        btn.disabled = true;
+
+        // Test all mirrors in parallel
+        const promises = mirrors.map(m => {
+            return new Promise(async (resolve) => {
+                try {
+                    const start = performance.now();
+                    await fetch(m.url + '/iso/SHA256SUMS', {
+                        method: 'HEAD',
+                        mode: 'no-cors',
+                        cache: 'no-store'
+                    });
+                    const elapsed = Math.round(performance.now() - start);
+                    m._latency = elapsed;
+
+                    // Update UI
+                    const latencyEl = document.getElementById(`latency-${m.id}`);
+                    const barEl = document.getElementById(`bar-${m.id}`);
+                    if (latencyEl) {
+                        latencyEl.textContent = elapsed + 'ms';
+                        latencyEl.className = 'mirror-latency ' + latencyClass(elapsed);
+                    }
+                    if (barEl) {
+                        const pct = Math.max(5, Math.min(100, 100 - (elapsed / 10)));
+                        barEl.style.width = pct + '%';
+                    }
+                } catch (e) {
+                    m._latency = -1;
+                }
+                resolve();
+            });
+        });
+
+        await Promise.all(promises);
+
+        // Find fastest
+        const tested = mirrors.filter(m => m._latency > 0);
+        if (tested.length === 0) {
+            btn.textContent = 'No mirrors responded';
+            btn.disabled = false;
+            return;
+        }
+
+        tested.sort((a, b) => a._latency - b._latency);
+        const best = tested[0];
+
+        // Show result
+        const resultDiv = document.getElementById('auto-result');
+        document.getElementById('best-mirror-name').textContent =
+            countryFlag(best.country) + ' ' + best.name;
+        document.getElementById('best-mirror-latency').textContent =
+            best._latency + 'ms';
+        document.getElementById('best-mirror-link').href =
+            best.url + '/iso/' + ISO_FILENAME;
+
+        resultDiv.classList.add('visible');
+
+        btn.textContent = 'Auto-Select Fastest';
+        btn.disabled = false;
+
+        // Sort table by latency
+        const tbody = document.getElementById('mirror-tbody');
+        const sorted = [...mirrors].sort((a, b) => {
+            if ((a._latency || 9999) < 0) return 1;
+            if ((b._latency || 9999) < 0) return -1;
+            return (a._latency || 9999) - (b._latency || 9999);
+        });
+        tbody.innerHTML = sorted.map(renderRow).join('');
+
+        // Re-apply latency values after re-render
+        for (const m of sorted) {
+            if (m._latency && m._latency > 0) {
+                const latencyEl = document.getElementById(`latency-${m.id}`);
+                const barEl = document.getElementById(`bar-${m.id}`);
+                if (latencyEl) {
+                    latencyEl.textContent = m._latency + 'ms';
+                    latencyEl.className = 'mirror-latency ' + latencyClass(m._latency);
+                }
+                if (barEl) {
+                    const pct = Math.max(5, Math.min(100, 100 - (m._latency / 10)));
+                    barEl.style.width = pct + '%';
+                }
+            }
+        }
+    };
+
+    // Initialize
+    document.addEventListener('DOMContentLoaded', loadMirrors);
+})();
+</script>
+
+<script>fetch("/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.pathname,referer:document.referrer})}).catch(()=>{})</script>
+</body>
+</html>

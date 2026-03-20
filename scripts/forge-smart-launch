@@ -58,8 +58,8 @@ POLL_INTERVAL = 2  # seconds
 PROCESS_SETTLE_TIME = 3  # wait for process tree to settle before applying
 
 # Performance profile binary
-HUBOS_PERFORMANCE = "/usr/bin/forge-performance"
-HUBOS_SESSION_SUMMARY = "/usr/bin/forge-session-summary"
+FORGE_PERFORMANCE = "/usr/bin/forge-performance"
+FORGE_SESSION_SUMMARY = "/usr/bin/forge-session-summary"
 
 # ---------------------------------------------------------------------------
 # MangoHud Presets
@@ -875,7 +875,7 @@ class OptimizationEngine:
     def _save_previous_state(self) -> None:
         """Snapshot current system state before modifications."""
         # Detect current performance profile
-        result = run_cmd([HUBOS_PERFORMANCE, "status"])
+        result = run_cmd([FORGE_PERFORMANCE, "status"])
         self.previous_state["performance"] = "balanced"  # default fallback
         if result.returncode == 0 and result.stdout.strip():
             self.previous_state["performance"] = result.stdout.strip().split()[-1] \
@@ -895,7 +895,7 @@ class OptimizationEngine:
 
     def _apply_performance(self, profile: str) -> None:
         """Switch system performance profile."""
-        result = run_cmd([HUBOS_PERFORMANCE, profile])
+        result = run_cmd([FORGE_PERFORMANCE, profile])
         if result.returncode == 0:
             self.applied_opts.append(f"performance:{profile}")
             log.info("Performance profile set to: %s", profile)
@@ -1049,8 +1049,8 @@ class OptimizationEngine:
 
     def _trigger_session_summary(self) -> None:
         """Call forge-session-summary for post-game report."""
-        if Path(HUBOS_SESSION_SUMMARY).exists():
-            run_cmd([HUBOS_SESSION_SUMMARY, "generate"], timeout=30)
+        if Path(FORGE_SESSION_SUMMARY).exists():
+            run_cmd([FORGE_SESSION_SUMMARY, "generate"], timeout=30)
             log.info("Session summary triggered")
         else:
             log.debug("forge-session-summary not found, skipping")
@@ -1416,7 +1416,7 @@ def cmd_status() -> None:
     print(f"\n  Daemon Status:  {daemon_status}")
 
     # Performance profile
-    result = run_cmd([HUBOS_PERFORMANCE, "status"])
+    result = run_cmd([FORGE_PERFORMANCE, "status"])
     perf = result.stdout.strip() if result.returncode == 0 and result.stdout else "unknown"
     print(f"  Perf Profile:   {perf}")
 

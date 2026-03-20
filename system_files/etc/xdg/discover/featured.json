@@ -1,0 +1,45 @@
+[
+  {
+    "type": "fullscreen",
+    "url": "https://hub.24hgaming.com",
+    "titleColor": "#ffffff",
+    "text": "24HG Hub — Your Gaming Community",
+    "links": [
+      {
+        "text": "Open Hub",
+        "url": "https://hub.24hgaming.com"
+      }
+    ],
+    "image": "file:///usr/share/forge/wallpapers/forge-dark.png"
+  },
+  {
+    "type": "application",
+    "application": "com.valvesoftware.Steam",
+    "titleColor": "#ffffff",
+    "text": "Steam — Install your games"
+  },
+  {
+    "type": "application",
+    "application": "com.heroicgameslauncher.hgl",
+    "titleColor": "#ffffff",
+    "text": "Heroic — Epic & GOG games on Linux"
+  },
+  {
+    "type": "application",
+    "application": "net.lutris.Lutris",
+    "titleColor": "#ffffff",
+    "text": "Lutris — Universal game launcher"
+  },
+  {
+    "type": "application",
+    "application": "com.obsproject.Studio",
+    "titleColor": "#ffffff",
+    "text": "OBS Studio — Stream & record gameplay"
+  },
+  {
+    "type": "application",
+    "application": "com.discordapp.Discord",
+    "titleColor": "#ffffff",
+    "text": "Discord — Join the 24HG community"
+  }
+]

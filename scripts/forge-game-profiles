@@ -13,7 +13,7 @@ set -euo pipefail
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 PROFILES_DIR="${HOME}/.config/forge/game-profiles"
-HUBOS_PROTON_DIR="/var/lib/forge/proton-ge"
+FORGE_PROTON_DIR="/var/lib/forge/proton-ge"
 
 # Possible Steam root directories (checked in order)
 STEAM_PATHS=(
@@ -176,8 +176,8 @@ _find_proton_versions() {
     done
 
     # 24HG Forge-managed Proton-GE
-    if [ -d "$HUBOS_PROTON_DIR" ]; then
-        for d in "$HUBOS_PROTON_DIR"/*/; do
+    if [ -d "$FORGE_PROTON_DIR" ]; then
+        for d in "$FORGE_PROTON_DIR"/*/; do
             [ -d "$d" ] || continue
             local name
             name="$(basename "$d")"
@@ -613,7 +613,7 @@ cmd_apply() {
         case "$ptype" in
             steam)  _log "  Steam built-in: $pname" ;;
             ge)     _log "  GE-Proton: $pname (in compatibilitytools.d)" ;;
-            forge)  _log "  24HG Forge Proton-GE: $pname (in $HUBOS_PROTON_DIR)" ;;
+            forge)  _log "  24HG Forge Proton-GE: $pname (in $FORGE_PROTON_DIR)" ;;
         esac
     fi
 

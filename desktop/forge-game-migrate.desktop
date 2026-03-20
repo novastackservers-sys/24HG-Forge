@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Forge Game Migrator
+Comment=Migrate games between drives
+Exec=/usr/bin/forge-game-migrate
+Icon=forge-logo
+Terminal=true
+Type=Application
+Categories=Game;Utility;
+Keywords=migrate;move;drive;transfer;game;

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=24HG Forge Desktop Tour
+Comment=Guided tour of 24HG Forge features (runs once after first-boot wizard)
+Exec=/usr/bin/forge-tour
+Icon=forge-logo
+Type=Application
+Categories=System;
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Phase=Application
+X-KDE-autostart-after=panel

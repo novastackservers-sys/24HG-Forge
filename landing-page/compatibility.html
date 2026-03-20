@@ -5,8 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game Compatibility — 24HG Forge</title>
     <meta name="description" content="Honest game compatibility info for 24HG Forge. See what works, what needs tweaks, and what doesn't — no surprises.">
+    <meta property="og:image" content="https://os.24hgaming.com/og-image.png">
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <link rel="stylesheet" href="style.css">
+    <script async src="https://analytics.24hgaming.com/track" data-website-id="a052da7e-3afe-40b1-9354-071901dd26e4"></script>
     <style>
         .stats-bar {
             display: flex;
@@ -153,13 +155,14 @@
 <nav class="nav">
     <a href="index.html" class="nav-logo">24HG Forge</a>
     <div class="nav-links">
-        <a href="index.html">Home</a>
-        <a href="install.html">Install Guide</a>
+        <a href="download.html">Download</a>
+        <a href="features.html">Features</a>
+        <a href="install.html">Install</a>
         <a href="compatibility.html" class="active">Compatibility</a>
         <a href="roadmap.html">Roadmap</a>
         <a href="faq.html">FAQ</a>
-        <a href="https://hub.24hgaming.com">Hub</a>
-        <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+        <a href="status.html">Status</a>
+        <a href="https://hub.24hgaming.com" class="btn-nav">Open Hub</a>
     </div>
 </nav>
 
@@ -632,12 +635,31 @@
 </main>
 
 <footer>
-    <p>
-        24HG Forge is made by <a href="https://24hgaming.com">24 Hour Gaming</a> &middot;
-        <a href="https://discord.gg/ymfEjH6EJN">Discord</a> &middot;
-        <a href="https://hub.24hgaming.com">Hub</a>
-    </p>
-    <p style="margin-top: 0.5rem;">Built on Bazzite / Universal Blue / Fedora Atomic. MIT License.</p>
+    <div class="footer-grid">
+        <div class="footer-col">
+            <h4>24HG Forge</h4>
+            <a href="download.html">Download</a>
+            <a href="install.html">Install Guide</a>
+            <a href="roadmap.html">Roadmap</a>
+            <a href="faq.html">FAQ</a>
+        <a href="status.html">Status</a>
+        </div>
+        <div class="footer-col">
+            <h4>Community</h4>
+            <a href="https://hub.24hgaming.com">24HG Hub</a>
+            <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+            <a href="https://24hgaming.com">24hgaming.com</a>
+        </div>
+        <div class="footer-col">
+            <h4>Built on</h4>
+            <a href="https://bazzite.gg">Bazzite</a>
+            <a href="https://universal-blue.org">Universal Blue</a>
+            <a href="https://fedoraproject.org">Fedora</a>
+        </div>
+    </div>
+    <div class="footer-bottom">
+        <p>Made by <a href="https://24hgaming.com">24 Hour Gaming</a> &middot; MIT License</p>
+    </div>
 </footer>
 
 <script>fetch("/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.pathname,referer:document.referrer})}).catch(()=>{})</script>

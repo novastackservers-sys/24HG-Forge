@@ -1,0 +1,515 @@
+#!/bin/bash
+# 24HG Forge Sunshine Setup — One-click game streaming to any device
+#
+# Sets up Sunshine (game streaming server) for seamless remote play
+# with Moonlight clients on phones, tablets, TVs, and other PCs.
+#
+# Usage: forge-sunshine-setup [--headless]
+#   --headless   Skip zenity dialogs (for automated installs)
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Colors & formatting
+# ---------------------------------------------------------------------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# ---------------------------------------------------------------------------
+# Globals
+# ---------------------------------------------------------------------------
+SUNSHINE_CONFIG_DIR="${HOME}/.config/sunshine"
+SUNSHINE_CONFIG="${SUNSHINE_CONFIG_DIR}/sunshine.conf"
+SUNSHINE_CERT_DIR="${SUNSHINE_CONFIG_DIR}/credentials"
+SUNSHINE_SERVICE_DIR="${HOME}/.config/systemd/user"
+SUNSHINE_DESKTOP_DIR="${HOME}/.local/share/applications"
+HEADLESS=false
+LOG_TAG="forge-sunshine"
+
+for arg in "$@"; do
+    case "$arg" in
+        --headless) HEADLESS=true ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+log() {
+    local level="$1"; shift
+    local msg="$*"
+    logger -t "$LOG_TAG" "[$level] $msg"
+    case "$level" in
+        INFO)  echo -e "${GREEN}[+]${RESET} $msg" ;;
+        WARN)  echo -e "${YELLOW}[!]${RESET} $msg" ;;
+        ERROR) echo -e "${RED}[x]${RESET} $msg" ;;
+        STEP)  echo -e "${CYAN}[>]${RESET} ${BOLD}$msg${RESET}" ;;
+        OK)    echo -e "${GREEN}[✓]${RESET} $msg" ;;
+    esac
+}
+
+header() {
+    echo ""
+    echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${BOLD}${BLUE}  🎮  24HG Forge — Sunshine Game Streaming Setup${RESET}"
+    echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+}
+
+die() {
+    log ERROR "$*"
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# GPU detection
+# ---------------------------------------------------------------------------
+detect_gpu() {
+    if lspci 2>/dev/null | grep -qi 'nvidia'; then
+        echo "nvidia"
+    elif lspci 2>/dev/null | grep -qiE 'amd|radeon'; then
+        echo "amd"
+    else
+        echo "software"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Display detection
+# ---------------------------------------------------------------------------
+detect_resolution() {
+    local res=""
+    # Try xrandr first
+    if command -v xrandr &>/dev/null; then
+        res=$(xrandr --current 2>/dev/null | grep '\*' | head -1 | awk '{print $1}')
+    fi
+    # Try wlr-randr for Wayland
+    if [[ -z "$res" ]] && command -v wlr-randr &>/dev/null; then
+        res=$(wlr-randr 2>/dev/null | grep 'current' | grep -oP '\d+x\d+' | head -1)
+    fi
+    # Try gnome-randr
+    if [[ -z "$res" ]] && command -v gnome-randr &>/dev/null; then
+        res=$(gnome-randr 2>/dev/null | grep '\*' | grep -oP '\d+x\d+' | head -1)
+    fi
+    # Fallback
+    echo "${res:-1920x1080}"
+}
+
+detect_refresh_rate() {
+    local rate=""
+    if command -v xrandr &>/dev/null; then
+        rate=$(xrandr --current 2>/dev/null | grep '\*' | head -1 | grep -oP '[\d.]+(?=\*)')
+    fi
+    if [[ -z "$rate" ]] && command -v wlr-randr &>/dev/null; then
+        rate=$(wlr-randr 2>/dev/null | grep 'current' | grep -oP '[\d.]+(?= Hz)' | head -1)
+    fi
+    # Return integer portion
+    local int_rate="${rate%%.*}"
+    int_rate="${int_rate:-60}"
+    echo "$int_rate"
+}
+
+# ---------------------------------------------------------------------------
+# Step 1: Install Sunshine
+# ---------------------------------------------------------------------------
+install_sunshine() {
+    log STEP "Checking Sunshine installation..."
+
+    # Check system install
+    if command -v sunshine &>/dev/null; then
+        log OK "Sunshine already installed (system): $(sunshine --version 2>/dev/null || echo 'unknown version')"
+        return 0
+    fi
+
+    # Check flatpak install
+    if flatpak list 2>/dev/null | grep -qi sunshine; then
+        log OK "Sunshine already installed (Flatpak)"
+        return 0
+    fi
+
+    log INFO "Sunshine not found — installing via Flatpak..."
+
+    if ! command -v flatpak &>/dev/null; then
+        die "Flatpak is not installed. Cannot install Sunshine automatically."
+    fi
+
+    # Ensure Flathub is available
+    if ! flatpak remotes 2>/dev/null | grep -q flathub; then
+        log INFO "Adding Flathub repository..."
+        flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    fi
+
+    log INFO "Installing Sunshine from Flathub (this may take a moment)..."
+    if flatpak install --user -y flathub dev.lizardbyte.sunshine; then
+        log OK "Sunshine installed successfully via Flatpak"
+    else
+        die "Failed to install Sunshine via Flatpak. Check your network connection."
+    fi
+}
+
+# Resolve the actual sunshine binary/command
+get_sunshine_cmd() {
+    if command -v sunshine &>/dev/null; then
+        echo "sunshine"
+    elif flatpak list 2>/dev/null | grep -qi sunshine; then
+        echo "flatpak run dev.lizardbyte.sunshine"
+    else
+        die "Sunshine is not installed"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Step 2: Generate self-signed certificate
+# ---------------------------------------------------------------------------
+generate_cert() {
+    log STEP "Checking TLS certificates..."
+
+    mkdir -p "$SUNSHINE_CERT_DIR"
+
+    local cert_file="${SUNSHINE_CERT_DIR}/cacert.pem"
+    local key_file="${SUNSHINE_CERT_DIR}/cakey.pem"
+
+    if [[ -f "$cert_file" && -f "$key_file" ]]; then
+        log OK "TLS certificates already exist"
+        return 0
+    fi
+
+    log INFO "Generating self-signed certificate for Sunshine..."
+
+    if ! command -v openssl &>/dev/null; then
+        die "openssl is required to generate certificates but is not installed"
+    fi
+
+    openssl req -x509 -newkey rsa:4096 \
+        -keyout "$key_file" \
+        -out "$cert_file" \
+        -sha256 -days 3650 -nodes \
+        -subj "/CN=Sunshine/O=24HG Forge/OU=Game Streaming" \
+        2>/dev/null
+
+    chmod 600 "$key_file"
+    chmod 644 "$cert_file"
+
+    log OK "Self-signed certificate generated (valid 10 years)"
+}
+
+# ---------------------------------------------------------------------------
+# Step 3: Configure Sunshine with gaming-optimized defaults
+# ---------------------------------------------------------------------------
+configure_sunshine() {
+    log STEP "Configuring Sunshine with gaming-optimized defaults..."
+
+    mkdir -p "$SUNSHINE_CONFIG_DIR"
+
+    local gpu_type
+    gpu_type=$(detect_gpu)
+    log INFO "Detected GPU: ${gpu_type}"
+
+    local resolution
+    resolution=$(detect_resolution)
+    local res_w="${resolution%%x*}"
+    local res_h="${resolution##*x}"
+    log INFO "Detected display resolution: ${resolution}"
+
+    local refresh_rate
+    refresh_rate=$(detect_refresh_rate)
+    log INFO "Detected refresh rate: ${refresh_rate}Hz"
+
+    # Determine FPS cap: 120 for high-refresh displays, 60 otherwise
+    local fps=60
+    if (( refresh_rate >= 120 )); then
+        fps=120
+        log INFO "High-refresh display detected — setting FPS cap to 120"
+    fi
+
+    # Encoder selection
+    local encoder="software"
+    local encoder_name="Software (libx264)"
+    case "$gpu_type" in
+        nvidia)
+            encoder="nvenc"
+            encoder_name="NVENC (NVIDIA hardware)"
+            ;;
+        amd)
+            encoder="vaapi"
+            encoder_name="VAAPI (AMD hardware)"
+            ;;
+    esac
+    log INFO "Encoder: ${encoder_name}"
+
+    # Audio backend detection
+    local audio_sink="pulse"
+    if pactl info 2>/dev/null | grep -qi pipewire; then
+        audio_sink="pulse"  # PipeWire exposes PulseAudio interface
+        log INFO "Audio: PipeWire (via PulseAudio interface)"
+    elif command -v pactl &>/dev/null; then
+        log INFO "Audio: PulseAudio"
+    else
+        log WARN "No PulseAudio/PipeWire detected — audio may not work"
+    fi
+
+    # Back up existing config
+    if [[ -f "$SUNSHINE_CONFIG" ]]; then
+        cp "$SUNSHINE_CONFIG" "${SUNSHINE_CONFIG}.bak.$(date +%s)"
+        log INFO "Backed up existing config"
+    fi
+
+    cat > "$SUNSHINE_CONFIG" <<CONF
+# Sunshine configuration — generated by 24HG Forge
+# $(date -Iseconds)
+
+# --- Network ---
+origin_web_ui_allowed = lan
+upnp = enabled
+
+# --- Video Encoding ---
+encoder = ${encoder}
+fps = [${fps}]
+min_fps_factor = 1
+
+# --- Resolution (match display) ---
+resolutions = [${res_w}x${res_h}]
+
+# --- Quality ---
+bitrate = 20000
+qp = 28
+
+# --- Audio ---
+audio_sink = ${audio_sink}
+
+# --- Certificates ---
+cert = ${SUNSHINE_CERT_DIR}/cacert.pem
+pkey = ${SUNSHINE_CERT_DIR}/cakey.pem
+
+# --- Input ---
+key_repeat_delay = 500
+key_repeat_period = 30
+back_button_timeout = 2000
+gamepad = enabled
+
+# --- Misc ---
+notify_pre_releases = disabled
+CONF
+
+    log OK "Configuration written to ${SUNSHINE_CONFIG}"
+}
+
+# ---------------------------------------------------------------------------
+# Step 4: Create systemd user service
+# ---------------------------------------------------------------------------
+create_service() {
+    log STEP "Setting up systemd user service..."
+
+    mkdir -p "$SUNSHINE_SERVICE_DIR"
+
+    local sunshine_cmd
+    sunshine_cmd=$(get_sunshine_cmd)
+
+    local exec_start
+    if [[ "$sunshine_cmd" == "flatpak"* ]]; then
+        exec_start="/usr/bin/flatpak run dev.lizardbyte.sunshine ${SUNSHINE_CONFIG}"
+    else
+        exec_start="$(command -v sunshine) ${SUNSHINE_CONFIG}"
+    fi
+
+    cat > "${SUNSHINE_SERVICE_DIR}/sunshine.service" <<SERVICE
+[Unit]
+Description=Sunshine Game Streaming Server (24HG Forge)
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=${exec_start}
+Restart=on-failure
+RestartSec=5
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+
+[Install]
+WantedBy=graphical-session.target
+SERVICE
+
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable sunshine.service 2>/dev/null || true
+    systemctl --user restart sunshine.service 2>/dev/null || true
+
+    log OK "Systemd user service created and enabled"
+}
+
+# ---------------------------------------------------------------------------
+# Step 5: Open firewall ports
+# ---------------------------------------------------------------------------
+configure_firewall() {
+    log STEP "Configuring firewall for game streaming..."
+
+    local ports_opened=false
+
+    # Try firewall-cmd (firewalld)
+    if command -v firewall-cmd &>/dev/null; then
+        log INFO "Using firewalld..."
+        sudo firewall-cmd --permanent --add-port=47984-47990/tcp 2>/dev/null || true
+        sudo firewall-cmd --permanent --add-port=48010/udp 2>/dev/null || true
+        sudo firewall-cmd --permanent --add-port=47998-48000/udp 2>/dev/null || true
+        sudo firewall-cmd --reload 2>/dev/null || true
+        ports_opened=true
+    fi
+
+    # Try ufw
+    if command -v ufw &>/dev/null && ! $ports_opened; then
+        log INFO "Using ufw..."
+        sudo ufw allow 47984:47990/tcp 2>/dev/null || true
+        sudo ufw allow 48010/udp 2>/dev/null || true
+        sudo ufw allow 47998:48000/udp 2>/dev/null || true
+        ports_opened=true
+    fi
+
+    # Try iptables as last resort
+    if ! $ports_opened && command -v iptables &>/dev/null; then
+        log INFO "Using iptables..."
+        sudo iptables -A INPUT -p tcp --dport 47984:47990 -j ACCEPT 2>/dev/null || true
+        sudo iptables -A INPUT -p udp --dport 48010 -j ACCEPT 2>/dev/null || true
+        sudo iptables -A INPUT -p udp --dport 47998:48000 -j ACCEPT 2>/dev/null || true
+        ports_opened=true
+    fi
+
+    if $ports_opened; then
+        log OK "Firewall ports opened: TCP 47984-47990, UDP 47998-48000, UDP 48010"
+    else
+        log WARN "No supported firewall found — ports may need to be opened manually"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Step 6: Show pairing PIN
+# ---------------------------------------------------------------------------
+show_pairing_pin() {
+    log STEP "Generating pairing PIN for Moonlight clients..."
+
+    local pin
+    pin=$(shuf -i 1000-9999 -n 1)
+
+    local sunshine_cmd
+    sunshine_cmd=$(get_sunshine_cmd)
+
+    # Attempt to send PIN via Sunshine API
+    local pin_set=false
+    for attempt in 1 2 3; do
+        sleep 2
+        if curl -s -k -X POST "https://localhost:47990/api/pin" \
+            -H "Content-Type: application/json" \
+            -d "{\"pin\": \"${pin}\"}" 2>/dev/null | grep -q "true"; then
+            pin_set=true
+            break
+        fi
+    done
+
+    if ! $pin_set; then
+        log WARN "Could not set PIN via API — Sunshine may still be starting up"
+        log INFO "You can set a PIN later at: https://localhost:47990"
+        return 0
+    fi
+
+    local ip_addr
+    ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}')
+    ip_addr="${ip_addr:-<your IP>}"
+
+    echo ""
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${BOLD}  Pairing PIN: ${YELLOW}${pin}${RESET}"
+    echo -e "${DIM}  Enter this PIN in Moonlight when connecting to: ${ip_addr}${RESET}"
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+
+    logger -t "$LOG_TAG" "[INFO] Pairing PIN set for Moonlight: ${pin}"
+
+    # Show zenity dialog if available and not headless
+    if ! $HEADLESS && command -v zenity &>/dev/null; then
+        zenity --info \
+            --title="Stream This PC — Pairing PIN" \
+            --text="<b>Your pairing PIN is: ${pin}</b>\n\nOpen <b>Moonlight</b> on your device and connect to:\n<b>${ip_addr}</b>\n\nEnter the PIN when prompted.\n\nPorts opened:\n  TCP 47984-47990\n  UDP 47998-48000, 48010" \
+            --width=400 \
+            --ok-label="Done" \
+            2>/dev/null &
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Step 7: Create desktop shortcut
+# ---------------------------------------------------------------------------
+create_desktop_shortcut() {
+    log STEP "Creating desktop shortcut..."
+
+    mkdir -p "$SUNSHINE_DESKTOP_DIR"
+
+    cat > "${SUNSHINE_DESKTOP_DIR}/forge-sunshine-stream.desktop" <<DESKTOP
+[Desktop Entry]
+Name=Stream This PC
+Comment=Set up game streaming to phones, tablets, and other devices
+Exec=forge-sunshine-setup
+Icon=forge-logo
+Terminal=true
+Type=Application
+Categories=Game;
+Keywords=stream;sunshine;moonlight;remote;play;
+DESKTOP
+
+    chmod +x "${SUNSHINE_DESKTOP_DIR}/forge-sunshine-stream.desktop"
+
+    # Also copy to Desktop if it exists
+    local desktop_dir
+    desktop_dir=$(xdg-user-dir DESKTOP 2>/dev/null || echo "${HOME}/Desktop")
+    if [[ -d "$desktop_dir" ]]; then
+        cp "${SUNSHINE_DESKTOP_DIR}/forge-sunshine-stream.desktop" "$desktop_dir/"
+        chmod +x "${desktop_dir}/forge-sunshine-stream.desktop"
+        log INFO "Shortcut also placed on Desktop"
+    fi
+
+    log OK "Desktop shortcut created: Stream This PC"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+    header
+
+    log INFO "Starting Sunshine game streaming setup..."
+    logger -t "$LOG_TAG" "[INFO] === Forge Sunshine Setup started ==="
+
+    install_sunshine
+    echo ""
+    generate_cert
+    echo ""
+    configure_sunshine
+    echo ""
+    create_service
+    echo ""
+    configure_firewall
+    echo ""
+    create_desktop_shortcut
+    echo ""
+    show_pairing_pin
+
+    echo ""
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${BOLD}${GREEN}  Sunshine setup complete!${RESET}"
+    echo -e "${DIM}  Web UI:    https://localhost:47990${RESET}"
+    echo -e "${DIM}  Config:    ${SUNSHINE_CONFIG}${RESET}"
+    echo -e "${DIM}  Service:   systemctl --user status sunshine${RESET}"
+    echo -e "${DIM}  Logs:      journalctl --user -u sunshine -f${RESET}"
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+    echo -e "  Install ${BOLD}Moonlight${RESET} on your device: ${CYAN}https://moonlight-stream.org${RESET}"
+    echo ""
+
+    logger -t "$LOG_TAG" "[INFO] === Forge Sunshine Setup completed successfully ==="
+}
+
+main "$@"

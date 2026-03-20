@@ -2,7 +2,7 @@
 # 24 Hour Gaming
 
 title-text: ""
-desktop-color: "#0a0a14"
+desktop-color: "#040910"
 desktop-image: "background.png"
 terminal-font: "DejaVu Sans Mono Regular 14"
 terminal-left: "10%"

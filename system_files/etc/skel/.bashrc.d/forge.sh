@@ -2,11 +2,15 @@
 # Sourced by .bashrc on Fedora (via /etc/skel/.bashrc.d/ pattern)
 
 # Show 24HG Forge system info + tip of the day on first terminal open (once per session)
-if [ -z "$24HG_FORGE_GREETED" ] && [ -x /usr/bin/forge-neofetch ]; then
+if [ -z "$_24HG_FORGE_GREETED" ] && [ -x /usr/bin/forge-neofetch ]; then
     /usr/bin/forge-neofetch
     [ -x /usr/bin/forge-tips ] && /usr/bin/forge-tips daily 2>/dev/null
-    export 24HG_FORGE_GREETED=1
+    export _24HG_FORGE_GREETED=1
 fi
+
+# Fastfetch / neofetch aliases
+alias fastfetch='fastfetch --config ~/.config/fastfetch/config.jsonc'
+alias neofetch='forge-neofetch'
 
 # 24HG Quick aliases
 alias hub='xdg-open https://hub.24hgaming.com'
@@ -110,7 +114,6 @@ alias shaders='forge-shader-cache'
 
 # Wave 6 feel aliases
 alias tips='forge-tips'
-alias achievements='forge-achievements list'
 alias wallpaper='forge-wallpaper'
 alias sounds='forge-sounds'
 
@@ -138,7 +141,6 @@ alias session='forge-session-summary last'
 
 # Wave 11 gap-filler aliases
 alias anticheat='forge-anticheat-tracker scan'
-alias mods='forge-mod-manager'
 alias hdr='forge-hdr status'
 alias flatpak-fix='forge-flatpak-fix scan'
 alias update-guard='forge-update-guard status'
@@ -153,3 +155,159 @@ alias setup-starfield='forge-game-setup starfield'
 alias setup-forza='forge-game-setup forza'
 alias setup-warframe='forge-game-setup warframe'
 alias setup-minecraft='forge-game-setup minecraft'
+
+# Wave 13 killer features aliases
+alias sunshine='forge-sunshine-setup'
+alias clip='forge-clip capture'
+alias clip-start='forge-clip start'
+alias clip-stop='forge-clip stop'
+alias clip-share='forge-clip share'
+alias lan='forge-lan-party scan'
+alias lan-announce='forge-lan-party announce --daemon'
+alias radio='forge-radio play'
+alias radio-stop='forge-radio stop'
+alias radio-next='forge-radio next'
+alias rig-score='forge-rig-score run'
+alias leaderboard='forge-rig-score leaderboard'
+alias invite='forge-invite create'
+alias game-compat='forge-game-compat check'
+alias compat-report='forge-game-compat report'
+alias tournament='forge-tournament list'
+alias live-wallpaper='forge-live-wallpaper start'
+alias hw-tune='forge-hw-optimizer tune'
+
+# Wave 14 social + intelligence aliases
+alias overlay='forge-overlay start'
+alias cloud-saves='forge-cloud-saves sync'
+alias save-sync='forge-cloud-saves watch'
+alias achievements='forge-achievements list'
+alias badges='forge-achievements progress'
+alias launch='forge-launch play'
+alias ping-test='forge-ping-optimizer test'
+alias ping-fix='forge-ping-optimizer optimize'
+alias rescue='forge-rescue scan'
+alias fix='forge-rescue fix'
+alias gallery='forge-gallery list'
+alias share-screenshot='forge-gallery share'
+alias mods='forge-mods list'
+
+# Wave 15 infrastructure aliases
+alias vpn='forge-vpn join'
+alias vpn-leave='forge-vpn leave'
+alias vpn-peers='forge-vpn peers'
+alias retro='forge-retro list'
+alias retro-setup='forge-retro setup'
+alias retro-play='forge-retro play'
+alias voice='forge-voice join'
+alias voice-leave='forge-voice leave'
+alias ptt='forge-voice ptt-bind'
+
+# Wave 16 polish + security aliases
+alias settings='forge-settings'
+alias notify='forge-notify send'
+alias tour='forge-tour'
+alias digest='forge-digest generate'
+alias feed='forge-feed'
+alias themes='forge-themes list'
+alias theme-apply='forge-themes apply'
+alias firewall='forge-firewall status'
+alias crash-report='forge-crash-report scan'
+alias mirrors='forge-mirror list'
+
+# Wave 17 smart gaming + family + hardware aliases
+alias ai='forge-ai'
+alias ask='forge-ai fix'
+alias perflog='forge-perflog live'
+alias perf-start='forge-perflog start'
+alias perf-stop='forge-perflog stop'
+alias deals='forge-deals check'
+alias wishlist='forge-deals wishlist'
+alias highlights='forge-highlights scan'
+alias parental='forge-parental status'
+alias a11y='forge-a11y status'
+alias colorblind='forge-a11y colorblind'
+alias laptop='forge-laptop status'
+alias laptop-gaming='forge-laptop gaming'
+alias laptop-battery='forge-laptop battery'
+alias controllers='forge-controllers list'
+alias challenges='forge-challenges list'
+alias discord-rpc='forge-discord-rpc start'
+alias snapshot='forge-snapshot create'
+alias snapshots='forge-snapshot list'
+alias win-import='forge-windows-import scan'
+
+# Wave 18 server hosting + streaming + hardware aliases
+alias host='forge-host list'
+alias host-start='forge-host start'
+alias host-stop='forge-host stop'
+alias go-live='forge-go-live'
+alias record='forge-record start'
+alias record-stop='forge-record stop'
+alias vr='forge-vr status'
+alias vr-start='forge-vr start'
+alias gamedrive='forge-gamedrive list'
+alias nas='forge-nas scan'
+alias proton-pick='forge-proton-pick check'
+alias game-backup='forge-game-backup list'
+alias splitscreen='forge-splitscreen start'
+alias focus='forge-focus on'
+alias focus-off='forge-focus off'
+
+# Help
+alias help='forge-help'
+
+# Wave 19 smart gaming OS aliases
+alias game-ready='forge-game-ready scan'
+alias game-ready-watch='forge-game-ready watch'
+alias smart-update='forge-smart-updates status'
+alias update-now='forge-smart-updates apply'
+alias update-rollback='forge-smart-updates rollback'
+alias quick-resume='forge-quick-resume save'
+alias resume='forge-quick-resume restore'
+alias hw-scout='forge-hw-scout status'
+alias hw-monitor='forge-hw-scout monitor'
+alias hw-report='forge-hw-scout report'
+alias game-install='forge-game-installer search'
+alias game-list='forge-game-installer list'
+alias lan-mode='forge-lan-mode start'
+alias lan-stop='forge-lan-mode stop'
+alias lan-peers='forge-lan-mode peers'
+alias perf-profile='forge-perf-profiles list'
+alias perf-apply='forge-perf-profiles apply'
+alias desktop-mode='forge-boot-select desktop'
+alias game-mode='forge-boot-select gamemode'
+alias drivers='forge-driver-mgr status'
+alias driver-health='forge-driver-mgr health'
+alias net-optimize='forge-net-optimizer optimize'
+alias net-ping='forge-net-optimizer ping'
+alias net-dns='forge-net-optimizer dns test'
+alias migrate-games='forge-game-migrate scan'
+alias tray='forge-tray-dashboard'
+alias sandbox='forge-sandbox run'
+alias power='forge-power-plan status'
+alias power-battery='forge-power-plan battery'
+alias power-perf='forge-power-plan performance'
+alias host-game='forge-one-click-server start'
+alias host-list='forge-one-click-server list'
+alias host-status='forge-one-click-server status'
+alias host-invite='forge-one-click-server invite'
+
+# Wave 20 hardware control + polish aliases
+alias peripherals='forge-peripherals list'
+alias mouse='forge-peripherals mouse'
+alias rgb='forge-peripherals rgb'
+alias macros='forge-peripherals macro list'
+alias input-lag='forge-input-lag status'
+alias low-latency='forge-input-lag optimize'
+alias audio-route='forge-audio-router status'
+alias audio-devices='forge-audio-router devices'
+alias clean='forge-cleaner scan'
+alias clean-now='forge-cleaner clean'
+alias dual-gpu='forge-dual-gpu status'
+alias dgpu='forge-dual-gpu run'
+alias mod='forge-mod-manager list'
+alias mod-install='forge-mod-manager install'
+alias custom-res='forge-custom-res list'
+alias stretched='forge-custom-res stretched'
+alias boot-speed='forge-boot-speed analyze'
+alias boot-optimize='forge-boot-speed optimize'

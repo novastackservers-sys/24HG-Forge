@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Forge Tray Dashboard
+Comment=System tray monitoring
+Exec=/usr/bin/forge-tray-dashboard
+Icon=forge-logo
+Terminal=false
+Type=Application
+Categories=System;Monitor;
+Keywords=tray;dashboard;monitor;system;status;

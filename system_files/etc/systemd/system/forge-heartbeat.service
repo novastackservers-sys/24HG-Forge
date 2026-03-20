@@ -1,0 +1,8 @@
+[Unit]
+Description=24HG Forge Heartbeat — Report system info to Control Room
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/forge/heartbeat.sh

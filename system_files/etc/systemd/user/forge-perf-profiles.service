@@ -1,0 +1,12 @@
+[Unit]
+Description=24HG Forge Performance Profiles — Auto-apply per-game profiles
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/forge-perf-profiles daemon
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Id": "com.24hg.hubwidget",
+        "Name": "24HG Hub",
+        "Description": "24 Hour Gaming community dashboard widget",
+        "Icon": "forge-logo",
+        "Authors": [{"Name": "24 Hour Gaming"}],
+        "Category": "Online Services",
+        "License": "MIT",
+        "Version": "1.0",
+        "Website": "https://24hgaming.com"
+    },
+    "X-Plasma-API": "declarativeappletscript",
+    "X-Plasma-MainScript": "ui/main.qml",
+    "X-Plasma-Provides": ["org.kde.plasma.notifications"],
+    "KPackageStructure": "Plasma/Applet"
+}

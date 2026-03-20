@@ -6,20 +6,23 @@
     <title>Install 24HG Forge — Step-by-Step Guide</title>
     <meta name="description" content="How to install 24HG Forge on your PC, laptop, or Steam Deck. Detailed guide with screenshots.">
     <link rel="icon" href="favicon.ico" type="image/x-icon">
+    <meta property="og:image" content="https://os.24hgaming.com/og-image.png">
     <link rel="stylesheet" href="style.css">
+    <script async src="https://analytics.24hgaming.com/track" data-website-id="a052da7e-3afe-40b1-9354-071901dd26e4"></script>
 </head>
 <body>
 
 <nav class="nav">
     <a href="index.html" class="nav-logo">24HG Forge</a>
     <div class="nav-links">
-        <a href="index.html">Home</a>
-        <a href="install.html" class="active">Install Guide</a>
+        <a href="download.html">Download</a>
+        <a href="features.html">Features</a>
+        <a href="install.html" class="active">Install</a>
         <a href="compatibility.html">Compatibility</a>
         <a href="roadmap.html">Roadmap</a>
         <a href="faq.html">FAQ</a>
-        <a href="https://hub.24hgaming.com">Hub</a>
-        <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+        <a href="status.html">Status</a>
+        <a href="https://hub.24hgaming.com" class="btn-nav">Open Hub</a>
     </div>
 </nav>
 
@@ -37,12 +40,12 @@
                     <tr>
                         <td><strong>Desktop</strong></td>
                         <td>AMD or Intel GPU (integrated or dedicated)</td>
-                        <td><a href="download.html" class="btn btn-small btn-primary">Download (~4 GB)</a></td>
+                        <td><a href="download.html" class="btn btn-small btn-primary">Download (~6.5 GB)</a></td>
                     </tr>
                     <tr>
                         <td><strong>NVIDIA</strong></td>
                         <td>NVIDIA GPU (GTX 900 series or newer)</td>
-                        <td><a href="download.html" class="btn btn-small btn-primary">Download (~4.5 GB)</a></td>
+                        <td><a href="download.html" class="btn btn-small btn-primary">Download (~6.4 GB)</a></td>
                     </tr>
                     <tr>
                         <td><strong>Deck</strong></td>
@@ -173,6 +176,7 @@
             <tr><td><code>forge-diag --paste</code></td><td>Upload diagnostics and get a shareable URL</td></tr>
             <tr><td><code>connect-rust</code></td><td>Quick-connect to 24HG Rust server</td></tr>
             <tr><td><code>connect-cs2</code></td><td>Quick-connect to 24HG CS2 server</td></tr>
+            <tr><td><code>forge-vpn</code></td><td>Join the Discovery VPN — find gamers worldwide</td></tr>
             <tr><td><code>forge-update</code></td><td>Check for and apply OS updates</td></tr>
             <tr><td><code>forge-rollback</code></td><td>Roll back to previous OS version</td></tr>
             <tr><td><code>forge-game-profiles list</code></td><td>Manage per-game launch profiles</td></tr>
@@ -225,11 +229,31 @@
 </main>
 
 <footer>
-    <p>
-        <a href="https://24hgaming.com">24 Hour Gaming</a> &middot;
-        <a href="https://discord.gg/ymfEjH6EJN">Discord</a> &middot;
-        <a href="https://hub.24hgaming.com">Hub</a>
-    </p>
+    <div class="footer-grid">
+        <div class="footer-col">
+            <h4>24HG Forge</h4>
+            <a href="download.html">Download</a>
+            <a href="install.html">Install Guide</a>
+            <a href="roadmap.html">Roadmap</a>
+            <a href="faq.html">FAQ</a>
+        <a href="status.html">Status</a>
+        </div>
+        <div class="footer-col">
+            <h4>Community</h4>
+            <a href="https://hub.24hgaming.com">24HG Hub</a>
+            <a href="https://discord.gg/ymfEjH6EJN">Discord</a>
+            <a href="https://24hgaming.com">24hgaming.com</a>
+        </div>
+        <div class="footer-col">
+            <h4>Built on</h4>
+            <a href="https://bazzite.gg">Bazzite</a>
+            <a href="https://universal-blue.org">Universal Blue</a>
+            <a href="https://fedoraproject.org">Fedora</a>
+        </div>
+    </div>
+    <div class="footer-bottom">
+        <p>Made by <a href="https://24hgaming.com">24 Hour Gaming</a> &middot; MIT License</p>
+    </div>
 </footer>
 
 <script>fetch("/api/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.pathname,referer:document.referrer})}).catch(()=>{})</script>

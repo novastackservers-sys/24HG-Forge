@@ -1,0 +1,351 @@
+# 24HG Forge — Lint & Validation
+# Quick checks on every PR to catch errors before a full build.
+#
+# Status badge:
+#   ![Lint](https://github.com/24hgaming/forge/actions/workflows/lint.yml/badge.svg)
+
+name: Lint
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.sh'
+      - '**.desktop'
+      - 'Containerfile*'
+      - 'stage-build.sh'
+      - 'scripts/**'
+      - 'system_files/**'
+      - 'hub-app/**'
+  push:
+    branches: [main]
+    paths:
+      - '**.sh'
+      - '**.desktop'
+      - 'Containerfile*'
+      - 'stage-build.sh'
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-scripts:
+    name: Lint shell scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check bash syntax on all .sh files
+        run: |
+          ERRORS=0
+          echo "Checking .sh files with bash -n..."
+
+          while IFS= read -r -d '' file; do
+            if ! bash -n "$file" 2>/tmp/bash-err; then
+              echo "::error file=${file}::Syntax error in ${file}"
+              cat /tmp/bash-err
+              ((ERRORS++))
+            fi
+          done < <(find . -name '*.sh' -type f -print0)
+
+          echo "Checked $(find . -name '*.sh' -type f | wc -l) .sh files"
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::${ERRORS} script(s) have syntax errors"
+            exit 1
+          fi
+          echo "All .sh files pass syntax check."
+
+      - name: Check bash syntax on executable scripts (no extension)
+        run: |
+          ERRORS=0
+          echo "Checking executable scripts in scripts/ and hub-app/..."
+
+          for dir in scripts hub-app; do
+            [ -d "$dir" ] || continue
+            while IFS= read -r -d '' file; do
+              # Skip non-text files and files with extensions already checked
+              case "$file" in
+                *.sh|*.desktop|*.json|*.lua|*.conf|*.xml|*.png|*.svg|*.jpg) continue ;;
+              esac
+
+              # Only check files that look like shell scripts
+              if head -1 "$file" 2>/dev/null | grep -qE '^#!.*(bash|sh)'; then
+                if ! bash -n "$file" 2>/tmp/bash-err; then
+                  echo "::error file=${file}::Syntax error in ${file}"
+                  cat /tmp/bash-err
+                  ((ERRORS++))
+                fi
+              fi
+            done < <(find "$dir" -type f -print0)
+          done
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::${ERRORS} script(s) have syntax errors"
+            exit 1
+          fi
+          echo "All executable scripts pass syntax check."
+
+  lint-desktop-files:
+    name: Validate .desktop files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required keys in .desktop files
+        run: |
+          ERRORS=0
+          CHECKED=0
+
+          while IFS= read -r -d '' file; do
+            ((CHECKED++))
+            MISSING=""
+
+            # Required keys per freedesktop.org spec
+            if ! grep -q '^Type=' "$file"; then
+              MISSING="${MISSING} Type"
+            fi
+            if ! grep -q '^Name=' "$file"; then
+              MISSING="${MISSING} Name"
+            fi
+
+            # Exec is required for Type=Application
+            TYPE=$(grep '^Type=' "$file" | head -1 | cut -d= -f2)
+            if [ "$TYPE" = "Application" ] && ! grep -q '^Exec=' "$file"; then
+              MISSING="${MISSING} Exec"
+            fi
+
+            # Must have [Desktop Entry] header
+            if ! head -5 "$file" | grep -q '^\[Desktop Entry\]'; then
+              MISSING="${MISSING} [Desktop-Entry-header]"
+            fi
+
+            if [ -n "$MISSING" ]; then
+              echo "::error file=${file}::Missing required keys:${MISSING}"
+              ((ERRORS++))
+            fi
+          done < <(find . -name '*.desktop' -type f -print0)
+
+          echo "Checked ${CHECKED} .desktop files"
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::${ERRORS} .desktop file(s) have missing required keys"
+            exit 1
+          fi
+          echo "All .desktop files have required keys."
+
+  lint-containerfiles:
+    name: Verify Containerfile sync
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare Containerfile and Containerfile.nvidia install sections
+        run: |
+          # Extract the RUN block (the main install section) from both files.
+          # They should be identical except for:
+          #   - LABEL lines (title/description differ)
+          #   - ARG BASE_IMAGE line
+          #   - OS identity sed commands (PRETTY_NAME, VARIANT, VARIANT_ID)
+
+          extract_run_block() {
+            # Get everything from the first "RUN rpm-ostree" to the end,
+            # excluding known-different lines
+            sed -n '/^RUN rpm-ostree/,$ p' "$1" \
+              | grep -v 'PRETTY_NAME' \
+              | grep -v 'VARIANT=' \
+              | grep -v 'VARIANT_ID='
+          }
+
+          echo "Extracting install sections..."
+          extract_run_block Containerfile > /tmp/cf-main.txt
+          extract_run_block Containerfile.nvidia > /tmp/cf-nvidia.txt
+
+          if diff -u /tmp/cf-main.txt /tmp/cf-nvidia.txt > /tmp/cf-diff.txt; then
+            echo "Containerfile and Containerfile.nvidia install sections are in sync."
+          else
+            echo "::error::Containerfile and Containerfile.nvidia install sections have diverged!"
+            echo ""
+            echo "Differences (excluding expected variant lines):"
+            cat /tmp/cf-diff.txt
+            echo ""
+            echo "The RUN blocks in both Containerfiles should be identical"
+            echo "(except PRETTY_NAME, VARIANT, and VARIANT_ID)."
+            echo "If you changed one, update the other to match."
+            exit 1
+          fi
+
+      - name: Verify ARG/FROM structure
+        run: |
+          ERRORS=0
+
+          for cf in Containerfile Containerfile.nvidia; do
+            [ -f "$cf" ] || continue
+
+            # Must have ARG BASE_IMAGE
+            if ! grep -q '^ARG BASE_IMAGE=' "$cf"; then
+              echo "::error file=${cf}::Missing ARG BASE_IMAGE"
+              ((ERRORS++))
+            fi
+
+            # Must have ARG BASE_TAG
+            if ! grep -q '^ARG BASE_TAG=' "$cf"; then
+              echo "::error file=${cf}::Missing ARG BASE_TAG"
+              ((ERRORS++))
+            fi
+
+            # Must have FROM
+            if ! grep -q '^FROM ' "$cf"; then
+              echo "::error file=${cf}::Missing FROM instruction"
+              ((ERRORS++))
+            fi
+
+            # Must end with ostree container commit
+            if ! grep -q 'ostree container commit' "$cf"; then
+              echo "::error file=${cf}::Missing 'ostree container commit' — required for bootc images"
+              ((ERRORS++))
+            fi
+          done
+
+          if [ "$ERRORS" -gt 0 ]; then
+            exit 1
+          fi
+          echo "Containerfile structure is valid."
+
+  lint-stage-build:
+    name: Validate stage-build.sh
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Syntax check stage-build.sh
+        run: bash -n stage-build.sh
+
+      - name: Dry-run stage-build.sh
+        run: |
+          # stage-build.sh copies files from known directories.
+          # We verify it runs without errors by creating the expected directory
+          # structure with placeholder files, then running the script.
+
+          echo "Creating minimal directory structure for dry-run..."
+
+          # Create directories that stage-build.sh expects
+          mkdir -p system_files/etc/systemd/{system,user}
+          mkdir -p system_files/etc/{pipewire/pipewire.conf.d,libinput,skel/.config/{conky,autostart,MangoHud,flatpak-overrides,kglobalshortcutsrc.d,kwinrc.d,systemd/user}}
+          mkdir -p system_files/etc/skel/.local/share/{konsole,kservices5}
+          mkdir -p system_files/etc/skel/Desktop
+          mkdir -p system_files/etc/skel/.bashrc.d
+          mkdir -p system_files/etc/{firewalld/services,sddm.conf.d,avahi/services,NetworkManager/conf.d,xdg/discover,default}
+          mkdir -p system_files/usr/share/{plymouth/themes/forge,sddm/themes/forge/icons,plasma/{plasmoids/com.24hg.hubwidget,look-and-feel/com.forge.splash/contents/splash},forge,gnome-background-properties,sounds/forge/stereo,kcm-about,calamares/branding/forge}
+          mkdir -p system_files/usr/lib/firefox/distribution
+          mkdir -p branding/{grub,wallpapers,icons,overlays}
+          mkdir -p hub-app
+          mkdir -p installer/branding
+          mkdir -p scripts
+
+          # Create minimal placeholder files that stage-build.sh references
+          touch system_files/etc/forge-gaming-tweaks.conf
+          touch system_files/etc/gamemode.ini
+          touch system_files/etc/issue
+          touch system_files/etc/machine-info
+          touch system_files/etc/default-grub-config
+          touch system_files/etc/systemd/system/{forge-gaming-tweaks,forge-first-boot-setup,forge-auto-update,forge-heartbeat}.service
+          touch system_files/etc/systemd/system/{forge-auto-update,forge-heartbeat}.timer
+          touch system_files/etc/skel/.config/{kdeglobals,plasma-org.kde.plasma.desktop-appletsrc,konsolerc,plasmanotifyrc,dolphinrc,kwinrulesrc,kscreenlockerrc,spectaclerc}
+          touch system_files/etc/skel/.config/MangoHud/MangoHud.conf
+          touch system_files/etc/skel/.config/flatpak-overrides/global
+          touch system_files/etc/skel/.config/kglobalshortcutsrc.d/forge.conf
+          touch system_files/etc/skel/.config/conky/{forge.conf,forge-json.lua}
+          touch system_files/etc/skel/.config/autostart/forge-conky.desktop
+          touch system_files/etc/skel/.config/kwinrc.d/forge.conf
+          touch system_files/etc/skel/.local/share/konsole/forge.profile
+          touch system_files/etc/skel/.local/share/user-places.xbel
+          touch system_files/etc/skel/.local/share/kservices5/dummy
+          touch system_files/etc/skel/Desktop/forge.desktop
+          touch system_files/etc/skel/.bashrc.d/forge.sh
+          touch system_files/etc/firewalld/services/forge-gaming.xml
+          touch system_files/etc/sddm.conf.d/forge.conf
+          touch system_files/etc/avahi/services/forge-lan.service
+          touch system_files/etc/NetworkManager/conf.d/24hg-dns.conf
+          touch system_files/etc/xdg/kcm-about-distrorc
+          touch system_files/etc/xdg/discover/featured.json
+          touch system_files/etc/pipewire/pipewire.conf.d/99-forge-defaults.conf
+          touch system_files/etc/libinput/local-overrides.quirks
+
+          # Systemd user services
+          for svc in forge-server-status forge-replay forge-discord-fix forge-backup \
+                     forge-hub-bridge forge-game-timer forge-proton-updater \
+                     forge-achievements forge-perks-claim forge-smart-launch \
+                     forge-anticheat-tracker forge-wallpaper forge-live-wallpaper; do
+            touch "system_files/etc/systemd/user/${svc}.service"
+          done
+          for tmr in forge-backup forge-proton-updater forge-achievements \
+                     forge-anticheat-tracker forge-wallpaper; do
+            touch "system_files/etc/systemd/user/${tmr}.timer"
+          done
+
+          # USR share files
+          touch system_files/usr/share/plymouth/themes/forge/logo.png
+          touch system_files/usr/share/sddm/themes/forge/theme.conf
+          touch system_files/usr/share/plasma/plasmoids/com.24hg.hubwidget/metadata.json
+          touch system_files/usr/share/plasma/look-and-feel/com.forge.splash/metadata.json
+          touch system_files/usr/share/forge/{servers.json,offline.html}
+          touch system_files/usr/share/gnome-background-properties/forge-wallpapers.xml
+          touch system_files/usr/share/sounds/forge/index.theme
+          touch system_files/usr/share/sounds/forge/stereo/login.ogg
+          touch system_files/usr/share/kcm-about/24hg-forge.json
+          touch system_files/usr/lib/firefox/distribution/policies.json
+
+          # Branding
+          touch branding/grub/theme.txt
+          touch branding/wallpapers/default.png
+          touch branding/icons/{forge-logo.svg,forge-logo-256.png}
+          touch branding/overlays/tournament.png
+
+          # Hub app
+          touch hub-app/{forge-hub,forge-tray,forge-gamescope-session}
+          touch hub-app/{forge-hub.desktop,forge-session.desktop,forge-tray.desktop}
+
+          # Installer
+          touch installer/branding/branding.desc
+          touch installer/settings.conf
+
+          # Scripts (create dummy forge-* executables and .desktop/.sh files)
+          touch scripts/{forge-first-boot-setup.sh,configure-steam-servers.sh,forge-auto-update.sh}
+          touch scripts/{forge-heartbeat.sh,forge-game-configs.sh,forge-obs-setup.sh}
+          touch scripts/{gamemode-start.sh,gamemode-end.sh,forge-update-guard-hook.sh}
+          touch scripts/{forge-neofetch,forge-diag,forge-first-boot,forge-benchmark}
+          touch scripts/{forge-clip.desktop,forge-overlay.desktop,forge-radio.desktop}
+          touch scripts/{forge-update-prompt.desktop,forge-vpn.desktop,forge-first-boot.desktop}
+          touch scripts/{forge-sunshine-setup.desktop,forge-nxm-handler.desktop,forge-demo.desktop}
+          touch scripts/forge-voice.desktop
+
+          echo "Running stage-build.sh..."
+          chmod +x stage-build.sh
+          if ./stage-build.sh; then
+            echo "stage-build.sh completed successfully."
+            STAGED=$(find .build-staging -type f 2>/dev/null | wc -l)
+            echo "Staged ${STAGED} files."
+          else
+            echo "::error::stage-build.sh failed"
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          echo "### Lint Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All lint checks passed." >> $GITHUB_STEP_SUMMARY
