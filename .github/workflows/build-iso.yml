@@ -170,7 +170,6 @@ jobs:
           echo "  - ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.version }}"
 
       - name: Generate ISO
-        id: iso
         uses: jasonn3/build-container-installer@main
         with:
           arch: x86_64
@@ -183,6 +182,7 @@ jobs:
           iso_name: ${{ steps.meta.outputs.iso_name }}
 
       - name: Move ISO to output dir
+        id: iso
         run: |
           mkdir -p ./output
           mv ${{ steps.meta.outputs.iso_name }} ./output/
