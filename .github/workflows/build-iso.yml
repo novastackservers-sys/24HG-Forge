@@ -169,6 +169,10 @@ jobs:
           echo "  - ${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }}"
           echo "  - ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.version }}"
 
+      - name: Pull target image for bootc-image-builder
+        run: |
+          sudo podman pull ${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }}
+
       - name: Generate ISO with bootc-image-builder
         id: iso
         run: |
