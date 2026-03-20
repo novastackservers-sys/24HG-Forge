@@ -35,7 +35,6 @@ RUN rpm-ostree install \
     libappindicator-gtk3 \
     conky \
     java-21-openjdk \
-    bibata-cursor-themes \
     fastfetch \
     && rpm-ostree cleanup -m \
     \

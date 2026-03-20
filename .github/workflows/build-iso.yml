@@ -169,37 +169,25 @@ jobs:
           echo "  - ${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }}"
           echo "  - ${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-${{ steps.meta.outputs.version }}"
 
-      - name: Pull target image for bootc-image-builder
-        run: |
-          sudo podman pull ${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }}
-
-      - name: Generate ISO with bootc-image-builder
+      - name: Generate ISO
         id: iso
+        uses: jasonn3/build-container-installer@main
+        with:
+          arch: x86_64
+          image_name: forge
+          image_repo: ghcr.io/${{ github.repository_owner }}
+          image_tag: latest-${{ matrix.variant }}
+          variant: Kinoite
+          version: "41"
+          image_signed: "false"
+          iso_name: ${{ steps.meta.outputs.iso_name }}
+
+      - name: Move ISO to output dir
         run: |
           mkdir -p ./output
-
-          sudo podman run \
-            --rm \
-            --privileged \
-            --pull=newer \
-            --security-opt label=type:unconfined_t \
-            -v ./output:/output \
-            -v /var/lib/containers/storage:/var/lib/containers/storage \
-            ghcr.io/osbuild/bootc-image-builder:latest \
-              --type iso \
-              --rootfs btrfs \
-              ${{ steps.meta.outputs.full_image }}:latest-${{ matrix.variant }}
-
-          # Rename to our naming convention
-          ISO_SRC=$(find ./output -name '*.iso' -type f | head -1)
-          if [ -z "$ISO_SRC" ]; then
-            echo "::error::No ISO file generated"
-            exit 1
-          fi
-          mv "$ISO_SRC" "./output/${{ steps.meta.outputs.iso_name }}"
+          mv ${{ steps.meta.outputs.iso_name }} ./output/
           echo "iso_path=./output" >> "$GITHUB_OUTPUT"
           echo "iso_file=${{ steps.meta.outputs.iso_name }}" >> "$GITHUB_OUTPUT"
-
           echo "ISO generated:"
           ls -lh "./output/${{ steps.meta.outputs.iso_name }}"
 
