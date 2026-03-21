@@ -180,10 +180,7 @@ RUN rpm-ostree install \
     # ── First-boot wizard + autostart ── \
     && install -m 755 /tmp/forge-build/bin/forge-first-boot /usr/bin/forge-first-boot \
     && cp /tmp/forge-build/desktop/forge-first-boot.desktop /usr/share/applications/ \
-    && cp /tmp/forge-build/desktop/forge-hub.desktop /etc/skel/.config/autostart/ \
-    && cp /tmp/forge-build/desktop/forge-tray.desktop /etc/skel/.config/autostart/ \
     && cp /tmp/forge-build/desktop/forge-first-boot.desktop /etc/skel/.config/autostart/ \
-    && cp /tmp/forge-build/desktop/forge-update-prompt.desktop /etc/skel/.config/autostart/ \
     \
     # ── CLI tools ── \
     && install -m 755 /tmp/forge-build/bin/forge-neofetch /usr/bin/forge-neofetch \
@@ -285,7 +282,6 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/forge-build/bin/forge-crash-report /usr/bin/forge-crash-report \
     && install -m 755 /tmp/forge-build/bin/forge-mirror /usr/bin/forge-mirror \
     && cp /tmp/forge-build/desktop/forge-tour.desktop /usr/share/applications/ \
-    && cp /tmp/forge-build/desktop/forge-tour.desktop /etc/skel/.config/autostart/ \
     \
     # ── Wave 17: Smart Gaming + Family + Hardware ── \
     && install -m 755 /tmp/forge-build/bin/forge-ai /usr/bin/forge-ai \
@@ -300,7 +296,6 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/forge-build/bin/forge-discord-rpc /usr/bin/forge-discord-rpc \
     && install -m 755 /tmp/forge-build/bin/forge-snapshot /usr/bin/forge-snapshot \
     && install -m 755 /tmp/forge-build/bin/forge-windows-import /usr/bin/forge-windows-import \
-    && cp /tmp/forge-build/desktop/forge-discord-rpc.desktop /etc/skel/.config/autostart/ \
     \
     # ── Wave 18: Server Hosting + Streaming + Hardware + QoL ── \
     && install -m 755 /tmp/forge-build/bin/forge-host /usr/bin/forge-host \
@@ -379,8 +374,9 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/forge-build/lib/forge-update-guard-hook.sh /usr/lib/forge/ \
     && install -m 755 /tmp/forge-build/lib/forge-i18n.sh /usr/lib/forge/forge-i18n.sh \
     \
-    # ── User systemd services ── \
+    # ── User systemd services (installed but NOT auto-enabled) ── \
     && mkdir -p /etc/skel/.config/systemd/user/default.target.wants \
+    && mkdir -p /etc/skel/.config/systemd/user/timers.target.wants \
     && cp /tmp/forge-build/systemd-user/forge-server-status.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-replay.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-discord-fix.service /etc/skel/.config/systemd/user/ \
@@ -390,45 +386,23 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/systemd-user/forge-game-timer.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-proton-updater.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-proton-updater.timer /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-server-status.service /etc/skel/.config/systemd/user/default.target.wants/forge-server-status.service \
-    && ln -sf ../forge-discord-fix.service /etc/skel/.config/systemd/user/default.target.wants/forge-discord-fix.service \
-    && ln -sf ../forge-hub-bridge.service /etc/skel/.config/systemd/user/default.target.wants/forge-hub-bridge.service \
-    && ln -sf ../forge-game-timer.service /etc/skel/.config/systemd/user/default.target.wants/forge-game-timer.service \
-    && mkdir -p /etc/skel/.config/systemd/user/timers.target.wants \
-    && ln -sf ../forge-backup.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-backup.timer \
-    && ln -sf ../forge-proton-updater.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-proton-updater.timer \
     && cp /tmp/forge-build/systemd-user/forge-achievements.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-achievements.timer /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-achievements.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-achievements.timer \
     && cp /tmp/forge-build/systemd-user/forge-perks-claim.service /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-perks-claim.service /etc/skel/.config/systemd/user/default.target.wants/forge-perks-claim.service \
     && cp /tmp/forge-build/systemd-user/forge-smart-launch.service /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-smart-launch.service /etc/skel/.config/systemd/user/default.target.wants/forge-smart-launch.service \
     && cp /tmp/forge-build/systemd-user/forge-anticheat-tracker.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-anticheat-tracker.timer /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-anticheat-tracker.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-anticheat-tracker.timer \
     && cp /tmp/forge-build/systemd-user/forge-wallpaper.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-wallpaper.timer /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-wallpaper.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-wallpaper.timer \
     && cp /tmp/forge-build/systemd-user/forge-live-wallpaper.service /etc/skel/.config/systemd/user/ \
-    && cp /tmp/forge-build/systemd-user/forge-achievements.service /etc/skel/.config/systemd/user/ \
-    && cp /tmp/forge-build/systemd-user/forge-achievements.timer /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-achievements.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-achievements.timer \
     && cp /tmp/forge-build/systemd-user/forge-notify.service /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-notify.service /etc/skel/.config/systemd/user/default.target.wants/forge-notify.service \
     && cp /tmp/forge-build/systemd-user/forge-digest.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-digest.timer /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-digest.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-digest.timer \
     && cp /tmp/forge-build/systemd-user/forge-crash-report.service /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-crash-report.service /etc/skel/.config/systemd/user/default.target.wants/forge-crash-report.service \
     && cp /tmp/forge-build/systemd-user/forge-deals.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-deals.timer /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-deals.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-deals.timer \
     && cp /tmp/forge-build/systemd-user/forge-challenges.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-challenges.timer /etc/skel/.config/systemd/user/ \
-    && ln -sf ../forge-challenges.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-challenges.timer \
-    \
-    # ── Wave 19 systemd services ── \
     && cp /tmp/forge-build/systemd-user/forge-game-ready.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-smart-updates.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-hw-scout.service /etc/skel/.config/systemd/user/ \
@@ -436,23 +410,12 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/systemd-user/forge-power-plan.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-tray-dashboard.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-quick-resume.service /etc/skel/.config/systemd/user/ \
-    \
-    # ── Wave 20 systemd services ── \
     && cp /tmp/forge-build/systemd-user/forge-peripherals.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-cleaner.service /etc/skel/.config/systemd/user/ \
     && cp /tmp/forge-build/systemd-user/forge-cleaner.timer /etc/skel/.config/systemd/user/ \
     \
-    # ── Enable Wave 19 + 20 user services on login ── \
-    && mkdir -p /etc/skel/.config/systemd/user/default.target.wants \
-    && mkdir -p /etc/skel/.config/systemd/user/timers.target.wants \
-    && ln -sf ../forge-game-ready.service /etc/skel/.config/systemd/user/default.target.wants/forge-game-ready.service \
-    && ln -sf ../forge-smart-updates.service /etc/skel/.config/systemd/user/default.target.wants/forge-smart-updates.service \
-    && ln -sf ../forge-hw-scout.service /etc/skel/.config/systemd/user/default.target.wants/forge-hw-scout.service \
-    && ln -sf ../forge-perf-profiles.service /etc/skel/.config/systemd/user/default.target.wants/forge-perf-profiles.service \
-    && ln -sf ../forge-power-plan.service /etc/skel/.config/systemd/user/default.target.wants/forge-power-plan.service \
-    && ln -sf ../forge-tray-dashboard.service /etc/skel/.config/systemd/user/default.target.wants/forge-tray-dashboard.service \
-    && ln -sf ../forge-quick-resume.service /etc/skel/.config/systemd/user/default.target.wants/forge-quick-resume.service \
-    && ln -sf ../forge-peripherals.service /etc/skel/.config/systemd/user/default.target.wants/forge-peripherals.service \
+    # ── Only auto-enable lightweight timers (no daemons at login) ── \
+    && ln -sf ../forge-backup.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-backup.timer \
     && ln -sf ../forge-cleaner.timer /etc/skel/.config/systemd/user/timers.target.wants/forge-cleaner.timer \
     \
     # ── PipeWire gaming config ── \

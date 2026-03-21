@@ -2,7 +2,7 @@
 Type=Application
 Name=24HG Forge Desktop Widget
 Exec=conky -c ~/.config/conky/forge.conf -d
-Hidden=false
+Hidden=true
 NoDisplay=true
 X-KDE-autostart-after=panel
 X-KDE-autostart-phase=2
