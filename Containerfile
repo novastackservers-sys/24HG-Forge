@@ -54,7 +54,7 @@ RUN rpm-ostree install \
     && systemctl enable forge-heartbeat.timer \
     && cp /tmp/forge-build/etc/systemd/system/forge-parental.service /etc/systemd/system/ \
     \
-    # ── Plymouth boot splash (remove upstream branding, install 24HG) ── \
+    # ── Plymouth boot splash (remove ALL upstream branding, install 24HG) ── \
     && rm -rf /usr/share/plymouth/themes/spinner/watermark.png 2>/dev/null || true \
     && rm -rf /usr/share/plymouth/themes/bgrt/* 2>/dev/null || true \
     && rm -f /usr/share/pixmaps/fedora-gdm-logo.png \
@@ -62,14 +62,35 @@ RUN rpm-ostree install \
               /usr/share/pixmaps/fedora-logo-small.png \
               /usr/share/pixmaps/system-logo-white.png 2>/dev/null || true \
     && cp -r /tmp/forge-build/usr/share/plymouth/themes/forge /usr/share/plymouth/themes/forge \
-    && plymouth-set-default-theme forge 2>/dev/null || true \
+    \
+    # Write Plymouth config directly (plymouth-set-default-theme fails in containers) \
+    && mkdir -p /etc/plymouth \
+    && printf '[Daemon]\nTheme=forge\nShowDelay=0\n' > /etc/plymouth/plymouthd.conf \
+    \
+    # Also override the spinner theme (fallback used by many initramfs configs) \
     && [ -d /usr/share/plymouth/themes/spinner ] \
     && cp /tmp/forge-build/usr/share/plymouth/themes/forge/logo.png /usr/share/plymouth/themes/spinner/watermark.png 2>/dev/null || true \
+    \
+    # Remove Bazzite/Fedora plymouth branding that could override ours \
+    && rm -f /usr/share/plymouth/themes/spinner/bgrt-fallback.png 2>/dev/null || true \
+    && for f in /usr/share/plymouth/themes/bazzite* /usr/share/plymouth/themes/fedora*; do \
+         [ -d "$f" ] && rm -rf "$f"; \
+       done 2>/dev/null || true \
+    \
+    # Ensure alternatives point to our theme \
+    && if [ -d /etc/alternatives ]; then \
+         ln -sf /usr/share/plymouth/themes/forge/forge.plymouth /etc/alternatives/default.plymouth 2>/dev/null || true; \
+       fi \
     \
     # ── GRUB theme ── \
     && mkdir -p /usr/share/forge/grub /etc/default/grub.d \
     && cp -r /tmp/forge-build/branding/grub/* /usr/share/forge/grub/ \
     && cp /tmp/forge-build/etc/default-grub-config /etc/default/grub.d/50-forge.cfg \
+    # Also write to /etc/default/grub directly as fallback \
+    && if [ -f /etc/default/grub ]; then \
+         sed -i 's/^GRUB_DISTRIBUTOR=.*/GRUB_DISTRIBUTOR="24HG Forge"/' /etc/default/grub; \
+         grep -q 'GRUB_THEME' /etc/default/grub || echo 'GRUB_THEME="/usr/share/forge/grub/theme.txt"' >> /etc/default/grub; \
+       fi \
     \
     # ── Wallpapers ── \
     && mkdir -p /usr/share/forge/wallpapers \
