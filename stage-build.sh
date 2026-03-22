@@ -80,6 +80,7 @@ cp system_files/etc/skel/.config/dolphinrc "${STAGE}/skel-dolphinrc" 2>/dev/null
 cp system_files/etc/skel/.config/kwinrulesrc "${STAGE}/skel-kwinrulesrc" 2>/dev/null || true
 cp system_files/etc/skel/.config/kscreenlockerrc "${STAGE}/skel-kscreenlockerrc" 2>/dev/null || true
 cp system_files/etc/skel/.config/spectaclerc "${STAGE}/skel-spectaclerc" 2>/dev/null || true
+cp system_files/etc/skel/.config/ksplashrc "${STAGE}/skel-ksplashrc" 2>/dev/null || true
 cp -r system_files/etc/skel/.config/kwinrc.d/* "${STAGE}/skel-kwinrc.d/" 2>/dev/null || true
 cp system_files/etc/skel/.local/share/user-places.xbel "${STAGE}/skel-user-places.xbel" 2>/dev/null || true
 cp -r system_files/etc/skel/.local/share/kservices5/* "${STAGE}/skel-kservices5/" 2>/dev/null || true

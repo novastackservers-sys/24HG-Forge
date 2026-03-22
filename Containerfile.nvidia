@@ -150,6 +150,7 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/skel-kwinrulesrc /etc/skel/.config/kwinrulesrc \
     && cp /tmp/forge-build/skel-kscreenlockerrc /etc/skel/.config/kscreenlockerrc \
     && cp /tmp/forge-build/skel-spectaclerc /etc/skel/.config/spectaclerc \
+    && cp /tmp/forge-build/skel-ksplashrc /etc/skel/.config/ksplashrc \
     && mkdir -p /etc/skel/.config/kwinrc.d \
     && cp /tmp/forge-build/skel-kwinrc.d/* /etc/skel/.config/kwinrc.d/ \
     && mkdir -p /etc/skel/.local/share \
@@ -201,7 +202,6 @@ RUN rpm-ostree install \
     # ── First-boot wizard + autostart ── \
     && install -m 755 /tmp/forge-build/bin/forge-first-boot /usr/bin/forge-first-boot \
     && cp /tmp/forge-build/desktop/forge-first-boot.desktop /usr/share/applications/ \
-    && cp /tmp/forge-build/desktop/forge-first-boot.desktop /etc/skel/.config/autostart/ \
     \
     # ── CLI tools ── \
     && install -m 755 /tmp/forge-build/bin/forge-neofetch /usr/bin/forge-neofetch \
