@@ -107,13 +107,15 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/branding/icons/forge-logo.svg /usr/share/pixmaps/system-logo-white.png 2>/dev/null || true \
     && cp /tmp/forge-build/branding/icons/forge-logo.svg /usr/share/pixmaps/fedora-logo.png 2>/dev/null || true \
     && cp /tmp/forge-build/branding/icons/forge-logo.svg /usr/share/pixmaps/fedora-gdm-logo.png 2>/dev/null || true \
+    && mkdir -p /usr/share/icons/hicolor/scalable/apps \
+    && cp /tmp/forge-build/branding/icons/forge-logo.svg /usr/share/icons/hicolor/scalable/apps/forge-logo.svg \
     \
     # ── KDE / Konsole / shell theming ── \
     && mkdir -p /etc/skel/.config/autostart /etc/skel/.config/MangoHud \
                /etc/skel/.config/flatpak-overrides /etc/skel/.local/share/konsole \
                /etc/skel/.bashrc.d \
     && cp /tmp/forge-build/etc/skel/.config/kdeglobals /etc/skel/.config/ \
-    && cp /tmp/forge-build/etc/skel/.config/plasma-org.kde.plasma.desktop-appletsrc /etc/skel/.config/ \
+    \
     && cp /tmp/forge-build/etc/skel/.config/konsolerc /etc/skel/.config/ \
     && cp /tmp/forge-build/etc/skel/.local/share/konsole/* /etc/skel/.local/share/konsole/ \
     && cp /tmp/forge-build/etc/skel/.bashrc.d/forge.sh /etc/skel/.bashrc.d/ \
@@ -141,9 +143,7 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/skel-kwinrulesrc /etc/skel/.config/kwinrulesrc \
     && cp /tmp/forge-build/skel-kscreenlockerrc /etc/skel/.config/kscreenlockerrc \
     && cp /tmp/forge-build/skel-spectaclerc /etc/skel/.config/spectaclerc \
-    && cp /tmp/forge-build/skel-ksplashrc /etc/skel/.config/ksplashrc \
-    && mkdir -p /etc/skel/.config/kwinrc.d \
-    && cp /tmp/forge-build/skel-kwinrc.d/* /etc/skel/.config/kwinrc.d/ \
+    \
     && mkdir -p /etc/skel/.local/share \
     && cp /tmp/forge-build/skel-user-places.xbel /etc/skel/.local/share/user-places.xbel \
     && mkdir -p /etc/skel/.local/share/kservices5/ServiceMenus \
