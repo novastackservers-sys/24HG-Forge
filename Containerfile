@@ -472,6 +472,18 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/etc/xdg/discover/featured.json /etc/xdg/discover/ \
     && cp /tmp/forge-build/branding/icons/forge-logo-256.png /usr/share/pixmaps/forge-logo-256.png \
     \
+    # ── Anaconda installer branding ── \
+    && mkdir -p /usr/share/anaconda/pixmaps /etc/anaconda/profile.d \
+    && cp /tmp/forge-build/usr/share/anaconda/pixmaps/sidebar-logo.png /usr/share/anaconda/pixmaps/ \
+    && cp /tmp/forge-build/usr/share/anaconda/pixmaps/sidebar-bg.png /usr/share/anaconda/pixmaps/ \
+    && cp /tmp/forge-build/usr/share/anaconda/pixmaps/forge-anaconda.css /usr/share/anaconda/pixmaps/ \
+    && cp /tmp/forge-build/usr/share/anaconda/pixmaps/anaconda-logo.svg /usr/share/anaconda/pixmaps/ 2>/dev/null || true \
+    && cp /tmp/forge-build/usr/share/anaconda/pixmaps/anaconda-logo.png /usr/share/anaconda/pixmaps/ 2>/dev/null || true \
+    && cp /tmp/forge-build/etc/anaconda/profile.d/forge.conf /etc/anaconda/profile.d/ \
+    && mkdir -p /usr/share/icons/hicolor/scalable/apps /usr/share/icons/hicolor/48x48/apps \
+    && cp /tmp/forge-build/branding/icons/forge-logo.svg /usr/share/icons/hicolor/scalable/apps/org.fedoraproject.AnacondaInstaller.svg 2>/dev/null || true \
+    && cp /tmp/forge-build/branding/icons/forge-logo-48.png /usr/share/icons/hicolor/48x48/apps/org.fedoraproject.AnacondaInstaller.png 2>/dev/null || true \
+    \
     # ── OS identity ── \
     && sed -i 's/^NAME=.*/NAME="24HG Forge"/' /usr/lib/os-release \
     && sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="24HG Forge (24 Hour Gaming)"/' /usr/lib/os-release \

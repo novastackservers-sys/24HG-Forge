@@ -1,0 +1,75 @@
+/* 24HG Forge — Anaconda Installer Theme */
+
+/* Dark background for all screens */
+@define-color bg_color #040910;
+@define-color fg_color #e0e0f0;
+@define-color accent_color #00e5ff;
+@define-color sidebar_color #0a1020;
+
+/* Main window background */
+AnacondaWidgets, .anaconda-window, window {
+    background-color: @bg_color;
+    color: @fg_color;
+}
+
+/* Sidebar */
+.logo-sidebar {
+    background-color: @sidebar_color;
+    background-image: none;
+}
+
+/* Top bar */
+.logo-topbar, .topbar {
+    background-color: #060d18;
+    background-image: none;
+}
+
+/* Spoke selectors (main menu items) */
+.spoke-selector {
+    background-color: #0d1525;
+    color: @fg_color;
+    border-color: #1a2540;
+}
+
+.spoke-selector:hover {
+    background-color: #142040;
+    border-color: @accent_color;
+}
+
+/* Buttons */
+button {
+    background-color: #1a2540;
+    color: @fg_color;
+    border-color: #2a3560;
+}
+
+button:hover {
+    background-color: #203060;
+    border-color: @accent_color;
+}
+
+button.suggested-action {
+    background-color: @accent_color;
+    color: #000000;
+}
+
+/* Text entries */
+entry {
+    background-color: #0d1525;
+    color: @fg_color;
+    border-color: #2a3560;
+}
+
+/* Progress bars */
+progressbar trough {
+    background-color: #1a2540;
+}
+
+progressbar progress {
+    background-color: @accent_color;
+}
+
+/* Links */
+link, .anaconda-link {
+    color: @accent_color;
+}
