@@ -382,6 +382,10 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/desktop/forge-custom-res.desktop /usr/share/applications/ \
     && cp /tmp/forge-build/desktop/forge-boot-speed.desktop /usr/share/applications/ \
     \
+    # ── Cloud Gaming ── \
+    && install -m 755 /tmp/forge-build/bin/forge-cloud-gaming /usr/bin/forge-cloud-gaming \
+    && cp /tmp/forge-build/desktop/forge-cloud-gaming.desktop /usr/share/applications/ \
+    \
     # ── Lib scripts ── \
     && mkdir -p /usr/lib/forge \
     && install -m 755 /tmp/forge-build/lib/forge-first-boot-setup.sh /usr/lib/forge/first-boot-setup.sh \

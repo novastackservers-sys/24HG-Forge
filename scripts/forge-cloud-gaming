@@ -1,0 +1,439 @@
+#!/bin/bash
+set -euo pipefail
+
+# 24HG Forge Cloud Gaming — Launch cloud gaming services
+# Play Valorant, Fortnite, Warzone, and other blocked games via cloud
+
+VERSION="1.0.0"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/forge/cloud-gaming"
+DATA_DIR="${HOME}/.local/share/forge/cloud-gaming"
+CHROME_FLAGS=(
+    "--no-first-run"
+    "--enable-gpu-rasterization"
+    "--enable-features=VaapiVideoDecoder,VaapiVideoEncoder"
+    "--disable-features=UseChromeOSDirectVideoDecoder"
+    "--enable-zero-copy"
+    "--ignore-gpu-blocklist"
+    "--ozone-platform-hint=auto"
+    "--enable-hardware-overlays"
+)
+
+# ── Colors ──
+BOLD="\033[1m"
+RESET="\033[0m"
+CYAN="\033[36m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+RED="\033[31m"
+DIM="\033[2m"
+MAGENTA="\033[35m"
+
+info()   { echo -e "  ${CYAN}[+]${RESET} $*"; }
+warn()   { echo -e "  ${YELLOW}[!]${RESET} $*"; }
+err()    { echo -e "  ${RED}[x]${RESET} $*" >&2; }
+header() { echo -e "\n${BOLD}${MAGENTA}══════ $* ══════${RESET}\n"; }
+
+# ── Service definitions ──
+declare -A SERVICE_URLS=(
+    [geforcenow]="https://play.geforcenow.com"
+    [xcloud]="https://www.xbox.com/play"
+    [boosteroid]="https://cloud.boosteroid.com"
+    [luna]="https://luna.amazon.com"
+    [stadia]="https://stadia.google.com"
+    [shadow]="https://shadow.tech/play"
+    [airgpu]="https://app.airgpu.com"
+    [plutosphere]="https://www.plutosphere.com"
+)
+
+declare -A SERVICE_NAMES=(
+    [geforcenow]="GeForce NOW"
+    [xcloud]="Xbox Cloud Gaming"
+    [boosteroid]="Boosteroid"
+    [luna]="Amazon Luna"
+    [stadia]="Google Stadia"
+    [shadow]="Shadow PC"
+    [airgpu]="AirGPU"
+    [plutosphere]="Plutosphere"
+)
+
+declare -A SERVICE_GAMES=(
+    [geforcenow]="Valorant, Fortnite, Destiny 2, Genshin Impact, R6 Siege, PUBG, CoD Warzone"
+    [xcloud]="Fortnite, Call of Duty, Rainbow Six Siege, Dead by Daylight, Destiny 2"
+    [boosteroid]="Fortnite, Warzone, PUBG, R6 Siege, Roblox, GTA V"
+    [luna]="Fortnite, Resident Evil, Control, Metro Exodus"
+    [shadow]="ANY Windows game (full Windows PC in the cloud)"
+    [airgpu]="ANY Windows game (cloud GPU rental)"
+)
+
+declare -A SERVICE_PRICING=(
+    [geforcenow]="Free tier available, Priority €10/mo, Ultimate €20/mo"
+    [xcloud]="Xbox Game Pass Ultimate €15/mo"
+    [boosteroid]="From €8/mo"
+    [luna]="From €10/mo"
+    [shadow]="From €30/mo (full cloud PC)"
+    [airgpu]="Pay-per-hour (~€0.50-1.50/hr)"
+)
+
+# ── Browser detection ──
+find_browser() {
+    local browsers=("chromium-browser" "chromium" "google-chrome" "google-chrome-stable" "brave-browser" "microsoft-edge" "firefox")
+    for b in "${browsers[@]}"; do
+        if command -v "$b" &>/dev/null; then
+            echo "$b"
+            return
+        fi
+    done
+    # Flatpak fallback
+    if flatpak list 2>/dev/null | grep -qi "chromium\|chrome\|brave"; then
+        echo "flatpak-chromium"
+        return
+    fi
+    echo ""
+}
+
+# ── Network check ──
+check_online() {
+    curl -sf --max-time 3 -o /dev/null "https://play.geforcenow.com" 2>/dev/null
+}
+
+check_latency() {
+    local host="$1"
+    local ping_result
+    ping_result=$(ping -c 3 -W 2 "$host" 2>/dev/null | tail -1 | awk -F'/' '{print $5}')
+    echo "${ping_result:-timeout}"
+}
+
+# ── Gamepad check ──
+check_gamepads() {
+    local count=0
+    if [ -d /dev/input ]; then
+        count=$(find /dev/input -name "js*" 2>/dev/null | wc -l)
+    fi
+    echo "$count"
+}
+
+# ── Commands ──
+
+cmd_launch() {
+    local service="${1:-}"
+    if [ -z "$service" ]; then
+        err "No service specified. Use: forge-cloud-gaming launch <service>"
+        echo ""
+        cmd_list
+        return 1
+    fi
+
+    service=$(echo "$service" | tr '[:upper:]' '[:lower:]')
+
+    # Aliases
+    case "$service" in
+        gfn|nvidia|geforce) service="geforcenow" ;;
+        xbox|gamepass) service="xcloud" ;;
+        amazon) service="luna" ;;
+    esac
+
+    local url="${SERVICE_URLS[$service]:-}"
+    if [ -z "$url" ]; then
+        err "Unknown service: $service"
+        echo ""
+        cmd_list
+        return 1
+    fi
+
+    local name="${SERVICE_NAMES[$service]}"
+
+    # Check network
+    if ! check_online; then
+        err "No internet connection. Cloud gaming requires internet."
+        info "Connect to the internet and try again."
+        return 1
+    fi
+
+    local browser
+    browser=$(find_browser)
+    if [ -z "$browser" ]; then
+        err "No browser found. Install Chromium:"
+        info "flatpak install flathub org.chromium.Chromium"
+        return 1
+    fi
+
+    header "Launching ${name}"
+    info "Service: ${name}"
+    info "URL: ${url}"
+    info "Browser: ${browser}"
+
+    local gamepads
+    gamepads=$(check_gamepads)
+    if [ "$gamepads" -gt 0 ]; then
+        info "Gamepads detected: ${gamepads}"
+    else
+        warn "No gamepad detected — connect a controller for best experience"
+    fi
+
+    echo ""
+
+    # Create user data dir for isolated profile
+    local user_data="${DATA_DIR}/${service}"
+    mkdir -p "$user_data"
+
+    # Log launch
+    mkdir -p "$CONFIG_DIR"
+    echo "$(date -Iseconds) $service" >> "${CONFIG_DIR}/history.log"
+
+    if [ "$browser" = "flatpak-chromium" ]; then
+        flatpak run org.chromium.Chromium --app="$url" "${CHROME_FLAGS[@]}" &
+    elif [[ "$browser" == *"firefox"* ]]; then
+        # Firefox doesn't support --app mode
+        exec "$browser" --new-window "$url" &
+    else
+        exec "$browser" --app="$url" --user-data-dir="$user_data" "${CHROME_FLAGS[@]}" &
+    fi
+
+    info "Launched ${name} — enjoy your game!"
+}
+
+cmd_list() {
+    header "Cloud Gaming Services"
+
+    echo -e "  ${BOLD}Available services:${RESET}\n"
+
+    local recommended=("geforcenow" "xcloud" "boosteroid")
+    local others=("luna" "shadow" "airgpu")
+
+    echo -e "  ${GREEN}${BOLD}★ Recommended${RESET}\n"
+    for svc in "${recommended[@]}"; do
+        local name="${SERVICE_NAMES[$svc]}"
+        local games="${SERVICE_GAMES[$svc]:-}"
+        local price="${SERVICE_PRICING[$svc]:-}"
+        echo -e "    ${CYAN}${BOLD}${name}${RESET} ${DIM}(${svc})${RESET}"
+        [ -n "$price" ] && echo -e "      ${DIM}Pricing:${RESET} ${price}"
+        [ -n "$games" ] && echo -e "      ${DIM}Games:${RESET} ${games}"
+        echo ""
+    done
+
+    echo -e "  ${YELLOW}${BOLD}○ Other Options${RESET}\n"
+    for svc in "${others[@]}"; do
+        local name="${SERVICE_NAMES[$svc]}"
+        local games="${SERVICE_GAMES[$svc]:-}"
+        local price="${SERVICE_PRICING[$svc]:-}"
+        echo -e "    ${CYAN}${BOLD}${name}${RESET} ${DIM}(${svc})${RESET}"
+        [ -n "$price" ] && echo -e "      ${DIM}Pricing:${RESET} ${price}"
+        [ -n "$games" ] && echo -e "      ${DIM}Games:${RESET} ${games}"
+        echo ""
+    done
+
+    echo -e "  ${DIM}Launch with: forge-cloud-gaming launch <service>${RESET}"
+    echo -e "  ${DIM}Example:     forge-cloud-gaming launch geforcenow${RESET}"
+}
+
+cmd_status() {
+    header "Cloud Gaming Status"
+
+    # Network
+    echo -e "  ${BOLD}Network:${RESET}"
+    if check_online; then
+        info "Internet: Connected"
+    else
+        err "Internet: Not connected"
+    fi
+
+    # Latency to cloud gaming servers
+    echo ""
+    echo -e "  ${BOLD}Latency to cloud servers:${RESET}"
+    local servers=("play.geforcenow.com:GeForce NOW" "xbox.com:Xbox Cloud" "cloud.boosteroid.com:Boosteroid")
+    for entry in "${servers[@]}"; do
+        local host="${entry%%:*}"
+        local name="${entry#*:}"
+        local latency
+        latency=$(check_latency "$host")
+        if [ "$latency" = "timeout" ]; then
+            echo -e "    ${RED}✗${RESET} ${name}: timeout"
+        else
+            local lat_int=${latency%.*}
+            local color="$GREEN"
+            [ "${lat_int:-999}" -gt 50 ] && color="$YELLOW"
+            [ "${lat_int:-999}" -gt 100 ] && color="$RED"
+            echo -e "    ${color}●${RESET} ${name}: ${latency}ms"
+        fi
+    done
+
+    # Gamepads
+    echo ""
+    echo -e "  ${BOLD}Controllers:${RESET}"
+    local gamepads
+    gamepads=$(check_gamepads)
+    if [ "$gamepads" -gt 0 ]; then
+        info "${gamepads} gamepad(s) detected"
+        # List them
+        for js in /dev/input/js*; do
+            [ -e "$js" ] || continue
+            local name
+            name=$(cat "/sys/class/input/$(basename "$js")/device/name" 2>/dev/null || echo "Unknown")
+            echo -e "      ${DIM}${js}: ${name}${RESET}"
+        done
+    else
+        warn "No gamepads detected"
+        info "Connect a controller via USB or Bluetooth"
+    fi
+
+    # Browser
+    echo ""
+    echo -e "  ${BOLD}Browser:${RESET}"
+    local browser
+    browser=$(find_browser)
+    if [ -n "$browser" ]; then
+        info "Found: ${browser}"
+    else
+        err "No compatible browser found"
+        info "Install: flatpak install flathub org.chromium.Chromium"
+    fi
+
+    # GPU
+    echo ""
+    echo -e "  ${BOLD}GPU (for hardware video decode):${RESET}"
+    if command -v vainfo &>/dev/null; then
+        local profiles
+        profiles=$(vainfo 2>/dev/null | grep -c "VAProfile" || echo "0")
+        info "VA-API: ${profiles} profiles available"
+    else
+        warn "VA-API: vainfo not found"
+    fi
+}
+
+cmd_games() {
+    header "Where to Play Blocked Games"
+
+    echo -e "  These games are blocked on Linux by their anti-cheat.\n"
+    echo -e "  ${BOLD}Use cloud gaming to play them:${RESET}\n"
+
+    local -A GAME_SERVICES=(
+        ["Valorant"]="GeForce NOW"
+        ["Fortnite"]="GeForce NOW, Xbox Cloud, Boosteroid"
+        ["PUBG"]="GeForce NOW, Boosteroid"
+        ["Destiny 2"]="GeForce NOW, Xbox Cloud"
+        ["Rainbow Six Siege"]="GeForce NOW, Xbox Cloud, Boosteroid"
+        ["CoD Warzone"]="Xbox Cloud, Boosteroid"
+        ["Roblox"]="Boosteroid (or use Sober on Linux)"
+        ["Genshin Impact"]="GeForce NOW, Boosteroid"
+        ["FACEIT CS2"]="Shadow PC, AirGPU (full Windows)"
+    )
+
+    for game in "Valorant" "Fortnite" "CoD Warzone" "PUBG" "Destiny 2" "Rainbow Six Siege" "Genshin Impact" "Roblox" "FACEIT CS2"; do
+        local services="${GAME_SERVICES[$game]:-Unknown}"
+        echo -e "    ${CYAN}${game}${RESET}"
+        echo -e "      ${DIM}Play via:${RESET} ${services}"
+        echo ""
+    done
+
+    echo -e "  ${BOLD}Quick launch:${RESET}"
+    echo -e "    ${DIM}forge-cloud-gaming launch geforcenow${RESET}  — Best for most games"
+    echo -e "    ${DIM}forge-cloud-gaming launch xcloud${RESET}      — Best with Game Pass"
+    echo -e "    ${DIM}forge-cloud-gaming launch boosteroid${RESET}  — Most game library"
+}
+
+cmd_optimize() {
+    header "Optimizing for Cloud Gaming"
+
+    # Disable compositor effects for lower latency
+    if command -v kwriteconfig6 &>/dev/null; then
+        info "Reducing compositor latency..."
+        kwriteconfig6 --file kwinrc --group Compositing --key LatencyPolicy Low 2>/dev/null || true
+        info "Compositor set to low-latency mode"
+    fi
+
+    # Set network tweaks for lower latency
+    info "Applying network tweaks..."
+    if [ -w /proc/sys/net/ipv4/tcp_low_latency ]; then
+        echo 1 > /proc/sys/net/ipv4/tcp_low_latency 2>/dev/null || true
+        info "TCP low-latency mode enabled"
+    else
+        warn "TCP low-latency: needs root (run with sudo for network tweaks)"
+    fi
+
+    # Disable power saving on WiFi
+    if command -v iwconfig &>/dev/null; then
+        local wlan
+        wlan=$(ip -o link show | awk -F': ' '/wl/{print $2}' | head -1)
+        if [ -n "$wlan" ]; then
+            sudo iwconfig "$wlan" power off 2>/dev/null && info "WiFi power-saving disabled on ${wlan}" || true
+        fi
+    fi
+
+    info "Optimization complete — launch your cloud gaming service"
+}
+
+show_help() {
+    echo -e "${BOLD}${CYAN}24HG Forge Cloud Gaming${RESET} v${VERSION}"
+    echo -e "Play blocked games via cloud gaming services\n"
+    echo -e "${BOLD}Usage:${RESET} forge-cloud-gaming <command> [args]\n"
+    echo -e "${BOLD}Commands:${RESET}"
+    echo -e "  ${CYAN}launch${RESET} <service>   Launch a cloud gaming service"
+    echo -e "  ${CYAN}list${RESET}               Show available services and pricing"
+    echo -e "  ${CYAN}games${RESET}              Show where to play blocked games"
+    echo -e "  ${CYAN}status${RESET}             Check network, latency, and gamepad"
+    echo -e "  ${CYAN}optimize${RESET}           Apply low-latency tweaks"
+    echo -e "  ${CYAN}help${RESET}               Show this help"
+    echo ""
+    echo -e "${BOLD}Services:${RESET}"
+    echo -e "  geforcenow (gfn)    GeForce NOW — Valorant, Fortnite, etc."
+    echo -e "  xcloud (xbox)       Xbox Cloud Gaming — Game Pass library"
+    echo -e "  boosteroid          Boosteroid — large game library"
+    echo -e "  luna (amazon)       Amazon Luna"
+    echo -e "  shadow              Shadow PC — full Windows in cloud"
+    echo -e "  airgpu              AirGPU — cloud GPU rental"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo -e "  forge-cloud-gaming launch gfn        # Launch GeForce NOW"
+    echo -e "  forge-cloud-gaming launch xbox       # Launch Xbox Cloud"
+    echo -e "  forge-cloud-gaming games             # See blocked games"
+    echo -e "  forge-cloud-gaming status            # Check readiness"
+}
+
+# ── GUI mode (for .desktop launcher) ──
+cmd_gui() {
+    # If kdialog is available, show a picker
+    if command -v kdialog &>/dev/null; then
+        local choice
+        choice=$(kdialog --title "24HG Cloud Gaming" --menu "Choose a cloud gaming service:" \
+            "geforcenow" "GeForce NOW — Valorant, Fortnite, Destiny 2" \
+            "xcloud" "Xbox Cloud Gaming — Game Pass library" \
+            "boosteroid" "Boosteroid — Fortnite, Warzone, PUBG" \
+            "shadow" "Shadow PC — Full Windows in the cloud" \
+            "games" "Show blocked games guide" \
+            2>/dev/null) || return 0
+
+        if [ "$choice" = "games" ]; then
+            # Show games info in a text box
+            local info_text
+            info_text=$(cmd_games 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+            kdialog --title "Blocked Games — Cloud Gaming Guide" --textbox <(echo "$info_text") 600 500
+        else
+            cmd_launch "$choice"
+        fi
+    else
+        # Fallback: launch GeForce NOW directly
+        cmd_launch "geforcenow"
+    fi
+}
+
+# ── Main ──
+case "${1:-}" in
+    launch|start|play|open) shift; cmd_launch "$@" ;;
+    list|services)          cmd_list ;;
+    games|blocked)          cmd_games ;;
+    status|check)           cmd_status ;;
+    optimize|tweaks)        cmd_optimize ;;
+    gui|picker)             cmd_gui ;;
+    help|--help|-h)         show_help ;;
+    "")                     show_help ;;
+    *)
+        # If first arg looks like a service name, launch it directly
+        if [ -n "${SERVICE_URLS[${1,,}]:-}" ] || [[ "${1,,}" =~ ^(gfn|nvidia|geforce|xbox|gamepass|amazon)$ ]]; then
+            cmd_launch "$1"
+        else
+            err "Unknown command: $1"
+            show_help
+            exit 1
+        fi
+        ;;
+esac
