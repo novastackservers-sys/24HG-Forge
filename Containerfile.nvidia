@@ -149,7 +149,7 @@ RUN rpm-ostree install \
     \
     # ── Dolphin + KWin + Lock screen + Desktop shortcuts ── \
     && cp /tmp/forge-build/skel-dolphinrc /etc/skel/.config/dolphinrc \
-    && cp /tmp/forge-build/skel-kwinrulesrc /etc/skel/.config/kwinrulesrc \
+    \
     && cp /tmp/forge-build/skel-kscreenlockerrc /etc/skel/.config/kscreenlockerrc \
     && cp /tmp/forge-build/skel-spectaclerc /etc/skel/.config/spectaclerc \
     \
@@ -189,8 +189,7 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/forge-build/bin/forge-tray /usr/bin/forge-tray \
     && install -m 755 /tmp/forge-build/bin/forge-gamescope-session /usr/bin/forge-gamescope-session \
     && cp /tmp/forge-build/desktop/forge-hub.desktop /usr/share/applications/ \
-    && mkdir -p /usr/share/wayland-sessions \
-    && cp /tmp/forge-build/desktop/forge-session.desktop /usr/share/wayland-sessions/ \
+    \
     && printf '[Desktop Entry]\nName=24HG Protocol Handler\nExec=/usr/bin/forge-hub %%u\nType=Application\nNoDisplay=true\nMimeType=x-scheme-handler/24hg;\n' \
        > /usr/share/applications/forge-protocol.desktop \
     \

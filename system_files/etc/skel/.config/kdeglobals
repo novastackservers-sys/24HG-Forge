@@ -1,6 +1,4 @@
 [General]
-ColorScheme=24HG Forge
-Name=24HG Forge
 shadeSortColumn=true
 
 [Colors:Window]
@@ -40,8 +38,7 @@ ForegroundNormal=200,200,220
 SingleClick=false
 
 [Sounds]
-Theme=forge
-Enable=true
+Enable=false
 
 [Icons]
 Theme=Papirus-Dark
