@@ -180,7 +180,8 @@ jobs:
           version: "41"
           image_signed: "false"
           iso_name: ${{ steps.meta.outputs.iso_name }}
-          extra_boot_params: inst.product=24HGForge
+          additional_templates: /github/workspace/lorax-templates/forge-branding.tmpl
+          extra_boot_params: inst.product=24HGForge inst.nosave=all
 
       - name: Move ISO to output dir
         id: iso

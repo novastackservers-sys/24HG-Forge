@@ -1,9 +1,10 @@
 ## 24HG Forge — Lorax post-install template
-## Customizes the ISO boot environment with Forge branding
+## Injects Forge branding into the ISO boot environment (Anaconda installer)
 
-## Replace Fedora product name references
-replace "Fedora" "24HG Forge" /etc/os-release
-replace "Fedora" "24HG Forge" /usr/lib/os-release
-
-## Set product name for Anaconda
-append /etc/anaconda/product.d/forge.conf "[Product]\nproduct_name = 24HG Forge\n"
+## Replace Fedora/Red Hat references in os-release
+replace "Fedora Linux" "24HG Forge" /etc/os-release
+replace "Fedora Linux" "24HG Forge" /usr/lib/os-release
+replace "NAME=\"Fedora Linux\"" "NAME=\"24HG Forge\"" /etc/os-release
+replace "NAME=\"Fedora Linux\"" "NAME=\"24HG Forge\"" /usr/lib/os-release
+replace "PRETTY_NAME=" "PRETTY_NAME=\"24HG Forge (24 Hour Gaming)\" #" /etc/os-release
+replace "PRETTY_NAME=" "PRETTY_NAME=\"24HG Forge (24 Hour Gaming)\" #" /usr/lib/os-release

@@ -499,13 +499,14 @@ RUN rpm-ostree install \
     && cp /tmp/forge-build/branding/icons/forge-logo-256.png /usr/share/pixmaps/forge-logo-256.png \
     \
     # ── Anaconda installer branding ── \
-    && mkdir -p /usr/share/anaconda/pixmaps /etc/anaconda/profile.d \
+    && mkdir -p /usr/share/anaconda/pixmaps /etc/anaconda/profile.d /etc/anaconda/product.d \
     && cp /tmp/forge-build/usr/share/anaconda/pixmaps/sidebar-logo.png /usr/share/anaconda/pixmaps/ \
     && cp /tmp/forge-build/usr/share/anaconda/pixmaps/sidebar-bg.png /usr/share/anaconda/pixmaps/ \
     && cp /tmp/forge-build/usr/share/anaconda/pixmaps/forge-anaconda.css /usr/share/anaconda/pixmaps/ \
     && cp /tmp/forge-build/usr/share/anaconda/pixmaps/anaconda-logo.svg /usr/share/anaconda/pixmaps/ 2>/dev/null || true \
     && cp /tmp/forge-build/usr/share/anaconda/pixmaps/anaconda-logo.png /usr/share/anaconda/pixmaps/ 2>/dev/null || true \
     && cp /tmp/forge-build/etc/anaconda/profile.d/forge.conf /etc/anaconda/profile.d/ \
+    && cp /tmp/forge-build/etc/anaconda/product.d/forge.conf /etc/anaconda/product.d/ \
     && mkdir -p /usr/share/anaconda/pixmaps/rnotes/en \
     && cp /tmp/forge-build/usr/share/anaconda/pixmaps/rnotes/en/*.png /usr/share/anaconda/pixmaps/rnotes/en/ \
     && mkdir -p /usr/share/icons/hicolor/scalable/apps /usr/share/icons/hicolor/48x48/apps \
