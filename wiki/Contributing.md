@@ -1,6 +1,6 @@
-# Contributing to 24HG Forge
+# Contributing to 24HG
 
-Thank you for your interest in contributing to 24HG Forge. This guide covers everything you need to know to get started.
+Thank you for your interest in contributing to 24HG. This guide covers everything you need to know to get started.
 
 ## Ways to Contribute
 
@@ -8,7 +8,7 @@ Thank you for your interest in contributing to 24HG Forge. This guide covers eve
 - **Suggest features** -- Have an idea? Open a discussion or issue.
 - **Write code** -- Fix bugs, add tools, improve existing tools.
 - **Improve documentation** -- Fix typos, add examples, write guides.
-- **Test** -- Try 24HG Forge on different hardware and report results.
+- **Test** -- Try 24HG on different hardware and report results.
 - **Help others** -- Answer questions in Discord or on GitHub issues.
 
 ## Getting Started
@@ -17,8 +17,8 @@ Thank you for your interest in contributing to 24HG Forge. This guide covers eve
 
 ```bash
 # Clone the repository
-git clone https://git.raggi.is/24hg/forge.git
-cd forge
+git clone https://git.raggi.is/24hg/24hg.git
+cd 24hg
 
 # Install build dependencies
 sudo dnf install podman git shellcheck python3-pylint  # Fedora
@@ -29,7 +29,7 @@ sudo apt install podman git shellcheck pylint            # Ubuntu/Debian
 
 Read the [Building from Source](Building) page for the full project structure. Key directories:
 
-- `scripts/` -- All 53 `forge-*` tools live here. Most are bash or Python scripts.
+- `scripts/` -- All 53 `24hg-*` tools live here. Most are bash or Python scripts.
 - `hub-app/` -- The Hub application and tray icon.
 - `system_files/` -- System configuration files deployed to the image.
 - `branding/` -- Visual assets (wallpapers, icons, themes).
@@ -41,7 +41,7 @@ Check the Gitea Issues for items tagged `good first issue` or `help wanted`. Or 
 
 ## Adding a New Tool
 
-24HG Forge tools follow a consistent pattern. Here is how to add a new one:
+24HG tools follow a consistent pattern. Here is how to add a new one:
 
 ### 1. Create the Script
 
@@ -49,8 +49,8 @@ Create your tool in `scripts/`:
 
 ```bash
 #!/bin/bash
-# 24HG Forge Tool Name — One-line description of what it does
-# Usage: forge-tool-name [command] [options]
+# 24HG Tool Name — One-line description of what it does
+# Usage: 24hg-tool-name [command] [options]
 #
 # Commands:
 #   status     Show current status
@@ -69,9 +69,9 @@ case "$ACTION" in
         echo "Configuring..."
         ;;
     help|*)
-        echo "Usage: forge-tool-name [status|configure|help]"
+        echo "Usage: 24hg-tool-name [status|configure|help]"
         echo ""
-        echo "24HG Forge Tool Name — One-line description"
+        echo "24HG Tool Name — One-line description"
         echo ""
         echo "Commands:"
         echo "  status      Show current status"
@@ -80,11 +80,11 @@ case "$ACTION" in
 esac
 ```
 
-For Python tools, use the same pattern as `forge-smart-launch` or `forge-games`:
+For Python tools, use the same pattern as `24hg-smart-launch` or `24hg-games`:
 
 ```python
 #!/usr/bin/env python3
-"""24HG Forge Tool Name — One-line description
+"""24HG Tool Name — One-line description
 
 Commands:
     status     Show current status
@@ -95,7 +95,7 @@ import argparse
 import sys
 
 def main():
-    parser = argparse.ArgumentParser(description="24HG Forge Tool Name")
+    parser = argparse.ArgumentParser(description="24HG Tool Name")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("status", help="Show current status")
     sub.add_parser("configure", help="Set up configuration")
@@ -117,10 +117,10 @@ Add two lines to the Containerfile:
 
 ```dockerfile
 # In the COPY section (near the top)
-COPY scripts/forge-tool-name /tmp/forge-build/bin/forge-tool-name
+COPY scripts/24hg-tool-name /tmp/24hg-build/bin/24hg-tool-name
 
 # In the RUN section (CLI tools area)
-&& install -m 755 /tmp/forge-build/bin/forge-tool-name /usr/bin/forge-tool-name \
+&& install -m 755 /tmp/24hg-build/bin/24hg-tool-name /usr/bin/24hg-tool-name \
 ```
 
 ### 3. Add a Systemd Service (If Needed)
@@ -131,11 +131,11 @@ If your tool runs as a background daemon or on a timer:
 
 ```ini
 [Unit]
-Description=24HG Forge Tool Name
+Description=24HG Tool Name
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/forge-tool-name daemon
+ExecStart=/usr/bin/24hg-tool-name daemon
 
 [Install]
 WantedBy=default.target
@@ -153,9 +153,9 @@ WantedBy=default.target
 
 ```bash
 # Test the script locally
-chmod +x scripts/forge-tool-name
-./scripts/forge-tool-name help
-./scripts/forge-tool-name status
+chmod +x scripts/24hg-tool-name
+./scripts/24hg-tool-name help
+./scripts/24hg-tool-name status
 
 # Build the image and verify
 ./scripts/build-local.sh desktop
@@ -182,7 +182,7 @@ chmod +x scripts/forge-tool-name
 Run shellcheck before submitting:
 
 ```bash
-shellcheck scripts/forge-tool-name
+shellcheck scripts/24hg-tool-name
 ```
 
 ### Python Scripts
@@ -193,23 +193,23 @@ shellcheck scripts/forge-tool-name
 - Use argparse for argument parsing.
 - Use type hints where practical.
 - Include a module docstring with tool description and commands.
-- Use the color helper pattern from existing tools (see `forge-games` for reference).
+- Use the color helper pattern from existing tools (see `24hg-games` for reference).
 
 Run pylint before submitting:
 
 ```bash
-pylint scripts/forge-tool-name
+pylint scripts/24hg-tool-name
 ```
 
 ### General
 
-- Tool names are always `forge-<name>` (lowercase, hyphens).
-- Config files go in `~/.config/forge/<tool>/`.
-- Data files go in `~/.local/share/forge/<tool>/`.
-- Cache files go in `~/.cache/forge/<tool>/`.
-- Log files go in `~/.local/share/forge/logs/`.
+- Tool names are always `24hg-<name>` (lowercase, hyphens).
+- Config files go in `~/.config/24hg/<tool>/`.
+- Data files go in `~/.local/share/24hg/<tool>/`.
+- Cache files go in `~/.cache/24hg/<tool>/`.
+- Log files go in `~/.local/share/24hg/logs/`.
 - Use zenity for GUI dialogs (check for `DISPLAY`/`WAYLAND_DISPLAY` and zenity availability).
-- Notifications use `notify-send` with the `forge` icon category.
+- Notifications use `notify-send` with the `24hg` icon category.
 - Tools must work offline (gracefully degrade if network is unavailable).
 
 ## Testing
@@ -220,15 +220,15 @@ Test your changes before building the full image:
 
 ```bash
 # Run the tool directly
-./scripts/forge-tool-name status
+./scripts/24hg-tool-name status
 
 # Run shellcheck on all bash tools
-for f in scripts/forge-*; do
+for f in scripts/24hg-*; do
     [[ "$(head -1 "$f")" == *bash* ]] && shellcheck "$f"
 done
 
 # Run pylint on all Python tools
-for f in scripts/forge-*; do
+for f in scripts/24hg-*; do
     [[ "$(head -1 "$f")" == *python* ]] && pylint "$f"
 done
 ```
@@ -244,7 +244,7 @@ done
 
 # Test in a VM (QEMU)
 qemu-system-x86_64 -enable-kvm -m 4096 -smp 4 \
-  -cdrom iso-output/forge-desktop-latest.iso \
+  -cdrom iso-output/24hg-desktop-latest.iso \
   -drive file=test.qcow2,format=qcow2 -boot d
 ```
 
@@ -254,8 +254,8 @@ qemu-system-x86_64 -enable-kvm -m 4096 -smp 4 \
 
 ```bash
 # Fork on GitHub, then:
-git clone https://github.com/YOUR_USERNAME/forge.git
-cd forge
+git clone https://github.com/YOUR_USERNAME/24hg-os.git
+cd 24hg
 git checkout -b feature/my-new-tool
 ```
 
@@ -266,7 +266,7 @@ Follow the coding style guide above. Keep commits focused and atomic.
 ### 3. Write a Good Commit Message
 
 ```
-Add forge-my-tool for <purpose>
+Add 24hg-my-tool for <purpose>
 
 - Implements <feature> using <approach>
 - Configures <what> for <why>
@@ -303,10 +303,10 @@ A maintainer will review your PR. Common feedback:
 
 ## License
 
-By contributing to 24HG Forge, you agree that your contributions will be licensed under the MIT License (matching the project license).
+By contributing to 24HG, you agree that your contributions will be licensed under the MIT License (matching the project license).
 
 ## Contact
 
 - **Discord:** [discord.gg/ymfEjH6EJN](https://discord.gg/ymfEjH6EJN)
-- **Gitea Issues:** [git.raggi.is/24hg/forge/issues](https://git.raggi.is/24hg/forge/issues)
+- **Gitea Issues:** [git.raggi.is/24hg/24hg/issues](https://git.raggi.is/24hg/24hg/issues)
 - **Hub:** [hub.24hgaming.com](https://hub.24hgaming.com)

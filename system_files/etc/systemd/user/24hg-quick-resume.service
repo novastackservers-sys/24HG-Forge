@@ -1,0 +1,9 @@
+[Unit]
+Description=24HG Quick Resume — Auto-restore session on login
+After=graphical-session.target
+ConditionPathExists=%h/.config/24hg/quick-resume/auto-restore
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/24hg-quick-resume auto-restore
+RemainAfterExit=yes

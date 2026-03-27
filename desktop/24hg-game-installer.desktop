@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Game Installer
+Comment=Unified game installer
+Exec=/usr/bin/24hg-game-installer
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Game;PackageManager;
+Keywords=game;install;steam;epic;gog;

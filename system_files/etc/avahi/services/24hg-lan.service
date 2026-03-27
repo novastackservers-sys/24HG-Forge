@@ -1,0 +1,10 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">24HG on %h</name>
+  <service>
+    <type>_24hg._tcp</type>
+    <port>24240</port>
+    <txt-record>version=1.0</txt-record>
+  </service>
+</service-group>

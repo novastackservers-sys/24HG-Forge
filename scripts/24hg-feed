@@ -1,0 +1,636 @@
+#!/usr/bin/env bash
+# 24hg-feed -- Friend activity feed viewer for 24HG
+# Fetches and displays activity from the Hub API.
+set -euo pipefail
+
+readonly VERSION="1.0.0"
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/24hg"
+readonly TOKEN_FILE="${CONFIG_DIR}/hub-token"
+readonly FRIENDS_FILE="${CONFIG_DIR}/friends.json"
+readonly API_BASE="https://hub.24hgaming.com/api"
+readonly DEFAULT_LIMIT=50
+readonly WATCH_INTERVAL=30
+
+# ── Colors ─────────────────────────────────────────────────────────────────────
+
+if [[ -t 1 ]] && command -v tput &>/dev/null && [[ "$(tput colors 2>/dev/null)" -ge 8 ]]; then
+    CR=$'\033[0m'; CB=$'\033[1m'; CD=$'\033[2m'; CI=$'\033[3m'
+    CC=$'\033[36m'; CG=$'\033[32m'; CY=$'\033[33m'; CRD=$'\033[31m'
+    CW=$'\033[97m'; CGR=$'\033[90m'
+    C_PLAY=$'\033[38;5;39m'
+    C_ACH=$'\033[38;5;220m'
+    C_CLIP=$'\033[38;5;208m'
+    C_SHOT=$'\033[38;5;147m'
+    C_RANK=$'\033[38;5;46m'
+    C_TOURN=$'\033[38;5;196m'
+    C_VOICE=$'\033[38;5;51m'
+else
+    CR="" CB="" CD="" CI=""
+    CC="" CG="" CY="" CRD="" CW="" CGR=""
+    C_PLAY="" C_ACH="" C_CLIP="" C_SHOT="" C_RANK="" C_TOURN="" C_VOICE=""
+fi
+
+declare -A LABELS=(
+    [playing]="[PLAYING]"
+    [achievement]="[ACHIEVEMENT]"
+    [clip]="[CLIP]"
+    [screenshot]="[SCREENSHOT]"
+    [rank]="[RANK]"
+    [tournament]="[TOURNAMENT]"
+    [voice]="[VOICE]"
+)
+
+declare -A COLORS=(
+    [playing]="$C_PLAY"
+    [achievement]="$C_ACH"
+    [clip]="$C_CLIP"
+    [screenshot]="$C_SHOT"
+    [rank]="$C_RANK"
+    [tournament]="$C_TOURN"
+    [voice]="$C_VOICE"
+)
+
+# ── Utility ────────────────────────────────────────────────────────────────────
+
+err()  { printf '%s%s[ERROR]%s %s\n' "$CRD" "$CB" "$CR" "$*" >&2; }
+warn() { printf '%s%s[WARN]%s %s\n'  "$CY"  "$CB" "$CR" "$*" >&2; }
+
+sep() {
+    local w="${1:-60}"
+    printf '%s%s%s\n' "$CD" "$(printf '%*s' "$w" '' | tr ' ' '-')" "$CR"
+}
+
+print_header() {
+    printf '\n%s%s  24HG :: %s%s\n' "$CB" "$CC" "${1:-Activity Feed}" "$CR"
+    sep 60
+}
+
+check_deps() {
+    for cmd in curl jq; do
+        command -v "$cmd" &>/dev/null || { err "Missing dependency: $cmd"; exit 1; }
+    done
+}
+
+# ── Authentication ─────────────────────────────────────────────────────────────
+
+load_token() {
+    if [[ ! -f "$TOKEN_FILE" ]]; then
+        err "Not authenticated. Token file not found: $TOKEN_FILE"
+        err "Sign in to 24HG first, or create the token file:"
+        err "  mkdir -p '$CONFIG_DIR' && echo 'YOUR_TOKEN' > '$TOKEN_FILE'"
+        return 1
+    fi
+
+    AUTH_TOKEN="$(<"$TOKEN_FILE")"
+    AUTH_TOKEN="${AUTH_TOKEN%%$'\n'}"
+    AUTH_TOKEN="${AUTH_TOKEN%%$'\r'}"
+    [[ -n "$AUTH_TOKEN" ]] || { err "Token file is empty: $TOKEN_FILE"; return 1; }
+}
+
+# ── API helpers ────────────────────────────────────────────────────────────────
+
+api_get() {
+    local body http_code
+    body=$(curl -s -w '\n%{http_code}' \
+        -H "Authorization: Bearer $AUTH_TOKEN" \
+        -H "Accept: application/json" \
+        -H "User-Agent: 24hg-feed/$VERSION" \
+        --connect-timeout 10 --max-time 30 \
+        "${API_BASE}$1" 2>/dev/null) || { err "Connection failed: $1"; return 1; }
+
+    http_code="${body##*$'\n'}"
+    body="${body%$'\n'"$http_code"}"
+
+    case "$http_code" in
+        200) echo "$body" ;;
+        401|403) err "Authentication failed (HTTP $http_code). Check your token."; return 1 ;;
+        404)     err "Endpoint not found: $1"; return 1 ;;
+        429)     warn "Rate limited. Try again later."; return 1 ;;
+        *)       err "HTTP $http_code on $1"; return 1 ;;
+    esac
+}
+
+api_post() {
+    local endpoint="$1" payload="$2"
+    local body http_code
+    body=$(curl -s -w '\n%{http_code}' -X POST \
+        -H "Authorization: Bearer $AUTH_TOKEN" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -H "User-Agent: 24hg-feed/$VERSION" \
+        --connect-timeout 10 --max-time 30 \
+        -d "$payload" "${API_BASE}${endpoint}" 2>/dev/null) \
+        || { err "Connection failed: $endpoint"; return 1; }
+
+    http_code="${body##*$'\n'}"
+    body="${body%$'\n'"$http_code"}"
+
+    case "$http_code" in
+        200|201) echo "$body" ;;
+        401|403) err "Authentication failed (HTTP $http_code)."; return 1 ;;
+        422)     err "Invalid request data."; return 1 ;;
+        429)     warn "Rate limited."; return 1 ;;
+        *)       err "HTTP $http_code on $endpoint"; return 1 ;;
+    esac
+}
+
+api_delete() {
+    local body http_code
+    body=$(curl -s -w '\n%{http_code}' -X DELETE \
+        -H "Authorization: Bearer $AUTH_TOKEN" \
+        -H "Accept: application/json" \
+        --connect-timeout 10 --max-time 30 \
+        "${API_BASE}$1" 2>/dev/null) || { err "Connection failed."; return 1; }
+
+    http_code="${body##*$'\n'}"
+    body="${body%$'\n'"$http_code"}"
+    [[ "$http_code" =~ ^(200|204)$ ]] || { err "HTTP $http_code on DELETE $1"; return 1; }
+    echo "$body"
+}
+
+# ── Friends file (local cache) ─────────────────────────────────────────────────
+
+ensure_friends() {
+    mkdir -p "$CONFIG_DIR"
+    [[ -f "$FRIENDS_FILE" ]] || echo '{"friends":[],"updated_at":""}' > "$FRIENDS_FILE"
+}
+
+read_friends() {
+    ensure_friends
+    jq -r '.friends // []' "$FRIENDS_FILE" 2>/dev/null || echo '[]'
+}
+
+write_friends() {
+    ensure_friends
+    jq -n --argjson f "$1" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{"friends":$f,"updated_at":$t}' > "$FRIENDS_FILE"
+}
+
+add_friend_local() {
+    local list exists
+    list=$(read_friends)
+    exists=$(echo "$list" | jq --arg u "$1" '[.[] | select(.username == $u)] | length')
+    [[ "$exists" -gt 0 ]] && return 0
+    local now; now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    write_friends "$(echo "$list" | jq --arg u "$1" --arg t "$now" \
+        '. + [{"username": $u, "followed_at": $t}]')"
+}
+
+remove_friend_local() {
+    write_friends "$(read_friends | jq --arg u "$1" '[.[] | select(.username != $u)]')"
+}
+
+# ── Time formatting ────────────────────────────────────────────────────────────
+
+time_ago() {
+    [[ -z "${1:-}" ]] && { echo "unknown"; return; }
+    local then_s now_s d
+    then_s=$(date -d "$1" +%s 2>/dev/null) || { echo "unknown"; return; }
+    now_s=$(date +%s)
+    d=$((now_s - then_s))
+    [[ $d -lt 0 ]] && { echo "just now"; return; }
+
+    if   [[ $d -lt 60 ]];     then echo "${d} sec ago"
+    elif [[ $d -lt 3600 ]];   then
+        local m=$((d / 60)); [[ $m -eq 1 ]] && echo "1 min ago" || echo "${m} min ago"
+    elif [[ $d -lt 86400 ]];  then
+        local h=$((d / 3600)); [[ $h -eq 1 ]] && echo "1 hour ago" || echo "${h} hours ago"
+    elif [[ $d -lt 604800 ]]; then
+        local dy=$((d / 86400)); [[ $dy -eq 1 ]] && echo "1 day ago" || echo "${dy} days ago"
+    else
+        local w=$((d / 604800)); [[ $w -eq 1 ]] && echo "1 week ago" || echo "${w} weeks ago"
+    fi
+}
+
+fmt_duration() {
+    local s="${1:-0}"
+    [[ "$s" -le 0 ]] 2>/dev/null && return
+    if   [[ $s -lt 60 ]];   then echo "${s}s"
+    elif [[ $s -lt 3600 ]]; then echo "$((s / 60))m"
+    else
+        local h=$((s / 3600)) m=$(( (s % 3600) / 60 ))
+        [[ $m -gt 0 ]] && echo "${h}h ${m}m" || echo "${h}h"
+    fi
+}
+
+# ── Display ────────────────────────────────────────────────────────────────────
+
+print_entry() {
+    local j="$1"
+    local atype username game detail ts duration
+    atype=$(echo "$j" | jq -r '.type // "playing"')
+    username=$(echo "$j" | jq -r '.username // .user // "Unknown"')
+    game=$(echo "$j" | jq -r '.game // empty')
+    detail=$(echo "$j" | jq -r '.detail // .details // empty')
+    ts=$(echo "$j" | jq -r '.timestamp // .created_at // .date // empty')
+    duration=$(echo "$j" | jq -r '.duration // 0')
+
+    local color="${COLORS[$atype]:-$CGR}"
+    local label="${LABELS[$atype]:-[ACTIVITY]}"
+    local ago; ago=$(time_ago "$ts")
+    local desc=""
+
+    case "$atype" in
+        playing)
+            desc="${CB}${CW}${username}${CR} is playing ${CB}${game:-a game}${CR}"
+            local d; d=$(fmt_duration "$duration")
+            [[ -n "${d:-}" ]] && desc="$desc ${CD}(${d})${CR}"
+            ;;
+        achievement)
+            desc="${CB}${CW}${username}${CR} unlocked ${CB}${detail:-an achievement}${CR}"
+            [[ -n "$game" ]] && desc="$desc ${CD}in ${game}${CR}"
+            ;;
+        clip)
+            local title; title=$(echo "$j" | jq -r '.title // empty')
+            desc="${CB}${CW}${username}${CR} shared a clip"
+            [[ -n "$title" ]] && desc="$desc: ${CI}${title}${CR}"
+            [[ -n "$game" ]] && desc="$desc ${CD}in ${game}${CR}"
+            ;;
+        screenshot)
+            desc="${CB}${CW}${username}${CR} shared a screenshot"
+            [[ -n "$game" ]] && desc="$desc ${CD}in ${game}${CR}"
+            ;;
+        rank)
+            local pos; pos=$(echo "$j" | jq -r '.position // .rank // empty')
+            desc="${CB}${CW}${username}${CR} reached ${CB}#${pos:-?}${CR} on leaderboard"
+            [[ -n "$game" ]] && desc="$desc ${CD}in ${game}${CR}"
+            ;;
+        tournament)
+            local tn; tn=$(echo "$j" | jq -r '.tournament // .detail // empty')
+            desc="${CB}${CW}${username}${CR} joined ${CB}${tn:-a tournament}${CR}"
+            [[ -n "$game" ]] && desc="$desc ${CD}in ${game}${CR}"
+            ;;
+        voice)
+            local room; room=$(echo "$j" | jq -r '.room // .channel // .detail // empty')
+            desc="${CB}${CW}${username}${CR} is in voice: ${CB}${room:-Unknown}${CR}"
+            ;;
+        *)
+            desc="${CB}${CW}${username}${CR} ${detail}"
+            ;;
+    esac
+
+    printf '  %s%-15s%s  %s\n' "$color" "$label" "$CR" "$desc"
+    printf '  %s%-15s  %s%s\n' "" "" "$CGR" "$ago"
+}
+
+# ── Command: list ──────────────────────────────────────────────────────────────
+
+cmd_list() {
+    local limit="${1:-$DEFAULT_LIMIT}"
+    print_header "Activity Feed"
+
+    local resp
+    resp=$(api_get "/24hg/feed?limit=$limit") || return 1
+
+    local entries
+    entries=$(echo "$resp" | jq -c '
+        .feed // .activities // .
+        | if type == "array" then .[] else empty end
+    ' 2>/dev/null)
+
+    if [[ -z "$entries" ]]; then
+        printf '\n  %sNo recent activity from your friends.%s\n' "$CD" "$CR"
+        printf '  %sFollow users to see their activity here.%s\n\n' "$CD" "$CR"
+        return 0
+    fi
+
+    local n=0
+    while IFS= read -r e; do
+        [[ -z "$e" ]] && continue
+        print_entry "$e"
+        n=$((n + 1))
+    done <<< "$entries"
+
+    printf '\n'
+    sep 60
+    printf '  %s%d activities%s  |  %sLive: 24hg-feed watch%s\n\n' \
+        "$CD" "$n" "$CR" "$CD" "$CR"
+}
+
+# ── Command: watch ─────────────────────────────────────────────────────────────
+
+cmd_watch() {
+    local limit="${1:-$DEFAULT_LIMIT}"
+    local interval="${2:-$WATCH_INTERVAL}"
+    local running=true
+
+    cleanup() {
+        running=false
+        printf '\033[?25h'
+        printf '\n%sFeed stopped.%s\n' "$CD" "$CR"
+        exit 0
+    }
+    trap cleanup INT TERM
+
+    # Hide cursor
+    printf '\033[?25l'
+
+    while $running; do
+        local cols lines
+        cols=$(tput cols 2>/dev/null || echo 80)
+        lines=$(tput lines 2>/dev/null || echo 24)
+        local sep_w=$((cols < 80 ? cols : 80))
+
+        clear
+
+        printf '%s%s  24HG :: Activity Feed%s  %s[Live :: %s :: %ds]%s\n' \
+            "$CB" "$CC" "$CR" "$CD" "$(date +%H:%M:%S)" "$interval" "$CR"
+        sep "$sep_w"
+
+        local resp
+        resp=$(api_get "/24hg/feed?limit=$limit" 2>/dev/null)
+
+        if [[ $? -ne 0 ]] || [[ -z "$resp" ]]; then
+            printf '\n  %sUnable to fetch feed. Retrying in %ds...%s\n' "$CRD" "$interval" "$CR"
+        else
+            local entries
+            entries=$(echo "$resp" | jq -c '
+                .feed // .activities // .
+                | if type == "array" then .[] else empty end
+            ' 2>/dev/null)
+
+            if [[ -z "$entries" ]]; then
+                printf '\n  %sNo recent activity.%s\n' "$CD" "$CR"
+            else
+                local n=0
+                local max=$(( (lines - 6) / 2 ))
+                [[ $max -lt 5 ]] && max=5
+
+                while IFS= read -r e; do
+                    [[ -z "$e" ]] && continue
+                    [[ $n -ge $max ]] && break
+                    print_entry "$e"
+                    n=$((n + 1))
+                done <<< "$entries"
+            fi
+        fi
+
+        printf '\n'
+        sep "$sep_w"
+        printf '  %sCtrl+C to exit  |  Next refresh in %ds%s\n' "$CD" "$interval" "$CR"
+
+        # Sleep in 1s increments for responsive SIGINT
+        local slept=0
+        while $running && [[ $slept -lt $interval ]]; do
+            sleep 1
+            slept=$((slept + 1))
+        done
+    done
+
+    printf '\033[?25h'
+}
+
+# ── Command: friends ───────────────────────────────────────────────────────────
+
+cmd_friends() {
+    print_header "Friends"
+
+    local resp
+    resp=$(api_get "/24hg/friends?include_status=true") || {
+        warn "API unreachable. Showing local cache."
+        local lf; lf=$(read_friends)
+        local c; c=$(echo "$lf" | jq 'length')
+        if [[ "$c" -eq 0 ]]; then
+            printf '\n  %sNo friends cached.%s\n\n' "$CD" "$CR"
+            return
+        fi
+        printf '  %s%d friends (cached, status unavailable)%s\n\n' "$CB" "$c" "$CR"
+        echo "$lf" | jq -c '.[]' | while IFS= read -r f; do
+            printf '  %s( )%s  %s%-20s%s\n' "$CD" "$CR" "$CB" \
+                "$(echo "$f" | jq -r '.username')" "$CR"
+        done
+        printf '\n'
+        return
+    }
+
+    local fl
+    fl=$(echo "$resp" | jq -c '.friends // . | if type == "array" then . else [] end')
+    local ct
+    ct=$(echo "$fl" | jq 'length')
+
+    if [[ "$ct" -eq 0 ]]; then
+        printf '\n  %sNo friends yet. Use "24hg-feed follow <user>".%s\n\n' "$CD" "$CR"
+        return
+    fi
+
+    # Update local cache
+    write_friends "$fl"
+
+    # Count by status
+    local on ig off
+    on=$(echo "$fl" | jq '[.[] | select(.status == "online")] | length')
+    ig=$(echo "$fl" | jq '[.[] | select(.status == "in-game" or .status == "ingame" or .status == "playing")] | length')
+    off=$(echo "$fl" | jq '[.[] | select(.status == "offline" or .status == null)] | length')
+
+    printf '  %s%d friends%s  |  %s%s%d online%s  |  %s%s%d in-game%s  |  %s%d offline%s\n\n' \
+        "$CB" "$ct" "$CR" "$CG" "$CB" "$on" "$CR" "$CY" "$CB" "$ig" "$CR" "$CD" "$off" "$CR"
+
+    # Print sorted: in-game > online > offline
+    local sorted
+    sorted=$(echo "$fl" | jq -c '
+        sort_by(
+            if .status == "in-game" or .status == "ingame" or .status == "playing" then 0
+            elif .status == "online" then 1
+            else 2 end
+        ) | .[]
+    ')
+
+    while IFS= read -r fr; do
+        [[ -z "$fr" ]] && continue
+        local nm st gm ls
+        nm=$(echo "$fr" | jq -r '.username // .name // "Unknown"')
+        st=$(echo "$fr" | jq -r '.status // "offline"')
+        gm=$(echo "$fr" | jq -r '.game // empty')
+        ls=$(echo "$fr" | jq -r '.last_seen // empty')
+
+        case "$st" in
+            in-game|ingame|playing)
+                printf '  %s>>>%s  %s%-20s%s  %sin-game%s' "$CY" "$CR" "$CB" "$nm" "$CR" "$CY" "$CR"
+                [[ -n "$gm" ]] && printf '  %s- %s%s' "$CD" "$gm" "$CR"
+                ;;
+            online)
+                printf '  %s(*)%s  %s%-20s%s  %sonline%s' "$CG" "$CR" "$CB" "$nm" "$CR" "$CG" "$CR"
+                [[ -n "$gm" ]] && printf '  %s- %s%s' "$CD" "$gm" "$CR"
+                ;;
+            *)
+                printf '  %s( )%s  %s%-20s%s  %soffline%s' "$CD" "$CR" "$CB" "$nm" "$CR" "$CD" "$CR"
+                [[ -n "$ls" ]] && printf '  %s(seen: %s)%s' "$CGR" "$(time_ago "$ls")" "$CR"
+                ;;
+        esac
+        printf '\n'
+    done <<< "$sorted"
+
+    printf '\n'
+}
+
+# ── Command: follow ────────────────────────────────────────────────────────────
+
+cmd_follow() {
+    local u="${1:-}"
+    [[ -z "$u" ]] && { err "Usage: 24hg-feed follow <username>"; return 1; }
+    u="${u#@}"
+    [[ "$u" =~ ^[a-zA-Z0-9_-]{1,32}$ ]] || { err "Invalid username: $u"; return 1; }
+
+    printf '%sFollowing %s...%s\n' "$CD" "$u" "$CR"
+
+    local resp
+    resp=$(api_post "/24hg/friends/follow" "{\"username\":\"$u\"}") || return 1
+    add_friend_local "$u"
+
+    local dname
+    dname=$(echo "$resp" | jq -r '.user.display_name // .display_name // empty' 2>/dev/null)
+    if [[ -n "$dname" ]] && [[ "$dname" != "$u" ]]; then
+        printf '%s%sNow following %s (%s)%s\n' "$CG" "$CB" "$u" "$dname" "$CR"
+    else
+        printf '%s%sNow following %s%s\n' "$CG" "$CB" "$u" "$CR"
+    fi
+
+    local st gm
+    st=$(echo "$resp" | jq -r '.user.status // .status // empty' 2>/dev/null)
+    gm=$(echo "$resp" | jq -r '.user.game // .game // empty' 2>/dev/null)
+    case "${st:-}" in
+        online)                printf '  %s(*)%s Currently online\n' "$CG" "$CR" ;;
+        in-game|ingame|playing) printf '  %s>>>%s Playing %s\n' "$CY" "$CR" "${gm:-a game}" ;;
+        offline)               printf '  %s( )%s Currently offline\n' "$CD" "$CR" ;;
+    esac
+}
+
+# ── Command: unfollow ──────────────────────────────────────────────────────────
+
+cmd_unfollow() {
+    local u="${1:-}"
+    [[ -z "$u" ]] && { err "Usage: 24hg-feed unfollow <username>"; return 1; }
+    u="${u#@}"
+    [[ "$u" =~ ^[a-zA-Z0-9_-]{1,32}$ ]] || { err "Invalid username: $u"; return 1; }
+
+    local list ct
+    list=$(read_friends)
+    ct=$(echo "$list" | jq --arg u "$u" '[.[] | select(.username == $u)] | length')
+    [[ "$ct" -eq 0 ]] && { warn "$u is not in your friends list."; return 1; }
+
+    printf '%sUnfollowing %s...%s\n' "$CD" "$u" "$CR"
+    api_delete "/24hg/friends/unfollow/$u" >/dev/null 2>&1 || warn "API failed; removing locally."
+    remove_friend_local "$u"
+
+    printf '%s%sUnfollowed %s%s\n' "$CG" "$CB" "$u" "$CR"
+}
+
+# ── Command: share ─────────────────────────────────────────────────────────────
+
+cmd_share() {
+    local stype="${1:-}"
+    shift 2>/dev/null || true
+    local sdata="$*"
+
+    if [[ -z "$stype" ]]; then
+        err "Usage: 24hg-feed share <clip|achievement|screenshot> <data>"
+        err "Examples:"
+        err "  24hg-feed share clip 'Epic clutch in CS2'"
+        err "  24hg-feed share achievement 'First Blood' --game Rust"
+        return 1
+    fi
+
+    case "$stype" in
+        clip|achievement|screenshot) ;;
+        *) err "Invalid type: $stype (use clip/achievement/screenshot)"; return 1 ;;
+    esac
+    [[ -z "$sdata" ]] && { err "Provide description: 24hg-feed share $stype 'text'"; return 1; }
+
+    # Parse optional --game flag
+    local game="" desc="$sdata"
+    if [[ "$sdata" == *"--game "* ]]; then
+        desc="${sdata%%--game *}"
+        game="${sdata#*--game }"
+        game="${game#\'}"; game="${game%\'}"
+        game="${game#\"}"; game="${game%\"}"
+        desc="${desc%"${desc##*[![:space:]]}"}"
+    fi
+
+    local payload
+    payload=$(jq -n --arg t "$stype" --arg d "$desc" --arg g "$game" \
+        '{type: $t, detail: $d} + (if $g != "" then {game: $g} else {} end)')
+
+    printf '%sSharing %s...%s\n' "$CD" "$stype" "$CR"
+    local resp
+    resp=$(api_post "/24hg/feed/share" "$payload") || return 1
+
+    printf '%s%sShared!%s %s%s%s %s\n' \
+        "$CG" "$CB" "$CR" \
+        "${COLORS[$stype]:-$CGR}" "${LABELS[$stype]}" "$CR" "$desc"
+    [[ -n "$game" ]] && printf '  %sin %s%s\n' "$CD" "$game" "$CR"
+
+    local url
+    url=$(echo "$resp" | jq -r '.url // empty' 2>/dev/null)
+    [[ -n "$url" ]] && printf '  %sView: %s%s\n' "$CD" "$url" "$CR"
+}
+
+# ── Help ───────────────────────────────────────────────────────────────────────
+
+print_usage() {
+    cat <<EOF
+
+${CB}${CC}24hg-feed${CR} ${CD}v${VERSION}${CR} -- 24HG Friend Activity Feed
+
+${CB}USAGE${CR}
+    24hg-feed [command] [options]
+
+${CB}COMMANDS${CR}
+    ${CB}list${CR} [limit]          Show recent friend activity (default: $DEFAULT_LIMIT)
+    ${CB}watch${CR} [limit] [secs]  Live-updating feed (default: ${WATCH_INTERVAL}s refresh)
+    ${CB}friends${CR}               List all friends and their status
+    ${CB}follow${CR} <username>      Follow a user (add to friends)
+    ${CB}unfollow${CR} <username>    Remove from friends list
+    ${CB}share${CR} <type> <data>    Share to your feed (clip/achievement/screenshot)
+                           Use --game 'Name' to tag the game
+
+${CB}ACTIVITY LABELS${CR}
+    [PLAYING]       Playing a game        [CLIP]         Shared a clip
+    [ACHIEVEMENT]   Unlocked achievement  [SCREENSHOT]   Shared a screenshot
+    [RANK]          Leaderboard rank      [TOURNAMENT]   Joined tournament
+    [VOICE]         In voice channel
+
+${CB}CONFIGURATION${CR}
+    Token:     $TOKEN_FILE
+    Friends:   $FRIENDS_FILE
+    API:       $API_BASE
+
+${CB}EXAMPLES${CR}
+    24hg-feed                                Recent activity
+    24hg-feed list 20                        Last 20 activities
+    24hg-feed watch                          Live feed (30s)
+    24hg-feed watch 20 10                    Live, 20 items, 10s refresh
+    24hg-feed friends                        All friends + status
+    24hg-feed follow ShadowBlade             Follow a user
+    24hg-feed unfollow ShadowBlade           Unfollow
+    24hg-feed share clip 'Ace!' --game CS2   Share a clip
+
+EOF
+}
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+main() {
+    check_deps
+
+    local cmd="${1:-list}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        -h|--help|help)    print_usage; exit 0 ;;
+        -v|--version)      echo "24hg-feed $VERSION"; exit 0 ;;
+    esac
+
+    load_token || exit 1
+
+    case "$cmd" in
+        list|ls|feed)       cmd_list "$@" ;;
+        watch|live|tail)    cmd_watch "$@" ;;
+        friends|who|online) cmd_friends "$@" ;;
+        follow|add)         cmd_follow "$@" ;;
+        unfollow|remove|rm) cmd_unfollow "$@" ;;
+        share|post)         cmd_share "$@" ;;
+        *)                  err "Unknown command: $cmd"; print_usage; exit 1 ;;
+    esac
+}
+
+main "$@"

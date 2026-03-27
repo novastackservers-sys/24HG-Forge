@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 24HG Forge ISO Builder
+# 24HG ISO Builder
 # Builds the OCI image then creates a bootable ISO via build-container-installer
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-IMAGE_NAME="forge"
+IMAGE_NAME="24hg"
 IMAGE_TAG="${1:-latest}"
 IMAGE_REF="localhost/${IMAGE_NAME}:${IMAGE_TAG}"
 ISO_DIR="${SCRIPT_DIR}/iso-output"
@@ -22,7 +22,7 @@ case "${VARIANT}" in
 esac
 
 echo "══════════════════════════════════════════"
-echo "  24HG Forge ISO Builder"
+echo "  24HG ISO Builder"
 echo "  Variant: ${VARIANT}"
 echo "  Base: ${BASE_IMAGE}"
 echo "  Tag: ${IMAGE_TAG}"
@@ -64,8 +64,8 @@ podman run --rm --privileged \
     IMAGE_NAME="${IMAGE_NAME}" \
     IMAGE_TAG="${IMAGE_TAG}" \
     VARIANT="Kinoite" \
-    ISO_NAME="forge-${VARIANT}-${IMAGE_TAG}.iso" \
-    ENROLLMENT_PASSWORD="forge"
+    ISO_NAME="24hg-${VARIANT}-${IMAGE_TAG}.iso" \
+    ENROLLMENT_PASSWORD="24hg"
 
 echo "✓ ISO created"
 
@@ -73,7 +73,7 @@ echo "✓ ISO created"
 echo ""
 echo "▶ Generating checksums..."
 cd "${ISO_DIR}"
-ISO_FILE="forge-${VARIANT}-${IMAGE_TAG}.iso"
+ISO_FILE="24hg-${VARIANT}-${IMAGE_TAG}.iso"
 if [ -f "${ISO_FILE}" ]; then
     sha256sum "${ISO_FILE}" > "${ISO_FILE}.sha256"
     echo "✓ SHA256: $(cat "${ISO_FILE}.sha256")"

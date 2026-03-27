@@ -1,0 +1,957 @@
+#!/bin/bash
+# 24HG Stream — One-command streaming setup and control
+# Supports Twitch, YouTube, Kick, and custom RTMP targets.
+# Uses OBS (Flatpak) when available, falls back to FFmpeg direct capture.
+#
+# Usage: 24hg-stream [setup|start|stop|status|config|obs-scenes]
+
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/24hg"
+CONFIG_FILE="$CONFIG_DIR/stream.conf"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/24hg-stream"
+PID_FILE="$STATE_DIR/stream.pid"
+LOG_FILE="$STATE_DIR/stream.log"
+OBS_SCENE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/obs-studio/basic/scenes"
+
+# RTMP ingest URLs
+RTMP_TWITCH="rtmp://live.twitch.tv/app/"
+RTMP_YOUTUBE="rtmp://a.rtmp.youtube.com/live2/"
+RTMP_KICK="rtmps://fa723fc1b171.global-contribute.live-video.net/app/"
+
+# Default config
+PLATFORM="twitch"
+STREAM_KEY=""
+QUALITY_PRESET="1080p60"
+ENCODER="auto"
+AUDIO_INPUT=""
+AUDIO_OUTPUT=""
+CUSTOM_RTMP_URL=""
+
+# Quality presets: resolution, fps, bitrate
+declare -A PRESET_RES=( ["1080p60"]="1920x1080" ["720p60"]="1280x720" ["720p30"]="1280x720" ["480p30"]="854x480" )
+declare -A PRESET_FPS=( ["1080p60"]="60" ["720p60"]="60" ["720p30"]="30" ["480p30"]="30" )
+declare -A PRESET_BITRATE=( ["1080p60"]="6000" ["720p60"]="4500" ["720p30"]="2500" ["480p30"]="1500" )
+
+mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+
+# ─── Config ──────────────────────────────────────────────────────────
+
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+    fi
+}
+
+save_config() {
+    cat > "$CONFIG_FILE" <<EOF
+# 24HG Stream Configuration
+# Generated $(date -Iseconds) — edit with: 24hg-stream config
+PLATFORM="$PLATFORM"
+STREAM_KEY="$STREAM_KEY"
+QUALITY_PRESET="$QUALITY_PRESET"
+ENCODER="$ENCODER"
+AUDIO_INPUT="$AUDIO_INPUT"
+AUDIO_OUTPUT="$AUDIO_OUTPUT"
+CUSTOM_RTMP_URL="$CUSTOM_RTMP_URL"
+EOF
+    chmod 600 "$CONFIG_FILE"
+}
+
+# ─── Detection helpers ───────────────────────────────────────────────
+
+detect_encoder() {
+    # NVENC (NVIDIA)
+    if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null 2>&1; then
+        echo "nvenc"
+        return
+    fi
+    # VAAPI (AMD / Intel)
+    if command -v vainfo &>/dev/null && vainfo &>/dev/null 2>&1; then
+        echo "vaapi"
+        return
+    fi
+    # CPU fallback
+    echo "x264"
+}
+
+detect_display_server() {
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        echo "wayland"
+    else
+        echo "x11"
+    fi
+}
+
+is_obs_installed() {
+    flatpak info com.obsproject.Studio &>/dev/null 2>&1
+}
+
+get_rtmp_url() {
+    local plat="${1:-$PLATFORM}"
+    case "$plat" in
+        twitch)  echo "${RTMP_TWITCH}${STREAM_KEY}" ;;
+        youtube) echo "${RTMP_YOUTUBE}${STREAM_KEY}" ;;
+        kick)    echo "${RTMP_KICK}${STREAM_KEY}" ;;
+        custom)  echo "${CUSTOM_RTMP_URL}${STREAM_KEY}" ;;
+        *)
+            echo "Unknown platform: $plat" >&2
+            return 1
+            ;;
+    esac
+}
+
+list_audio_inputs() {
+    pactl list sources short 2>/dev/null | grep -v ".monitor" | awk '{print $2}'
+}
+
+list_audio_outputs() {
+    pactl list sinks short 2>/dev/null | awk '{print $2}'
+}
+
+get_audio_input_desc() {
+    pactl list sources 2>/dev/null | grep -A1 "Name: $1" | grep "Description:" | sed 's/.*Description: //'
+}
+
+get_audio_output_desc() {
+    pactl list sinks 2>/dev/null | grep -A1 "Name: $1" | grep "Description:" | sed 's/.*Description: //'
+}
+
+# ─── Setup wizard ────────────────────────────────────────────────────
+
+cmd_setup() {
+    if ! command -v zenity &>/dev/null; then
+        echo "Error: zenity is required for the setup wizard."
+        echo "Install with:  sudo dnf install zenity  (or rpm-ostree install zenity)"
+        exit 1
+    fi
+
+    echo "Starting 24HG Stream Setup Wizard..."
+
+    # 1) Platform
+    PLATFORM=$(zenity --list --radiolist \
+        --title="24HG Stream — Platform" \
+        --text="Choose your streaming platform:" \
+        --column="Pick" --column="Platform" --column="Description" \
+        TRUE  "twitch"  "Twitch.tv" \
+        FALSE "youtube" "YouTube Live" \
+        FALSE "kick"    "Kick.com" \
+        FALSE "custom"  "Custom RTMP URL" \
+        --width=450 --height=350 2>/dev/null) || { echo "Setup cancelled."; exit 0; }
+
+    # 2) Custom RTMP URL (if needed)
+    if [ "$PLATFORM" = "custom" ]; then
+        CUSTOM_RTMP_URL=$(zenity --entry \
+            --title="24HG Stream — Custom RTMP" \
+            --text="Enter the RTMP ingest URL (without stream key):" \
+            --width=450 2>/dev/null) || { echo "Setup cancelled."; exit 0; }
+    fi
+
+    # 3) Stream key
+    STREAM_KEY=$(zenity --password \
+        --title="24HG Stream — Stream Key" \
+        --text="Enter your ${PLATFORM} stream key:" \
+        --width=400 2>/dev/null) || { echo "Setup cancelled."; exit 0; }
+
+    if [ -z "$STREAM_KEY" ]; then
+        zenity --error --text="Stream key cannot be empty." --width=300 2>/dev/null
+        exit 1
+    fi
+
+    # 4) Quality preset
+    QUALITY_PRESET=$(zenity --list --radiolist \
+        --title="24HG Stream — Quality" \
+        --text="Choose a quality preset:" \
+        --column="Pick" --column="Preset" --column="Details" \
+        TRUE  "1080p60" "1920x1080 @ 60fps — 6000 kbps" \
+        FALSE "720p60"  "1280x720 @ 60fps — 4500 kbps" \
+        FALSE "720p30"  "1280x720 @ 30fps — 2500 kbps" \
+        FALSE "480p30"  "854x480 @ 30fps — 1500 kbps" \
+        --width=480 --height=350 2>/dev/null) || { echo "Setup cancelled."; exit 0; }
+
+    # 5) Encoder — auto-detect then let user confirm/change
+    local DETECTED
+    DETECTED=$(detect_encoder)
+    local NVENC_STATE="FALSE" VAAPI_STATE="FALSE" X264_STATE="FALSE"
+    case "$DETECTED" in
+        nvenc) NVENC_STATE="TRUE" ;;
+        vaapi) VAAPI_STATE="TRUE" ;;
+        *)     X264_STATE="TRUE" ;;
+    esac
+
+    ENCODER=$(zenity --list --radiolist \
+        --title="24HG Stream — Encoder" \
+        --text="Select encoder (auto-detected: ${DETECTED^^}):" \
+        --column="Pick" --column="Encoder" --column="Description" \
+        "$NVENC_STATE" "nvenc" "NVIDIA NVENC (best for NVIDIA GPUs)" \
+        "$VAAPI_STATE" "vaapi" "VAAPI (AMD / Intel iGPU)" \
+        "$X264_STATE"  "x264"  "x264 CPU (universal fallback)" \
+        --width=500 --height=300 2>/dev/null) || { echo "Setup cancelled."; exit 0; }
+
+    # 6) Audio input (microphone)
+    local MIC_LIST=""
+    local FIRST=true
+    while read -r SRC; do
+        [ -z "$SRC" ] && continue
+        local DESC
+        DESC=$(get_audio_input_desc "$SRC")
+        if $FIRST; then
+            MIC_LIST+="TRUE|${SRC}|${DESC:-$SRC}"
+            FIRST=false
+        else
+            MIC_LIST+="|FALSE|${SRC}|${DESC:-$SRC}"
+        fi
+    done < <(list_audio_inputs)
+
+    if [ -n "$MIC_LIST" ]; then
+        AUDIO_INPUT=$(echo "$MIC_LIST" | tr '|' '\n' | zenity --list --radiolist \
+            --title="24HG Stream — Microphone" \
+            --text="Select your microphone (or cancel to skip):" \
+            --column="Pick" --column="Device" --column="Description" \
+            --width=600 --height=400 2>/dev/null) || AUDIO_INPUT=""
+    fi
+
+    # 7) Desktop audio — auto-select PipeWire monitor
+    AUDIO_OUTPUT=$(pactl get-default-sink 2>/dev/null || echo "")
+    if [ -n "$AUDIO_OUTPUT" ]; then
+        AUDIO_OUTPUT="${AUDIO_OUTPUT}.monitor"
+        echo "Desktop audio: $AUDIO_OUTPUT"
+    fi
+
+    # Save
+    save_config
+    echo ""
+    echo "Setup complete! Config saved to: $CONFIG_FILE (permissions: 600)"
+    echo ""
+    cmd_config_show
+    echo ""
+    echo "Start streaming with: 24hg-stream start"
+
+    notify-send -a "24HG" -i "video-display" "Stream Setup Complete" \
+        "Platform: ${PLATFORM}, Quality: ${QUALITY_PRESET}" 2>/dev/null || true
+}
+
+# ─── Start ───────────────────────────────────────────────────────────
+
+build_ffmpeg_cmd() {
+    local URL RES FPS BITRATE
+    URL=$(get_rtmp_url)
+    RES="${PRESET_RES[$QUALITY_PRESET]}"
+    FPS="${PRESET_FPS[$QUALITY_PRESET]}"
+    BITRATE="${PRESET_BITRATE[$QUALITY_PRESET]}"
+    local WIDTH="${RES%x*}"
+    local HEIGHT="${RES#*x}"
+
+    local CMD=("ffmpeg" "-hide_banner" "-loglevel" "warning" "-stats")
+
+    # Video input — Wayland or X11
+    if [ "$(detect_display_server)" = "wayland" ]; then
+        if command -v wf-recorder &>/dev/null; then
+            # Use wf-recorder piped to ffmpeg
+            CMD=("wf-recorder"
+                "--muxer=v4l2"
+                "-c" "rawvideo"
+                "-f" "/dev/stdout"
+                "|" "ffmpeg" "-hide_banner" "-loglevel" "warning" "-stats"
+                "-f" "rawvideo" "-i" "pipe:0")
+        else
+            # PipeWire screen capture via FFmpeg
+            CMD+=("-f" "lavfi" "-i" "pipewire_screen")
+        fi
+    else
+        CMD+=("-f" "x11grab" "-framerate" "$FPS"
+              "-video_size" "${WIDTH}x${HEIGHT}"
+              "-i" "${DISPLAY:-:0}")
+    fi
+
+    # Desktop audio via PipeWire
+    if [ -n "$AUDIO_OUTPUT" ]; then
+        CMD+=("-f" "pulse" "-i" "$AUDIO_OUTPUT")
+    fi
+
+    # Microphone
+    if [ -n "$AUDIO_INPUT" ]; then
+        CMD+=("-f" "pulse" "-i" "$AUDIO_INPUT")
+    fi
+
+    # Audio mixing — if both desktop + mic, mix them down
+    if [ -n "$AUDIO_OUTPUT" ] && [ -n "$AUDIO_INPUT" ]; then
+        CMD+=("-filter_complex" "[1:a][2:a]amix=inputs=2:duration=first[aout]" "-map" "0:v" "-map" "[aout]")
+    elif [ -n "$AUDIO_OUTPUT" ] || [ -n "$AUDIO_INPUT" ]; then
+        CMD+=("-map" "0:v" "-map" "1:a")
+    fi
+
+    # Video encoding
+    case "$ENCODER" in
+        nvenc)
+            CMD+=("-c:v" "h264_nvenc"
+                  "-preset" "p4" "-tune" "ll"
+                  "-b:v" "${BITRATE}k" "-maxrate" "${BITRATE}k"
+                  "-bufsize" "$((BITRATE * 2))k"
+                  "-g" "$((FPS * 2))"
+                  "-rc" "cbr")
+            ;;
+        vaapi)
+            CMD+=("-vaapi_device" "/dev/dri/renderD128"
+                  "-vf" "format=nv12,hwupload"
+                  "-c:v" "h264_vaapi"
+                  "-b:v" "${BITRATE}k" "-maxrate" "${BITRATE}k"
+                  "-bufsize" "$((BITRATE * 2))k"
+                  "-g" "$((FPS * 2))")
+            ;;
+        x264)
+            CMD+=("-c:v" "libx264"
+                  "-preset" "veryfast" "-tune" "zerolatency"
+                  "-b:v" "${BITRATE}k" "-maxrate" "${BITRATE}k"
+                  "-bufsize" "$((BITRATE * 2))k"
+                  "-g" "$((FPS * 2))"
+                  "-x264-params" "nal-hrd=cbr")
+            ;;
+    esac
+
+    # Output scaling (if source != preset)
+    CMD+=("-s" "$RES" "-r" "$FPS")
+
+    # Audio encoding
+    CMD+=("-c:a" "aac" "-b:a" "160k" "-ar" "44100")
+
+    # Output
+    CMD+=("-f" "flv" "$URL")
+
+    echo "${CMD[@]}"
+}
+
+cmd_start() {
+    local TARGET="${1:-}"
+    load_config
+
+    # Override platform if provided
+    if [ -n "$TARGET" ]; then
+        case "$TARGET" in
+            twitch|youtube|kick|custom) PLATFORM="$TARGET" ;;
+            *) echo "Unknown platform: $TARGET (use: twitch, youtube, kick, custom)"; exit 1 ;;
+        esac
+    fi
+
+    if [ -z "$STREAM_KEY" ]; then
+        echo "No stream key configured. Run: 24hg-stream setup"
+        exit 1
+    fi
+
+    # Already running?
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        echo "Stream already running (PID: $(cat "$PID_FILE"))"
+        echo "Stop first with: 24hg-stream stop"
+        exit 1
+    fi
+
+    echo "Starting 24HG Stream..."
+    echo "  Platform: ${PLATFORM^^}"
+    echo "  Quality:  $QUALITY_PRESET (${PRESET_RES[$QUALITY_PRESET]} @ ${PRESET_FPS[$QUALITY_PRESET]}fps, ${PRESET_BITRATE[$QUALITY_PRESET]}kbps)"
+    echo "  Encoder:  ${ENCODER^^}"
+
+    # Try OBS first
+    if is_obs_installed; then
+        echo "  Method:   OBS Studio (Flatpak)"
+        echo ""
+
+        # Create/select OBS profile for this platform
+        local OBS_PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/obs-studio/basic/profiles/24HG-${PLATFORM}"
+        mkdir -p "$OBS_PROFILE_DIR"
+
+        local RES="${PRESET_RES[$QUALITY_PRESET]}"
+        local FPS="${PRESET_FPS[$QUALITY_PRESET]}"
+        local BITRATE="${PRESET_BITRATE[$QUALITY_PRESET]}"
+        local RTMP_SERVER
+        case "$PLATFORM" in
+            twitch)  RTMP_SERVER="$RTMP_TWITCH" ;;
+            youtube) RTMP_SERVER="$RTMP_YOUTUBE" ;;
+            kick)    RTMP_SERVER="$RTMP_KICK" ;;
+            custom)  RTMP_SERVER="$CUSTOM_RTMP_URL" ;;
+        esac
+
+        # OBS encoder mapping
+        local OBS_ENCODER
+        case "$ENCODER" in
+            nvenc) OBS_ENCODER="jim_nvenc" ;;
+            vaapi) OBS_ENCODER="ffmpeg_vaapi" ;;
+            x264)  OBS_ENCODER="obs_x264" ;;
+        esac
+
+        cat > "$OBS_PROFILE_DIR/basic.ini" <<OBSEOF
+[General]
+Name=24HG-${PLATFORM}
+
+[Stream]
+Mode=CustomRTMP
+Server=${RTMP_SERVER}
+Key=${STREAM_KEY}
+Type=rtmp_custom
+
+[Output]
+Mode=Advanced
+
+[AdvOut]
+TrackIndex=1
+Encoder=${OBS_ENCODER}
+ApplyServiceSettings=true
+VBitrate=${BITRATE}
+RecType=Standard
+
+[Video]
+BaseCX=${RES%x*}
+BaseCY=${RES#*x}
+OutputCX=${RES%x*}
+OutputCY=${RES#*x}
+FPSCommon=${FPS}
+
+[Audio]
+SampleRate=44100
+ChannelSetup=Stereo
+OBSEOF
+
+        flatpak run com.obsproject.Studio --profile "24HG-${PLATFORM}" &
+        local OBS_PID=$!
+        echo "$OBS_PID" > "$PID_FILE"
+        date +%s > "$STATE_DIR/start_time"
+        echo "$PLATFORM" > "$STATE_DIR/platform"
+        echo "OBS launched (PID: $OBS_PID). Use OBS to go live."
+        notify-send -a "24HG" -i "video-display" "OBS Ready" \
+            "Profile: 24HG-${PLATFORM} loaded. Press Start Streaming in OBS." 2>/dev/null || true
+        return
+    fi
+
+    # FFmpeg fallback
+    if ! command -v ffmpeg &>/dev/null; then
+        echo "Error: Neither OBS nor FFmpeg found."
+        echo "Install OBS:    flatpak install com.obsproject.Studio"
+        echo "Install FFmpeg: sudo dnf install ffmpeg"
+        exit 1
+    fi
+
+    echo "  Method:   FFmpeg direct capture"
+    echo ""
+
+    local FFMPEG_CMD
+    FFMPEG_CMD=$(build_ffmpeg_cmd)
+    echo "Command: $FFMPEG_CMD"
+    echo ""
+
+    # Launch in background
+    eval "$FFMPEG_CMD" > "$LOG_FILE" 2>&1 &
+    local FFPID=$!
+    echo "$FFPID" > "$PID_FILE"
+    date +%s > "$STATE_DIR/start_time"
+    echo "$PLATFORM" > "$STATE_DIR/platform"
+
+    # Wait a moment to check it didn't immediately die
+    sleep 2
+    if ! kill -0 "$FFPID" 2>/dev/null; then
+        echo "ERROR: Stream failed to start. Check log:"
+        echo "  $LOG_FILE"
+        tail -20 "$LOG_FILE" 2>/dev/null
+        rm -f "$PID_FILE"
+        exit 1
+    fi
+
+    echo "Stream is LIVE! (PID: $FFPID)"
+    echo "Log: $LOG_FILE"
+    notify-send -a "24HG" -i "video-display" "Stream Live" \
+        "Streaming to ${PLATFORM^^} at ${QUALITY_PRESET}" 2>/dev/null || true
+}
+
+# ─── Stop ────────────────────────────────────────────────────────────
+
+cmd_stop() {
+    if [ ! -f "$PID_FILE" ]; then
+        echo "No stream is running."
+        return 0
+    fi
+
+    local PID
+    PID=$(cat "$PID_FILE")
+    if kill -0 "$PID" 2>/dev/null; then
+        echo "Stopping stream (PID: $PID)..."
+        kill -SIGINT "$PID" 2>/dev/null || true
+        # Wait up to 5 seconds for graceful shutdown
+        local WAITED=0
+        while kill -0 "$PID" 2>/dev/null && [ $WAITED -lt 5 ]; do
+            sleep 1
+            WAITED=$((WAITED + 1))
+        done
+        # Force kill if still alive
+        if kill -0 "$PID" 2>/dev/null; then
+            kill -9 "$PID" 2>/dev/null || true
+            echo "Force-killed stream process."
+        else
+            echo "Stream stopped gracefully."
+        fi
+    else
+        echo "Stream process already exited."
+    fi
+
+    # Also stop wf-recorder if it was used
+    pkill -f "wf-recorder.*24hg" 2>/dev/null || true
+
+    local UPTIME_STR=""
+    if [ -f "$STATE_DIR/start_time" ]; then
+        local START NOW ELAPSED
+        START=$(cat "$STATE_DIR/start_time")
+        NOW=$(date +%s)
+        ELAPSED=$((NOW - START))
+        UPTIME_STR=$(printf "%dh %dm %ds" $((ELAPSED/3600)) $((ELAPSED%3600/60)) $((ELAPSED%60)))
+        echo "Session duration: $UPTIME_STR"
+    fi
+
+    rm -f "$PID_FILE" "$STATE_DIR/start_time" "$STATE_DIR/platform"
+    notify-send -a "24HG" -i "video-display" "Stream Ended" \
+        "Duration: ${UPTIME_STR:-unknown}" 2>/dev/null || true
+}
+
+# ─── Status ──────────────────────────────────────────────────────────
+
+cmd_status() {
+    load_config
+
+    echo "╔══════════════════════════════════════╗"
+    echo "║         24HG Stream Status          ║"
+    echo "╠══════════════════════════════════════╣"
+
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        local PID
+        PID=$(cat "$PID_FILE")
+        local PLAT="unknown"
+        [ -f "$STATE_DIR/platform" ] && PLAT=$(cat "$STATE_DIR/platform")
+
+        echo "║  Status:    LIVE                     ║"
+        printf "║  Platform:  %-25s║\n" "${PLAT^^}"
+        printf "║  PID:       %-25s║\n" "$PID"
+
+        # Uptime
+        if [ -f "$STATE_DIR/start_time" ]; then
+            local START NOW ELAPSED
+            START=$(cat "$STATE_DIR/start_time")
+            NOW=$(date +%s)
+            ELAPSED=$((NOW - START))
+            local UPTIME
+            UPTIME=$(printf "%dh %dm %ds" $((ELAPSED/3600)) $((ELAPSED%3600/60)) $((ELAPSED%60)))
+            printf "║  Uptime:    %-25s║\n" "$UPTIME"
+        fi
+
+        # Parse FFmpeg log for stats
+        if [ -f "$LOG_FILE" ]; then
+            local LAST_LINE
+            LAST_LINE=$(tail -1 "$LOG_FILE" 2>/dev/null || echo "")
+            if echo "$LAST_LINE" | grep -q "bitrate="; then
+                local BR
+                BR=$(echo "$LAST_LINE" | grep -oP 'bitrate=\s*\K[0-9.]+kbits/s' || echo "N/A")
+                printf "║  Bitrate:   %-25s║\n" "$BR"
+            fi
+            if echo "$LAST_LINE" | grep -q "drop="; then
+                local DROPS
+                DROPS=$(echo "$LAST_LINE" | grep -oP 'drop=\K[0-9]+' || echo "0")
+                printf "║  Dropped:   %-25s║\n" "${DROPS} frames"
+            fi
+        fi
+    else
+        echo "║  Status:    OFFLINE                  ║"
+        rm -f "$PID_FILE" 2>/dev/null
+    fi
+
+    echo "╠══════════════════════════════════════╣"
+    printf "║  Encoder:   %-25s║\n" "${ENCODER^^}"
+    printf "║  Quality:   %-25s║\n" "$QUALITY_PRESET"
+    printf "║  Config:    %-25s║\n" "$([ -f "$CONFIG_FILE" ] && echo "OK" || echo "Not set")"
+    echo "╚══════════════════════════════════════╝"
+}
+
+# ─── Config ──────────────────────────────────────────────────────────
+
+cmd_config_show() {
+    load_config
+    echo "24HG Stream Configuration"
+    echo "──────────────────────────"
+    echo "  Platform:      ${PLATFORM}"
+    echo "  Stream Key:    ${STREAM_KEY:+****$(echo "$STREAM_KEY" | tail -c 5)}"
+    echo "  Quality:       ${QUALITY_PRESET} (${PRESET_RES[$QUALITY_PRESET]} @ ${PRESET_FPS[$QUALITY_PRESET]}fps, ${PRESET_BITRATE[$QUALITY_PRESET]}kbps)"
+    echo "  Encoder:       ${ENCODER^^} (detected: $(detect_encoder))"
+    echo "  Audio Input:   ${AUDIO_INPUT:-not set}"
+    echo "  Audio Output:  ${AUDIO_OUTPUT:-not set}"
+    [ "$PLATFORM" = "custom" ] && echo "  RTMP URL:      ${CUSTOM_RTMP_URL}"
+    echo ""
+    echo "  Config file:   $CONFIG_FILE"
+    echo ""
+    echo "Edit with: 24hg-stream setup"
+}
+
+cmd_config() {
+    local KEY="${1:-}"
+    local VAL="${2:-}"
+
+    if [ -z "$KEY" ]; then
+        cmd_config_show
+        return
+    fi
+
+    load_config
+    case "$KEY" in
+        platform)       PLATFORM="$VAL" ;;
+        key)            STREAM_KEY="$VAL" ;;
+        quality)        QUALITY_PRESET="$VAL" ;;
+        encoder)        ENCODER="$VAL" ;;
+        audio-input)    AUDIO_INPUT="$VAL" ;;
+        audio-output)   AUDIO_OUTPUT="$VAL" ;;
+        rtmp-url)       CUSTOM_RTMP_URL="$VAL" ;;
+        *)
+            echo "Unknown config key: $KEY"
+            echo "Valid keys: platform, key, quality, encoder, audio-input, audio-output, rtmp-url"
+            exit 1
+            ;;
+    esac
+    save_config
+    echo "Updated $KEY = $VAL"
+}
+
+# ─── OBS Scenes ──────────────────────────────────────────────────────
+
+cmd_obs_scenes() {
+    load_config
+
+    local SCENE_FILE="$STATE_DIR/24hg-scenes.json"
+    local RES="${PRESET_RES[$QUALITY_PRESET]}"
+    local WIDTH="${RES%x*}"
+    local HEIGHT="${RES#*x}"
+
+    cat > "$SCENE_FILE" <<SCENEEOF
+{
+    "name": "24HG Scenes",
+    "current_scene": "Gaming",
+    "current_program_scene": "Gaming",
+    "scene_order": [
+        { "name": "Gaming" },
+        { "name": "Just Chatting" },
+        { "name": "BRB" }
+    ],
+    "sources": [
+        {
+            "name": "Game Capture",
+            "id": "pipewire-screen-capture-source",
+            "versioned_id": "pipewire-screen-capture-source",
+            "settings": {
+                "ShowCursor": true,
+                "RestoreToken": "",
+                "CaptureType": 0
+            },
+            "flags": 0,
+            "volume": 1.0,
+            "muted": false,
+            "enabled": true
+        },
+        {
+            "name": "Webcam",
+            "id": "v4l2_input",
+            "versioned_id": "v4l2_input",
+            "settings": {
+                "device_id": "/dev/video0",
+                "resolution": "1280x720",
+                "frame_rate": 30,
+                "auto_reset": true
+            },
+            "flags": 0,
+            "volume": 0.0,
+            "muted": true,
+            "enabled": true
+        },
+        {
+            "name": "Chat Overlay",
+            "id": "browser_source",
+            "versioned_id": "browser_source",
+            "settings": {
+                "url": "https://www.twitch.tv/popout/YOURCHANNEL/chat?popout=",
+                "width": 400,
+                "height": ${HEIGHT},
+                "css": "body { background: rgba(0,0,0,0.6) !important; } .chat-scrollable-area__message-container { background: transparent !important; }",
+                "shutdown": true
+            },
+            "flags": 0,
+            "volume": 0.0,
+            "muted": true,
+            "enabled": true
+        },
+        {
+            "name": "Desktop Audio",
+            "id": "pulse_output_capture",
+            "versioned_id": "pulse_output_capture",
+            "settings": {
+                "device_id": "default"
+            },
+            "flags": 0,
+            "volume": 1.0,
+            "muted": false,
+            "enabled": true
+        },
+        {
+            "name": "Microphone",
+            "id": "pulse_input_capture",
+            "versioned_id": "pulse_input_capture",
+            "settings": {
+                "device_id": "${AUDIO_INPUT:-default}"
+            },
+            "flags": 0,
+            "volume": 1.0,
+            "muted": false,
+            "enabled": true
+        },
+        {
+            "name": "Chatting Background",
+            "id": "color_source_v3",
+            "versioned_id": "color_source_v3",
+            "settings": {
+                "color": 4281545523,
+                "width": ${WIDTH},
+                "height": ${HEIGHT}
+            },
+            "flags": 0,
+            "volume": 0.0,
+            "muted": true,
+            "enabled": true
+        },
+        {
+            "name": "BRB Image",
+            "id": "image_source",
+            "versioned_id": "image_source",
+            "settings": {
+                "file": "",
+                "unload": false
+            },
+            "flags": 0,
+            "volume": 0.0,
+            "muted": true,
+            "enabled": true
+        },
+        {
+            "name": "BRB Text",
+            "id": "text_ft2_source_v2",
+            "versioned_id": "text_ft2_source_v2",
+            "settings": {
+                "text": "Be Right Back!",
+                "font": {
+                    "face": "Sans Serif",
+                    "size": 72,
+                    "style": "Bold"
+                },
+                "color1": 4294967295,
+                "color2": 4294967295
+            },
+            "flags": 0,
+            "volume": 0.0,
+            "muted": true,
+            "enabled": true
+        }
+    ],
+    "scenes": [
+        {
+            "name": "Gaming",
+            "settings": {
+                "items": [
+                    {
+                        "name": "Game Capture",
+                        "pos": { "x": 0.0, "y": 0.0 },
+                        "bounds": { "x": ${WIDTH}.0, "y": ${HEIGHT}.0 },
+                        "bounds_type": 2,
+                        "visible": true
+                    },
+                    {
+                        "name": "Webcam",
+                        "pos": { "x": $((WIDTH - 320)).0, "y": $((HEIGHT - 240)).0 },
+                        "bounds": { "x": 320.0, "y": 240.0 },
+                        "bounds_type": 2,
+                        "visible": true
+                    },
+                    {
+                        "name": "Chat Overlay",
+                        "pos": { "x": 0.0, "y": 0.0 },
+                        "bounds": { "x": 400.0, "y": ${HEIGHT}.0 },
+                        "bounds_type": 2,
+                        "visible": true
+                    },
+                    {
+                        "name": "Desktop Audio",
+                        "visible": true
+                    },
+                    {
+                        "name": "Microphone",
+                        "visible": true
+                    }
+                ]
+            }
+        },
+        {
+            "name": "Just Chatting",
+            "settings": {
+                "items": [
+                    {
+                        "name": "Chatting Background",
+                        "pos": { "x": 0.0, "y": 0.0 },
+                        "bounds": { "x": ${WIDTH}.0, "y": ${HEIGHT}.0 },
+                        "bounds_type": 2,
+                        "visible": true
+                    },
+                    {
+                        "name": "Webcam",
+                        "pos": { "x": $((WIDTH / 2 - 640)).0, "y": $((HEIGHT / 2 - 360)).0 },
+                        "bounds": { "x": 1280.0, "y": 720.0 },
+                        "bounds_type": 2,
+                        "visible": true
+                    },
+                    {
+                        "name": "Desktop Audio",
+                        "visible": true
+                    },
+                    {
+                        "name": "Microphone",
+                        "visible": true
+                    }
+                ]
+            }
+        },
+        {
+            "name": "BRB",
+            "settings": {
+                "items": [
+                    {
+                        "name": "BRB Image",
+                        "pos": { "x": 0.0, "y": 0.0 },
+                        "bounds": { "x": ${WIDTH}.0, "y": ${HEIGHT}.0 },
+                        "bounds_type": 2,
+                        "visible": true
+                    },
+                    {
+                        "name": "BRB Text",
+                        "pos": { "x": $((WIDTH / 2 - 200)).0, "y": $((HEIGHT / 2 - 40)).0 },
+                        "visible": true
+                    },
+                    {
+                        "name": "Desktop Audio",
+                        "visible": true
+                    }
+                ]
+            }
+        }
+    ],
+    "transitions": [
+        {
+            "name": "Fade",
+            "id": "fade_transition",
+            "settings": {
+                "duration": 300
+            }
+        }
+    ],
+    "current_transition": "Fade",
+    "transition_duration": 300
+}
+SCENEEOF
+
+    echo "Generated OBS scene collection: $SCENE_FILE"
+
+    # Import into OBS
+    mkdir -p "$OBS_SCENE_DIR" 2>/dev/null || true
+    local DEST="$OBS_SCENE_DIR/24HG Scenes.json"
+    if [ -d "$OBS_SCENE_DIR" ]; then
+        cp "$SCENE_FILE" "$DEST"
+        echo "Imported to: $DEST"
+        echo ""
+        echo "In OBS: Scene Collection → Import → select '24HG Scenes'"
+    else
+        echo ""
+        echo "OBS scenes directory not found. Copy manually:"
+        echo "  cp '$SCENE_FILE' ~/.config/obs-studio/basic/scenes/"
+    fi
+
+    echo ""
+    echo "Scenes created:"
+    echo "  1. Gaming     — Game capture + webcam (bottom-right) + chat overlay (left)"
+    echo "  2. Just Chatting — Webcam centered + background"
+    echo "  3. BRB        — Static image + 'Be Right Back!' text"
+    echo ""
+    echo "NOTE: Edit 'Chat Overlay' URL and 'BRB Image' path in OBS to customize."
+}
+
+# ─── Help ────────────────────────────────────────────────────────────
+
+cmd_help() {
+    cat <<'HELPEOF'
+24HG Stream — One-command streaming setup
+
+USAGE:
+    24hg-stream <command> [options]
+
+COMMANDS:
+    setup                Interactive setup wizard (platform, key, quality, encoder, audio)
+    start [platform]     Start streaming (twitch|youtube|kick|custom)
+                         Uses OBS if installed, FFmpeg otherwise
+    stop                 Stop the active stream gracefully
+    status               Show stream status, uptime, bitrate, dropped frames
+    config [key value]   Show config, or set a specific key
+    obs-scenes           Generate and import OBS scene collection
+                         (Gaming, Just Chatting, BRB scenes)
+    help                 Show this help
+
+CONFIG KEYS:
+    platform             twitch, youtube, kick, custom
+    key                  Stream key (stored securely, chmod 600)
+    quality              1080p60, 720p60, 720p30, 480p30
+    encoder              nvenc, vaapi, x264, auto
+    audio-input          PulseAudio/PipeWire source name
+    audio-output         PulseAudio/PipeWire sink monitor
+    rtmp-url             Custom RTMP ingest URL
+
+QUALITY PRESETS:
+    1080p60              1920x1080 @ 60fps — 6000 kbps
+    720p60               1280x720  @ 60fps — 4500 kbps
+    720p30               1280x720  @ 30fps — 2500 kbps
+    480p30               854x480   @ 30fps — 1500 kbps
+
+ENCODERS:
+    nvenc                NVIDIA GPU (lowest CPU usage, best quality)
+    vaapi                AMD / Intel GPU (low CPU usage)
+    x264                 CPU software encoding (universal fallback)
+    auto                 Auto-detect best available encoder
+
+EXAMPLES:
+    24hg-stream setup                   # First-time interactive setup
+    24hg-stream start                   # Start streaming to configured platform
+    24hg-stream start twitch            # Start streaming to Twitch
+    24hg-stream stop                    # End the stream
+    24hg-stream status                  # Check if you're live
+    24hg-stream config quality 720p60   # Switch to 720p60
+    24hg-stream obs-scenes              # Generate OBS scenes
+
+DEPENDENCIES:
+    Required:  ffmpeg
+    Optional:  obs-studio (Flatpak), wf-recorder (Wayland), zenity (setup wizard)
+    Audio:     pipewire, pactl
+    Encoders:  nvidia-smi (NVENC), vainfo (VAAPI)
+HELPEOF
+}
+
+# ─── Main ────────────────────────────────────────────────────────────
+
+load_config
+
+case "${1:-help}" in
+    setup)      cmd_setup ;;
+    start)      cmd_start "${2:-}" ;;
+    stop)       cmd_stop ;;
+    status)     cmd_status ;;
+    config)     cmd_config "${2:-}" "${3:-}" ;;
+    obs-scenes) cmd_obs_scenes ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Run '24hg-stream help' for usage."
+        exit 1
+        ;;
+esac

@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Quick Resume
-Comment=Save and restore desktop state
-Exec=/usr/bin/forge-quick-resume
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=System;Utility;
-Keywords=save;restore;resume;state;desktop;

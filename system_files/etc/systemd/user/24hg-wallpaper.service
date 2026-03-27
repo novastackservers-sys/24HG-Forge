@@ -1,0 +1,6 @@
+[Unit]
+Description=24HG Wallpaper Rotation
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/24hg-wallpaper rotate

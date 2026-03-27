@@ -1,20 +1,20 @@
 # Tools Reference
 
-Complete reference for all 24HG Forge tools. Every tool is installed to `/usr/bin/` and can be run from any terminal.
+Complete reference for all 24HG tools. Every tool is installed to `/usr/bin/` and can be run from any terminal.
 
 ---
 
 ## Core System
 
-### forge-neofetch
+### 24hg-neofetch
 
 Custom system info display with 24HG branding. Shows OS, kernel, CPU, GPU, memory, disk, and desktop info in a styled terminal output.
 
 ```
-Usage: forge-neofetch
+Usage: 24hg-neofetch
 ```
 
-No commands or options. Runs automatically when you open a terminal (configurable in `~/.bashrc.d/forge.sh`).
+No commands or options. Runs automatically when you open a terminal (configurable in `~/.bashrc.d/24hg.sh`).
 
 **Example output:**
 
@@ -25,7 +25,7 @@ No commands or options. Runs automatically when you open a terminal (configurabl
     ██   ██ ██    ██ ██   ██ ██    ██      ██
     ██   ██  ██████  ██████   ██████  ███████
 
-    OS:      24HG Forge (24 Hour Gaming)
+    OS:      24HG (24 Hour Gaming)
     Kernel:  6.8.0-100-generic
     CPU:     AMD Ryzen 7 5800X (16 cores)
     GPU:     NVIDIA GeForce RTX 3070
@@ -37,12 +37,12 @@ No commands or options. Runs automatically when you open a terminal (configurabl
 
 ---
 
-### forge-diag
+### 24hg-diag
 
 Collect comprehensive system diagnostics for support tickets. Gathers OS, hardware, GPU, audio, network, Steam, Proton, and log information.
 
 ```
-Usage: forge-diag [--paste]
+Usage: 24hg-diag [--paste]
 ```
 
 | Flag | Description |
@@ -52,20 +52,20 @@ Usage: forge-diag [--paste]
 **Examples:**
 
 ```bash
-forge-diag                # Print diagnostics to terminal
-forge-diag --paste        # Upload and get URL like https://termbin.com/abc123
+24hg-diag                # Print diagnostics to terminal
+24hg-diag --paste        # Upload and get URL like https://termbin.com/abc123
 ```
 
 **Sections collected:** OS info, kernel, hardware (CPU, GPU, RAM), disk layout, display server, audio (PipeWire), network, Steam installation, Proton versions, recent journal errors, loaded kernel modules.
 
 ---
 
-### forge-performance
+### 24hg-performance
 
 Switch between performance profiles for different use cases. Controls CPU governor, GPU power mode, compositor, and GameMode.
 
 ```
-Usage: forge-performance [gaming|balanced|powersave|status]
+Usage: 24hg-performance [gaming|balanced|powersave|status]
 ```
 
 | Command | Description |
@@ -78,21 +78,21 @@ Usage: forge-performance [gaming|balanced|powersave|status]
 **Examples:**
 
 ```bash
-forge-performance gaming     # Switch to gaming mode
-forge-performance status     # Check current profile
-forge-performance balanced   # Return to balanced mode
+24hg-performance gaming     # Switch to gaming mode
+24hg-performance status     # Check current profile
+24hg-performance balanced   # Return to balanced mode
 ```
 
 **Supports:** powerprofilesctl, direct sysfs, NVIDIA (nvidia-smi), AMD (dpm_force_performance_level), KDE KWin compositor.
 
 ---
 
-### forge-update-guard
+### 24hg-update-guard
 
 Safe system updates with rollback protection. Checks for known issues before applying updates.
 
 ```
-Usage: forge-update-guard [check|apply|rollback|status|history]
+Usage: 24hg-update-guard [check|apply|rollback|status|history]
 ```
 
 | Command | Description |
@@ -106,35 +106,35 @@ Usage: forge-update-guard [check|apply|rollback|status|history]
 **Examples:**
 
 ```bash
-forge-update-guard check      # See what's new and if it's safe
-forge-update-guard apply      # Update if safe
-forge-update-guard rollback   # Undo last update
+24hg-update-guard check      # See what's new and if it's safe
+24hg-update-guard apply      # Update if safe
+24hg-update-guard rollback   # Undo last update
 ```
 
-**Config:** Uses a pre-transaction hook at `/usr/lib/forge/forge-update-guard-hook.sh`.
+**Config:** Uses a pre-transaction hook at `/usr/lib/24hg/24hg-update-guard-hook.sh`.
 
 ---
 
 ## Server & Community
 
-### forge-hub
+### 24hg-hub
 
 The main 24HG Hub application. Opens hub.24hgaming.com in a Chromium kiosk window with protocol handler support.
 
 ```
-Usage: forge-hub [url]
+Usage: 24hg-hub [url]
 ```
 
 Launched via desktop icon, autostart, or `24hg://` protocol links. Connects to the community hub for servers, chat, forums, tournaments, and leaderboards.
 
 ---
 
-### forge-tray
+### 24hg-tray
 
 System tray icon for 24HG integration. Shows connection status, server counts, and provides quick actions.
 
 ```
-Usage: forge-tray
+Usage: 24hg-tray
 ```
 
 Runs as an autostart service. Provides a tray icon with:
@@ -145,12 +145,12 @@ Runs as an autostart service. Provides a tray icon with:
 
 ---
 
-### forge-hub-bridge
+### 24hg-hub-bridge
 
-Background service that bridges 24HG Forge system events to the 24HG Hub. Syncs playtime, achievements, and system info.
+Background service that bridges 24HG system events to the 24HG Hub. Syncs playtime, achievements, and system info.
 
 ```
-Usage: forge-hub-bridge [daemon|status|sync]
+Usage: 24hg-hub-bridge [daemon|status|sync]
 ```
 
 | Command | Description |
@@ -159,32 +159,32 @@ Usage: forge-hub-bridge [daemon|status|sync]
 | `status` | Show bridge connection status |
 | `sync` | Force sync data to hub |
 
-**Systemd:** `forge-hub-bridge.service` (user, auto-enabled).
+**Systemd:** `24hg-hub-bridge.service` (user, auto-enabled).
 
 ---
 
-### forge-server-status
+### 24hg-server-status
 
 Show all 24HG game servers with real-time player counts and status.
 
 ```
-Usage: forge-server-status
+Usage: 24hg-server-status
 ```
 
-Queries the server list from `/usr/share/forge/servers.json` and checks each server's status via game query protocols. Shows player counts, map names, and ping.
+Queries the server list from `/usr/share/24hg/servers.json` and checks each server's status via game query protocols. Shows player counts, map names, and ping.
 
-**Systemd:** `forge-server-status.service` (user, auto-enabled) provides periodic updates.
+**Systemd:** `24hg-server-status.service` (user, auto-enabled) provides periodic updates.
 
 ---
 
 ## Gaming Performance
 
-### forge-smart-launch
+### 24hg-smart-launch
 
 Intelligent per-game optimization daemon. Automatically detects game launches and applies optimal settings (CPU governor, GPU mode, compositor, env vars) per game.
 
 ```
-Usage: forge-smart-launch [daemon|apply|config|status|rules|log] [appid]
+Usage: 24hg-smart-launch [daemon|apply|config|status|rules|log] [appid]
 ```
 
 | Command | Description |
@@ -199,23 +199,23 @@ Usage: forge-smart-launch [daemon|apply|config|status|rules|log] [appid]
 **Examples:**
 
 ```bash
-forge-smart-launch status         # See what's currently optimized
-forge-smart-launch rules          # View built-in rules for known games
-forge-smart-launch config 730     # Edit CS2 optimization profile
+24hg-smart-launch status         # See what's currently optimized
+24hg-smart-launch rules          # View built-in rules for known games
+24hg-smart-launch config 730     # Edit CS2 optimization profile
 ```
 
-**Systemd:** `forge-smart-launch.service` (user, auto-enabled). Runs as a daemon that monitors `/proc` for game processes.
+**Systemd:** `24hg-smart-launch.service` (user, auto-enabled). Runs as a daemon that monitors `/proc` for game processes.
 
-**Config:** `~/.config/forge/smart-launch/`
+**Config:** `~/.config/24hg/smart-launch/`
 
 ---
 
-### forge-game-profiles
+### 24hg-game-profiles
 
 Per-game launch profiles with Proton versions, environment variables, resolution, MangoHud configs, and launch arguments.
 
 ```
-Usage: forge-game-profiles [create|edit|apply|list|delete|search|import|export|help] [options]
+Usage: 24hg-game-profiles [create|edit|apply|list|delete|search|import|export|help] [options]
 ```
 
 | Command | Description |
@@ -232,21 +232,21 @@ Usage: forge-game-profiles [create|edit|apply|list|delete|search|import|export|h
 **Examples:**
 
 ```bash
-forge-game-profiles create 1245620   # Create Elden Ring profile
-forge-game-profiles list             # List all profiles
-forge-game-profiles edit 730         # Edit CS2 profile
+24hg-game-profiles create 1245620   # Create Elden Ring profile
+24hg-game-profiles list             # List all profiles
+24hg-game-profiles edit 730         # Edit CS2 profile
 ```
 
-**Config:** `~/.config/forge/game-profiles/<appid>.json`
+**Config:** `~/.config/24hg/game-profiles/<appid>.json`
 
 ---
 
-### forge-shader-cache
+### 24hg-shader-cache
 
 Manage shader caches to eliminate first-launch stuttering. Supports Steam (Flatpak and native), DXVK, Mesa, NVIDIA, and AMD caches.
 
 ```
-Usage: forge-shader-cache [status|clean|size|prebuild|export|import|optimize]
+Usage: 24hg-shader-cache [status|clean|size|prebuild|export|import|optimize]
 ```
 
 | Command | Description |
@@ -262,10 +262,10 @@ Usage: forge-shader-cache [status|clean|size|prebuild|export|import|optimize]
 **Examples:**
 
 ```bash
-forge-shader-cache status           # Check cache health
-forge-shader-cache prebuild 730     # Pre-build CS2 shaders
-forge-shader-cache size             # See how much space caches use
-forge-shader-cache clean            # Clean stale entries
+24hg-shader-cache status           # Check cache health
+24hg-shader-cache prebuild 730     # Pre-build CS2 shaders
+24hg-shader-cache size             # See how much space caches use
+24hg-shader-cache clean            # Clean stale entries
 ```
 
 **Cache locations:** `~/.cache/mesa_shader_cache/`, `~/.cache/nvidia/GLCache/`, Steam shader caches.
@@ -274,12 +274,12 @@ forge-shader-cache clean            # Clean stale entries
 
 ## Game Management
 
-### forge-games
+### 24hg-games
 
 Unified game library across all launchers. Shows all installed games from Steam, Lutris, Heroic, and native sources in one place.
 
 ```
-Usage: forge-games [list|search|launch|info|recent|stats|refresh] [args]
+Usage: 24hg-games [list|search|launch|info|recent|stats|refresh] [args]
 ```
 
 | Command | Description |
@@ -295,20 +295,20 @@ Usage: forge-games [list|search|launch|info|recent|stats|refresh] [args]
 **Examples:**
 
 ```bash
-forge-games list                     # All games, all launchers
-forge-games search "cyberpunk"       # Find a game
-forge-games launch "Counter-Strike 2"  # Launch from any launcher
-forge-games stats                    # Library breakdown
+24hg-games list                     # All games, all launchers
+24hg-games search "cyberpunk"       # Find a game
+24hg-games launch "Counter-Strike 2"  # Launch from any launcher
+24hg-games stats                    # Library breakdown
 ```
 
 ---
 
-### forge-compat
+### 24hg-compat
 
 Game compatibility checker. Queries ProtonDB, Steam, and anti-cheat databases.
 
 ```
-Usage: forge-compat [check|search|scan|report|status] [appid|name]
+Usage: 24hg-compat [check|search|scan|report|status] [appid|name]
 ```
 
 | Command | Description |
@@ -322,20 +322,20 @@ Usage: forge-compat [check|search|scan|report|status] [appid|name]
 **Examples:**
 
 ```bash
-forge-compat check 730               # Check CS2
-forge-compat check "Elden Ring"      # Check by name
-forge-compat scan                    # Check entire library
-forge-compat status                  # System readiness
+24hg-compat check 730               # Check CS2
+24hg-compat check "Elden Ring"      # Check by name
+24hg-compat scan                    # Check entire library
+24hg-compat status                  # System readiness
 ```
 
 ---
 
-### forge-anticheat-tracker
+### 24hg-anticheat-tracker
 
 Track anti-cheat compatibility for your Steam library. Notifies you when games enable Linux support.
 
 ```
-Usage: forge-anticheat-tracker [scan|watch|status|check|updates|database] [game]
+Usage: 24hg-anticheat-tracker [scan|watch|status|check|updates|database] [game]
 ```
 
 | Command | Description |
@@ -350,23 +350,23 @@ Usage: forge-anticheat-tracker [scan|watch|status|check|updates|database] [game]
 **Examples:**
 
 ```bash
-forge-anticheat-tracker scan          # Full library scan
-forge-anticheat-tracker check "PUBG"  # Check a specific game
-forge-anticheat-tracker updates       # Recent changes
+24hg-anticheat-tracker scan          # Full library scan
+24hg-anticheat-tracker check "PUBG"  # Check a specific game
+24hg-anticheat-tracker updates       # Recent changes
 ```
 
-**Systemd:** `forge-anticheat-tracker.timer` (user, daily). Sends desktop notifications when status changes.
+**Systemd:** `24hg-anticheat-tracker.timer` (user, daily). Sends desktop notifications when status changes.
 
-**Data:** `~/.local/share/forge/anticheat/`
+**Data:** `~/.local/share/24hg/anticheat/`
 
 ---
 
-### forge-game-timer
+### 24hg-game-timer
 
 Track playtime across all game launchers. Monitors Steam, Lutris, Heroic, native games, and GameMode sessions.
 
 ```
-Usage: forge-game-timer [start|stop|status|stats|report|export|daemon|help] [game]
+Usage: 24hg-game-timer [start|stop|status|stats|report|export|daemon|help] [game]
 ```
 
 | Command | Description |
@@ -382,25 +382,25 @@ Usage: forge-game-timer [start|stop|status|stats|report|export|daemon|help] [gam
 **Examples:**
 
 ```bash
-forge-game-timer status               # What's running now
-forge-game-timer stats                # Top 10 by playtime
-forge-game-timer report weekly        # This week's breakdown
+24hg-game-timer status               # What's running now
+24hg-game-timer stats                # Top 10 by playtime
+24hg-game-timer report weekly        # This week's breakdown
 ```
 
-**Systemd:** `forge-game-timer.service` (user, auto-enabled).
+**Systemd:** `24hg-game-timer.service` (user, auto-enabled).
 
-**Data:** `~/.local/share/forge/game-timer.json`
+**Data:** `~/.local/share/24hg/game-timer.json`
 
 ---
 
 ## Proton & Wine
 
-### forge-proton-fix
+### 24hg-proton-fix
 
 Diagnose and fix Proton/Wine game issues. Checks Vulkan, Proton versions, game logs, and common failure modes.
 
 ```
-Usage: forge-proton-fix [appid|game-name] [--fix]
+Usage: 24hg-proton-fix [appid|game-name] [--fix]
 ```
 
 | Flag | Description |
@@ -410,9 +410,9 @@ Usage: forge-proton-fix [appid|game-name] [--fix]
 **Examples:**
 
 ```bash
-forge-proton-fix 730                 # Diagnose CS2
-forge-proton-fix "Elden Ring" --fix  # Diagnose and auto-fix
-forge-proton-fix 252490              # Diagnose Rust
+24hg-proton-fix 730                 # Diagnose CS2
+24hg-proton-fix "Elden Ring" --fix  # Diagnose and auto-fix
+24hg-proton-fix 252490              # Diagnose Rust
 ```
 
 **Checks:** Vulkan drivers, Proton versions, crash logs, missing dependencies (vcredist, .NET, DirectX), anti-cheat status, Wine prefix health.
@@ -421,12 +421,12 @@ forge-proton-fix 252490              # Diagnose Rust
 
 ---
 
-### forge-proton-updater
+### 24hg-proton-updater
 
 Automatically keep Proton-GE up to date. Manages GloriousEggroll's Proton-GE custom builds.
 
 ```
-Usage: forge-proton-updater [check|update|list|set-default|cleanup|auto] [options]
+Usage: 24hg-proton-updater [check|update|list|set-default|cleanup|auto] [options]
 ```
 
 | Command | Description |
@@ -441,24 +441,24 @@ Usage: forge-proton-updater [check|update|list|set-default|cleanup|auto] [option
 **Examples:**
 
 ```bash
-forge-proton-updater check           # Is there an update?
-forge-proton-updater update          # Install latest
-forge-proton-updater list            # See all installed versions
-forge-proton-updater cleanup         # Remove old versions
+24hg-proton-updater check           # Is there an update?
+24hg-proton-updater update          # Install latest
+24hg-proton-updater list            # See all installed versions
+24hg-proton-updater cleanup         # Remove old versions
 ```
 
-**Systemd:** `forge-proton-updater.timer` (user, weekly check).
+**Systemd:** `24hg-proton-updater.timer` (user, weekly check).
 
 **Install path:** `~/.local/share/Steam/compatibilitytools.d/` (Flatpak or native Steam).
 
 ---
 
-### forge-prefix
+### 24hg-prefix
 
 Wine/Proton prefix manager. Manages prefixes for Steam games -- list, inspect, health-check, backup, restore, install dependencies, and reset.
 
 ```
-Usage: forge-prefix [list|info|health|install-deps|backup|restore|cleanup|reset] [options]
+Usage: 24hg-prefix [list|info|health|install-deps|backup|restore|cleanup|reset] [options]
 ```
 
 | Command | Description |
@@ -482,24 +482,24 @@ Usage: forge-prefix [list|info|health|install-deps|backup|restore|cleanup|reset]
 **Examples:**
 
 ```bash
-forge-prefix list                     # See all prefixes and sizes
-forge-prefix info 730                 # CS2 prefix details
-forge-prefix health 1245620           # Health-check Elden Ring prefix
-forge-prefix install-deps 12345 vcredist  # Install VC++ redistributables
-forge-prefix backup 730               # Backup CS2 prefix
-forge-prefix reset 12345              # Nuclear reset (backs up saves)
+24hg-prefix list                     # See all prefixes and sizes
+24hg-prefix info 730                 # CS2 prefix details
+24hg-prefix health 1245620           # Health-check Elden Ring prefix
+24hg-prefix install-deps 12345 vcredist  # Install VC++ redistributables
+24hg-prefix backup 730               # Backup CS2 prefix
+24hg-prefix reset 12345              # Nuclear reset (backs up saves)
 ```
 
-**Backup path:** `~/.local/share/forge/prefix-backups/`
+**Backup path:** `~/.local/share/24hg/prefix-backups/`
 
 ---
 
-### forge-crash-fix
+### 24hg-crash-fix
 
 Game crash diagnosis and auto-fix tool. Analyzes Steam/Proton crash logs, system journals, and common failure modes.
 
 ```
-Usage: forge-crash-fix [diagnose|fix|log|report|watch] [appid|name] [options]
+Usage: 24hg-crash-fix [diagnose|fix|log|report|watch] [appid|name] [options]
 ```
 
 | Command | Description |
@@ -519,23 +519,23 @@ Usage: forge-crash-fix [diagnose|fix|log|report|watch] [appid|name] [options]
 **Examples:**
 
 ```bash
-forge-crash-fix diagnose 1245620      # Why did Elden Ring crash?
-forge-crash-fix fix 730               # Auto-fix CS2 crash issues
-forge-crash-fix log 252490            # Show Rust crash logs
-forge-crash-fix report                # Full report for support
-forge-crash-fix watch                 # Monitor all games
+24hg-crash-fix diagnose 1245620      # Why did Elden Ring crash?
+24hg-crash-fix fix 730               # Auto-fix CS2 crash issues
+24hg-crash-fix log 252490            # Show Rust crash logs
+24hg-crash-fix report                # Full report for support
+24hg-crash-fix watch                 # Monitor all games
 ```
 
 ---
 
 ## Display & Graphics
 
-### forge-display
+### 24hg-display
 
 Multi-monitor and display settings manager. Handles gaming/desktop modes, VRR, profiles, and per-monitor settings. Auto-detects Wayland vs X11.
 
 ```
-Usage: forge-display [status|list|gaming|desktop|save|load|vrr|resolution] [options]
+Usage: 24hg-display [status|list|gaming|desktop|save|load|vrr|resolution] [options]
 ```
 
 | Command | Description |
@@ -552,23 +552,23 @@ Usage: forge-display [status|list|gaming|desktop|save|load|vrr|resolution] [opti
 **Examples:**
 
 ```bash
-forge-display status                  # Current config
-forge-display gaming                  # Optimize for gaming
-forge-display save "triple-monitor"   # Save layout
-forge-display load "triple-monitor"   # Restore layout
-forge-display vrr                     # Toggle VRR
+24hg-display status                  # Current config
+24hg-display gaming                  # Optimize for gaming
+24hg-display save "triple-monitor"   # Save layout
+24hg-display load "triple-monitor"   # Restore layout
+24hg-display vrr                     # Toggle VRR
 ```
 
-**Profiles:** `~/.config/forge/display-profiles/`
+**Profiles:** `~/.config/24hg/display-profiles/`
 
 ---
 
-### forge-hdr
+### 24hg-hdr
 
 HDR gaming configuration wizard. Handles hardware detection, KDE Plasma 6 config, gamescope integration, and per-game HDR profiles.
 
 ```
-Usage: forge-hdr [setup|status|enable|disable|game|calibrate|test] [options]
+Usage: 24hg-hdr [setup|status|enable|disable|game|calibrate|test] [options]
 ```
 
 | Command | Description |
@@ -584,21 +584,21 @@ Usage: forge-hdr [setup|status|enable|disable|game|calibrate|test] [options]
 **Examples:**
 
 ```bash
-forge-hdr setup                       # Full setup wizard
-forge-hdr status                      # Check HDR support
-forge-hdr game 1091500                # HDR for Cyberpunk 2077
+24hg-hdr setup                       # Full setup wizard
+24hg-hdr status                      # Check HDR support
+24hg-hdr game 1091500                # HDR for Cyberpunk 2077
 ```
 
-**Config:** `~/.config/forge/hdr/`
+**Config:** `~/.config/24hg/hdr/`
 
 ---
 
-### forge-nvidia-wayland
+### 24hg-nvidia-wayland
 
 Auto-detect and fix all NVIDIA + Wayland gaming issues. The most comprehensive NVIDIA Wayland fix tool for Linux.
 
 ```
-Usage: forge-nvidia-wayland [fix|status|diagnose|optimize|env|flicker-fix|sync|driver-check]
+Usage: 24hg-nvidia-wayland [fix|status|diagnose|optimize|env|flicker-fix|sync|driver-check]
 ```
 
 | Command | Description |
@@ -615,10 +615,10 @@ Usage: forge-nvidia-wayland [fix|status|diagnose|optimize|env|flicker-fix|sync|d
 **Examples:**
 
 ```bash
-forge-nvidia-wayland fix              # Fix everything
-forge-nvidia-wayland status           # Health check
-forge-nvidia-wayland flicker-fix      # Just fix flickering
-forge-nvidia-wayland driver-check     # Check driver
+24hg-nvidia-wayland fix              # Fix everything
+24hg-nvidia-wayland status           # Health check
+24hg-nvidia-wayland flicker-fix      # Just fix flickering
+24hg-nvidia-wayland driver-check     # Check driver
 ```
 
 **Config:** `~/.config/environment.d/nvidia-gaming.conf`
@@ -627,12 +627,12 @@ forge-nvidia-wayland driver-check     # Check driver
 
 ## Audio
 
-### forge-audio
+### 24hg-audio
 
 PipeWire audio optimizer. Configures low-latency gaming audio, noise cancellation, and device switching.
 
 ```
-Usage: forge-audio [gaming|desktop|devices|switch|noise-cancel|status] [name]
+Usage: 24hg-audio [gaming|desktop|devices|switch|noise-cancel|status] [name]
 ```
 
 | Command | Description |
@@ -647,25 +647,25 @@ Usage: forge-audio [gaming|desktop|devices|switch|noise-cancel|status] [name]
 **Examples:**
 
 ```bash
-forge-audio status                    # Current config
-forge-audio gaming                    # Low-latency mode
-forge-audio devices                   # List all devices
-forge-audio switch "Headphones"       # Switch output
-forge-audio noise-cancel              # Toggle noise cancel
+24hg-audio status                    # Current config
+24hg-audio gaming                    # Low-latency mode
+24hg-audio devices                   # List all devices
+24hg-audio switch "Headphones"       # Switch output
+24hg-audio noise-cancel              # Toggle noise cancel
 ```
 
-**Config:** `/etc/pipewire/pipewire.conf.d/99-forge-defaults.conf` (system), managed per-profile.
+**Config:** `/etc/pipewire/pipewire.conf.d/99-24hg-defaults.conf` (system), managed per-profile.
 
 ---
 
 ## Input
 
-### forge-input
+### 24hg-input
 
 Input latency optimizer for mice and keyboards. Configures acceleration profiles and polling rates for competitive gaming.
 
 ```
-Usage: forge-input [gaming|desktop|status]
+Usage: 24hg-input [gaming|desktop|status]
 ```
 
 | Command | Description |
@@ -677,21 +677,21 @@ Usage: forge-input [gaming|desktop|status]
 **Examples:**
 
 ```bash
-forge-input gaming                    # Flat mouse accel, max polling
-forge-input status                    # Current settings
-forge-input desktop                   # Restore defaults
+24hg-input gaming                    # Flat mouse accel, max polling
+24hg-input status                    # Current settings
+24hg-input desktop                   # Restore defaults
 ```
 
 **Applies to:** xinput (X11), KDE kcminputrc (Wayland), libinput settings.
 
 ---
 
-### forge-controller
+### 24hg-controller
 
 Gamepad manager. Detects, calibrates, profiles, remaps, and troubleshoots controllers. Supports Xbox, PlayStation, Nintendo, 8BitDo, and generic HID.
 
 ```
-Usage: forge-controller [list|test|calibrate|profile|map|fix|status] [device]
+Usage: 24hg-controller [list|test|calibrate|profile|map|fix|status] [device]
 ```
 
 | Command | Description |
@@ -707,24 +707,24 @@ Usage: forge-controller [list|test|calibrate|profile|map|fix|status] [device]
 **Examples:**
 
 ```bash
-forge-controller list                 # See all controllers
-forge-controller test                 # Test button input
-forge-controller fix                  # Fix detection issues
-forge-controller calibrate            # Calibrate joysticks
+24hg-controller list                 # See all controllers
+24hg-controller test                 # Test button input
+24hg-controller fix                  # Fix detection issues
+24hg-controller calibrate            # Calibrate joysticks
 ```
 
-**Profiles:** `~/.config/forge/controller/`
+**Profiles:** `~/.config/24hg/controller/`
 
 ---
 
 ## Recording & Streaming
 
-### forge-replay
+### 24hg-replay
 
 Instant replay recording (like NVIDIA ShadowPlay). Uses gpu-screen-recorder for zero-overhead hardware-accelerated recording. Saves the last N minutes when you press F9.
 
 ```
-Usage: forge-replay [start|stop|save|status|config]
+Usage: 24hg-replay [start|stop|save|status|config]
 ```
 
 | Command | Description |
@@ -738,28 +738,28 @@ Usage: forge-replay [start|stop|save|status|config]
 **Examples:**
 
 ```bash
-forge-replay start                    # Start recording
-forge-replay save                     # Save last 2 minutes
-forge-replay status                   # Check if recording
-forge-replay config                   # Change settings
+24hg-replay start                    # Start recording
+24hg-replay save                     # Save last 2 minutes
+24hg-replay status                   # Check if recording
+24hg-replay config                   # Change settings
 ```
 
 **Defaults:** 120 seconds buffer, 60 FPS, very_high quality, auto-detect encoder (NVENC/VAAPI).
 
-**Clips saved to:** `~/Videos/24HG Forge Clips/`
+**Clips saved to:** `~/Videos/24HG Clips/`
 
-**Config:** `~/.config/forge/replay.conf`
+**Config:** `~/.config/24hg/replay.conf`
 
-**Systemd:** `forge-replay.service` (user, manual start).
+**Systemd:** `24hg-replay.service` (user, manual start).
 
 ---
 
-### forge-stream
+### 24hg-stream
 
 One-command streaming setup and control. Supports Twitch, YouTube, Kick, and custom RTMP targets. Uses OBS when available, falls back to FFmpeg.
 
 ```
-Usage: forge-stream [setup|start|stop|status|config|obs-scenes]
+Usage: 24hg-stream [setup|start|stop|status|config|obs-scenes]
 ```
 
 | Command | Description |
@@ -769,26 +769,26 @@ Usage: forge-stream [setup|start|stop|status|config|obs-scenes]
 | `stop` | Stop streaming |
 | `status` | Show stream status |
 | `config` | Edit stream settings |
-| `obs-scenes` | Install 24HG Forge-optimized OBS scene templates |
+| `obs-scenes` | Install 24HG-optimized OBS scene templates |
 
 **Examples:**
 
 ```bash
-forge-stream setup                    # Configure Twitch/YouTube/Kick
-forge-stream start                    # Go live
-forge-stream stop                     # Stop streaming
+24hg-stream setup                    # Configure Twitch/YouTube/Kick
+24hg-stream start                    # Go live
+24hg-stream stop                     # Stop streaming
 ```
 
-**Config:** `~/.config/forge/stream.conf`
+**Config:** `~/.config/24hg/stream.conf`
 
 ---
 
-### forge-creator-kit
+### 24hg-creator-kit
 
 Content creation utilities. Scene templates, overlay setup, and encoding profiles for streamers and content creators.
 
 ```
-Usage: forge-creator-kit [setup|templates|overlays|encode|help]
+Usage: 24hg-creator-kit [setup|templates|overlays|encode|help]
 ```
 
 | Command | Description |
@@ -800,12 +800,12 @@ Usage: forge-creator-kit [setup|templates|overlays|encode|help]
 
 ---
 
-### forge-screenshot
+### 24hg-screenshot
 
-Screenshot tool with 24HG Forge branding and automatic saving. Supports full screen, area selection, and active window capture.
+Screenshot tool with 24HG branding and automatic saving. Supports full screen, area selection, and active window capture.
 
 ```
-Usage: forge-screenshot [full|area|window]
+Usage: 24hg-screenshot [full|area|window]
 ```
 
 | Command | Description |
@@ -814,18 +814,18 @@ Usage: forge-screenshot [full|area|window]
 | `area` | Select area to capture (Shift+Print shortcut) |
 | `window` | Capture active window (Meta+Print shortcut) |
 
-**Saves to:** `~/Pictures/24HG Forge Screenshots/`
+**Saves to:** `~/Pictures/24HG Screenshots/`
 
 ---
 
 ## Network
 
-### forge-netguard
+### 24hg-netguard
 
 Network monitoring for gaming. Tracks connections made by games, detects anomalies, and provides latency diagnostics.
 
 ```
-Usage: forge-netguard [status|monitor|latency|firewall|help]
+Usage: 24hg-netguard [status|monitor|latency|firewall|help]
 ```
 
 | Command | Description |
@@ -838,18 +838,18 @@ Usage: forge-netguard [status|monitor|latency|firewall|help]
 **Examples:**
 
 ```bash
-forge-netguard status                 # Current connections
-forge-netguard latency                # Ping game servers
+24hg-netguard status                 # Current connections
+24hg-netguard latency                # Ping game servers
 ```
 
 ---
 
-### forge-download-mgr
+### 24hg-download-mgr
 
 Download manager for game-related downloads. Manages bandwidth allocation and scheduling.
 
 ```
-Usage: forge-download-mgr [status|limit|schedule|queue|help]
+Usage: 24hg-download-mgr [status|limit|schedule|queue|help]
 ```
 
 | Command | Description |
@@ -863,12 +863,12 @@ Usage: forge-download-mgr [status|limit|schedule|queue|help]
 
 ## System Maintenance
 
-### forge-backup
+### 24hg-backup
 
-Automated game save and config backup. Backs up saves, 24HG Forge configs, and important dotfiles.
+Automated game save and config backup. Backs up saves, 24HG configs, and important dotfiles.
 
 ```
-Usage: forge-backup [now|status|restore|list|config|help]
+Usage: 24hg-backup [now|status|restore|list|config|help]
 ```
 
 | Command | Description |
@@ -879,16 +879,16 @@ Usage: forge-backup [now|status|restore|list|config|help]
 | `list` | List available backups |
 | `config` | Edit backup settings (paths, schedule, retention) |
 
-**Systemd:** `forge-backup.timer` (user, daily).
+**Systemd:** `24hg-backup.timer` (user, daily).
 
 ---
 
-### forge-save-manager
+### 24hg-save-manager
 
 Find, backup, and restore game save files across all launchers and prefix locations.
 
 ```
-Usage: forge-save-manager [find|list|backup|restore|sync|help] [appid|name]
+Usage: 24hg-save-manager [find|list|backup|restore|sync|help] [appid|name]
 ```
 
 | Command | Description |
@@ -902,31 +902,31 @@ Usage: forge-save-manager [find|list|backup|restore|sync|help] [appid|name]
 **Examples:**
 
 ```bash
-forge-save-manager find 1245620       # Find Elden Ring saves
-forge-save-manager list               # All save locations
-forge-save-manager backup 730         # Backup CS2 saves
+24hg-save-manager find 1245620       # Find Elden Ring saves
+24hg-save-manager list               # All save locations
+24hg-save-manager backup 730         # Backup CS2 saves
 ```
 
 ---
 
-### forge-flatpak-fix
+### 24hg-flatpak-fix
 
 Fix Flatpak filesystem permissions for Steam, Lutris, and other gaming apps.
 
 ```
-Usage: forge-flatpak-fix
+Usage: 24hg-flatpak-fix
 ```
 
 No subcommands. Reconfigures Flatpak overrides so gaming apps can access game drives, external storage, and shared directories.
 
 ---
 
-### forge-dualboot
+### 24hg-dualboot
 
 Dual-boot management tool. Detects other operating systems and manages GRUB bootloader.
 
 ```
-Usage: forge-dualboot [status|repair|timeout] [value]
+Usage: 24hg-dualboot [status|repair|timeout] [value]
 ```
 
 | Command | Description |
@@ -939,12 +939,12 @@ Usage: forge-dualboot [status|repair|timeout] [value]
 
 ## Migration & Setup
 
-### forge-migrate
+### 24hg-migrate
 
-Migrate settings and data from Windows or another Linux distro to 24HG Forge.
+Migrate settings and data from Windows or another Linux distro to 24HG.
 
 ```
-Usage: forge-migrate [scan|import|status|help]
+Usage: 24hg-migrate [scan|import|status|help]
 ```
 
 | Command | Description |
@@ -955,34 +955,34 @@ Usage: forge-migrate [scan|import|status|help]
 
 ---
 
-### forge-discord-fix
+### 24hg-discord-fix
 
-Fix Discord integration on 24HG Forge. Configures PipeWire, XDG portals, and Flatpak permissions.
+Fix Discord integration on 24HG. Configures PipeWire, XDG portals, and Flatpak permissions.
 
 ```
-Usage: forge-discord-fix
+Usage: 24hg-discord-fix
 ```
 
-Runs automatically as a systemd service (`forge-discord-fix.service`). Ensures Discord can access audio, screen share, and system notifications.
+Runs automatically as a systemd service (`24hg-discord-fix.service`). Ensures Discord can access audio, screen share, and system notifications.
 
 ---
 
-### forge-discord-screen
+### 24hg-discord-screen
 
 Fix Discord screen sharing specifically. Configures PipeWire screen capture portal for Wayland.
 
 ```
-Usage: forge-discord-screen
+Usage: 24hg-discord-screen
 ```
 
 ---
 
-### forge-first-boot
+### 24hg-first-boot
 
-First boot wizard for new 24HG Forge installations. Guides users through GPU detection, display setup, account connection, and preferences.
+First boot wizard for new 24HG installations. Guides users through GPU detection, display setup, account connection, and preferences.
 
 ```
-Usage: forge-first-boot
+Usage: 24hg-first-boot
 ```
 
 Launched automatically via autostart desktop entry on the first login. Can be re-run manually.
@@ -991,12 +991,12 @@ Launched automatically via autostart desktop entry on the first login. Can be re
 
 ## Personalization
 
-### forge-wallpaper
+### 24hg-wallpaper
 
-Wallpaper manager with rotation support. Manages 24HG Forge-branded wallpapers and custom wallpaper collections.
+Wallpaper manager with rotation support. Manages 24HG-branded wallpapers and custom wallpaper collections.
 
 ```
-Usage: forge-wallpaper [set|random|rotate|list|add|help]
+Usage: 24hg-wallpaper [set|random|rotate|list|add|help]
 ```
 
 | Command | Description |
@@ -1007,16 +1007,16 @@ Usage: forge-wallpaper [set|random|rotate|list|add|help]
 | `list` | List available wallpapers |
 | `add <file>` | Add a wallpaper to the collection |
 
-**Systemd:** `forge-wallpaper.timer` (user, for rotation).
+**Systemd:** `24hg-wallpaper.timer` (user, for rotation).
 
 ---
 
-### forge-sounds
+### 24hg-sounds
 
-Sound theme manager. Switches between 24HG Forge sound themes for system events.
+Sound theme manager. Switches between 24HG sound themes for system events.
 
 ```
-Usage: forge-sounds [list|set|preview|mute|help]
+Usage: 24hg-sounds [list|set|preview|mute|help]
 ```
 
 | Command | Description |
@@ -1028,12 +1028,12 @@ Usage: forge-sounds [list|set|preview|mute|help]
 
 ---
 
-### forge-achievements
+### 24hg-achievements
 
 Community achievement tracker. Tracks gaming milestones and syncs with the 24HG Hub.
 
 ```
-Usage: forge-achievements [list|check|sync|help]
+Usage: 24hg-achievements [list|check|sync|help]
 ```
 
 | Command | Description |
@@ -1042,16 +1042,16 @@ Usage: forge-achievements [list|check|sync|help]
 | `check` | Check for newly earned achievements |
 | `sync` | Sync achievements with 24HG Hub |
 
-**Systemd:** `forge-achievements.timer` (user, periodic check).
+**Systemd:** `24hg-achievements.timer` (user, periodic check).
 
 ---
 
-### forge-tips
+### 24hg-tips
 
-Display gaming tips and 24HG Forge feature highlights. Shows helpful tips in notifications.
+Display gaming tips and 24HG feature highlights. Shows helpful tips in notifications.
 
 ```
-Usage: forge-tips [show|random|list|disable|help]
+Usage: 24hg-tips [show|random|list|disable|help]
 ```
 
 | Command | Description |
@@ -1063,12 +1063,12 @@ Usage: forge-tips [show|random|list|disable|help]
 
 ---
 
-### forge-notify-style
+### 24hg-notify-style
 
 Notification style manager. Configures how desktop notifications appear during gaming.
 
 ```
-Usage: forge-notify-style [gaming|minimal|full|custom|status|help]
+Usage: 24hg-notify-style [gaming|minimal|full|custom|status|help]
 ```
 
 | Command | Description |
@@ -1081,17 +1081,17 @@ Usage: forge-notify-style [gaming|minimal|full|custom|status|help]
 
 ---
 
-### forge-desktop-setup
+### 24hg-desktop-setup
 
 Desktop layout and widget configuration. Manages KDE Plasma panel layout, widgets, and desktop shortcuts.
 
 ```
-Usage: forge-desktop-setup [default|gaming|minimal|reset|help]
+Usage: 24hg-desktop-setup [default|gaming|minimal|reset|help]
 ```
 
 | Command | Description |
 |---------|-------------|
-| `default` | Apply 24HG Forge default desktop layout |
+| `default` | Apply 24HG default desktop layout |
 | `gaming` | Gaming-focused layout (minimal panels, quick-launch) |
 | `minimal` | Clean minimal layout |
 | `reset` | Reset to factory defaults |
@@ -1100,12 +1100,12 @@ Usage: forge-desktop-setup [default|gaming|minimal|reset|help]
 
 ## Adoption & Community
 
-### forge-perks
+### 24hg-perks
 
-Manage VIP perks for 24HG Forge users on 24HG game servers.
+Manage VIP perks for 24HG users on 24HG game servers.
 
 ```
-Usage: forge-perks [claim|status|list|help]
+Usage: 24hg-perks [claim|status|list|help]
 ```
 
 | Command | Description |
@@ -1114,16 +1114,16 @@ Usage: forge-perks [claim|status|list|help]
 | `status` | Show current perk status |
 | `list` | List all available perks |
 
-**Systemd:** `forge-perks-claim.service` (user, auto-start to check claim status).
+**Systemd:** `24hg-perks-claim.service` (user, auto-start to check claim status).
 
 ---
 
-### forge-benchmark
+### 24hg-benchmark
 
 System benchmark tool. Tests GPU, CPU, and storage performance with gaming-relevant workloads.
 
 ```
-Usage: forge-benchmark [run|gpu|cpu|storage|results|help]
+Usage: 24hg-benchmark [run|gpu|cpu|storage|results|help]
 ```
 
 | Command | Description |
@@ -1136,12 +1136,12 @@ Usage: forge-benchmark [run|gpu|cpu|storage|results|help]
 
 ---
 
-### forge-benchmark-compare
+### 24hg-benchmark-compare
 
-Compare benchmark results with other 24HG Forge users and community averages.
+Compare benchmark results with other 24HG users and community averages.
 
 ```
-Usage: forge-benchmark-compare [latest|upload|compare|leaderboard|help]
+Usage: 24hg-benchmark-compare [latest|upload|compare|leaderboard|help]
 ```
 
 | Command | Description |
@@ -1153,24 +1153,24 @@ Usage: forge-benchmark-compare [latest|upload|compare|leaderboard|help]
 
 ---
 
-### forge-demo
+### 24hg-demo
 
-Interactive 24HG Forge feature demo. Showcases all major tools and features for new users.
+Interactive 24HG feature demo. Showcases all major tools and features for new users.
 
 ```
-Usage: forge-demo
+Usage: 24hg-demo
 ```
 
-Launched from the desktop (`forge-demo.desktop`) or terminal. Walks through each tool category with examples and explanations.
+Launched from the desktop (`24hg-demo.desktop`) or terminal. Walks through each tool category with examples and explanations.
 
 ---
 
-### forge-mod-manager
+### 24hg-mod-manager
 
 Game mod manager. Handles Nexus Mods NXM protocol links and mod installation for Proton/Wine games.
 
 ```
-Usage: forge-mod-manager [install|list|enable|disable|update|help] [appid]
+Usage: 24hg-mod-manager [install|list|enable|disable|update|help] [appid]
 ```
 
 | Command | Description |
@@ -1181,62 +1181,62 @@ Usage: forge-mod-manager [install|list|enable|disable|update|help] [appid]
 | `disable <mod>` | Disable a mod without removing |
 | `update` | Check for mod updates |
 
-Registered as NXM protocol handler (`forge-nxm-handler.desktop`). Click "Download with Mod Manager" on Nexus Mods and 24HG Forge handles the rest.
+Registered as NXM protocol handler (`24hg-nxm-handler.desktop`). Click "Download with Mod Manager" on Nexus Mods and 24HG handles the rest.
 
 ---
 
 ## Additional Tools
 
-### forge-crash-recovery
+### 24hg-crash-recovery
 
 General system crash recovery. Restores from black screen, frozen desktop, or boot failures.
 
 ```
-Usage: forge-crash-recovery
+Usage: 24hg-crash-recovery
 ```
 
 Can be run from a TTY (Ctrl+Alt+F2) if the desktop is unresponsive.
 
 ---
 
-### forge-thermal
+### 24hg-thermal
 
 System thermal monitoring. Shows CPU and GPU temperatures, fan speeds, and throttling status.
 
 ```
-Usage: forge-thermal
+Usage: 24hg-thermal
 ```
 
 Uses `lm_sensors` and GPU-specific tools to display thermal data.
 
 ---
 
-### forge-session-summary
+### 24hg-session-summary
 
 Show a summary of the current or last gaming session. Playtime, games played, performance stats.
 
 ```
-Usage: forge-session-summary
+Usage: 24hg-session-summary
 ```
 
 ---
 
-### forge-lock-info
+### 24hg-lock-info
 
 Customizes the lock screen with gaming-related info (server status, next event, tips).
 
 ```
-Usage: forge-lock-info
+Usage: 24hg-lock-info
 ```
 
 ---
 
-### forge-nightlight
+### 24hg-nightlight
 
 Toggle night light (blue light filter) for late-night gaming sessions.
 
 ```
-Usage: forge-nightlight [toggle|on|off|status]
+Usage: 24hg-nightlight [toggle|on|off|status]
 ```
 
 | Command | Description |
@@ -1250,16 +1250,16 @@ Usage: forge-nightlight [toggle|on|off|status]
 
 ## Configuration File Locations
 
-All 24HG Forge tools follow the XDG Base Directory specification:
+All 24HG tools follow the XDG Base Directory specification:
 
 | Type | Path | Example |
 |------|------|---------|
-| Config | `~/.config/forge/<tool>/` | `~/.config/forge/replay.conf` |
-| Data | `~/.local/share/forge/<tool>/` | `~/.local/share/forge/game-timer.json` |
-| Cache | `~/.cache/forge/<tool>/` | `~/.cache/forge/anticheat/` |
-| Logs | `~/.local/share/forge/logs/` | `~/.local/share/forge/logs/nvidia-wayland-*.log` |
-| System | `/usr/share/forge/` | `/usr/share/forge/servers.json` |
-| Lib | `/usr/lib/forge/` | `/usr/lib/forge/gamemode-start.sh` |
+| Config | `~/.config/24hg/<tool>/` | `~/.config/24hg/replay.conf` |
+| Data | `~/.local/share/24hg/<tool>/` | `~/.local/share/24hg/game-timer.json` |
+| Cache | `~/.cache/24hg/<tool>/` | `~/.cache/24hg/anticheat/` |
+| Logs | `~/.local/share/24hg/logs/` | `~/.local/share/24hg/logs/nvidia-wayland-*.log` |
+| System | `/usr/share/24hg/` | `/usr/share/24hg/servers.json` |
+| Lib | `/usr/lib/24hg/` | `/usr/lib/24hg/gamemode-start.sh` |
 
 ## Systemd Services Summary
 
@@ -1267,23 +1267,23 @@ All 24HG Forge tools follow the XDG Base Directory specification:
 
 | Service | Description |
 |---------|-------------|
-| `forge-gaming-tweaks.service` | Sysctl gaming optimizations (boot) |
-| `forge-first-boot-setup.service` | First-boot system configuration (one-shot) |
-| `forge-auto-update.timer` | Automatic system update checks |
+| `24hg-gaming-tweaks.service` | Sysctl gaming optimizations (boot) |
+| `24hg-first-boot-setup.service` | First-boot system configuration (one-shot) |
+| `24hg-auto-update.timer` | Automatic system update checks |
 
 ### User Services
 
 | Service | Description | Auto-Enabled |
 |---------|-------------|-------------|
-| `forge-server-status.service` | Server status monitoring | Yes |
-| `forge-hub-bridge.service` | Hub data sync | Yes |
-| `forge-discord-fix.service` | Discord integration fix | Yes |
-| `forge-game-timer.service` | Playtime tracking daemon | Yes |
-| `forge-smart-launch.service` | Per-game optimization daemon | Yes |
-| `forge-perks-claim.service` | VIP perks checker | Yes |
-| `forge-replay.service` | Instant replay recording | Manual |
-| `forge-backup.timer` | Automatic backups | Yes (daily) |
-| `forge-proton-updater.timer` | Proton-GE update check | Yes (weekly) |
-| `forge-achievements.timer` | Achievement check | Yes |
-| `forge-anticheat-tracker.timer` | Anti-cheat status check | Yes (daily) |
-| `forge-wallpaper.timer` | Wallpaper rotation | Yes |
+| `24hg-server-status.service` | Server status monitoring | Yes |
+| `24hg-hub-bridge.service` | Hub data sync | Yes |
+| `24hg-discord-fix.service` | Discord integration fix | Yes |
+| `24hg-game-timer.service` | Playtime tracking daemon | Yes |
+| `24hg-smart-launch.service` | Per-game optimization daemon | Yes |
+| `24hg-perks-claim.service` | VIP perks checker | Yes |
+| `24hg-replay.service` | Instant replay recording | Manual |
+| `24hg-backup.timer` | Automatic backups | Yes (daily) |
+| `24hg-proton-updater.timer` | Proton-GE update check | Yes (weekly) |
+| `24hg-achievements.timer` | Achievement check | Yes |
+| `24hg-anticheat-tracker.timer` | Anti-cheat status check | Yes (daily) |
+| `24hg-wallpaper.timer` | Wallpaper rotation | Yes |

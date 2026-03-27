@@ -1,0 +1,14 @@
+[Unit]
+Description=24HG Weekly Digest Generator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/24hg-digest send
+Environment=HOME=%h
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

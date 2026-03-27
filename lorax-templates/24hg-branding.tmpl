@@ -1,0 +1,10 @@
+## 24HG — Lorax post-install template
+## Injects 24HG branding into the ISO boot environment (Anaconda installer)
+
+## Replace Fedora/Red Hat references in os-release
+replace "Fedora Linux" "24HG" /etc/os-release
+replace "Fedora Linux" "24HG" /usr/lib/os-release
+replace "NAME=\"Fedora Linux\"" "NAME=\"24HG\"" /etc/os-release
+replace "NAME=\"Fedora Linux\"" "NAME=\"24HG\"" /usr/lib/os-release
+replace "PRETTY_NAME=" "PRETTY_NAME=\"24HG (24 Hour Gaming)\" #" /etc/os-release
+replace "PRETTY_NAME=" "PRETTY_NAME=\"24HG (24 Hour Gaming)\" #" /usr/lib/os-release

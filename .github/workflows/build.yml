@@ -1,7 +1,7 @@
 # Legacy reference — actual builds use build-image.yml and build-iso.yml
 # This file kept for Gitea Actions compatibility if needed.
 
-name: Build 24HG Forge (Gitea)
+name: Build 24HG (Gitea)
 
 on:
   workflow_dispatch:
@@ -34,9 +34,9 @@ jobs:
           docker build \
             --build-arg BASE_IMAGE=${{ matrix.base_image }} \
             --build-arg BASE_TAG=stable \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/forge-${{ matrix.variant }}:latest \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/24hg-${{ matrix.variant }}:latest \
             -f Containerfile .
 
       - name: Push image
         run: |
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/forge-${{ matrix.variant }}:latest
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/24hg-${{ matrix.variant }}:latest

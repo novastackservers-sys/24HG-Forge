@@ -1,0 +1,1677 @@
+#!/usr/bin/env bash
+# 24HG Benchmark Comparison Tool
+# Compare gaming performance across runs, hardware, and platforms.
+# Generate shareable benchmark cards to show Linux gaming performance.
+#
+# Usage: 24hg-benchmark-compare <command> [options]
+# Commands: quick, run, compare, history, share
+#
+# Part of 24HG — os.24hgaming.com
+
+set -euo pipefail
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+
+VERSION="1.0.0"
+APP_NAME="24hg-benchmark-compare"
+DATA_DIR="${HOME}/.local/share/24hg/benchmarks"
+HISTORY_FILE="${DATA_DIR}/history.json"
+MANGOHUD_DIR="${DATA_DIR}/mangohud_logs"
+SHARE_DIR="${DATA_DIR}/cards"
+HG24_URL="https://os.24hgaming.com"
+HUB_API="https://hub.24hgaming.com/api"
+QUICK_DURATION=30
+
+# ── Colors ─────────────────────────────────────────────────────────────────────
+
+BOLD='\033[1m'
+DIM='\033[2m'
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+BLUE='\033[34m'
+MAGENTA='\033[35m'
+CYAN='\033[36m'
+WHITE='\033[97m'
+RESET='\033[0m'
+BG_RED='\033[41m'
+BG_GREEN='\033[42m'
+BG_YELLOW='\033[43m'
+BG_BLUE='\033[44m'
+
+# ── Reference Data ─────────────────────────────────────────────────────────────
+# Typical Windows FPS at 1080p for common GPUs
+# Format: GAME_GPU="avg_fps"
+
+declare -A REF_CS2_MED=(
+    ["RTX 3060"]=250  ["RTX 3070"]=300  ["RTX 3080"]=350
+    ["RTX 4060"]=280  ["RTX 4070"]=380  ["RTX 4080"]=450
+    ["RX 6600"]=200   ["RX 6600 XT"]=230 ["RX 6700 XT"]=270
+    ["RX 6800"]=310   ["RX 6800 XT"]=330
+    ["RX 7600"]=250   ["RX 7800 XT"]=320 ["RX 7900 XT"]=400
+    ["RX 7900 XTX"]=420
+    ["GTX 1660"]=150  ["GTX 1660 Super"]=170
+    ["RTX 2060"]=200  ["RTX 2070"]=230  ["RTX 2080"]=270
+    ["Arc A770"]=220  ["Arc A750"]=190
+)
+
+declare -A REF_RUST_MED=(
+    ["RTX 3060"]=80   ["RTX 3070"]=100  ["RTX 3080"]=120
+    ["RTX 4060"]=90   ["RTX 4070"]=130  ["RTX 4080"]=160
+    ["RX 6600"]=65    ["RX 6600 XT"]=75  ["RX 6700 XT"]=85
+    ["RX 6800"]=100   ["RX 6800 XT"]=110
+    ["RX 7600"]=80    ["RX 7800 XT"]=110 ["RX 7900 XT"]=140
+    ["RX 7900 XTX"]=150
+    ["GTX 1660"]=50   ["GTX 1660 Super"]=55
+    ["RTX 2060"]=65   ["RTX 2070"]=80   ["RTX 2080"]=95
+    ["Arc A770"]=70   ["Arc A750"]=60
+)
+
+declare -A REF_TF2_HIGH=(
+    ["RTX 3060"]=350  ["RTX 3070"]=380  ["RTX 3080"]=400
+    ["RTX 4060"]=360  ["RTX 4070"]=400  ["RTX 4080"]=400
+    ["RX 6600"]=300   ["RX 6600 XT"]=320 ["RX 6700 XT"]=350
+    ["RX 6800"]=380   ["RX 6800 XT"]=390
+    ["RX 7600"]=330   ["RX 7800 XT"]=370 ["RX 7900 XT"]=400
+    ["RX 7900 XTX"]=400
+    ["GTX 1660"]=250  ["GTX 1660 Super"]=280
+    ["RTX 2060"]=320  ["RTX 2070"]=350  ["RTX 2080"]=380
+    ["Arc A770"]=280  ["Arc A750"]=250
+)
+
+declare -A REF_CYBERPUNK_MED=(
+    ["RTX 3060"]=60   ["RTX 3070"]=75   ["RTX 3080"]=90
+    ["RTX 4060"]=70   ["RTX 4070"]=100  ["RTX 4080"]=130
+    ["RX 6600"]=45    ["RX 6600 XT"]=52  ["RX 6700 XT"]=62
+    ["RX 6800"]=75    ["RX 6800 XT"]=82
+    ["RX 7600"]=55    ["RX 7800 XT"]=80  ["RX 7900 XT"]=110
+    ["RX 7900 XTX"]=120
+    ["GTX 1660"]=35   ["GTX 1660 Super"]=40
+    ["RTX 2060"]=50   ["RTX 2070"]=60   ["RTX 2080"]=72
+    ["Arc A770"]=55   ["Arc A750"]=45
+)
+
+declare -A REF_SOTTR_HIGH=(
+    ["RTX 3060"]=90   ["RTX 3070"]=110  ["RTX 3080"]=130
+    ["RTX 4060"]=100  ["RTX 4070"]=140  ["RTX 4080"]=175
+    ["RX 6600"]=70    ["RX 6600 XT"]=82  ["RX 6700 XT"]=95
+    ["RX 6800"]=115   ["RX 6800 XT"]=125
+    ["RX 7600"]=85    ["RX 7800 XT"]=115 ["RX 7900 XT"]=150
+    ["RX 7900 XTX"]=160
+    ["GTX 1660"]=55   ["GTX 1660 Super"]=62
+    ["RTX 2060"]=75   ["RTX 2070"]=88   ["RTX 2080"]=105
+    ["Arc A770"]=80   ["Arc A750"]=65
+)
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+init_dirs() {
+    mkdir -p "$DATA_DIR" "$MANGOHUD_DIR" "$SHARE_DIR"
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        echo '{"benchmarks":[],"system_snapshots":[]}' > "$HISTORY_FILE"
+    fi
+}
+
+header() {
+    local text="$1"
+    local width=60
+    local pad=$(( (width - ${#text} - 2) / 2 ))
+    echo ""
+    echo -e "${BOLD}${CYAN}$(printf '═%.0s' $(seq 1 $width))${RESET}"
+    echo -e "${BOLD}${CYAN}$(printf ' %.0s' $(seq 1 $pad)) $text${RESET}"
+    echo -e "${BOLD}${CYAN}$(printf '═%.0s' $(seq 1 $width))${RESET}"
+}
+
+subheader() {
+    echo -e "\n${BOLD}${BLUE}── $1 ──${RESET}"
+}
+
+info() {
+    echo -e "  ${CYAN}$1${RESET}"
+}
+
+success() {
+    echo -e "  ${GREEN}$1${RESET}"
+}
+
+warn() {
+    echo -e "  ${YELLOW}$1${RESET}"
+}
+
+error() {
+    echo -e "  ${RED}$1${RESET}"
+}
+
+fps_color() {
+    local fps=$1
+    if (( fps >= 60 )); then
+        echo -e "${GREEN}${fps} FPS${RESET}"
+    elif (( fps >= 30 )); then
+        echo -e "${YELLOW}${fps} FPS${RESET}"
+    else
+        echo -e "${RED}${fps} FPS${RESET}"
+    fi
+}
+
+fps_color_plain() {
+    local fps=$1
+    if (( fps >= 60 )); then
+        echo -e "${GREEN}"
+    elif (( fps >= 30 )); then
+        echo -e "${YELLOW}"
+    else
+        echo -e "${RED}"
+    fi
+}
+
+bar_graph() {
+    local value=$1
+    local max=$2
+    local width=${3:-30}
+    local filled=$(( value * width / max ))
+    [[ $filled -gt $width ]] && filled=$width
+    local empty=$(( width - filled ))
+    local bar=""
+    for (( i=0; i<filled; i++ )); do bar+="█"; done
+    for (( i=0; i<empty; i++ )); do bar+="░"; done
+    echo "$bar"
+}
+
+percent_diff() {
+    local yours=$1
+    local ref=$2
+    if (( ref == 0 )); then
+        echo "N/A"
+        return
+    fi
+    local diff=$(( (yours - ref) * 100 / ref ))
+    if (( diff > 0 )); then
+        echo -e "${GREEN}+${diff}%${RESET}"
+    elif (( diff < 0 )); then
+        echo -e "${RED}${diff}%${RESET}"
+    else
+        echo -e "${YELLOW}±0%${RESET}"
+    fi
+}
+
+timestamp() {
+    date +"%Y-%m-%dT%H:%M:%S%z"
+}
+
+date_short() {
+    date +"%Y-%m-%d %H:%M"
+}
+
+check_cmd() {
+    command -v "$1" &>/dev/null
+}
+
+require_cmd() {
+    if ! check_cmd "$1"; then
+        error "Required command not found: $1"
+        error "Install with: $2"
+        return 1
+    fi
+}
+
+# ── System Detection ──────────────────────────────────────────────────────────
+
+detect_gpu() {
+    local gpu_raw
+    gpu_raw=$(lspci 2>/dev/null | grep -iE "VGA|3D|Display" | head -1 | sed 's/.*: //' || echo "Unknown GPU")
+    # Try to extract a clean model name
+    local gpu_clean="$gpu_raw"
+    # NVIDIA
+    if echo "$gpu_raw" | grep -qi "nvidia"; then
+        gpu_clean=$(echo "$gpu_raw" | grep -oP '(GTX|RTX|GT)\s*\d{3,4}(\s*(Ti|Super|SUPER))?' || echo "$gpu_raw")
+    fi
+    # AMD
+    if echo "$gpu_raw" | grep -qi "amd\|radeon"; then
+        gpu_clean=$(echo "$gpu_raw" | grep -oP '(RX\s*\d{4}(\s*(XT|XTX)?))' || echo "$gpu_raw")
+    fi
+    # Intel Arc
+    if echo "$gpu_raw" | grep -qi "intel.*arc"; then
+        gpu_clean=$(echo "$gpu_raw" | grep -oP 'Arc\s*A\d{3,4}' || echo "$gpu_raw")
+    fi
+    [[ -z "$gpu_clean" ]] && gpu_clean="$gpu_raw"
+    echo "$gpu_clean"
+}
+
+detect_gpu_full() {
+    lspci 2>/dev/null | grep -iE "VGA|3D|Display" | head -1 | sed 's/.*: //' || echo "Unknown"
+}
+
+detect_gpu_driver() {
+    if check_cmd nvidia-smi; then
+        nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || echo "Unknown"
+    elif [[ -f /sys/class/drm/card0/device/driver/module/version ]]; then
+        cat /sys/class/drm/card0/device/driver/module/version 2>/dev/null || echo "Unknown"
+    else
+        # Try mesa
+        glxinfo 2>/dev/null | grep "OpenGL version" | head -1 | sed 's/.*: //' || echo "Unknown"
+    fi
+}
+
+detect_cpu() {
+    grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || echo "Unknown CPU"
+}
+
+detect_cpu_cores() {
+    nproc 2>/dev/null || echo "?"
+}
+
+detect_ram() {
+    local total_kb
+    total_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
+    if [[ -n "$total_kb" ]]; then
+        echo "$(( total_kb / 1024 / 1024 + 1 )) GB"
+    else
+        echo "Unknown"
+    fi
+}
+
+detect_ram_mb() {
+    grep MemTotal /proc/meminfo 2>/dev/null | awk '{printf "%.0f", $2/1024}' || echo "0"
+}
+
+detect_kernel() {
+    uname -r 2>/dev/null || echo "Unknown"
+}
+
+detect_distro() {
+    if [[ -f /etc/24hg-release ]]; then
+        cat /etc/24hg-release 2>/dev/null | head -1
+    elif [[ -f /etc/os-release ]]; then
+        source /etc/os-release 2>/dev/null
+        echo "${PRETTY_NAME:-Unknown}"
+    else
+        echo "Unknown"
+    fi
+}
+
+detect_resolution() {
+    if check_cmd xrandr; then
+        xrandr 2>/dev/null | grep '\*' | head -1 | awk '{print $1}' || echo "Unknown"
+    elif check_cmd wlr-randr; then
+        wlr-randr 2>/dev/null | grep "current" | head -1 | awk '{print $1}' || echo "Unknown"
+    else
+        echo "Unknown"
+    fi
+}
+
+get_system_json() {
+    local gpu cpu ram kernel driver distro resolution cores
+    gpu=$(detect_gpu)
+    gpu_full=$(detect_gpu_full)
+    cpu=$(detect_cpu)
+    cores=$(detect_cpu_cores)
+    ram=$(detect_ram)
+    ram_mb=$(detect_ram_mb)
+    kernel=$(detect_kernel)
+    driver=$(detect_gpu_driver)
+    distro=$(detect_distro)
+    resolution=$(detect_resolution)
+    cat <<SYSJSON
+{
+  "gpu": "$gpu",
+  "gpu_full": "$gpu_full",
+  "cpu": "$cpu",
+  "cpu_cores": $cores,
+  "ram": "$ram",
+  "ram_mb": $ram_mb,
+  "kernel": "$kernel",
+  "driver": "$driver",
+  "distro": "$distro",
+  "resolution": "$resolution",
+  "timestamp": "$(timestamp)"
+}
+SYSJSON
+}
+
+# ── GPU Reference Lookup ──────────────────────────────────────────────────────
+
+lookup_ref_fps() {
+    local game="$1"
+    local gpu="$2"
+
+    # Normalize GPU name for lookup
+    local gpu_key="$gpu"
+
+    case "$game" in
+        cs2|counter-strike*|csgo)
+            echo "${REF_CS2_MED[$gpu_key]:-0}" ;;
+        rust)
+            echo "${REF_RUST_MED[$gpu_key]:-0}" ;;
+        tf2|team-fortress*|teamfortress*)
+            echo "${REF_TF2_HIGH[$gpu_key]:-0}" ;;
+        cyberpunk*|cp2077)
+            echo "${REF_CYBERPUNK_MED[$gpu_key]:-0}" ;;
+        tomb*|sottr|shadow*)
+            echo "${REF_SOTTR_HIGH[$gpu_key]:-0}" ;;
+        *)
+            echo "0" ;;
+    esac
+}
+
+find_closest_gpu() {
+    local gpu="$1"
+    # Try exact match first, then fuzzy
+    for key in "${!REF_CS2_MED[@]}"; do
+        if echo "$gpu" | grep -qi "$key"; then
+            echo "$key"
+            return
+        fi
+    done
+    echo ""
+}
+
+# ── JSON Helpers ──────────────────────────────────────────────────────────────
+
+json_append_benchmark() {
+    local entry="$1"
+    local tmpfile="${HISTORY_FILE}.tmp"
+
+    if check_cmd jq; then
+        jq --argjson entry "$entry" '.benchmarks += [$entry]' "$HISTORY_FILE" > "$tmpfile" \
+            && mv "$tmpfile" "$HISTORY_FILE"
+    else
+        # Fallback: simple append without jq
+        local content
+        content=$(cat "$HISTORY_FILE")
+        # Remove trailing }] and append
+        echo "$content" | sed 's/\(.*\)"benchmarks":\[\(.*\)\]/\1"benchmarks":[\2,'"$(echo "$entry" | tr -d '\n')"']/' > "$tmpfile"
+        mv "$tmpfile" "$HISTORY_FILE"
+    fi
+}
+
+json_get_benchmarks() {
+    if check_cmd jq; then
+        jq -r '.benchmarks[]' "$HISTORY_FILE" 2>/dev/null
+    else
+        cat "$HISTORY_FILE"
+    fi
+}
+
+# ── Quick Benchmark ───────────────────────────────────────────────────────────
+
+cmd_quick() {
+    header "24HG Quick Benchmark"
+    echo -e "  ${DIM}System performance snapshot — no game required${RESET}"
+    echo -e "  ${DIM}Duration: ~${QUICK_DURATION}s per graphics test${RESET}"
+
+    local gpu cpu kernel driver ram resolution
+    gpu=$(detect_gpu)
+    cpu=$(detect_cpu)
+    kernel=$(detect_kernel)
+    driver=$(detect_gpu_driver)
+    ram=$(detect_ram)
+    resolution=$(detect_resolution)
+
+    subheader "System Info"
+    echo -e "  GPU:        ${BOLD}${gpu}${RESET}"
+    echo -e "  CPU:        ${BOLD}${cpu}${RESET}"
+    echo -e "  RAM:        ${BOLD}${ram}${RESET}"
+    echo -e "  Kernel:     ${BOLD}${kernel}${RESET}"
+    echo -e "  Driver:     ${BOLD}${driver}${RESET}"
+    echo -e "  Resolution: ${BOLD}${resolution}${RESET}"
+
+    local gpu_score=0
+    local cpu_score=0
+    local ram_score=0
+    local gl_fps=0
+    local vk_fps=0
+
+    # ── GPU Test: glxgears ──
+    subheader "OpenGL Test (glxgears, ${QUICK_DURATION}s)"
+    if check_cmd glxgears; then
+        local gl_log="${DATA_DIR}/glxgears_${RANDOM}.log"
+        timeout "${QUICK_DURATION}" glxgears -info 2>&1 | tee "$gl_log" &
+        local gl_pid=$!
+        echo -ne "  Running"
+        local elapsed=0
+        while kill -0 "$gl_pid" 2>/dev/null && (( elapsed < QUICK_DURATION + 5 )); do
+            echo -ne "."
+            sleep 2
+            elapsed=$(( elapsed + 2 ))
+        done
+        wait "$gl_pid" 2>/dev/null || true
+        echo ""
+
+        # Parse glxgears FPS (lines like "300 frames in 5.0 seconds = 60.000 FPS")
+        gl_fps=$(grep -oP '[\d.]+ FPS' "$gl_log" | tail -1 | grep -oP '[\d.]+' | head -1 || echo "0")
+        gl_fps=${gl_fps%%.*}
+        [[ -z "$gl_fps" || "$gl_fps" == "0" ]] && gl_fps=0
+        rm -f "$gl_log"
+
+        if (( gl_fps > 0 )); then
+            echo -e "  OpenGL FPS: ${BOLD}$(fps_color "$gl_fps")${RESET}"
+        else
+            warn "Could not parse glxgears output"
+        fi
+    else
+        warn "glxgears not found — install mesa-demos"
+    fi
+
+    # ── GPU Test: vkcube ──
+    subheader "Vulkan Test (vkcube, ${QUICK_DURATION}s)"
+    if check_cmd vkcube; then
+        local vk_log="${DATA_DIR}/vkcube_${RANDOM}.log"
+        timeout "${QUICK_DURATION}" vkcube 2>&1 | tee "$vk_log" &
+        local vk_pid=$!
+        echo -ne "  Running"
+        local elapsed=0
+        while kill -0 "$vk_pid" 2>/dev/null && (( elapsed < QUICK_DURATION + 5 )); do
+            echo -ne "."
+            sleep 2
+            elapsed=$(( elapsed + 2 ))
+        done
+        wait "$vk_pid" 2>/dev/null || true
+        echo ""
+
+        # vkcube doesn't always output FPS; try to parse if it does
+        vk_fps=$(grep -oP '[\d.]+ FPS' "$vk_log" | tail -1 | grep -oP '[\d.]+' | head -1 || echo "0")
+        vk_fps=${vk_fps%%.*}
+        [[ -z "$vk_fps" ]] && vk_fps=0
+        rm -f "$vk_log"
+
+        if (( vk_fps > 0 )); then
+            echo -e "  Vulkan FPS: ${BOLD}$(fps_color "$vk_fps")${RESET}"
+        else
+            info "Vulkan test completed (vkcube doesn't report FPS by default)"
+            vk_fps=0
+        fi
+    else
+        warn "vkcube not found — install vulkan-tools"
+    fi
+
+    # ── CPU Test ──
+    subheader "CPU Benchmark"
+    if check_cmd sysbench; then
+        echo -e "  ${DIM}Running sysbench CPU test (single-thread)...${RESET}"
+        local cpu_st
+        cpu_st=$(sysbench cpu --cpu-max-prime=20000 --threads=1 run 2>/dev/null \
+            | grep "events per second" | awk '{print $NF}')
+        cpu_st=${cpu_st%%.*}
+        [[ -z "$cpu_st" ]] && cpu_st=0
+
+        echo -e "  ${DIM}Running sysbench CPU test (multi-thread)...${RESET}"
+        local cores
+        cores=$(nproc)
+        local cpu_mt
+        cpu_mt=$(sysbench cpu --cpu-max-prime=20000 --threads="$cores" run 2>/dev/null \
+            | grep "events per second" | awk '{print $NF}')
+        cpu_mt=${cpu_mt%%.*}
+        [[ -z "$cpu_mt" ]] && cpu_mt=0
+
+        echo -e "  Single-thread: ${BOLD}${cpu_st} events/s${RESET}"
+        echo -e "  Multi-thread:  ${BOLD}${cpu_mt} events/s${RESET} (${cores} threads)"
+
+        # Score: sysbench on modern CPUs usually 2000-8000 single-thread
+        cpu_score=$(( cpu_st * 100 / 5000 ))
+        (( cpu_score > 100 )) && cpu_score=100
+    elif check_cmd openssl; then
+        echo -e "  ${DIM}Running OpenSSL speed test...${RESET}"
+        local ssl_score
+        ssl_score=$(openssl speed -seconds 5 aes-256-cbc 2>&1 | tail -1 | awk '{print $NF}')
+        ssl_score=${ssl_score%%.*}
+        [[ -z "$ssl_score" ]] && ssl_score=0
+        echo -e "  AES-256-CBC: ${BOLD}${ssl_score} bytes/s${RESET}"
+        # Rough normalization
+        cpu_score=$(( ssl_score / 10000000 ))
+        (( cpu_score > 100 )) && cpu_score=100
+    else
+        echo -e "  ${DIM}Running SHA256 benchmark (fallback)...${RESET}"
+        local st_start st_end st_time
+        st_start=$(date +%s%N)
+        for i in $(seq 1 500); do
+            echo "$i" | sha256sum > /dev/null
+        done
+        st_end=$(date +%s%N)
+        st_time=$(( (st_end - st_start) / 1000000 ))
+        echo -e "  500 SHA256 hashes: ${BOLD}${st_time}ms${RESET}"
+        cpu_score=$(( 100 - st_time / 20 ))
+        (( cpu_score < 0 )) && cpu_score=0
+        (( cpu_score > 100 )) && cpu_score=100
+    fi
+
+    # ── RAM Bandwidth Test ──
+    subheader "Memory Bandwidth"
+    if check_cmd sysbench; then
+        local ram_bw
+        ram_bw=$(sysbench memory --memory-block-size=1M --memory-total-size=4G --threads=4 run 2>/dev/null \
+            | grep "transferred" | grep -oP '[\d.]+\s*MiB/sec' | head -1 || echo "0 MiB/sec")
+        echo -e "  Bandwidth: ${BOLD}${ram_bw}${RESET}"
+        local ram_num
+        ram_num=$(echo "$ram_bw" | grep -oP '[\d.]+' | head -1)
+        ram_num=${ram_num%%.*}
+        [[ -z "$ram_num" ]] && ram_num=0
+        # Typical: 5000-20000 MiB/sec
+        ram_score=$(( ram_num * 100 / 15000 ))
+        (( ram_score > 100 )) && ram_score=100
+    else
+        echo -e "  ${DIM}Running dd memory test...${RESET}"
+        local dd_result
+        dd_result=$(dd if=/dev/zero of=/dev/null bs=1M count=2048 2>&1 | tail -1)
+        local dd_speed
+        dd_speed=$(echo "$dd_result" | grep -oP '[\d.]+\s*(GB|MB)/s' || echo "N/A")
+        echo -e "  Throughput: ${BOLD}${dd_speed}${RESET}"
+        ram_score=50  # Can't reliably score dd
+    fi
+
+    # ── GPU scoring ──
+    if (( gl_fps > 0 )); then
+        # glxgears on modern GPUs typically 5000-20000+ FPS (vsync off)
+        # Cap at 10000 for scoring
+        gpu_score=$(( gl_fps * 100 / 10000 ))
+        (( gpu_score > 100 )) && gpu_score=100
+        (( gpu_score < 5 )) && gpu_score=5
+    else
+        gpu_score=50  # Unknown, assume mid
+    fi
+
+    # ── Overall Score ──
+    local total_score=$(( (gpu_score * 40 + cpu_score * 40 + ram_score * 20) / 100 ))
+    (( total_score > 100 )) && total_score=100
+
+    subheader "24HG Gaming Score"
+    echo ""
+    echo -e "  GPU:  $(bar_graph $gpu_score 100 25)  ${BOLD}${gpu_score}/100${RESET}"
+    echo -e "  CPU:  $(bar_graph $cpu_score 100 25)  ${BOLD}${cpu_score}/100${RESET}"
+    echo -e "  RAM:  $(bar_graph $ram_score 100 25)  ${BOLD}${ram_score}/100${RESET}"
+    echo ""
+
+    local score_color="${GREEN}"
+    if (( total_score < 30 )); then score_color="${RED}"
+    elif (( total_score < 60 )); then score_color="${YELLOW}"
+    fi
+
+    echo -e "  ${BOLD}${score_color}╔══════════════════════════════════╗${RESET}"
+    echo -e "  ${BOLD}${score_color}║   24HG Gaming Score: ${total_score}/100     ║${RESET}"
+    echo -e "  ${BOLD}${score_color}╚══════════════════════════════════╝${RESET}"
+
+    # ── Windows Comparison ──
+    local matched_gpu
+    matched_gpu=$(find_closest_gpu "$gpu")
+    if [[ -n "$matched_gpu" ]]; then
+        subheader "vs. Typical Windows Performance (${matched_gpu})"
+        echo -e "  ${DIM}Reference: Windows 11, latest drivers, 1080p Medium${RESET}"
+        echo ""
+        printf "  ${BOLD}%-25s %12s %12s${RESET}\n" "Game" "Win Avg FPS" "Typical"
+        printf "  %-25s %12s %12s\n" "─────────────────────────" "────────────" "────────────"
+        local ref_cs2="${REF_CS2_MED[$matched_gpu]:-0}"
+        local ref_rust="${REF_RUST_MED[$matched_gpu]:-0}"
+        local ref_tf2="${REF_TF2_HIGH[$matched_gpu]:-0}"
+        local ref_cp="${REF_CYBERPUNK_MED[$matched_gpu]:-0}"
+        printf "  %-25s %12s %12s\n" "CS2 (1080p Med)" "${ref_cs2} FPS" "Achievable"
+        printf "  %-25s %12s %12s\n" "Rust (1080p Med)" "${ref_rust} FPS" "Achievable"
+        printf "  %-25s %12s %12s\n" "TF2 (1080p High)" "${ref_tf2} FPS" "Often better"
+        printf "  %-25s %12s %12s\n" "Cyberpunk 2077 (1080p Med)" "${ref_cp} FPS" "Within 5-10%"
+        echo ""
+        info "Linux typically matches or exceeds Windows in Vulkan games."
+        info "OpenGL games may see 5-15% variance depending on drivers."
+    fi
+
+    # ── Save result ──
+    local result_json
+    result_json=$(cat <<QJSON
+{
+  "type": "quick",
+  "timestamp": "$(timestamp)",
+  "system": $(get_system_json),
+  "scores": {
+    "gpu": $gpu_score,
+    "cpu": $cpu_score,
+    "ram": $ram_score,
+    "total": $total_score
+  },
+  "raw": {
+    "gl_fps": $gl_fps,
+    "vk_fps": $vk_fps
+  }
+}
+QJSON
+)
+    json_append_benchmark "$result_json"
+    echo ""
+    success "Results saved to ${HISTORY_FILE}"
+    info "Run '24hg-benchmark-compare share' to generate a shareable card."
+}
+
+# ── MangoHud CSV Parsing ──────────────────────────────────────────────────────
+
+parse_mangohud_csv() {
+    local csv_file="$1"
+
+    if [[ ! -f "$csv_file" ]]; then
+        error "MangoHud log not found: $csv_file"
+        return 1
+    fi
+
+    # MangoHud CSV columns vary but typically include: fps, frametime, cpu_load, gpu_load
+    # First line is the header
+    local header
+    header=$(head -1 "$csv_file")
+
+    # Find the FPS column index
+    local fps_col=-1
+    local ft_col=-1
+    local col=1
+    IFS=',' read -ra cols <<< "$header"
+    for c in "${cols[@]}"; do
+        c=$(echo "$c" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+        case "$c" in
+            fps) fps_col=$col ;;
+            frametime|frametime_ms) ft_col=$col ;;
+        esac
+        (( col++ ))
+    done
+
+    if (( fps_col < 0 )); then
+        error "No FPS column found in MangoHud log"
+        return 1
+    fi
+
+    # Extract FPS values (skip header, skip 0s)
+    local fps_values
+    fps_values=$(tail -n +2 "$csv_file" | cut -d',' -f"$fps_col" | grep -E '^[0-9]+\.?[0-9]*$' | grep -v '^0$')
+
+    if [[ -z "$fps_values" ]]; then
+        error "No FPS data found in MangoHud log"
+        return 1
+    fi
+
+    local count avg_fps min_fps max_fps p1_fps p01_fps p99_frametime
+    count=$(echo "$fps_values" | wc -l)
+
+    # Sort for percentiles
+    local sorted
+    sorted=$(echo "$fps_values" | sort -n)
+
+    avg_fps=$(echo "$fps_values" | awk '{sum+=$1} END {printf "%.0f", sum/NR}')
+    min_fps=$(echo "$sorted" | head -1 | awk '{printf "%.0f", $1}')
+    max_fps=$(echo "$sorted" | tail -1 | awk '{printf "%.0f", $1}')
+
+    # 1% low = average of bottom 1% of FPS values
+    local p1_count=$(( count / 100 ))
+    (( p1_count < 1 )) && p1_count=1
+    p1_fps=$(echo "$sorted" | head -"$p1_count" | awk '{sum+=$1} END {printf "%.0f", sum/NR}')
+
+    # 0.1% low
+    local p01_count=$(( count / 1000 ))
+    (( p01_count < 1 )) && p01_count=1
+    p01_fps=$(echo "$sorted" | head -"$p01_count" | awk '{sum+=$1} END {printf "%.0f", sum/NR}')
+
+    # 99th percentile frametime (if available)
+    if (( ft_col > 0 )); then
+        local ft_sorted
+        ft_sorted=$(tail -n +2 "$csv_file" | cut -d',' -f"$ft_col" | grep -E '^[0-9]+\.?[0-9]*$' | sort -n)
+        local ft_count
+        ft_count=$(echo "$ft_sorted" | wc -l)
+        local ft_p99_idx=$(( ft_count * 99 / 100 ))
+        (( ft_p99_idx < 1 )) && ft_p99_idx=1
+        p99_frametime=$(echo "$ft_sorted" | sed -n "${ft_p99_idx}p")
+    else
+        p99_frametime="N/A"
+    fi
+
+    echo "${avg_fps}|${p1_fps}|${p01_fps}|${min_fps}|${max_fps}|${p99_frametime}|${count}"
+}
+
+# ── Run Benchmark ─────────────────────────────────────────────────────────────
+
+detect_game_id() {
+    local input="$1"
+    input=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+    case "$input" in
+        cs2|counter-strike*|csgo|730) echo "cs2" ;;
+        rust|252490) echo "rust" ;;
+        tf2|team*fortress*|440) echo "tf2" ;;
+        cyberpunk*|cp2077|1091500) echo "cyberpunk2077" ;;
+        tomb*|sottr|shadow*|750920) echo "sottr" ;;
+        dota*|570) echo "dota2" ;;
+        apex*) echo "apex" ;;
+        *) echo "$input" ;;
+    esac
+}
+
+detect_installed_games() {
+    local games=()
+    local steam_dirs=()
+
+    # Find Steam library folders
+    local steam_root="${HOME}/.local/share/Steam"
+    if [[ -d "$steam_root" ]]; then
+        steam_dirs+=("${steam_root}/steamapps")
+        # Parse libraryfolders.vdf for additional paths
+        local lf="${steam_root}/steamapps/libraryfolders.vdf"
+        if [[ -f "$lf" ]]; then
+            while IFS= read -r line; do
+                local path
+                path=$(echo "$line" | grep -oP '"path"\s+"\K[^"]+' || true)
+                [[ -n "$path" && -d "${path}/steamapps" ]] && steam_dirs+=("${path}/steamapps")
+            done < "$lf"
+        fi
+    fi
+
+    for sdir in "${steam_dirs[@]}"; do
+        [[ -f "${sdir}/appmanifest_730.acf" ]] && games+=("cs2")
+        [[ -f "${sdir}/appmanifest_252490.acf" ]] && games+=("rust")
+        [[ -f "${sdir}/appmanifest_440.acf" ]] && games+=("tf2")
+        [[ -f "${sdir}/appmanifest_1091500.acf" ]] && games+=("cyberpunk2077")
+        [[ -f "${sdir}/appmanifest_750920.acf" ]] && games+=("sottr")
+        [[ -f "${sdir}/appmanifest_570.acf" ]] && games+=("dota2")
+    done
+
+    echo "${games[@]}"
+}
+
+cmd_run() {
+    local game="${1:-}"
+
+    if [[ -z "$game" ]]; then
+        header "Game Benchmark"
+        echo ""
+        info "Usage: 24hg-benchmark-compare run <game>"
+        echo ""
+        info "Supported games with built-in benchmarks:"
+        echo "  cs2         — Counter-Strike 2"
+        echo "  rust        — Rust"
+        echo "  tf2         — Team Fortress 2"
+        echo "  cyberpunk   — Cyberpunk 2077"
+        echo "  sottr       — Shadow of the Tomb Raider"
+        echo ""
+        info "Or specify any game — MangoHud will capture FPS:"
+        echo "  24hg-benchmark-compare run <steam-app-id>"
+        echo "  24hg-benchmark-compare run <game-name>"
+        echo ""
+
+        local installed
+        installed=$(detect_installed_games)
+        if [[ -n "$installed" ]]; then
+            info "Detected installed games: ${BOLD}${installed}${RESET}"
+        fi
+        return 0
+    fi
+
+    local game_id
+    game_id=$(detect_game_id "$game")
+
+    header "Benchmarking: ${game_id}"
+
+    local gpu cpu kernel
+    gpu=$(detect_gpu)
+    cpu=$(detect_cpu)
+    kernel=$(detect_kernel)
+    local resolution
+    resolution=$(detect_resolution)
+
+    echo -e "  GPU: ${BOLD}${gpu}${RESET}  |  CPU: ${BOLD}${cpu}${RESET}"
+    echo -e "  Resolution: ${BOLD}${resolution}${RESET}  |  Kernel: ${BOLD}${kernel}${RESET}"
+
+    # Setup MangoHud logging
+    local log_name="${game_id}_$(date +%Y%m%d_%H%M%S)"
+    local mangohud_log="${MANGOHUD_DIR}/${log_name}.csv"
+    export MANGOHUD=1
+    export MANGOHUD_CONFIG="fps,frametime,cpu_load,gpu_load,cpu_temp,gpu_temp,ram,vram,log_duration=0,output_folder=${MANGOHUD_DIR},log_file=${log_name}"
+    export MANGOHUD_LOG_FILE="$mangohud_log"
+
+    echo ""
+    info "MangoHud logging to: ${mangohud_log}"
+    echo ""
+
+    local launched=false
+
+    case "$game_id" in
+        cs2)
+            subheader "CS2 Benchmark"
+            info "Launching CS2 with benchmark config..."
+            info "Tip: Use the Steam Workshop benchmark map for consistent results"
+            echo ""
+            warn "After the benchmark finishes, close CS2 to see results."
+            echo ""
+
+            if check_cmd steam; then
+                steam -applaunch 730 +exec benchmark +timedemo_runcount 1 2>/dev/null &
+                launched=true
+            else
+                warn "Steam not found in PATH. Launch CS2 manually with MangoHud:"
+                echo "  MANGOHUD=1 MANGOHUD_LOG_FILE=${mangohud_log} steam -applaunch 730"
+            fi
+            ;;
+        sottr)
+            subheader "Shadow of the Tomb Raider Benchmark"
+            info "Launching built-in benchmark..."
+            if check_cmd steam; then
+                steam -applaunch 750920 --benchmark 2>/dev/null &
+                launched=true
+            else
+                warn "Launch SOTTR manually with: MANGOHUD=1 steam -applaunch 750920 --benchmark"
+            fi
+            ;;
+        cyberpunk2077)
+            subheader "Cyberpunk 2077 Benchmark"
+            info "Launching game — use in-game benchmark (Settings > Graphics > Run Benchmark)"
+            if check_cmd steam; then
+                steam -applaunch 1091500 2>/dev/null &
+                launched=true
+            else
+                warn "Launch manually with: MANGOHUD=1 steam -applaunch 1091500"
+            fi
+            ;;
+        *)
+            subheader "Generic Game Benchmark"
+            info "MangoHud will capture FPS data while you play."
+            info "Play for at least 60 seconds for meaningful results."
+            echo ""
+
+            # Try Steam app ID
+            if [[ "$game_id" =~ ^[0-9]+$ ]] && check_cmd steam; then
+                info "Launching Steam app $game_id..."
+                steam -applaunch "$game_id" 2>/dev/null &
+                launched=true
+            else
+                warn "Launch your game manually with MangoHud:"
+                echo "  MANGOHUD=1 MANGOHUD_LOG_FILE=${mangohud_log} <game-command>"
+                echo ""
+                echo "  Or via Steam: MANGOHUD=1 steam -applaunch <app-id>"
+            fi
+            ;;
+    esac
+
+    if $launched; then
+        echo ""
+        info "Waiting for game to close..."
+        echo -e "  ${DIM}(Press Ctrl+C to stop monitoring early)${RESET}"
+        echo ""
+
+        # Wait for the MangoHud log to appear
+        local wait_count=0
+        while [[ ! -f "$mangohud_log" ]] && (( wait_count < 120 )); do
+            sleep 2
+            (( wait_count += 2 ))
+            echo -ne "  Waiting for MangoHud data... ${wait_count}s\r"
+        done
+
+        if [[ -f "$mangohud_log" ]]; then
+            # Wait for game to finish (log stops growing)
+            local last_size=0
+            local stable_count=0
+            while (( stable_count < 5 )); do
+                sleep 3
+                local cur_size
+                cur_size=$(stat -c%s "$mangohud_log" 2>/dev/null || echo "0")
+                if (( cur_size == last_size )); then
+                    (( stable_count++ ))
+                else
+                    stable_count=0
+                    last_size=$cur_size
+                fi
+                local line_count
+                line_count=$(wc -l < "$mangohud_log" 2>/dev/null || echo "0")
+                echo -ne "  Recording... ${line_count} frames captured\r"
+            done
+            echo ""
+            echo ""
+
+            # Parse results
+            display_benchmark_results "$game_id" "$mangohud_log"
+        else
+            echo ""
+            warn "No MangoHud log was created."
+            info "Make sure MangoHud is installed: flatpak install MangoHud"
+            info "Or: sudo dnf install mangohud"
+        fi
+    else
+        echo ""
+        info "Once you've finished benchmarking, parse the log with:"
+        echo "  24hg-benchmark-compare parse ${mangohud_log}"
+    fi
+}
+
+display_benchmark_results() {
+    local game_id="$1"
+    local log_file="$2"
+
+    subheader "Benchmark Results: ${game_id}"
+
+    local parsed
+    parsed=$(parse_mangohud_csv "$log_file") || return 1
+
+    IFS='|' read -r avg_fps p1_fps p01_fps min_fps max_fps p99_ft frame_count <<< "$parsed"
+
+    echo ""
+    printf "  ${BOLD}%-20s %s${RESET}\n" "Avg FPS:" "$(fps_color "$avg_fps")"
+    printf "  ${BOLD}%-20s %s${RESET}\n" "1%% Low:" "$(fps_color "$p1_fps")"
+    printf "  ${BOLD}%-20s %s${RESET}\n" "0.1%% Low:" "$(fps_color "$p01_fps")"
+    printf "  %-20s %s\n" "Min FPS:" "$(fps_color "$min_fps")"
+    printf "  %-20s %s\n" "Max FPS:" "$(fps_color "$max_fps")"
+    [[ "$p99_ft" != "N/A" ]] && printf "  %-20s %s ms\n" "99th %% Frametime:" "$p99_ft"
+    printf "  %-20s %s\n" "Frames Captured:" "$frame_count"
+
+    # Compare with Windows reference
+    local gpu
+    gpu=$(detect_gpu)
+    local matched
+    matched=$(find_closest_gpu "$gpu")
+    if [[ -n "$matched" ]]; then
+        local ref_fps
+        ref_fps=$(lookup_ref_fps "$game_id" "$matched")
+        if (( ref_fps > 0 )); then
+            echo ""
+            subheader "Windows Comparison (${matched})"
+            echo -e "  Windows typical:  ${BOLD}${ref_fps} FPS${RESET}"
+            echo -e "  Your 24HG score: ${BOLD}$(fps_color "$avg_fps")${RESET}"
+            echo -e "  Difference:       ${BOLD}$(percent_diff "$avg_fps" "$ref_fps")${RESET}"
+
+            local diff=$(( avg_fps - ref_fps ))
+            if (( diff >= 0 )); then
+                success "Your Linux performance meets or exceeds typical Windows!"
+            elif (( diff > -ref_fps * 10 / 100 )); then
+                info "Within 10% of Windows — excellent Linux compatibility!"
+            else
+                warn "Below Windows reference — check drivers and game settings."
+                info "Run '24hg-performance tune' for optimization tips."
+            fi
+        fi
+    fi
+
+    # Save to history
+    local gpu_full driver kernel resolution
+    gpu_full=$(detect_gpu_full)
+    driver=$(detect_gpu_driver)
+    kernel=$(detect_kernel)
+    resolution=$(detect_resolution)
+
+    local result_json
+    result_json=$(cat <<BJSON
+{
+  "type": "game",
+  "game": "${game_id}",
+  "timestamp": "$(timestamp)",
+  "system": $(get_system_json),
+  "results": {
+    "avg_fps": ${avg_fps},
+    "p1_fps": ${p1_fps},
+    "p01_fps": ${p01_fps},
+    "min_fps": ${min_fps},
+    "max_fps": ${max_fps},
+    "p99_frametime": "${p99_ft}",
+    "frames": ${frame_count}
+  },
+  "log_file": "${log_file}"
+}
+BJSON
+)
+    json_append_benchmark "$result_json"
+    success "Results saved!"
+}
+
+# Parse an existing MangoHud log
+cmd_parse() {
+    local log_file="${1:-}"
+    if [[ -z "$log_file" || ! -f "$log_file" ]]; then
+        error "Usage: 24hg-benchmark-compare parse <mangohud-csv-file>"
+        return 1
+    fi
+
+    local game_id="${2:-unknown}"
+    display_benchmark_results "$game_id" "$log_file"
+}
+
+# ── Compare ───────────────────────────────────────────────────────────────────
+
+cmd_compare() {
+    local filter="${1:-}"
+
+    header "Benchmark Comparison"
+
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        warn "No benchmark data found. Run some benchmarks first:"
+        echo "  24hg-benchmark-compare quick"
+        echo "  24hg-benchmark-compare run cs2"
+        return 0
+    fi
+
+    if ! check_cmd jq; then
+        warn "jq is required for comparison features."
+        warn "Install with: sudo dnf install jq"
+        # Fallback: dump raw
+        cat "$HISTORY_FILE"
+        return 0
+    fi
+
+    local bench_count
+    bench_count=$(jq '.benchmarks | length' "$HISTORY_FILE")
+
+    if (( bench_count == 0 )); then
+        warn "No benchmarks recorded yet."
+        info "Run: 24hg-benchmark-compare quick"
+        return 0
+    fi
+
+    if [[ -z "$filter" ]]; then
+        # Show all benchmarks in a table
+        subheader "All Benchmarks (${bench_count} results)"
+        echo ""
+        printf "  ${BOLD}%-4s %-14s %-20s %-12s %-10s %-10s %-10s${RESET}\n" \
+            "#" "Date" "Game/Type" "GPU" "Avg FPS" "1% Low" "Score"
+        printf "  %-4s %-14s %-20s %-12s %-10s %-10s %-10s\n" \
+            "────" "──────────────" "────────────────────" "────────────" "──────────" "──────────" "──────────"
+
+        local idx=0
+        while IFS= read -r line; do
+            local btype game ts gpu avg_fps p1_fps score
+            btype=$(echo "$line" | jq -r '.type')
+            game=$(echo "$line" | jq -r '.game // .type')
+            ts=$(echo "$line" | jq -r '.timestamp' | cut -c1-16 | tr 'T' ' ')
+            gpu=$(echo "$line" | jq -r '.system.gpu // "?"')
+
+            if [[ "$btype" == "quick" ]]; then
+                score=$(echo "$line" | jq -r '.scores.total // "?"')
+                avg_fps="-"
+                p1_fps="-"
+            else
+                avg_fps=$(echo "$line" | jq -r '.results.avg_fps // "?"')
+                p1_fps=$(echo "$line" | jq -r '.results.p1_fps // "?"')
+                score="-"
+            fi
+
+            (( idx++ ))
+            printf "  %-4s %-14s %-20s %-12s " "$idx" "$ts" "$game" "$gpu"
+
+            if [[ "$avg_fps" != "-" && "$avg_fps" != "?" ]]; then
+                printf "%-10s " "$(fps_color "${avg_fps%%.*}")"
+            else
+                printf "%-10s " "$avg_fps"
+            fi
+
+            if [[ "$p1_fps" != "-" && "$p1_fps" != "?" ]]; then
+                printf "%-10s " "$(fps_color "${p1_fps%%.*}")"
+            else
+                printf "%-10s " "$p1_fps"
+            fi
+
+            printf "%-10s\n" "$score"
+        done < <(jq -c '.benchmarks[]' "$HISTORY_FILE")
+
+    else
+        # Filter by game
+        local game_id
+        game_id=$(detect_game_id "$filter")
+        subheader "Results for: ${game_id}"
+
+        local filtered
+        filtered=$(jq -c "[.benchmarks[] | select(.game == \"${game_id}\")]" "$HISTORY_FILE")
+        local fcount
+        fcount=$(echo "$filtered" | jq 'length')
+
+        if (( fcount == 0 )); then
+            warn "No benchmarks found for '${game_id}'."
+            return 0
+        fi
+
+        echo ""
+        printf "  ${BOLD}%-4s %-14s %-12s %-10s %-10s %-10s %-12s${RESET}\n" \
+            "#" "Date" "GPU" "Avg FPS" "1% Low" "0.1% Low" "Driver"
+        printf "  %-4s %-14s %-12s %-10s %-10s %-10s %-12s\n" \
+            "────" "──────────────" "────────────" "──────────" "──────────" "──────────" "────────────"
+
+        local idx=0
+        while IFS= read -r line; do
+            local ts gpu avg_fps p1_fps p01_fps driver
+            ts=$(echo "$line" | jq -r '.timestamp' | cut -c1-16 | tr 'T' ' ')
+            gpu=$(echo "$line" | jq -r '.system.gpu // "?"')
+            driver=$(echo "$line" | jq -r '.system.driver // "?"' | cut -c1-12)
+            avg_fps=$(echo "$line" | jq -r '.results.avg_fps // "?"')
+            p1_fps=$(echo "$line" | jq -r '.results.p1_fps // "?"')
+            p01_fps=$(echo "$line" | jq -r '.results.p01_fps // "?"')
+
+            (( idx++ ))
+            printf "  %-4s %-14s %-12s %-10s %-10s %-10s %-12s\n" \
+                "$idx" "$ts" "$gpu" "$avg_fps" "$p1_fps" "$p01_fps" "$driver"
+        done < <(echo "$filtered" | jq -c '.[]')
+
+        # Show trend if multiple results
+        if (( fcount >= 2 )); then
+            echo ""
+            subheader "Performance Trend"
+            local first_fps last_fps
+            first_fps=$(echo "$filtered" | jq -r '.[0].results.avg_fps // 0')
+            last_fps=$(echo "$filtered" | jq -r '.[-1].results.avg_fps // 0')
+            first_fps=${first_fps%%.*}
+            last_fps=${last_fps%%.*}
+
+            echo -e "  First run: ${BOLD}${first_fps} FPS${RESET}"
+            echo -e "  Latest:    ${BOLD}${last_fps} FPS${RESET}"
+            echo -e "  Change:    ${BOLD}$(percent_diff "$last_fps" "$first_fps")${RESET}"
+        fi
+
+        # Hardware tier comparison
+        local gpu
+        gpu=$(detect_gpu)
+        local matched
+        matched=$(find_closest_gpu "$gpu")
+        if [[ -n "$matched" ]]; then
+            local ref_fps
+            ref_fps=$(lookup_ref_fps "$game_id" "$matched")
+            if (( ref_fps > 0 )); then
+                echo ""
+                subheader "Hardware Tier: ${matched}"
+                echo -e "  Windows typical for ${game_id}: ${BOLD}${ref_fps} FPS${RESET}"
+                local latest_fps
+                latest_fps=$(echo "$filtered" | jq -r '.[-1].results.avg_fps // 0')
+                latest_fps=${latest_fps%%.*}
+                echo -e "  Your 24HG result:             ${BOLD}$(fps_color "$latest_fps")${RESET}"
+                echo -e "  Performance ratio:             ${BOLD}$(percent_diff "$latest_fps" "$ref_fps")${RESET}"
+            fi
+        fi
+    fi
+}
+
+# ── History ───────────────────────────────────────────────────────────────────
+
+cmd_history() {
+    header "Benchmark History"
+
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        warn "No benchmark history found."
+        info "Run: 24hg-benchmark-compare quick"
+        return 0
+    fi
+
+    if ! check_cmd jq; then
+        warn "jq is required for history view. Install: sudo dnf install jq"
+        return 1
+    fi
+
+    local bench_count
+    bench_count=$(jq '.benchmarks | length' "$HISTORY_FILE")
+
+    if (( bench_count == 0 )); then
+        warn "No benchmarks recorded."
+        return 0
+    fi
+
+    subheader "Timeline (${bench_count} entries)"
+    echo ""
+
+    local prev_driver=""
+    local prev_kernel=""
+    local prev_fps=0
+    local idx=0
+
+    while IFS= read -r line; do
+        (( idx++ ))
+        local btype game ts gpu driver kernel avg_fps score
+        btype=$(echo "$line" | jq -r '.type')
+        game=$(echo "$line" | jq -r '.game // .type')
+        ts=$(echo "$line" | jq -r '.timestamp' | cut -c1-16 | tr 'T' ' ')
+        gpu=$(echo "$line" | jq -r '.system.gpu // "?"')
+        driver=$(echo "$line" | jq -r '.system.driver // "?"')
+        kernel=$(echo "$line" | jq -r '.system.kernel // "?"')
+
+        # Detect changes
+        local changes=""
+        if [[ -n "$prev_driver" && "$driver" != "$prev_driver" ]]; then
+            changes+=" ${MAGENTA}[Driver: ${prev_driver} -> ${driver}]${RESET}"
+        fi
+        if [[ -n "$prev_kernel" && "$kernel" != "$prev_kernel" ]]; then
+            changes+=" ${MAGENTA}[Kernel: ${prev_kernel} -> ${kernel}]${RESET}"
+        fi
+
+        if [[ "$btype" == "quick" ]]; then
+            score=$(echo "$line" | jq -r '.scores.total // "?"')
+            echo -e "  ${BOLD}${idx}.${RESET} ${DIM}${ts}${RESET}  ${CYAN}System Quick${RESET}  Score: ${BOLD}${score}/100${RESET}  [${gpu}]${changes}"
+        else
+            avg_fps=$(echo "$line" | jq -r '.results.avg_fps // 0')
+            avg_fps=${avg_fps%%.*}
+            local p1_fps
+            p1_fps=$(echo "$line" | jq -r '.results.p1_fps // 0')
+            p1_fps=${p1_fps%%.*}
+
+            local trend=""
+            if (( prev_fps > 0 )) && [[ "$game" == "$(echo "$line" | jq -r '.game // ""')" ]]; then
+                local diff=$(( avg_fps - prev_fps ))
+                if (( diff > 5 )); then
+                    trend=" ${GREEN}+${diff} FPS ↑${RESET}"
+                elif (( diff < -5 )); then
+                    trend=" ${RED}${diff} FPS ↓${RESET}"
+                else
+                    trend=" ${DIM}~stable${RESET}"
+                fi
+            fi
+
+            echo -e "  ${BOLD}${idx}.${RESET} ${DIM}${ts}${RESET}  ${CYAN}${game}${RESET}  $(fps_color "$avg_fps")  1%: $(fps_color "$p1_fps")  [${gpu}]${trend}${changes}"
+            prev_fps=$avg_fps
+        fi
+
+        prev_driver="$driver"
+        prev_kernel="$kernel"
+    done < <(jq -c '.benchmarks[]' "$HISTORY_FILE")
+
+    # Summary
+    echo ""
+    subheader "Summary"
+    local game_list
+    game_list=$(jq -r '[.benchmarks[] | select(.type == "game") | .game] | unique | .[]' "$HISTORY_FILE" 2>/dev/null)
+    local quick_count
+    quick_count=$(jq '[.benchmarks[] | select(.type == "quick")] | length' "$HISTORY_FILE")
+
+    echo -e "  Quick benchmarks: ${BOLD}${quick_count}${RESET}"
+    if [[ -n "$game_list" ]]; then
+        echo -e "  Games benchmarked:"
+        while IFS= read -r g; do
+            local gcount
+            gcount=$(jq "[.benchmarks[] | select(.game == \"${g}\")] | length" "$HISTORY_FILE")
+            echo -e "    ${CYAN}${g}${RESET}: ${gcount} runs"
+        done <<< "$game_list"
+    fi
+
+    echo ""
+    info "Tip: Run '24hg-benchmark-compare compare <game>' for detailed analysis."
+}
+
+# ── Share ─────────────────────────────────────────────────────────────────────
+
+generate_share_image() {
+    local output_file="$1"
+
+    if ! check_cmd convert; then
+        warn "ImageMagick not found. Install: sudo dnf install ImageMagick"
+        warn "Generating text-only card instead."
+        return 1
+    fi
+
+    local gpu cpu ram kernel driver score
+    gpu=$(detect_gpu)
+    cpu=$(detect_cpu)
+    ram=$(detect_ram)
+    kernel=$(detect_kernel)
+    driver=$(detect_gpu_driver)
+
+    # Get latest quick score
+    score="N/A"
+    if check_cmd jq && [[ -f "$HISTORY_FILE" ]]; then
+        score=$(jq -r '[.benchmarks[] | select(.type == "quick")] | last | .scores.total // "N/A"' "$HISTORY_FILE" 2>/dev/null)
+    fi
+
+    # Get recent game benchmarks
+    local game_lines=""
+    if check_cmd jq && [[ -f "$HISTORY_FILE" ]]; then
+        while IFS= read -r line; do
+            [[ -z "$line" || "$line" == "null" ]] && continue
+            local g a p1
+            g=$(echo "$line" | jq -r '.game')
+            a=$(echo "$line" | jq -r '.results.avg_fps')
+            p1=$(echo "$line" | jq -r '.results.p1_fps')
+            game_lines+="  ${g}: ${a} avg / ${p1} (1% low)\n"
+        done < <(jq -c '[.benchmarks[] | select(.type == "game")] | group_by(.game) | .[] | last' "$HISTORY_FILE" 2>/dev/null)
+    fi
+
+    # Card dimensions
+    local width=800
+    local height=500
+    local bg_color="#1a1b2e"
+    local accent="#4f8ffa"
+    local text_color="#e0e0e0"
+    local title_color="#ffffff"
+    local score_color="#00ff88"
+
+    # Build ImageMagick command
+    local draw_cmds=()
+    draw_cmds+=("-size" "${width}x${height}" "xc:${bg_color}")
+
+    # Border accent
+    draw_cmds+=("-fill" "$accent" "-draw" "rectangle 0,0 ${width},4")
+    draw_cmds+=("-fill" "$accent" "-draw" "rectangle 0,$((height-4)) ${width},${height}")
+
+    # Title
+    draw_cmds+=("-font" "DejaVu-Sans-Bold" "-pointsize" "28" "-fill" "$title_color")
+    draw_cmds+=("-gravity" "NorthWest" "-annotate" "+30+30" "24HG Gaming Benchmark")
+
+    # Subtitle
+    draw_cmds+=("-font" "DejaVu-Sans" "-pointsize" "14" "-fill" "$accent")
+    draw_cmds+=("-annotate" "+30+65" "os.24hgaming.com  |  $(date_short)")
+
+    # Separator
+    draw_cmds+=("-fill" "#333355" "-draw" "rectangle 30,85 $((width-30)),86")
+
+    # System specs
+    draw_cmds+=("-font" "DejaVu-Sans" "-pointsize" "16" "-fill" "$text_color")
+    draw_cmds+=("-annotate" "+30+110" "GPU: ${gpu}")
+    draw_cmds+=("-annotate" "+30+135" "CPU: ${cpu}")
+    draw_cmds+=("-annotate" "+30+160" "RAM: ${ram}  |  Kernel: ${kernel}")
+    draw_cmds+=("-annotate" "+30+185" "Driver: ${driver}")
+
+    # Separator
+    draw_cmds+=("-fill" "#333355" "-draw" "rectangle 30,205 $((width-30)),206")
+
+    # Gaming Score
+    draw_cmds+=("-font" "DejaVu-Sans-Bold" "-pointsize" "22" "-fill" "$score_color")
+    draw_cmds+=("-annotate" "+30+235" "24HG Gaming Score: ${score}/100")
+
+    # Game benchmarks
+    local y=275
+    if [[ -n "$game_lines" ]]; then
+        draw_cmds+=("-font" "DejaVu-Sans-Bold" "-pointsize" "16" "-fill" "$accent")
+        draw_cmds+=("-annotate" "+30+${y}" "Game Benchmarks:")
+        y=$((y + 30))
+
+        draw_cmds+=("-font" "DejaVu-Sans" "-pointsize" "15" "-fill" "$text_color")
+        while IFS= read -r gl; do
+            [[ -z "$gl" ]] && continue
+            draw_cmds+=("-annotate" "+40+${y}" "$gl")
+            y=$((y + 25))
+        done < <(echo -e "$game_lines")
+    fi
+
+    # Footer
+    draw_cmds+=("-font" "DejaVu-Sans" "-pointsize" "13" "-fill" "#888899")
+    draw_cmds+=("-gravity" "SouthWest" "-annotate" "+30+20" "Powered by 24HG  -  os.24hgaming.com")
+    draw_cmds+=("-gravity" "SouthEast" "-annotate" "+30+20" "24 Hour Gaming Community")
+
+    # Generate
+    convert "${draw_cmds[@]}" "$output_file" 2>/dev/null
+    return $?
+}
+
+generate_share_text() {
+    local gpu cpu ram kernel driver score
+    gpu=$(detect_gpu)
+    cpu=$(detect_cpu)
+    ram=$(detect_ram)
+    kernel=$(detect_kernel)
+    driver=$(detect_gpu_driver)
+
+    score="N/A"
+    if check_cmd jq && [[ -f "$HISTORY_FILE" ]]; then
+        score=$(jq -r '[.benchmarks[] | select(.type == "quick")] | last | .scores.total // "N/A"' "$HISTORY_FILE" 2>/dev/null)
+    fi
+
+    local text=""
+    text+="╔══════════════════════════════════════════════════╗\n"
+    text+="║          24HG Gaming Benchmark Card            ║\n"
+    text+="╠══════════════════════════════════════════════════╣\n"
+    text+="║ GPU:    ${gpu}\n"
+    text+="║ CPU:    ${cpu}\n"
+    text+="║ RAM:    ${ram}  |  Kernel: ${kernel}\n"
+    text+="║ Driver: ${driver}\n"
+    text+="╠══════════════════════════════════════════════════╣\n"
+    text+="║ 24HG Gaming Score: ${score}/100\n"
+    text+="╠══════════════════════════════════════════════════╣\n"
+
+    # Game results
+    if check_cmd jq && [[ -f "$HISTORY_FILE" ]]; then
+        local has_games=false
+        while IFS= read -r line; do
+            [[ -z "$line" || "$line" == "null" ]] && continue
+            has_games=true
+            local g a p1
+            g=$(echo "$line" | jq -r '.game')
+            a=$(echo "$line" | jq -r '.results.avg_fps')
+            p1=$(echo "$line" | jq -r '.results.p1_fps')
+            printf -v gline "║ %-18s Avg: %4s FPS  1%%: %4s FPS\n" "${g}" "${a}" "${p1}"
+            text+="$gline"
+        done < <(jq -c '[.benchmarks[] | select(.type == "game")] | group_by(.game) | .[] | last' "$HISTORY_FILE" 2>/dev/null)
+
+        if ! $has_games; then
+            text+="║ No game benchmarks yet — run some games!\n"
+        fi
+    fi
+
+    text+="╠══════════════════════════════════════════════════╣\n"
+    text+="║ Powered by 24HG — os.24hgaming.com             ║\n"
+    text+="║ 24 Hour Gaming Community                        ║\n"
+    text+="╚══════════════════════════════════════════════════╝\n"
+
+    echo -e "$text"
+}
+
+cmd_share() {
+    local mode="${1:-all}"
+
+    header "Shareable Benchmark Card"
+
+    local card_file="${SHARE_DIR}/24hg-benchmark-$(date +%Y%m%d_%H%M%S)"
+
+    # Generate text version
+    subheader "Text Card (for Discord/Forums)"
+    echo ""
+    local text_card
+    text_card=$(generate_share_text)
+    echo -e "$text_card"
+
+    local text_file="${card_file}.txt"
+    echo -e "$text_card" > "$text_file"
+    success "Text card saved: ${text_file}"
+
+    # Generate image version
+    echo ""
+    subheader "Image Card (PNG)"
+    local img_file="${card_file}.png"
+
+    if generate_share_image "$img_file"; then
+        success "Image card saved: ${img_file}"
+
+        # Try to open it
+        if check_cmd xdg-open; then
+            info "Opening image..."
+            xdg-open "$img_file" 2>/dev/null &
+        fi
+    else
+        warn "Could not generate image card."
+        info "Install ImageMagick for image generation: sudo dnf install ImageMagick"
+    fi
+
+    # Upload option
+    echo ""
+    subheader "Share Options"
+    echo "  1. Copy text card to clipboard:"
+    echo "     cat ${text_file} | xclip -selection clipboard"
+    echo ""
+    echo "  2. Upload to 24HG profile (requires hub account):"
+    echo "     24hg-benchmark-compare upload"
+    echo ""
+    echo "  3. Share image on Discord/social media:"
+    echo "     ${img_file}"
+}
+
+cmd_upload() {
+    header "Upload Benchmark"
+
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        error "No benchmark data to upload."
+        return 1
+    fi
+
+    # Check for auth token
+    local token_file="${HOME}/.config/24hg/hub-token"
+    if [[ ! -f "$token_file" ]]; then
+        warn "Not logged in to 24HG Hub."
+        info "Login with: 24hg-hub-bridge login"
+        return 1
+    fi
+
+    local token
+    token=$(cat "$token_file")
+
+    info "Uploading benchmark data to 24HG Hub..."
+
+    local response
+    response=$(curl -sf -X POST "${HUB_API}/benchmarks/upload" \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -d @"$HISTORY_FILE" 2>&1) || {
+        error "Upload failed: ${response}"
+        return 1
+    }
+
+    success "Benchmark data uploaded to your 24HG Hub profile!"
+    info "View at: ${HG24_URL}/profile/benchmarks"
+}
+
+# ── GUI Mode ──────────────────────────────────────────────────────────────────
+
+cmd_gui() {
+    if ! check_cmd zenity; then
+        error "zenity is required for GUI mode."
+        error "Install: sudo dnf install zenity"
+        return 1
+    fi
+
+    local choice
+    choice=$(zenity --list \
+        --title="24HG Benchmark Compare" \
+        --text="Select a benchmark action:" \
+        --column="Action" --column="Description" \
+        --width=500 --height=400 \
+        "quick" "Quick system performance snapshot" \
+        "run" "Benchmark a specific game" \
+        "compare" "Compare benchmark results" \
+        "history" "View benchmark history" \
+        "share" "Generate shareable benchmark card" \
+        2>/dev/null) || return 0
+
+    case "$choice" in
+        quick)
+            cmd_quick 2>&1 | zenity --text-info --title="Quick Benchmark" \
+                --width=700 --height=600 --font="monospace" 2>/dev/null
+            ;;
+        run)
+            local game
+            game=$(zenity --entry --title="Game Benchmark" \
+                --text="Enter game name or Steam app ID:" \
+                --entry-text="cs2" 2>/dev/null) || return 0
+            cmd_run "$game" 2>&1 | zenity --text-info --title="Game Benchmark: ${game}" \
+                --width=700 --height=600 --font="monospace" 2>/dev/null
+            ;;
+        compare)
+            local filter
+            filter=$(zenity --entry --title="Compare Benchmarks" \
+                --text="Filter by game (leave empty for all):" 2>/dev/null) || filter=""
+            cmd_compare "$filter" 2>&1 | zenity --text-info --title="Benchmark Comparison" \
+                --width=800 --height=600 --font="monospace" 2>/dev/null
+            ;;
+        history)
+            cmd_history 2>&1 | zenity --text-info --title="Benchmark History" \
+                --width=700 --height=600 --font="monospace" 2>/dev/null
+            ;;
+        share)
+            cmd_share 2>&1 | zenity --text-info --title="Share Benchmark" \
+                --width=700 --height=500 --font="monospace" 2>/dev/null
+            ;;
+    esac
+}
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+
+cmd_help() {
+    echo -e "${BOLD}${CYAN}24HG Benchmark Comparison Tool${RESET} v${VERSION}"
+    echo ""
+    echo -e "${BOLD}USAGE:${RESET}"
+    echo "  24hg-benchmark-compare <command> [options]"
+    echo ""
+    echo -e "${BOLD}COMMANDS:${RESET}"
+    echo -e "  ${GREEN}quick${RESET}            Quick system performance snapshot (no game needed)"
+    echo -e "  ${GREEN}run${RESET} <game>       Benchmark a specific game via MangoHud"
+    echo -e "  ${GREEN}compare${RESET} [game]   Compare benchmark results (all or by game)"
+    echo -e "  ${GREEN}history${RESET}          Show benchmark timeline with trend detection"
+    echo -e "  ${GREEN}share${RESET}            Generate a shareable benchmark card (PNG + text)"
+    echo -e "  ${GREEN}parse${RESET} <file>     Parse an existing MangoHud CSV log"
+    echo -e "  ${GREEN}upload${RESET}           Upload results to 24HG Hub profile"
+    echo ""
+    echo -e "${BOLD}OPTIONS:${RESET}"
+    echo -e "  --gui            Launch with zenity GUI"
+    echo -e "  --help, -h       Show this help"
+    echo -e "  --version, -v    Show version"
+    echo ""
+    echo -e "${BOLD}EXAMPLES:${RESET}"
+    echo "  24hg-benchmark-compare quick              # Quick system score"
+    echo "  24hg-benchmark-compare run cs2             # Benchmark CS2"
+    echo "  24hg-benchmark-compare run 252490          # Benchmark by Steam app ID"
+    echo "  24hg-benchmark-compare compare             # Compare all results"
+    echo "  24hg-benchmark-compare compare cs2         # CS2 results over time"
+    echo "  24hg-benchmark-compare history             # Performance timeline"
+    echo "  24hg-benchmark-compare share               # Generate shareable card"
+    echo "  24hg-benchmark-compare --gui               # GUI mode"
+    echo ""
+    echo -e "${BOLD}SUPPORTED GAMES:${RESET}"
+    echo "  cs2, rust, tf2, cyberpunk2077, sottr (Shadow of the Tomb Raider)"
+    echo "  Any Steam game via app ID — MangoHud captures FPS automatically"
+    echo ""
+    echo -e "${BOLD}REFERENCE DATA:${RESET}"
+    echo "  Includes typical Windows FPS for GPUs: RTX 3060-4080, RX 6600-7900 XTX"
+    echo "  Games: CS2, Rust, TF2, Cyberpunk 2077, Shadow of the Tomb Raider"
+    echo ""
+    echo -e "${BOLD}REQUIREMENTS:${RESET}"
+    echo "  Required: bash, coreutils"
+    echo "  Optional: mangohud (game FPS), jq (history/compare), sysbench (CPU bench)"
+    echo "            ImageMagick (share cards), zenity (GUI), glxgears/vkcube (GPU test)"
+    echo ""
+    echo -e "${DIM}Part of 24HG — os.24hgaming.com${RESET}"
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+    init_dirs
+
+    local command="${1:-help}"
+    shift 2>/dev/null || true
+
+    # Handle flags anywhere
+    case "$command" in
+        --gui|-g)
+            cmd_gui "$@"
+            return
+            ;;
+        --help|-h|help)
+            cmd_help
+            return
+            ;;
+        --version|-v)
+            echo "${APP_NAME} v${VERSION}"
+            return
+            ;;
+    esac
+
+    # Check for --gui flag in remaining args
+    for arg in "$@"; do
+        if [[ "$arg" == "--gui" || "$arg" == "-g" ]]; then
+            cmd_gui
+            return
+        fi
+    done
+
+    case "$command" in
+        quick)
+            cmd_quick "$@"
+            ;;
+        run)
+            cmd_run "$@"
+            ;;
+        compare)
+            cmd_compare "$@"
+            ;;
+        history)
+            cmd_history "$@"
+            ;;
+        share)
+            cmd_share "$@"
+            ;;
+        parse)
+            cmd_parse "$@"
+            ;;
+        upload)
+            cmd_upload "$@"
+            ;;
+        *)
+            error "Unknown command: ${command}"
+            echo ""
+            cmd_help
+            return 1
+            ;;
+    esac
+}
+
+main "$@"

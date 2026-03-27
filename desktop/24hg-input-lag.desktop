@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Input Lag Analyzer
+Comment=Input latency optimization
+Exec=/usr/bin/24hg-input-lag
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Game;System;
+Keywords=input;latency;lag;mouse;keyboard;optimize;

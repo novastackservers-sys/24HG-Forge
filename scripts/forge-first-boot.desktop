@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=24HG Forge First Boot Wizard
-Comment=Configure your 24HG Forge installation
-Exec=/usr/bin/forge-first-boot
-Icon=forge-logo
-Type=Application
-Categories=System;Settings;
-NoDisplay=true
-X-GNOME-Autostart-enabled=true

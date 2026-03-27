@@ -1,0 +1,558 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG LAN Party — Auto-discover nearby 24HG gamers on the network
+
+HG24_VERSION="1.0"
+SERVICE_TYPE="_24hg-24hg._tcp"
+LAN_PORT=24240
+PID_FILE="/tmp/24hg-lan-party.pid"
+LISTENER_PID_FILE="/tmp/24hg-lan-listener.pid"
+AVAHI_PID_FILE="/tmp/24hg-lan-avahi.pid"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+log() {
+    logger -t 24hg-lan "$*"
+}
+
+die() {
+    echo -e "${RED}Error:${RESET} $*" >&2
+    log "ERROR: $*"
+    exit 1
+}
+
+info() {
+    echo -e "${CYAN}[LAN]${RESET} $*"
+}
+
+# ── Game Detection ──────────────────────────────────────────────────────────
+
+detect_current_game() {
+    local game="idle"
+
+    # Check Steam games (look for running game processes under steam/steamapps)
+    local steam_pid
+    steam_pid=$(pgrep -f "steamapps/common" 2>/dev/null | head -1 || true)
+    if [[ -n "$steam_pid" ]]; then
+        local cmdline
+        cmdline=$(tr '\0' ' ' < "/proc/$steam_pid/cmdline" 2>/dev/null || true)
+        # Extract game name from steamapps/common/<GameName>/
+        if [[ "$cmdline" =~ steamapps/common/([^/]+)/ ]]; then
+            game="${BASH_REMATCH[1]}"
+            echo "$game"
+            return
+        fi
+    fi
+
+    # Check Lutris games
+    local lutris_pid
+    lutris_pid=$(pgrep -f "lutris:rungame" 2>/dev/null | head -1 || true)
+    if [[ -n "$lutris_pid" ]]; then
+        local cmdline
+        cmdline=$(tr '\0' ' ' < "/proc/$lutris_pid/cmdline" 2>/dev/null || true)
+        if [[ "$cmdline" =~ rungame/([^/[:space:]]+) ]]; then
+            game="${BASH_REMATCH[1]}"
+            echo "$game"
+            return
+        fi
+        game="Lutris Game"
+        echo "$game"
+        return
+    fi
+
+    # Check Heroic games
+    local heroic_pid
+    heroic_pid=$(pgrep -f "heroic.*--game" 2>/dev/null | head -1 || true)
+    if [[ -n "$heroic_pid" ]]; then
+        local cmdline
+        cmdline=$(tr '\0' ' ' < "/proc/$heroic_pid/cmdline" 2>/dev/null || true)
+        if [[ "$cmdline" =~ --game[[:space:]]+([^[:space:]]+) ]]; then
+            game="${BASH_REMATCH[1]}"
+        else
+            game="Heroic Game"
+        fi
+        echo "$game"
+        return
+    fi
+
+    # Check common game processes by name
+    local -a known_games=(
+        "cs2:CS2"
+        "hl2_linux:Source Game"
+        "dota2:Dota 2"
+        "factorio:Factorio"
+        "valheim:Valheim"
+        "rust:Rust"
+        "minecraft-launcher:Minecraft"
+        "java.*minecraft:Minecraft"
+    )
+    for entry in "${known_games[@]}"; do
+        local pattern="${entry%%:*}"
+        local name="${entry#*:}"
+        if pgrep -f "$pattern" &>/dev/null; then
+            game="$name"
+            echo "$game"
+            return
+        fi
+    done
+
+    echo "$game"
+}
+
+# ── Avahi Service Publishing ────────────────────────────────────────────────
+
+get_local_ip() {
+    ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1
+}
+
+publish_service() {
+    local user game
+    user=$(whoami)
+    game=$(detect_current_game)
+
+    log "Publishing service: user=$user game=$game"
+
+    avahi-publish-service \
+        "24HG (${user}@$(hostname))" \
+        "$SERVICE_TYPE" \
+        "$LAN_PORT" \
+        "user=$user" \
+        "game=$game" \
+        "version=$HG24_VERSION" &
+
+    local pub_pid=$!
+    echo "$pub_pid" > "$AVAHI_PID_FILE"
+    log "Avahi publish started (PID $pub_pid)"
+    echo "$pub_pid"
+}
+
+update_game_status() {
+    # Kill old avahi-publish and restart with current game
+    if [[ -f "$AVAHI_PID_FILE" ]]; then
+        local old_pid
+        old_pid=$(cat "$AVAHI_PID_FILE")
+        kill "$old_pid" 2>/dev/null || true
+        sleep 0.5
+    fi
+    publish_service
+}
+
+# ── Scanning ────────────────────────────────────────────────────────────────
+
+scan_network() {
+    local results=()
+    local my_ip
+    my_ip=$(get_local_ip)
+
+    info "Scanning local network for 24HG machines..."
+    echo ""
+
+    local raw_output
+    raw_output=$(avahi-browse -t "$SERVICE_TYPE" --resolve -p 2>/dev/null || true)
+
+    if [[ -z "$raw_output" ]]; then
+        echo -e "${DIM}  No 24HG machines found on the network.${RESET}"
+        echo -e "${DIM}  Run '${WHITE}24hg-lan-party announce${DIM}' to make yourself visible.${RESET}"
+        return
+    fi
+
+    # Parse resolved entries (lines starting with '=')
+    # Format: =;interface;protocol;name;type;domain;hostname;address;port;txt
+    local -a hostnames=() ips=() users=() games=() versions=()
+    local count=0
+
+    while IFS=';' read -r status iface proto name stype domain hostname address port txt_raw; do
+        [[ "$status" == "=" ]] || continue
+        # Skip IPv6
+        [[ "$proto" == "0" ]] || continue
+
+        local user="unknown" game="idle" version="?"
+
+        # Parse TXT records
+        if [[ -n "$txt_raw" ]]; then
+            if [[ "$txt_raw" =~ \"user=([^\"]+)\" ]]; then
+                user="${BASH_REMATCH[1]}"
+            fi
+            if [[ "$txt_raw" =~ \"game=([^\"]+)\" ]]; then
+                game="${BASH_REMATCH[1]}"
+            fi
+            if [[ "$txt_raw" =~ \"version=([^\"]+)\" ]]; then
+                version="${BASH_REMATCH[1]}"
+            fi
+        fi
+
+        hostnames+=("${hostname%.local.}")
+        ips+=("$address")
+        users+=("$user")
+        games+=("$game")
+        versions+=("$version")
+        ((count++)) || true
+    done <<< "$raw_output"
+
+    if [[ $count -eq 0 ]]; then
+        echo -e "${DIM}  No 24HG machines found on the network.${RESET}"
+        return
+    fi
+
+    # Print table header
+    printf "${BOLD}${WHITE}  %-20s %-16s %-12s %-20s %-8s${RESET}\n" \
+        "HOSTNAME" "IP ADDRESS" "USER" "PLAYING" "VERSION"
+    printf "${DIM}  %-20s %-16s %-12s %-20s %-8s${RESET}\n" \
+        "────────────────────" "────────────────" "────────────" "────────────────────" "────────"
+
+    for ((i=0; i<count; i++)); do
+        local game_color="$DIM"
+        local game_display="${games[$i]}"
+        local marker=""
+
+        if [[ "${games[$i]}" != "idle" ]]; then
+            game_color="$GREEN"
+            marker="${GREEN}>${RESET} "
+        else
+            marker="  "
+            game_display="--"
+        fi
+
+        local ip_display="${ips[$i]}"
+        if [[ "$ip_display" == "$my_ip" ]]; then
+            ip_display="${ips[$i]} ${YELLOW}(you)${RESET}"
+        fi
+
+        printf "${marker}${WHITE}%-20s${RESET} %-16b ${CYAN}%-12s${RESET} ${game_color}%-20s${RESET} ${DIM}v%-7s${RESET}\n" \
+            "${hostnames[$i]}" "$ip_display" "${users[$i]}" "$game_display" "${versions[$i]}"
+    done
+
+    echo ""
+    echo -e "${DIM}  Found ${WHITE}${count}${DIM} machine(s) on the LAN.${RESET}"
+}
+
+# ── Invite System ───────────────────────────────────────────────────────────
+
+send_invite() {
+    local target_ip="$1"
+    local game="$2"
+    local user
+    user=$(whoami)
+    local my_ip
+    my_ip=$(get_local_ip)
+
+    local payload
+    payload=$(printf '{"type":"invite","from":"%s","game":"%s","ip":"%s","timestamp":%d}' \
+        "$user" "$game" "$my_ip" "$(date +%s)")
+
+    info "Sending game invite to ${WHITE}${target_ip}${RESET} for ${GREEN}${game}${RESET}..."
+    log "Sending invite to $target_ip: $payload"
+
+    echo "$payload" | socat - UDP-SENDTO:"${target_ip}:${LAN_PORT}" 2>/dev/null \
+        || die "Failed to send invite to $target_ip. Is the machine reachable?"
+
+    echo -e "${GREEN}  Invite sent!${RESET} Waiting for response..."
+}
+
+listen_for_invites() {
+    log "Listening for invites on UDP port $LAN_PORT"
+    while true; do
+        local data
+        data=$(socat -u UDP-RECV:"$LAN_PORT",reuseaddr STDOUT 2>/dev/null | head -1) || continue
+
+        if [[ -z "$data" ]]; then
+            continue
+        fi
+
+        log "Received packet: $data"
+
+        # Parse JSON fields with simple pattern matching
+        local msg_type="" from="" game="" from_ip=""
+        if [[ "$data" =~ \"type\":\"([^\"]+)\" ]]; then
+            msg_type="${BASH_REMATCH[1]}"
+        fi
+        if [[ "$data" =~ \"from\":\"([^\"]+)\" ]]; then
+            from="${BASH_REMATCH[1]}"
+        fi
+        if [[ "$data" =~ \"game\":\"([^\"]+)\" ]]; then
+            game="${BASH_REMATCH[1]}"
+        fi
+        if [[ "$data" =~ \"ip\":\"([^\"]+)\" ]]; then
+            from_ip="${BASH_REMATCH[1]}"
+        fi
+
+        if [[ "$msg_type" == "invite" ]]; then
+            log "Game invite from $from ($from_ip) for $game"
+
+            # Desktop notification
+            notify-send -u normal -i applications-games \
+                "24HG LAN Party Invite" \
+                "${from} wants to play ${game}!\nFrom: ${from_ip}" \
+                2>/dev/null || true
+
+            # If zenity is available, show accept/decline dialog
+            if command -v zenity &>/dev/null; then
+                (
+                    if zenity --question \
+                        --title="24HG LAN Party Invite" \
+                        --text="<b>${from}</b> wants to play <b>${game}</b>!\n\nFrom: ${from_ip}\n\nAccept the invite?" \
+                        --ok-label="Accept" \
+                        --cancel-label="Decline" \
+                        2>/dev/null; then
+                        # Send acceptance
+                        local response
+                        response=$(printf '{"type":"accept","from":"%s","game":"%s","ip":"%s"}' \
+                            "$(whoami)" "$game" "$(get_local_ip)")
+                        echo "$response" | socat - UDP-SENDTO:"${from_ip}:${LAN_PORT}" 2>/dev/null || true
+                        notify-send -u low "24HG LAN Party" "Accepted invite from ${from} for ${game}" 2>/dev/null || true
+                        log "Accepted invite from $from for $game"
+                    else
+                        # Send decline
+                        local response
+                        response=$(printf '{"type":"decline","from":"%s","game":"%s","ip":"%s"}' \
+                            "$(whoami)" "$game" "$(get_local_ip)")
+                        echo "$response" | socat - UDP-SENDTO:"${from_ip}:${LAN_PORT}" 2>/dev/null || true
+                        log "Declined invite from $from for $game"
+                    fi
+                ) &
+            fi
+        elif [[ "$msg_type" == "accept" ]]; then
+            notify-send -u normal -i dialog-ok \
+                "24HG LAN Party" \
+                "${from} accepted your invite for ${game}!" \
+                2>/dev/null || true
+            log "Invite accepted by $from for $game"
+        elif [[ "$msg_type" == "decline" ]]; then
+            notify-send -u low -i dialog-cancel \
+                "24HG LAN Party" \
+                "${from} declined your invite for ${game}." \
+                2>/dev/null || true
+            log "Invite declined by $from for $game"
+        fi
+    done
+}
+
+# ── Announce / Daemon ───────────────────────────────────────────────────────
+
+cmd_announce() {
+    local daemon_mode=false
+    if [[ "${1:-}" == "--daemon" ]]; then
+        daemon_mode=true
+    fi
+
+    # Check if already running
+    if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        die "Already announcing (PID $(cat "$PID_FILE")). Use '24hg-lan-party stop' first."
+    fi
+
+    # Check dependencies
+    command -v avahi-publish-service &>/dev/null || die "avahi-utils not installed. Install with: sudo dnf install avahi-tools"
+    command -v socat &>/dev/null || die "socat not installed. Install with: sudo dnf install socat"
+
+    if $daemon_mode; then
+        info "Starting LAN party daemon (announce + invite listener)..."
+
+        (
+            # Publish service
+            publish_service > /dev/null
+
+            # Start invite listener in background
+            listen_for_invites &
+            local listener_pid=$!
+            echo "$listener_pid" > "$LISTENER_PID_FILE"
+
+            # Periodically update game status (every 30 seconds)
+            while true; do
+                sleep 30
+                update_game_status > /dev/null 2>&1 || true
+            done
+        ) &
+
+        local daemon_pid=$!
+        echo "$daemon_pid" > "$PID_FILE"
+        log "Daemon started (PID $daemon_pid)"
+
+        echo -e "${GREEN}  LAN party daemon started!${RESET} (PID $daemon_pid)"
+        echo -e "${DIM}  Announcing as: ${WHITE}$(whoami)@$(hostname)${RESET}"
+        echo -e "${DIM}  Current game:  ${WHITE}$(detect_current_game)${RESET}"
+        echo -e "${DIM}  Listening for invites on UDP port ${LAN_PORT}${RESET}"
+        echo ""
+        echo -e "${DIM}  Stop with: ${WHITE}24hg-lan-party stop${RESET}"
+    else
+        info "Announcing on local network..."
+
+        command -v avahi-publish-service &>/dev/null || die "avahi-utils not installed"
+
+        (
+            publish_service > /dev/null
+
+            # Update game status every 30 seconds
+            while true; do
+                sleep 30
+                update_game_status > /dev/null 2>&1 || true
+            done
+        ) &
+
+        local bg_pid=$!
+        echo "$bg_pid" > "$PID_FILE"
+
+        echo -e "${GREEN}  Now visible on the LAN!${RESET} (PID $bg_pid)"
+        echo -e "${DIM}  Announcing as: ${WHITE}$(whoami)@$(hostname)${RESET}"
+        echo -e "${DIM}  Current game:  ${WHITE}$(detect_current_game)${RESET}"
+        echo ""
+        echo -e "${DIM}  Stop with: ${WHITE}24hg-lan-party stop${RESET}"
+    fi
+}
+
+cmd_stop() {
+    local stopped=false
+
+    # Stop main daemon
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+            info "Stopped LAN party daemon (PID $pid)"
+            stopped=true
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    # Stop avahi-publish
+    if [[ -f "$AVAHI_PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$AVAHI_PID_FILE")
+        kill "$pid" 2>/dev/null || true
+        rm -f "$AVAHI_PID_FILE"
+        stopped=true
+    fi
+
+    # Stop invite listener
+    if [[ -f "$LISTENER_PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$LISTENER_PID_FILE")
+        kill "$pid" 2>/dev/null || true
+        rm -f "$LISTENER_PID_FILE"
+        stopped=true
+    fi
+
+    # Kill any remaining avahi-publish for our service
+    pkill -f "avahi-publish-service.*${SERVICE_TYPE}" 2>/dev/null || true
+
+    if $stopped; then
+        echo -e "${GREEN}  Stopped announcing.${RESET} You are no longer visible on the LAN."
+        log "LAN party services stopped"
+    else
+        echo -e "${DIM}  Not currently announcing.${RESET}"
+    fi
+}
+
+# ── Status ──────────────────────────────────────────────────────────────────
+
+cmd_status() {
+    echo ""
+    echo -e "${BOLD}${MAGENTA}  ╔══════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${MAGENTA}  ║      24HG LAN Party Status     ║${RESET}"
+    echo -e "${BOLD}${MAGENTA}  ╚══════════════════════════════════════╝${RESET}"
+    echo ""
+
+    # Local status
+    local my_ip
+    my_ip=$(get_local_ip 2>/dev/null || echo "unknown")
+    local my_game
+    my_game=$(detect_current_game)
+
+    echo -e "  ${BOLD}Your Machine:${RESET}"
+    echo -e "    Hostname:  ${WHITE}$(hostname)${RESET}"
+    echo -e "    IP:        ${WHITE}${my_ip}${RESET}"
+    echo -e "    User:      ${CYAN}$(whoami)${RESET}"
+    if [[ "$my_game" != "idle" ]]; then
+        echo -e "    Playing:   ${GREEN}${my_game}${RESET}"
+    else
+        echo -e "    Playing:   ${DIM}--${RESET}"
+    fi
+
+    # Daemon status
+    if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        echo -e "    Announcing: ${GREEN}Yes${RESET} (PID $(cat "$PID_FILE"))"
+    else
+        echo -e "    Announcing: ${RED}No${RESET}"
+    fi
+
+    if [[ -f "$LISTENER_PID_FILE" ]] && kill -0 "$(cat "$LISTENER_PID_FILE")" 2>/dev/null; then
+        echo -e "    Listening:  ${GREEN}Yes${RESET}"
+    else
+        echo -e "    Listening:  ${DIM}No${RESET}"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Nearby Gamers:${RESET}"
+    echo ""
+
+    # Scan network
+    scan_network
+}
+
+# ── Usage ───────────────────────────────────────────────────────────────────
+
+usage() {
+    echo ""
+    echo -e "${BOLD}${MAGENTA}  24HG LAN Party${RESET} ${DIM}v${HG24_VERSION}${RESET}"
+    echo -e "${DIM}  Auto-discover nearby 24HG gamers on the network${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Usage:${RESET}"
+    echo -e "    24hg-lan-party ${WHITE}scan${RESET}                  Scan for nearby 24HG machines"
+    echo -e "    24hg-lan-party ${WHITE}announce${RESET} [--daemon]   Publish this machine on the network"
+    echo -e "    24hg-lan-party ${WHITE}stop${RESET}                  Stop announcing"
+    echo -e "    24hg-lan-party ${WHITE}invite${RESET} <ip> <game>    Send a game invite to another machine"
+    echo -e "    24hg-lan-party ${WHITE}status${RESET}                Show LAN party status"
+    echo ""
+    echo -e "  ${BOLD}Examples:${RESET}"
+    echo -e "    ${DIM}24hg-lan-party scan${RESET}"
+    echo -e "    ${DIM}24hg-lan-party announce --daemon${RESET}"
+    echo -e "    ${DIM}24hg-lan-party invite 192.168.1.42 CS2${RESET}"
+    echo ""
+}
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        scan)
+            scan_network
+            ;;
+        announce)
+            cmd_announce "${1:-}"
+            ;;
+        stop)
+            cmd_stop
+            ;;
+        invite)
+            local ip="${1:-}"
+            local game="${2:-}"
+            [[ -n "$ip" ]] || die "Usage: 24hg-lan-party invite <ip> <game>"
+            [[ -n "$game" ]] || die "Usage: 24hg-lan-party invite <ip> <game>"
+            send_invite "$ip" "$game"
+            ;;
+        status)
+            cmd_status
+            ;;
+        -h|--help|help|"")
+            usage
+            ;;
+        *)
+            die "Unknown command: $cmd (try '24hg-lan-party --help')"
+            ;;
+    esac
+}
+
+main "$@"

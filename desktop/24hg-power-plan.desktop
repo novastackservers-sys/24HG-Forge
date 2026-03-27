@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Power Plan
+Comment=Gaming power management
+Exec=/usr/bin/24hg-power-plan
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=System;
+Keywords=power;battery;performance;energy;gaming;

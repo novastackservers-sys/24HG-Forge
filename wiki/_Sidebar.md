@@ -1,4 +1,4 @@
-**24HG Forge Wiki**
+**24HG Wiki**
 
 - [Home](Home)
 - [Getting Started](Getting-Started)
@@ -13,6 +13,6 @@
 
 **Links**
 
-- [Download 24HG Forge](https://os.24hgaming.com/download.html)
+- [Download 24HG](https://os.24hgaming.com/download.html)
 - [24HG Hub](https://hub.24hgaming.com)
 - [Discord](https://discord.gg/ymfEjH6EJN)

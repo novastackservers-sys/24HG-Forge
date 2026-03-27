@@ -1,0 +1,181 @@
+#!/bin/bash
+# 24HG Network Latency Guardian
+# Optimizes network for gaming by prioritizing game traffic,
+# pausing background updates, and setting fast DNS during game sessions.
+#
+# Usage: 24hg-netguard [start|stop|status]
+# Designed to be triggered by GameMode hooks or manually.
+
+set -euo pipefail
+
+GAMING_DNS="1.1.1.1"
+GAMING_DNS_V6="2606:4700:4700::1111"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/24hg-netguard"
+STATE_FILE="$STATE_DIR/active"
+
+mkdir -p "$STATE_DIR"
+
+is_gaming() {
+    # Check for game processes (same pattern as auto-update)
+    pgrep -f '(wine|proton|gamescope|steam_app_|lutris-wrapper|heroic)' &>/dev/null && return 0
+    # Check GameMode
+    gamemoded -s 2>/dev/null | grep -q "is active" && return 0
+    return 1
+}
+
+get_default_iface() {
+    ip route show default 2>/dev/null | awk '/default/{print $5; exit}'
+}
+
+start_guard() {
+    local IFACE
+    IFACE=$(get_default_iface)
+    if [ -z "$IFACE" ]; then
+        echo "No default network interface found"
+        exit 1
+    fi
+
+    echo "Activating Network Latency Guardian on $IFACE..."
+
+    # ── 1. Traffic shaping with fq_codel (best for gaming) ──
+    # Remove existing qdisc if any (ignore errors)
+    sudo tc qdisc del dev "$IFACE" root 2>/dev/null || true
+
+    # Add FQ-CoDel with low target latency (5ms vs default 100ms)
+    sudo tc qdisc add dev "$IFACE" root fq_codel target 5ms interval 50ms quantum 1514 noecn
+
+    # ── 2. Optimize DNS ──
+    # Save current DNS for restoration
+    resolvectl status 2>/dev/null | grep "DNS Servers" | head -1 > "$STATE_DIR/saved-dns" || true
+
+    # Set gaming-optimized DNS (Cloudflare — lowest latency globally)
+    if command -v resolvectl &>/dev/null; then
+        sudo resolvectl dns "$IFACE" "$GAMING_DNS" "$GAMING_DNS_V6" 2>/dev/null || true
+        sudo resolvectl dnsovertls "$IFACE" no 2>/dev/null || true  # Skip DoT during gaming for lower latency
+    fi
+
+    # ── 3. Pause background services that cause jitter ──
+    # PackageKit (GNOME Software / KDE Discover auto-updates)
+    systemctl --user stop flatpak-user-update.timer 2>/dev/null || true
+    sudo systemctl stop packagekit.service 2>/dev/null || true
+
+    # Tracker file indexer (massive I/O hog)
+    systemctl --user stop tracker-miner-fs-3.service 2>/dev/null || true
+    systemctl --user stop tracker-miner-fs-control-3.service 2>/dev/null || true
+
+    # Baloo file indexer (KDE)
+    balooctl6 suspend 2>/dev/null || balooctl suspend 2>/dev/null || true
+
+    # 24HG auto-update
+    sudo systemctl stop 24hg-auto-update.timer 2>/dev/null || true
+
+    # ── 4. Network stack tuning for low-latency ──
+    # Disable Nagle's algorithm delay
+    sudo sysctl -qw net.ipv4.tcp_low_latency=1 2>/dev/null || true
+    # Reduce TCP keepalive to detect disconnects faster
+    sudo sysctl -qw net.ipv4.tcp_keepalive_time=60 2>/dev/null || true
+    sudo sysctl -qw net.ipv4.tcp_keepalive_intvl=10 2>/dev/null || true
+
+    # ── 5. Mark as active ──
+    echo "$IFACE" > "$STATE_FILE"
+    echo "Network Latency Guardian ACTIVE"
+    echo "  - FQ-CoDel qdisc (5ms target) on $IFACE"
+    echo "  - DNS: $GAMING_DNS (Cloudflare)"
+    echo "  - Background services paused"
+    echo "  - TCP low-latency mode enabled"
+
+    notify-send -a "24HG" -i "24hg-logo" "Network Optimized" \
+        "Gaming network mode active. Background services paused." 2>/dev/null || true
+}
+
+stop_guard() {
+    if [ ! -f "$STATE_FILE" ]; then
+        echo "Network Guardian not active"
+        return 0
+    fi
+
+    local IFACE
+    IFACE=$(cat "$STATE_FILE")
+    echo "Deactivating Network Latency Guardian..."
+
+    # Restore default qdisc
+    sudo tc qdisc del dev "$IFACE" root 2>/dev/null || true
+    sudo tc qdisc add dev "$IFACE" root fq_codel 2>/dev/null || true  # Default fq_codel
+
+    # Restore DNS to DHCP defaults
+    if command -v resolvectl &>/dev/null; then
+        sudo resolvectl revert "$IFACE" 2>/dev/null || true
+    fi
+
+    # Resume background services
+    systemctl --user start flatpak-user-update.timer 2>/dev/null || true
+    sudo systemctl start packagekit.service 2>/dev/null || true
+    systemctl --user start tracker-miner-fs-3.service 2>/dev/null || true
+    balooctl6 resume 2>/dev/null || balooctl resume 2>/dev/null || true
+    sudo systemctl start 24hg-auto-update.timer 2>/dev/null || true
+
+    # Restore normal TCP settings
+    sudo sysctl -qw net.ipv4.tcp_low_latency=0 2>/dev/null || true
+    sudo sysctl -qw net.ipv4.tcp_keepalive_time=7200 2>/dev/null || true
+
+    rm -f "$STATE_FILE"
+    echo "Network Guardian deactivated — normal mode restored"
+
+    notify-send -a "24HG" -i "24hg-logo" "Network Restored" \
+        "Gaming network mode deactivated." 2>/dev/null || true
+}
+
+show_status() {
+    echo "=== 24HG Network Latency Guardian ==="
+    if [ -f "$STATE_FILE" ]; then
+        local IFACE
+        IFACE=$(cat "$STATE_FILE")
+        echo "Status: ACTIVE on $IFACE"
+    else
+        echo "Status: Inactive"
+    fi
+
+    # Show current qdisc
+    local DEF_IFACE
+    DEF_IFACE=$(get_default_iface)
+    if [ -n "$DEF_IFACE" ]; then
+        echo ""
+        echo "Queue discipline ($DEF_IFACE):"
+        tc qdisc show dev "$DEF_IFACE" 2>/dev/null | head -3
+    fi
+
+    # Show DNS
+    echo ""
+    echo "DNS:"
+    resolvectl status 2>/dev/null | grep -E "(DNS Servers|DNS over TLS)" | head -4 || \
+        cat /etc/resolv.conf 2>/dev/null | grep nameserver
+
+    # Ping to game servers
+    echo ""
+    echo "Latency to 24HG servers:"
+    ping -c 1 -W 2 91.99.37.118 2>/dev/null | grep "time=" | \
+        sed 's/.*time=\([0-9.]*\).*/  91.99.37.118: \1 ms/' || echo "  91.99.37.118: unreachable"
+}
+
+case "${1:-status}" in
+    start)  start_guard ;;
+    stop)   stop_guard ;;
+    status) show_status ;;
+    auto)
+        # Auto mode: start if gaming, stop if not
+        if is_gaming; then
+            [ ! -f "$STATE_FILE" ] && start_guard
+        else
+            [ -f "$STATE_FILE" ] && stop_guard
+        fi
+        ;;
+    *)
+        echo "Usage: 24hg-netguard [start|stop|status|auto]"
+        echo ""
+        echo "  start  — Activate gaming network optimization"
+        echo "  stop   — Restore normal network settings"
+        echo "  status — Show current network state"
+        echo "  auto   — Start/stop based on game detection"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,1566 @@
+#!/usr/bin/env bash
+# 24HG HDR Gaming Wizard — End-to-end HDR setup for Linux gaming
+# The most comprehensive HDR configuration tool for any Linux distro.
+# Handles hardware detection, KDE Plasma 6 config, gamescope integration,
+# NVIDIA/AMD/Intel quirks, and per-game HDR profiles.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Paths & globals
+# ---------------------------------------------------------------------------
+
+HDR_CONFIG_DIR="$HOME/.config/24hg/hdr"
+HDR_GAME_PROFILES="$HDR_CONFIG_DIR/game-profiles"
+HDR_ENV_FILE="$HDR_CONFIG_DIR/environment"
+HDR_STATE_FILE="$HDR_CONFIG_DIR/state"
+STEAM_DIR="${STEAM_DIR:-$HOME/.steam/steam}"
+STEAM_LAUNCH_DIR="$STEAM_DIR/userdata"
+LOG_FILE="$HDR_CONFIG_DIR/hdr.log"
+
+mkdir -p "$HDR_CONFIG_DIR" "$HDR_GAME_PROFILES"
+
+# ---------------------------------------------------------------------------
+# Color helpers
+# ---------------------------------------------------------------------------
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+info()  { echo -e "${CYAN}[info]${RESET}  $*"; }
+ok()    { echo -e "${GREEN}[ ok ]${RESET}  $*"; }
+warn()  { echo -e "${YELLOW}[warn]${RESET}  $*"; }
+err()   { echo -e "${RED}[error]${RESET} $*" >&2; }
+hdr_on(){ echo -e "${MAGENTA}[ HDR]${RESET}  $*"; }
+step()  { echo -e "${BOLD}${CYAN}==> $*${RESET}"; }
+dim()   { echo -e "${DIM}    $*${RESET}"; }
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
+
+# ---------------------------------------------------------------------------
+# HDR game database
+# ---------------------------------------------------------------------------
+# Format: "appid:Name:hdr_quality"
+#   hdr_quality: excellent / good / partial / no
+
+HDR_GAMES=(
+    "1091500:Cyberpunk 2077:excellent"
+    "1245620:Elden Ring:good"
+    "1174180:Red Dead Redemption 2:excellent"
+    "1817070:Spider-Man Remastered:good"
+    "1151640:Horizon Zero Dawn:good"
+    "1593500:God of War:good"
+    "292030:The Witcher 3:good"
+    "990080:Hogwarts Legacy:good"
+    "1782120:Returnal:excellent"
+    "2358720:Black Myth Wukong:excellent"
+    "553850:Helldivers 2:partial"
+    "1716740:Lies of P:good"
+    "1446780:Monster Hunter Rise:partial"
+    "814380:Sekiro:partial"
+    "374320:Dark Souls 3:no"
+    "271590:Grand Theft Auto V:good"
+    "1938090:Call of Duty HQ:good"
+    "1203220:Naraka Bladepoint:good"
+    "1086940:Baldur's Gate 3:partial"
+    "2050650:Resident Evil 4:good"
+    "1888160:The Last of Us Part I:good"
+    "1332010:Stray:partial"
+    "1928980:Nightingale:partial"
+    "2344520:Star Wars Outlaws:good"
+    "892970:Valheim:no"
+    "413150:Stardew Valley:no"
+)
+
+# ---------------------------------------------------------------------------
+# Utility: query the game database
+# ---------------------------------------------------------------------------
+
+lookup_game() {
+    local appid="$1"
+    for entry in "${HDR_GAMES[@]}"; do
+        IFS=: read -r id name quality <<< "$entry"
+        if [[ "$id" == "$appid" ]]; then
+            echo "$id:$name:$quality"
+            return 0
+        fi
+    done
+    return 1
+}
+
+hdr_quality_label() {
+    case "$1" in
+        excellent) echo -e "${GREEN}Excellent${RESET} — native HDR, well-calibrated";;
+        good)      echo -e "${GREEN}Good${RESET} — HDR works, minor quirks possible";;
+        partial)   echo -e "${YELLOW}Partial${RESET} — HDR may need tweaking or has artifacts";;
+        no)        echo -e "${RED}None${RESET} — game does not support HDR";;
+        *)         echo -e "${DIM}Unknown${RESET}";;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Hardware detection helpers
+# ---------------------------------------------------------------------------
+
+detect_session() {
+    if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+        echo "wayland"
+    elif [[ "${XDG_SESSION_TYPE:-}" == "x11" ]] || [[ -n "${DISPLAY:-}" ]]; then
+        echo "x11"
+    else
+        echo "unknown"
+    fi
+}
+
+detect_gpu_vendor() {
+    if lspci 2>/dev/null | grep -qi 'nvidia'; then
+        echo "nvidia"
+    elif lspci 2>/dev/null | grep -qi 'amd\|radeon'; then
+        echo "amd"
+    elif lspci 2>/dev/null | grep -qi 'intel.*graphics\|intel.*iris'; then
+        echo "intel"
+    else
+        echo "unknown"
+    fi
+}
+
+get_nvidia_driver_version() {
+    if command -v nvidia-smi &>/dev/null; then
+        nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1
+    else
+        echo "not-found"
+    fi
+}
+
+get_mesa_version() {
+    if command -v glxinfo &>/dev/null; then
+        glxinfo 2>/dev/null | grep "OpenGL version" | grep -oP 'Mesa \K[0-9]+\.[0-9]+' | head -1
+    elif command -v vulkaninfo &>/dev/null; then
+        vulkaninfo 2>/dev/null | grep -i "driverInfo.*mesa" | grep -oP '[0-9]+\.[0-9]+' | head -1
+    else
+        echo "not-found"
+    fi
+}
+
+get_kde_version() {
+    if command -v plasmashell &>/dev/null; then
+        plasmashell --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+' | head -1
+    else
+        echo "not-found"
+    fi
+}
+
+get_gamescope_version() {
+    if command -v gamescope &>/dev/null; then
+        gamescope --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+' | head -1 || echo "installed"
+    else
+        echo "not-found"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# EDID / Monitor HDR detection
+# ---------------------------------------------------------------------------
+
+detect_monitor_hdr() {
+    # Returns structured monitor HDR info
+    # Try drm_info first (best), then fall back to EDID parsing
+
+    local found_hdr=false
+    local max_luminance=0
+    local hdr10=false
+    local dolby_vision=false
+    local color_gamut="unknown"
+    local monitor_name="Unknown"
+    local connector="unknown"
+
+    # Method 1: drm_info (most reliable)
+    if command -v drm_info &>/dev/null; then
+        local drm_out
+        drm_out="$(drm_info 2>/dev/null)" || true
+
+        if echo "$drm_out" | grep -qi "HDR_OUTPUT_METADATA"; then
+            found_hdr=true
+        fi
+        if echo "$drm_out" | grep -qi "max_luminance"; then
+            max_luminance=$(echo "$drm_out" | grep -i "max_luminance" | grep -oP '[0-9]+' | head -1)
+        fi
+        # Connector name
+        connector=$(echo "$drm_out" | grep -P "^Connector" | head -1 | awk '{print $2}' || echo "unknown")
+    fi
+
+    # Method 2: Parse EDID from sysfs
+    local drm_path
+    for drm_path in /sys/class/drm/card*-*/; do
+        [[ -d "$drm_path" ]] || continue
+        local edid_file="$drm_path/edid"
+        local status_file="$drm_path/status"
+
+        # Only connected outputs
+        if [[ -f "$status_file" ]] && [[ "$(cat "$status_file" 2>/dev/null)" != "connected" ]]; then
+            continue
+        fi
+
+        if [[ ! -f "$edid_file" ]]; then
+            continue
+        fi
+
+        connector=$(basename "$drm_path" | sed 's/^card[0-9]*-//')
+
+        # Check for HDR static metadata descriptor (EDID CTA-861 block)
+        # Byte sequence 0x06 0x07 in CTA extension indicates HDR metadata
+        if command -v edid-decode &>/dev/null; then
+            local edid_out
+            edid_out="$(edid-decode "$edid_file" 2>/dev/null)" || true
+
+            if echo "$edid_out" | grep -qi "HDR Static Metadata"; then
+                found_hdr=true
+                hdr10=true
+            fi
+            if echo "$edid_out" | grep -qi "Dolby Vision"; then
+                dolby_vision=true
+            fi
+            if echo "$edid_out" | grep -qi "BT2020"; then
+                color_gamut="BT.2020"
+            elif echo "$edid_out" | grep -qi "DCI-P3"; then
+                color_gamut="DCI-P3"
+            fi
+            # Max luminance from EDID
+            local lum
+            lum=$(echo "$edid_out" | grep -i "Desired .* Max Luminance" | grep -oP '[0-9]+' | tail -1)
+            if [[ -n "$lum" ]] && (( lum > max_luminance )); then
+                max_luminance="$lum"
+            fi
+            # Monitor name
+            local name
+            name=$(echo "$edid_out" | grep "Monitor name" | sed 's/.*: //')
+            if [[ -n "$name" ]]; then
+                monitor_name="$name"
+            fi
+        else
+            # Raw EDID hex check: look for HDR metadata block
+            local hex
+            hex=$(xxd -p "$edid_file" 2>/dev/null | tr -d '\n')
+            # CTA-861 HDR Static Metadata Data Block tag = 0x07, extended tag = 0x06
+            if echo "$hex" | grep -qi "0607"; then
+                found_hdr=true
+                hdr10=true
+            fi
+        fi
+    done
+
+    # Method 3: Check DRM HDR properties
+    for prop_file in /sys/class/drm/card*-*/hdr_output_metadata; do
+        if [[ -f "$prop_file" ]]; then
+            found_hdr=true
+            break
+        fi
+    done
+
+    # Output results
+    echo "monitor_name=$monitor_name"
+    echo "connector=$connector"
+    echo "hdr_capable=$found_hdr"
+    echo "max_luminance=$max_luminance"
+    echo "hdr10=$hdr10"
+    echo "dolby_vision=$dolby_vision"
+    echo "color_gamut=$color_gamut"
+}
+
+parse_monitor_info() {
+    # Parse detect_monitor_hdr output into variables
+    local line
+    while IFS= read -r line; do
+        export "MON_${line}"
+    done <<< "$(detect_monitor_hdr)"
+}
+
+# ---------------------------------------------------------------------------
+# GPU HDR readiness
+# ---------------------------------------------------------------------------
+
+check_gpu_hdr_ready() {
+    local vendor
+    vendor="$(detect_gpu_vendor)"
+
+    case "$vendor" in
+        nvidia)
+            local ver
+            ver="$(get_nvidia_driver_version)"
+            if [[ "$ver" == "not-found" ]]; then
+                echo "no:NVIDIA GPU detected but driver not found"
+                return
+            fi
+            local major
+            major="${ver%%.*}"
+            if (( major >= 545 )); then
+                echo "yes:NVIDIA driver $ver (545+ required)"
+            else
+                echo "no:NVIDIA driver $ver too old (need 545+)"
+            fi
+            ;;
+        amd)
+            local ver
+            ver="$(get_mesa_version)"
+            if [[ "$ver" == "not-found" ]]; then
+                echo "no:AMD GPU detected but Mesa version not found"
+                return
+            fi
+            local major minor
+            major="${ver%%.*}"
+            minor="${ver##*.}"
+            if (( major > 24 )) || { (( major == 24 )) && (( minor >= 0 )); }; then
+                echo "yes:AMD with Mesa $ver (24.0+ required)"
+            else
+                echo "no:AMD with Mesa $ver too old (need 24.0+)"
+            fi
+            ;;
+        intel)
+            echo "partial:Intel GPU — HDR support is limited and experimental"
+            ;;
+        *)
+            echo "no:Could not detect GPU vendor"
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# KDE Plasma HDR configuration
+# ---------------------------------------------------------------------------
+
+kde_hdr_get() {
+    local key="$1"
+    local default="${2:-}"
+    kwriteconfig6 --file kwinrc --group Compositing --key "$key" 2>/dev/null || echo "$default"
+}
+
+kde_hdr_set() {
+    local key="$1" value="$2"
+    kwriteconfig6 --file kwinrc --group Compositing --key "$key" "$value"
+    log "KDE: Set $key=$value"
+}
+
+kde_hdr_enabled() {
+    local val
+    val="$(kreadconfig6 --file kwinrc --group Compositing --key AllowHDR 2>/dev/null || echo "false")"
+    [[ "$val" == "true" ]]
+}
+
+kde_reconfigure() {
+    if command -v qdbus6 &>/dev/null; then
+        qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || true
+    elif command -v qdbus &>/dev/null; then
+        qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
+    else
+        warn "Cannot reconfigure KWin — qdbus not found. Log out/in to apply."
+    fi
+}
+
+configure_kde_hdr() {
+    local sdr_nits="${1:-200}"
+
+    step "Configuring KDE Plasma HDR"
+
+    if ! command -v kwriteconfig6 &>/dev/null; then
+        err "kwriteconfig6 not found — is this KDE Plasma 6?"
+        return 1
+    fi
+
+    info "Enabling HDR compositing..."
+    kde_hdr_set "AllowHDR" "true"
+
+    info "Setting SDR content brightness to ${sdr_nits} nits..."
+    kde_hdr_set "SDRBrightness" "$sdr_nits"
+
+    info "Enabling wide color gamut..."
+    kde_hdr_set "WideColorGamut" "true"
+
+    info "Applying changes (reconfiguring KWin)..."
+    kde_reconfigure
+    sleep 1
+
+    if kde_hdr_enabled; then
+        ok "KDE HDR enabled successfully"
+    else
+        warn "KDE HDR flag set but could not confirm — may need logout/login"
+    fi
+}
+
+disable_kde_hdr() {
+    step "Disabling KDE Plasma HDR"
+
+    if ! command -v kwriteconfig6 &>/dev/null; then
+        err "kwriteconfig6 not found"
+        return 1
+    fi
+
+    kde_hdr_set "AllowHDR" "false"
+    kde_hdr_set "WideColorGamut" "false"
+
+    info "Applying changes..."
+    kde_reconfigure
+    sleep 1
+    ok "KDE HDR disabled — back to SDR"
+}
+
+# ---------------------------------------------------------------------------
+# Environment variables
+# ---------------------------------------------------------------------------
+
+write_hdr_env() {
+    local enable="${1:-true}"
+
+    if [[ "$enable" == "true" ]]; then
+        cat > "$HDR_ENV_FILE" <<'ENVEOF'
+# 24HG HDR environment — sourced by 24hg-smart-launch and Steam
+export DXVK_HDR=1
+export PROTON_ENABLE_WAYLAND=1
+export ENABLE_HDR_WSI=1
+ENVEOF
+        ok "HDR environment variables written to $HDR_ENV_FILE"
+    else
+        cat > "$HDR_ENV_FILE" <<'ENVEOF'
+# 24HG HDR environment — HDR disabled
+unset DXVK_HDR
+unset ENABLE_HDR_WSI
+# Keep Wayland for Proton (beneficial even without HDR)
+export PROTON_ENABLE_WAYLAND=1
+ENVEOF
+        ok "HDR environment variables cleared"
+    fi
+
+    # Also install into environment.d for systemd user sessions
+    local envd_dir="$HOME/.config/environment.d"
+    mkdir -p "$envd_dir"
+    if [[ "$enable" == "true" ]]; then
+        cat > "$envd_dir/50-24hg-hdr.conf" <<'ENVEOF'
+DXVK_HDR=1
+PROTON_ENABLE_WAYLAND=1
+ENABLE_HDR_WSI=1
+ENVEOF
+    else
+        rm -f "$envd_dir/50-24hg-hdr.conf"
+    fi
+
+    log "Environment: HDR=$enable"
+}
+
+source_hdr_env() {
+    if [[ -f "$HDR_ENV_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$HDR_ENV_FILE"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# State tracking
+# ---------------------------------------------------------------------------
+
+save_state() {
+    local key="$1" value="$2"
+    # Atomic write to state file
+    local tmp="$HDR_STATE_FILE.tmp"
+    if [[ -f "$HDR_STATE_FILE" ]]; then
+        grep -v "^${key}=" "$HDR_STATE_FILE" > "$tmp" 2>/dev/null || true
+    else
+        : > "$tmp"
+    fi
+    echo "${key}=${value}" >> "$tmp"
+    mv "$tmp" "$HDR_STATE_FILE"
+}
+
+load_state() {
+    local key="$1" default="${2:-}"
+    if [[ -f "$HDR_STATE_FILE" ]]; then
+        grep "^${key}=" "$HDR_STATE_FILE" 2>/dev/null | cut -d= -f2- || echo "$default"
+    else
+        echo "$default"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Gamescope helpers
+# ---------------------------------------------------------------------------
+
+detect_resolution() {
+    # Try to get current display resolution
+    if command -v kscreen-doctor &>/dev/null; then
+        kscreen-doctor -o 2>/dev/null | grep -oP '[0-9]{3,5}x[0-9]{3,5}' | head -1
+    elif command -v xdpyinfo &>/dev/null; then
+        xdpyinfo 2>/dev/null | grep dimensions | awk '{print $2}'
+    else
+        echo "2560x1440"  # sensible default
+    fi
+}
+
+detect_refresh_rate() {
+    if command -v kscreen-doctor &>/dev/null; then
+        kscreen-doctor -o 2>/dev/null | grep -oP '@[0-9]+' | head -1 | tr -d '@'
+    else
+        echo "60"
+    fi
+}
+
+build_gamescope_cmd() {
+    local appid="${1:-}"
+    local res
+    res="$(detect_resolution)"
+    local width="${res%%x*}"
+    local height="${res##*x}"
+    local refresh
+    refresh="$(detect_refresh_rate)"
+    local vendor
+    vendor="$(detect_gpu_vendor)"
+
+    local cmd="gamescope"
+    cmd+=" -W ${width} -H ${height}"
+    cmd+=" -r ${refresh}"
+    cmd+=" --hdr-enabled"
+    cmd+=" --hdr-sdr-content-nits 200"
+
+    # Vendor-specific flags
+    case "$vendor" in
+        nvidia)
+            # NVIDIA needs explicit backend on some setups
+            cmd+=" --backend drm"
+            ;;
+        amd)
+            # AMD gamescope works well with default backend
+            ;;
+        intel)
+            cmd+=" --backend drm"
+            ;;
+    esac
+
+    # Check if we're already inside a gamescope session (Steam Deck mode)
+    if [[ -n "${GAMESCOPE_WAYLAND_DISPLAY:-}" ]]; then
+        # Nested gamescope — use wayland backend
+        cmd="gamescope --backend wayland"
+        cmd+=" -W ${width} -H ${height}"
+        cmd+=" --hdr-enabled"
+        cmd+=" --hdr-sdr-content-nits 200"
+    fi
+
+    echo "$cmd"
+}
+
+steam_launch_options() {
+    local appid="$1"
+    local gs_cmd
+    gs_cmd="$(build_gamescope_cmd "$appid")"
+
+    echo "${gs_cmd} -- %command%"
+}
+
+# ---------------------------------------------------------------------------
+# Game profile management
+# ---------------------------------------------------------------------------
+
+save_game_profile() {
+    local appid="$1"
+    local launch_opts="$2"
+    local hdr_quality="${3:-unknown}"
+
+    cat > "$HDR_GAME_PROFILES/${appid}.conf" <<EOF
+# 24HG HDR profile for AppID $appid
+LAUNCH_OPTIONS=${launch_opts}
+HDR_QUALITY=${hdr_quality}
+CONFIGURED=$(date -Iseconds)
+EOF
+    log "Game profile saved: $appid"
+}
+
+load_game_profile() {
+    local appid="$1"
+    local profile="$HDR_GAME_PROFILES/${appid}.conf"
+    if [[ -f "$profile" ]]; then
+        cat "$profile"
+        return 0
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Desktop notifications
+# ---------------------------------------------------------------------------
+
+notify() {
+    local title="$1" body="${2:-}" icon="${3:-video-display}"
+    if command -v notify-send &>/dev/null; then
+        notify-send -a "24HG HDR" -i "$icon" "$title" "$body" 2>/dev/null || true
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Command: setup
+# ---------------------------------------------------------------------------
+
+cmd_setup() {
+    echo ""
+    echo -e "${BOLD}${MAGENTA}  24HG HDR Setup Wizard${RESET}"
+    echo -e "${DIM}  End-to-end HDR configuration for Linux gaming${RESET}"
+    echo ""
+
+    # ------------------------------------------------------------------
+    # Step 1: Hardware detection
+    # ------------------------------------------------------------------
+    step "Step 1/5 — Hardware Detection"
+    echo ""
+
+    # Session type
+    local session
+    session="$(detect_session)"
+    if [[ "$session" == "wayland" ]]; then
+        ok "Session: Wayland (required for HDR)"
+    elif [[ "$session" == "x11" ]]; then
+        err "Session: X11 — HDR requires Wayland"
+        warn "Switch to a Wayland session (KDE Plasma Wayland) and re-run this wizard."
+        echo ""
+        read -rp "Continue anyway for diagnostics? [y/N] " yn
+        [[ "${yn,,}" == "y" ]] || return 1
+    else
+        warn "Session: Could not detect (are you running in a terminal?)"
+    fi
+
+    # KDE Plasma version
+    local kde_ver
+    kde_ver="$(get_kde_version)"
+    if [[ "$kde_ver" == "not-found" ]]; then
+        warn "KDE Plasma: Not detected"
+    else
+        local kde_major="${kde_ver%%.*}"
+        if (( kde_major >= 6 )); then
+            ok "KDE Plasma: $kde_ver (6.0+ required for HDR)"
+        else
+            err "KDE Plasma: $kde_ver — need 6.0+ for HDR support"
+        fi
+    fi
+
+    # Monitor HDR
+    echo ""
+    info "Scanning monitor EDID for HDR capabilities..."
+    parse_monitor_info
+
+    if [[ "${MON_hdr_capable:-false}" == "true" ]]; then
+        ok "Monitor: ${MON_monitor_name:-Unknown} on ${MON_connector:-?}"
+        ok "  HDR capable: Yes"
+        [[ "${MON_max_luminance:-0}" != "0" ]] && ok "  Max luminance: ${MON_max_luminance} nits"
+        [[ "${MON_hdr10:-false}" == "true" ]]   && ok "  HDR10: Supported"
+        [[ "${MON_dolby_vision:-false}" == "true" ]] && ok "  Dolby Vision: Supported"
+        [[ "${MON_color_gamut:-unknown}" != "unknown" ]] && ok "  Color gamut: ${MON_color_gamut}"
+    else
+        warn "Monitor: HDR not detected via EDID"
+        warn "This could mean:"
+        dim "- Your monitor doesn't support HDR"
+        dim "- HDR is disabled in your monitor's OSD settings"
+        dim "- EDID data is incomplete (try a different cable or port)"
+        echo ""
+        read -rp "Force continue anyway? [y/N] " yn
+        [[ "${yn,,}" == "y" ]] || return 1
+    fi
+
+    # GPU
+    echo ""
+    local gpu_status
+    gpu_status="$(check_gpu_hdr_ready)"
+    local gpu_ready="${gpu_status%%:*}"
+    local gpu_msg="${gpu_status#*:}"
+
+    case "$gpu_ready" in
+        yes)     ok  "GPU: $gpu_msg" ;;
+        partial) warn "GPU: $gpu_msg" ;;
+        no)      err  "GPU: $gpu_msg" ;;
+    esac
+
+    if [[ "$gpu_ready" == "no" ]]; then
+        echo ""
+        warn "Your GPU/driver may not support HDR. Continuing may not work."
+        read -rp "Continue anyway? [y/N] " yn
+        [[ "${yn,,}" == "y" ]] || return 1
+    fi
+
+    # Gamescope
+    local gs_ver
+    gs_ver="$(get_gamescope_version)"
+    if [[ "$gs_ver" == "not-found" ]]; then
+        warn "Gamescope: Not installed (recommended for per-game HDR)"
+        dim "Install with: sudo dnf install gamescope"
+    else
+        ok "Gamescope: $gs_ver"
+    fi
+
+    echo ""
+
+    # ------------------------------------------------------------------
+    # Step 2: Configure KDE HDR
+    # ------------------------------------------------------------------
+    step "Step 2/5 — KDE Plasma HDR Configuration"
+    echo ""
+
+    local sdr_nits=200
+    if [[ "${MON_max_luminance:-0}" != "0" ]] && (( MON_max_luminance > 400 )); then
+        # Brighter monitors benefit from higher SDR mapping
+        sdr_nits=250
+        info "Your monitor supports ${MON_max_luminance} nits — using SDR brightness of ${sdr_nits}"
+    fi
+
+    read -rp "Configure KDE HDR with SDR brightness=${sdr_nits} nits? [Y/n] " yn
+    if [[ "${yn,,}" != "n" ]]; then
+        configure_kde_hdr "$sdr_nits"
+    else
+        info "Skipping KDE HDR configuration"
+    fi
+    echo ""
+
+    # ------------------------------------------------------------------
+    # Step 3: Gamescope setup
+    # ------------------------------------------------------------------
+    step "Step 3/5 — Gamescope Per-Game HDR"
+    echo ""
+
+    if [[ "$gs_ver" != "not-found" ]]; then
+        local res
+        res="$(detect_resolution)"
+        local refresh
+        refresh="$(detect_refresh_rate)"
+        local gs_cmd
+        gs_cmd="$(build_gamescope_cmd)"
+
+        info "Detected display: ${res} @ ${refresh}Hz"
+        info "Gamescope launch prefix:"
+        echo ""
+        echo -e "  ${BOLD}${gs_cmd} -- %command%${RESET}"
+        echo ""
+        info "Add this to Steam game launch options for per-game HDR."
+        dim "Or use: 24hg-hdr game <appid> to configure a specific game."
+    else
+        info "Gamescope not available — using system-wide HDR only."
+        dim "System-wide HDR through KDE Plasma works but some games"
+        dim "perform better with gamescope isolation."
+    fi
+    echo ""
+
+    # ------------------------------------------------------------------
+    # Step 4: Environment variables
+    # ------------------------------------------------------------------
+    step "Step 4/5 — Environment Variables"
+    echo ""
+
+    info "Setting HDR environment variables:"
+    dim "DXVK_HDR=1            — DXVK HDR output"
+    dim "PROTON_ENABLE_WAYLAND=1 — Wayland for Proton"
+    dim "ENABLE_HDR_WSI=1       — Vulkan HDR WSI layer"
+    echo ""
+
+    read -rp "Write HDR environment variables? [Y/n] " yn
+    if [[ "${yn,,}" != "n" ]]; then
+        write_hdr_env "true"
+        source_hdr_env
+    else
+        info "Skipping environment variable setup"
+    fi
+    echo ""
+
+    # ------------------------------------------------------------------
+    # Step 5: Test
+    # ------------------------------------------------------------------
+    step "Step 5/5 — HDR Test"
+    echo ""
+
+    read -rp "Run HDR test now? [Y/n] " yn
+    if [[ "${yn,,}" != "n" ]]; then
+        cmd_test
+    else
+        info "Skipping test — run '24hg-hdr test' anytime."
+    fi
+
+    # Save state
+    save_state "setup_complete" "true"
+    save_state "setup_date" "$(date -Iseconds)"
+    save_state "sdr_nits" "$sdr_nits"
+
+    echo ""
+    echo -e "${BOLD}${GREEN}  HDR setup complete!${RESET}"
+    echo ""
+    dim "Quick commands:"
+    dim "  24hg-hdr status    — Check current HDR state"
+    dim "  24hg-hdr toggle    — Quick on/off"
+    dim "  24hg-hdr game ID   — Configure a game"
+    dim "  24hg-hdr fix       — Troubleshoot issues"
+    echo ""
+
+    notify "HDR Setup Complete" "Your display is now configured for HDR gaming." "video-display"
+    log "Setup wizard completed"
+}
+
+# ---------------------------------------------------------------------------
+# Command: status
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+    echo ""
+    echo -e "${BOLD}${MAGENTA}  24HG HDR Status${RESET}"
+    echo ""
+
+    # Session
+    local session
+    session="$(detect_session)"
+    case "$session" in
+        wayland) ok  "Session: Wayland" ;;
+        x11)     err "Session: X11 (HDR not supported)" ;;
+        *)       warn "Session: Unknown" ;;
+    esac
+
+    # Monitor
+    parse_monitor_info
+    echo ""
+    if [[ "${MON_hdr_capable:-false}" == "true" ]]; then
+        ok "Monitor: ${MON_monitor_name:-Unknown} — HDR capable"
+        [[ "${MON_max_luminance:-0}" != "0" ]] && dim "  Max luminance: ${MON_max_luminance} nits"
+        [[ "${MON_hdr10:-false}" == "true" ]]   && dim "  HDR10: Yes"
+        [[ "${MON_dolby_vision:-false}" == "true" ]] && dim "  Dolby Vision: Yes"
+        [[ "${MON_color_gamut:-unknown}" != "unknown" ]] && dim "  Color gamut: ${MON_color_gamut}"
+    else
+        warn "Monitor: HDR not detected"
+    fi
+
+    # GPU
+    echo ""
+    local gpu_status
+    gpu_status="$(check_gpu_hdr_ready)"
+    local gpu_ready="${gpu_status%%:*}"
+    local gpu_msg="${gpu_status#*:}"
+    case "$gpu_ready" in
+        yes)     ok   "GPU: $gpu_msg" ;;
+        partial) warn "GPU: $gpu_msg" ;;
+        no)      err  "GPU: $gpu_msg" ;;
+    esac
+
+    # KDE
+    echo ""
+    if command -v kreadconfig6 &>/dev/null; then
+        local hdr_val sdr_val wcg_val
+        hdr_val="$(kreadconfig6 --file kwinrc --group Compositing --key AllowHDR 2>/dev/null || echo "unset")"
+        sdr_val="$(kreadconfig6 --file kwinrc --group Compositing --key SDRBrightness 2>/dev/null || echo "unset")"
+        wcg_val="$(kreadconfig6 --file kwinrc --group Compositing --key WideColorGamut 2>/dev/null || echo "unset")"
+
+        if [[ "$hdr_val" == "true" ]]; then
+            ok "KDE HDR: Enabled"
+        else
+            warn "KDE HDR: Disabled (AllowHDR=$hdr_val)"
+        fi
+        dim "  SDR Brightness: ${sdr_val:-unset} nits"
+        dim "  Wide Color Gamut: ${wcg_val:-unset}"
+    else
+        warn "KDE Plasma 6: Not detected (kreadconfig6 missing)"
+    fi
+
+    # Gamescope
+    echo ""
+    local gs_ver
+    gs_ver="$(get_gamescope_version)"
+    if [[ "$gs_ver" == "not-found" ]]; then
+        warn "Gamescope: Not installed"
+    else
+        ok "Gamescope: $gs_ver"
+    fi
+
+    # Environment
+    echo ""
+    if [[ "${DXVK_HDR:-}" == "1" ]]; then
+        ok "DXVK_HDR: 1 (enabled)"
+    else
+        warn "DXVK_HDR: Not set"
+    fi
+    if [[ "${ENABLE_HDR_WSI:-}" == "1" ]]; then
+        ok "ENABLE_HDR_WSI: 1 (enabled)"
+    else
+        warn "ENABLE_HDR_WSI: Not set"
+    fi
+    if [[ "${PROTON_ENABLE_WAYLAND:-}" == "1" ]]; then
+        ok "PROTON_ENABLE_WAYLAND: 1"
+    else
+        dim "PROTON_ENABLE_WAYLAND: Not set"
+    fi
+
+    # Per-game overrides
+    echo ""
+    local -a profiles=()
+    shopt -s nullglob
+    profiles=("$HDR_GAME_PROFILES"/*.conf)
+    shopt -u nullglob
+    local profile_count=0
+    for p in "${profiles[@]}"; do
+        [[ -f "$p" ]] && (( profile_count++ ))
+    done
+    if (( profile_count > 0 )); then
+        info "Per-game HDR profiles: $profile_count"
+        for p in "${profiles[@]}"; do
+            [[ -f "$p" ]] || continue
+            local aid
+            aid="$(basename "$p" .conf)"
+            local entry
+            if entry="$(lookup_game "$aid")"; then
+                local gname
+                gname="$(echo "$entry" | cut -d: -f2)"
+                dim "  $aid — $gname"
+            else
+                dim "  $aid"
+            fi
+        done
+    else
+        dim "No per-game HDR profiles configured"
+    fi
+
+    # DRM metadata check
+    echo ""
+    local hdr_active=false
+    for meta in /sys/class/drm/card*-*/hdr_output_metadata; do
+        if [[ -f "$meta" ]]; then
+            local size
+            size=$(wc -c < "$meta" 2>/dev/null || echo 0)
+            if (( size > 0 )); then
+                hdr_active=true
+                break
+            fi
+        fi
+    done
+    if $hdr_active; then
+        hdr_on "HDR output metadata: Active (DRM is sending HDR info to display)"
+    else
+        dim "HDR output metadata: Inactive"
+    fi
+
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Command: test
+# ---------------------------------------------------------------------------
+
+cmd_test() {
+    echo ""
+    step "HDR Test"
+    echo ""
+
+    local tested=false
+
+    # Method 1: mpv with HDR test video
+    if command -v mpv &>/dev/null; then
+        info "Checking for HDR test content..."
+
+        # Try a built-in HDR test if we have lavfi
+        info "Launching mpv HDR test pattern (10 seconds)..."
+        dim "You should see a bright gradient that is visibly brighter than normal SDR content."
+        echo ""
+
+        # Generate a synthetic HDR test via mpv's lavfi source
+        # This creates a bright gradient that triggers HDR if the pipeline works
+        timeout 12 mpv --no-config --vo=gpu-next --gpu-api=vulkan \
+            --target-colorspace-hint=yes --target-trc=pq \
+            --vf=format=colorlevels=full:colormatrix=bt.2020-ncl:primaries=bt.2020:gamma=pq \
+            "lavfi://[testsrc2=duration=10:size=1920x1080:rate=60,format=gbrp10le]" \
+            --title="24HG HDR Test" 2>/dev/null && tested=true || true
+    fi
+
+    # Method 2: vkcube or vkcube-hdr
+    if ! $tested && command -v vkcube &>/dev/null; then
+        info "Running Vulkan cube HDR test (5 seconds)..."
+        timeout 7 vkcube 2>/dev/null && tested=true || true
+    fi
+
+    # Method 3: gamescope test
+    if ! $tested && command -v gamescope &>/dev/null; then
+        info "Running gamescope HDR test..."
+        local gs_cmd
+        gs_cmd="$(build_gamescope_cmd)"
+        if command -v glxgears &>/dev/null; then
+            timeout 7 $gs_cmd -- glxgears 2>/dev/null && tested=true || true
+        fi
+    fi
+
+    if ! $tested; then
+        warn "No HDR test tools available."
+        dim "Install mpv for the best test experience: sudo dnf install mpv"
+    fi
+
+    echo ""
+
+    # DRM metadata diagnostic
+    info "Checking DRM HDR output metadata..."
+    local meta_found=false
+    for meta in /sys/class/drm/card*-*/hdr_output_metadata; do
+        if [[ -f "$meta" ]]; then
+            local size
+            size=$(wc -c < "$meta" 2>/dev/null || echo 0)
+            local connector
+            connector=$(echo "$meta" | grep -oP 'card[0-9]+-\K[^/]+')
+            if (( size > 0 )); then
+                ok "DRM HDR metadata active on $connector ($size bytes)"
+                meta_found=true
+            else
+                dim "DRM HDR metadata file exists on $connector but is empty"
+            fi
+        fi
+    done
+    if ! $meta_found; then
+        warn "No active HDR output metadata found in DRM"
+        dim "This means the display may not be receiving HDR signals."
+    fi
+
+    echo ""
+    echo -e "${BOLD}Quick check:${RESET}"
+    echo "  1. Did the test image look noticeably brighter than your desktop?"
+    echo "  2. Did you see smooth gradients without banding?"
+    echo "  3. Did your monitor's OSD show an HDR indicator?"
+    echo ""
+    read -rp "Did HDR appear to be working? [y/N/skip] " answer
+    case "${answer,,}" in
+        y|yes)
+            ok "HDR test passed!"
+            save_state "test_passed" "true"
+            save_state "test_date" "$(date -Iseconds)"
+            notify "HDR Test Passed" "HDR is working on your display." "dialog-positive"
+            ;;
+        skip|s)
+            info "Test skipped."
+            ;;
+        *)
+            warn "HDR test did not pass."
+            info "Try running '24hg-hdr fix' for troubleshooting."
+            save_state "test_passed" "false"
+            ;;
+    esac
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Command: game [appid]
+# ---------------------------------------------------------------------------
+
+cmd_game() {
+    local appid="${1:-}"
+
+    if [[ -z "$appid" ]]; then
+        echo ""
+        echo -e "${BOLD}Usage:${RESET} 24hg-hdr game <steam_appid>"
+        echo ""
+        echo -e "${BOLD}Known HDR games:${RESET}"
+        for entry in "${HDR_GAMES[@]}"; do
+            IFS=: read -r id name quality <<< "$entry"
+            local qlabel
+            qlabel="$(hdr_quality_label "$quality")"
+            printf "  %-10s %-35s %b\n" "$id" "$name" "$qlabel"
+        done
+        echo ""
+        dim "You can also use any AppID — the wizard will set up generic HDR."
+        echo ""
+        return 0
+    fi
+
+    echo ""
+    step "Configuring HDR for AppID $appid"
+    echo ""
+
+    # Look up in database
+    local game_name="Unknown Game"
+    local game_quality="unknown"
+    local entry
+    if entry="$(lookup_game "$appid")"; then
+        IFS=: read -r _ game_name game_quality <<< "$entry"
+        ok "Game: $game_name"
+        echo -n "  HDR quality: "
+        hdr_quality_label "$game_quality"
+    else
+        info "Game not in HDR database — configuring generic HDR"
+    fi
+
+    if [[ "$game_quality" == "no" ]]; then
+        echo ""
+        warn "This game does not support HDR output."
+        warn "Enabling system HDR may cause washed-out colors."
+        read -rp "Continue anyway? [y/N] " yn
+        [[ "${yn,,}" == "y" ]] || return 0
+    fi
+
+    echo ""
+
+    # Build launch options
+    local gs_ver
+    gs_ver="$(get_gamescope_version)"
+    local launch_opts=""
+
+    if [[ "$gs_ver" != "not-found" ]]; then
+        launch_opts="$(steam_launch_options "$appid")"
+        info "Recommended Steam launch options (with gamescope):"
+    else
+        # Without gamescope, use env vars only
+        launch_opts="DXVK_HDR=1 ENABLE_HDR_WSI=1 PROTON_ENABLE_WAYLAND=1 %command%"
+        info "Recommended Steam launch options (no gamescope):"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}${launch_opts}${RESET}"
+    echo ""
+
+    # Game-specific tweaks
+    case "$appid" in
+        1091500)  # Cyberpunk 2077
+            dim "Tip: Enable HDR in-game: Settings > Graphics > HDR Mode: HDR10"
+            dim "     Set peak brightness to match your monitor's max nits."
+            ;;
+        1174180)  # RDR2
+            dim "Tip: Use Vulkan renderer in-game for best HDR."
+            dim "     Calibrate HDR in-game settings after launching."
+            ;;
+        1245620)  # Elden Ring
+            dim "Tip: HDR was added in patch 1.10. Ensure game is updated."
+            dim "     Enable in-game: System > Display Settings > HDR."
+            ;;
+        2358720)  # Black Myth Wukong
+            dim "Tip: Excellent native HDR. Enable in Graphics settings."
+            dim "     Recommended: Set peak brightness in-game."
+            ;;
+        1817070)  # Spider-Man
+            dim "Tip: Enable HDR in Display settings after launching."
+            ;;
+        292030)   # Witcher 3
+            dim "Tip: HDR added in next-gen update. Use DX12 mode."
+            ;;
+    esac
+
+    echo ""
+
+    # Save profile
+    save_game_profile "$appid" "$launch_opts" "$game_quality"
+    ok "Game profile saved"
+
+    # Instructions for Steam
+    echo ""
+    info "To apply in Steam:"
+    dim "1. Right-click $game_name in Steam Library"
+    dim "2. Properties > General > Launch Options"
+    dim "3. Paste the launch options shown above"
+    echo ""
+
+    log "Game configured: $appid ($game_name)"
+}
+
+# ---------------------------------------------------------------------------
+# Command: toggle [on|off]
+# ---------------------------------------------------------------------------
+
+cmd_toggle() {
+    local mode="${1:-}"
+
+    if [[ -z "$mode" ]]; then
+        # Auto-toggle: if on, turn off; if off, turn on
+        if kde_hdr_enabled 2>/dev/null; then
+            mode="off"
+        else
+            mode="on"
+        fi
+    fi
+
+    case "$mode" in
+        on|enable|1)
+            echo ""
+            step "Enabling HDR"
+            echo ""
+
+            configure_kde_hdr "$(load_state sdr_nits 200)"
+            write_hdr_env "true"
+            source_hdr_env
+
+            save_state "hdr_enabled" "true"
+            ok "HDR is now ON"
+            notify "HDR Enabled" "System HDR and DXVK HDR are active." "video-display"
+            dim "Tip: Bind Meta+H to '24hg-hdr toggle' for quick switching."
+            echo ""
+            ;;
+
+        off|disable|0)
+            echo ""
+            step "Disabling HDR"
+            echo ""
+
+            disable_kde_hdr
+            write_hdr_env "false"
+
+            save_state "hdr_enabled" "false"
+            ok "HDR is now OFF"
+            notify "HDR Disabled" "System HDR disabled, SDR mode restored." "video-display"
+            echo ""
+            ;;
+
+        *)
+            err "Usage: 24hg-hdr toggle [on|off]"
+            return 1
+            ;;
+    esac
+
+    log "Toggle: $mode"
+}
+
+# ---------------------------------------------------------------------------
+# Command: fix
+# ---------------------------------------------------------------------------
+
+cmd_fix() {
+    echo ""
+    echo -e "${BOLD}${MAGENTA}  24HG HDR Troubleshooter${RESET}"
+    echo ""
+
+    local issues=()
+
+    # Check session
+    local session
+    session="$(detect_session)"
+    if [[ "$session" != "wayland" ]]; then
+        issues+=("x11_session")
+    fi
+
+    # Check GPU
+    local gpu_status vendor
+    gpu_status="$(check_gpu_hdr_ready)"
+    vendor="$(detect_gpu_vendor)"
+    local gpu_ready="${gpu_status%%:*}"
+    if [[ "$gpu_ready" == "no" ]]; then
+        issues+=("gpu_driver")
+    fi
+
+    # Check KDE
+    if command -v kreadconfig6 &>/dev/null; then
+        if ! kde_hdr_enabled 2>/dev/null; then
+            issues+=("kde_hdr_off")
+        fi
+    fi
+
+    # Check env
+    if [[ "${DXVK_HDR:-}" != "1" ]]; then
+        issues+=("env_missing")
+    fi
+
+    # Check DRM metadata
+    local hdr_active=false
+    for meta in /sys/class/drm/card*-*/hdr_output_metadata; do
+        if [[ -f "$meta" ]]; then
+            local size
+            size=$(wc -c < "$meta" 2>/dev/null || echo 0)
+            (( size > 0 )) && hdr_active=true
+        fi
+    done
+    if ! $hdr_active; then
+        issues+=("drm_inactive")
+    fi
+
+    if (( ${#issues[@]} == 0 )); then
+        ok "No obvious HDR issues detected!"
+        echo ""
+        info "If you're still having problems, try these manual checks:"
+        echo ""
+    else
+        warn "Found ${#issues[@]} potential issue(s):"
+        echo ""
+    fi
+
+    # ---- Issue: X11 session ----
+    if [[ " ${issues[*]} " == *" x11_session "* ]]; then
+        echo -e "${BOLD}${RED}Issue: X11 Session${RESET}"
+        echo "  HDR is not supported on X11 — it requires Wayland."
+        echo ""
+        echo "  Fix:"
+        echo "    1. Log out"
+        echo "    2. On the login screen, click the session selector (bottom-left)"
+        echo "    3. Choose 'Plasma (Wayland)'"
+        echo "    4. Log in and re-run '24hg-hdr setup'"
+        echo ""
+    fi
+
+    # ---- Issue: GPU driver ----
+    if [[ " ${issues[*]} " == *" gpu_driver "* ]]; then
+        echo -e "${BOLD}${RED}Issue: GPU Driver${RESET}"
+        case "$vendor" in
+            nvidia)
+                local nv_ver
+                nv_ver="$(get_nvidia_driver_version)"
+                echo "  NVIDIA driver $nv_ver is too old. Need 545+."
+                echo ""
+                echo "  Fix:"
+                echo "    sudo dnf install akmod-nvidia-545   # or newer"
+                echo "    # Then reboot"
+                echo ""
+                echo "  For flickering issues with NVIDIA HDR:"
+                echo "    sudo mkdir -p /etc/modprobe.d"
+                echo "    echo 'options nvidia NVreg_RegistryDwords=\"RMHdcpKeyglobZero=1\"' | \\"
+                echo "      sudo tee /etc/modprobe.d/nvidia-hdr.conf"
+                echo "    sudo dracut -f && sudo reboot"
+                ;;
+            amd)
+                local mesa_ver
+                mesa_ver="$(get_mesa_version)"
+                echo "  Mesa $mesa_ver is too old. Need 24.0+."
+                echo ""
+                echo "  Fix:"
+                echo "    sudo dnf update mesa-*"
+                echo "    # Then reboot"
+                echo ""
+                echo "  For AMD oversaturated colors:"
+                echo "    kwriteconfig6 --file kwinrc --group Compositing --key SDRBrightness 180"
+                echo "    qdbus org.kde.KWin /KWin reconfigure"
+                ;;
+            intel)
+                echo "  Intel GPU HDR support is experimental and limited."
+                echo ""
+                echo "  Fix:"
+                echo "    Ensure you have the latest kernel and Mesa."
+                echo "    Intel Arc GPUs have better HDR support than integrated."
+                echo "    sudo dnf update kernel mesa-*"
+                ;;
+        esac
+        echo ""
+    fi
+
+    # ---- Issue: KDE HDR off ----
+    if [[ " ${issues[*]} " == *" kde_hdr_off "* ]]; then
+        echo -e "${BOLD}${YELLOW}Issue: KDE HDR Not Enabled${RESET}"
+        echo "  KDE Plasma's HDR compositing is not turned on."
+        echo ""
+        echo "  Fix:"
+        echo "    24hg-hdr toggle on"
+        echo ""
+        echo "  Or manually:"
+        echo "    kwriteconfig6 --file kwinrc --group Compositing --key AllowHDR true"
+        echo "    kwriteconfig6 --file kwinrc --group Compositing --key WideColorGamut true"
+        echo "    qdbus org.kde.KWin /KWin reconfigure"
+        echo ""
+    fi
+
+    # ---- Issue: Env vars missing ----
+    if [[ " ${issues[*]} " == *" env_missing "* ]]; then
+        echo -e "${BOLD}${YELLOW}Issue: HDR Environment Variables Not Set${RESET}"
+        echo "  DXVK_HDR and/or ENABLE_HDR_WSI are not in the current environment."
+        echo ""
+        echo "  Fix:"
+        echo "    24hg-hdr toggle on   # sets environment + KDE"
+        echo ""
+        echo "  Or add to ~/.config/environment.d/50-24hg-hdr.conf:"
+        echo "    DXVK_HDR=1"
+        echo "    ENABLE_HDR_WSI=1"
+        echo "    PROTON_ENABLE_WAYLAND=1"
+        echo ""
+    fi
+
+    # ---- Issue: DRM metadata inactive ----
+    if [[ " ${issues[*]} " == *" drm_inactive "* ]]; then
+        echo -e "${BOLD}${YELLOW}Issue: No Active HDR Output Metadata${RESET}"
+        echo "  The kernel DRM subsystem is not sending HDR metadata to your display."
+        echo "  This usually means HDR is not active at the compositor level."
+        echo ""
+        echo "  Fix:"
+        echo "    1. Ensure KDE HDR is enabled: 24hg-hdr toggle on"
+        echo "    2. Check monitor OSD settings — enable HDR input"
+        echo "    3. Try a different cable (HDMI 2.0+ or DP 1.4+)"
+        echo "    4. Some monitors need a specific input port for HDR"
+        echo ""
+    fi
+
+    # ---- Common problems (always show) ----
+    echo -e "${BOLD}Common HDR Problems:${RESET}"
+    echo ""
+
+    echo -e "  ${BOLD}Washed-out colors / too bright SDR content:${RESET}"
+    echo "    Lower the SDR brightness mapping:"
+    echo "      kwriteconfig6 --file kwinrc --group Compositing --key SDRBrightness 150"
+    echo "      qdbus org.kde.KWin /KWin reconfigure"
+    echo "    Try values between 100-300 until SDR content looks normal."
+    echo ""
+
+    echo -e "  ${BOLD}Black screen when enabling HDR:${RESET}"
+    echo "    1. Wait 15 seconds — KWin may recover automatically"
+    echo "    2. If stuck, switch to TTY: Ctrl+Alt+F2"
+    echo "    3. Run: 24hg-hdr toggle off"
+    echo "    4. Switch back: Ctrl+Alt+F1"
+    echo "    5. Check driver version and cable quality"
+    echo ""
+
+    echo -e "  ${BOLD}NVIDIA flickering in HDR:${RESET}"
+    echo "    Add kernel module parameter:"
+    echo "      sudo bash -c 'echo \"options nvidia NVreg_RegistryDwords=\\\"RMHdcpKeyglobZero=1\\\"\" > /etc/modprobe.d/nvidia-hdr.conf'"
+    echo "    Rebuild initramfs and reboot:"
+    echo "      sudo dracut -f && sudo reboot"
+    echo ""
+
+    echo -e "  ${BOLD}AMD oversaturated / neon colors:${RESET}"
+    echo "    This is usually an SDR→HDR tone-mapping issue."
+    echo "    Lower SDR brightness to 150-180 nits."
+    echo "    Ensure WideColorGamut is true (counterintuitively, this helps)."
+    echo ""
+
+    echo -e "  ${BOLD}Gamescope not finding HDR:${RESET}"
+    echo "    1. Run gamescope from a Wayland session (not X11)"
+    echo "    2. Ensure DRM properties allow HDR:"
+    echo "       cat /sys/class/drm/card*-*/hdr_output_metadata"
+    echo "    3. Try: gamescope --backend drm --hdr-enabled -- <app>"
+    echo ""
+
+    echo -e "  ${BOLD}Game-specific DXVK HDR issues:${RESET}"
+    echo "    Some games need DXVK 2.3+ for proper HDR."
+    echo "    If using Proton Experimental, it should be recent enough."
+    echo "    For Proton GE, ensure you have GE-Proton9-1 or newer."
+    echo ""
+
+    log "Fix wizard ran, issues: ${issues[*]:-none}"
+}
+
+# ---------------------------------------------------------------------------
+# Command: gamescope [appid]
+# ---------------------------------------------------------------------------
+
+cmd_gamescope() {
+    local appid="${1:-}"
+
+    if [[ -z "$appid" ]]; then
+        echo ""
+        echo -e "${BOLD}Usage:${RESET} 24hg-hdr gamescope <steam_appid>"
+        echo ""
+        echo "Launches a game through gamescope with HDR enabled."
+        echo "This constructs the optimal gamescope command for your hardware."
+        echo ""
+
+        local gs_cmd
+        gs_cmd="$(build_gamescope_cmd)"
+        info "Current gamescope HDR command:"
+        echo ""
+        echo -e "  ${BOLD}${gs_cmd} -- <command>${RESET}"
+        echo ""
+        return 0
+    fi
+
+    # Check gamescope
+    if ! command -v gamescope &>/dev/null; then
+        err "Gamescope is not installed."
+        echo ""
+        echo "  Install with: sudo dnf install gamescope"
+        return 1
+    fi
+
+    # Source HDR env
+    source_hdr_env
+
+    local gs_cmd
+    gs_cmd="$(build_gamescope_cmd "$appid")"
+
+    echo ""
+    step "Launching game $appid via gamescope HDR"
+    echo ""
+
+    # Check if we know this game
+    local entry
+    if entry="$(lookup_game "$appid")"; then
+        local gname gquality
+        IFS=: read -r _ gname gquality <<< "$entry"
+        info "Game: $gname"
+        echo -n "  HDR: "
+        hdr_quality_label "$gquality"
+        echo ""
+    fi
+
+    # Set HDR env vars for this session
+    export DXVK_HDR=1
+    export ENABLE_HDR_WSI=1
+    export PROTON_ENABLE_WAYLAND=1
+
+    # Build Steam launch command
+    local steam_cmd="steam -applaunch $appid"
+    local full_cmd="${gs_cmd} -- ${steam_cmd}"
+
+    info "Running: $full_cmd"
+    echo ""
+
+    # Launch
+    log "Gamescope launch: $full_cmd"
+    eval "$full_cmd" &
+    local pid=$!
+
+    ok "Game launched (PID: $pid)"
+    dim "The game is running in a gamescope HDR session."
+    dim "Close the game normally to exit."
+
+    wait "$pid" 2>/dev/null || true
+    info "Game session ended."
+    log "Gamescope session ended for $appid"
+}
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+
+usage() {
+    echo ""
+    echo -e "${BOLD}24HG HDR Gaming Wizard${RESET}"
+    echo -e "${DIM}End-to-end HDR setup for Linux gaming${RESET}"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET} 24hg-hdr <command> [options]"
+    echo ""
+    echo -e "${BOLD}Commands:${RESET}"
+    echo "  setup              Full HDR setup wizard (hardware detect + configure)"
+    echo "  status             Show current HDR state and diagnostics"
+    echo "  test               Run HDR test patterns and diagnostics"
+    echo "  game <appid>       Configure HDR for a specific Steam game"
+    echo "  toggle [on|off]    Quick HDR enable/disable"
+    echo "  fix                Troubleshoot common HDR issues"
+    echo "  gamescope [appid]  Launch a game through gamescope with HDR"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo "  24hg-hdr setup                   # First-time HDR setup"
+    echo "  24hg-hdr game 1091500            # Configure Cyberpunk 2077"
+    echo "  24hg-hdr toggle on               # Quick enable"
+    echo "  24hg-hdr gamescope 2358720       # Launch Black Myth Wukong"
+    echo "  24hg-hdr status                  # Check everything"
+    echo ""
+    echo -e "${BOLD}HDR requires:${RESET}"
+    echo "  - Wayland session (not X11)"
+    echo "  - KDE Plasma 6.0+"
+    echo "  - HDR-capable monitor"
+    echo "  - NVIDIA 545+ driver or AMD Mesa 24.0+"
+    echo ""
+    echo -e "${DIM}Config: $HDR_CONFIG_DIR${RESET}"
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        setup)     cmd_setup "$@" ;;
+        status)    cmd_status "$@" ;;
+        test)      cmd_test "$@" ;;
+        game)      cmd_game "$@" ;;
+        toggle)    cmd_toggle "$@" ;;
+        fix)       cmd_fix "$@" ;;
+        gamescope) cmd_gamescope "$@" ;;
+        help|-h|--help)
+            usage ;;
+        "")
+            usage ;;
+        *)
+            err "Unknown command: $cmd"
+            usage
+            return 1
+            ;;
+    esac
+}
+
+main "$@"

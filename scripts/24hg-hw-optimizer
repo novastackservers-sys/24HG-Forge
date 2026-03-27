@@ -1,0 +1,1513 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Hardware Optimizer — Auto-detect and tune your system for peak gaming performance
+
+###############################################################################
+# Constants & Globals
+###############################################################################
+VERSION="1.0.0"
+HG24_CONFIG_DIR="${HOME}/.config/24hg"
+LOG_FILE="${HG24_CONFIG_DIR}/hw-optimizer.log"
+GPU_ENV_FILE="${HG24_CONFIG_DIR}/gpu-env.conf"
+SYSCTL_CONF="/etc/sysctl.d/99-24hg-hw-optimizer.conf"
+BACKUP_DIR="${HG24_CONFIG_DIR}/hw-optimizer-backups"
+STATE_FILE="${HG24_CONFIG_DIR}/hw-optimizer-state.json"
+
+# Counters
+APPLIED=0
+ALREADY_OPTIMAL=0
+SKIPPED=0
+FAILED=0
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# Symbols
+CHECK="${GREEN}✓${RESET}"
+WARN="${YELLOW}⚠${RESET}"
+CROSS="${RED}✗${RESET}"
+ARROW="${CYAN}→${RESET}"
+GEAR="${MAGENTA}⚙${RESET}"
+INFO="${BLUE}ℹ${RESET}"
+
+###############################################################################
+# Utility Functions
+###############################################################################
+ensure_dirs() {
+    mkdir -p "$HG24_CONFIG_DIR" "$BACKUP_DIR"
+}
+
+log() {
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    echo "$msg" >> "$LOG_FILE"
+    logger -t 24hg-hw-optimizer "$*" 2>/dev/null || true
+}
+
+print_header() {
+    echo ""
+    echo -e "${BOLD}${MAGENTA}╔══════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${MAGENTA}║${RESET}  ${BOLD}${WHITE}🔧 24HG Hardware Optimizer${RESET}  ${DIM}v${VERSION}${RESET}                    ${BOLD}${MAGENTA}║${RESET}"
+    echo -e "${BOLD}${MAGENTA}║${RESET}  ${DIM}Auto-detect and tune your system for peak gaming${RESET}           ${BOLD}${MAGENTA}║${RESET}"
+    echo -e "${BOLD}${MAGENTA}╚══════════════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+}
+
+print_section() {
+    local title="$1"
+    echo ""
+    echo -e "${BOLD}${CYAN}┌─────────────────────────────────────────────────────────────┐${RESET}"
+    echo -e "${BOLD}${CYAN}│${RESET} ${BOLD}${WHITE}${title}${RESET}"
+    echo -e "${BOLD}${CYAN}└─────────────────────────────────────────────────────────────┘${RESET}"
+}
+
+print_detect() {
+    echo -e "  ${INFO} ${DIM}Detected:${RESET} $1"
+}
+
+print_change() {
+    echo -e "  ${ARROW} ${DIM}Change:${RESET}   $1"
+}
+
+print_reason() {
+    echo -e "  ${GEAR} ${DIM}Why:${RESET}      $1"
+}
+
+print_result_applied() {
+    echo -e "  ${CHECK} ${GREEN}Applied${RESET}"
+    ((APPLIED++))
+    log "APPLIED: $1"
+}
+
+print_result_optimal() {
+    echo -e "  ${WARN} ${YELLOW}Already optimal${RESET}"
+    ((ALREADY_OPTIMAL++))
+    log "ALREADY_OPTIMAL: $1"
+}
+
+print_result_skipped() {
+    echo -e "  ${CROSS} ${RED}Skipped:${RESET} $1"
+    ((SKIPPED++))
+    log "SKIPPED: $1 — $2"
+}
+
+print_result_failed() {
+    echo -e "  ${CROSS} ${RED}Failed:${RESET} $1"
+    ((FAILED++))
+    log "FAILED: $1 — $2"
+}
+
+print_divider() {
+    echo -e "  ${DIM}─────────────────────────────────────────────────────────${RESET}"
+}
+
+print_summary() {
+    local total=$((APPLIED + ALREADY_OPTIMAL + SKIPPED + FAILED))
+    echo ""
+    echo -e "${BOLD}${MAGENTA}╔══════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${MAGENTA}║${RESET}  ${BOLD}${WHITE}Optimization Summary${RESET}                                        ${BOLD}${MAGENTA}║${RESET}"
+    echo -e "${BOLD}${MAGENTA}╠══════════════════════════════════════════════════════════════╣${RESET}"
+    printf "${BOLD}${MAGENTA}║${RESET}  ${CHECK} %-18s ${GREEN}%-5d${RESET}                                  ${BOLD}${MAGENTA}║${RESET}\n" "Applied:" "$APPLIED"
+    printf "${BOLD}${MAGENTA}║${RESET}  ${WARN} %-18s ${YELLOW}%-5d${RESET}                                  ${BOLD}${MAGENTA}║${RESET}\n" "Already optimal:" "$ALREADY_OPTIMAL"
+    printf "${BOLD}${MAGENTA}║${RESET}  ${CROSS} %-18s ${RED}%-5d${RESET}                                  ${BOLD}${MAGENTA}║${RESET}\n" "Skipped/Failed:" "$((SKIPPED + FAILED))"
+    echo -e "${BOLD}${MAGENTA}║${RESET}  ${DIM}─────────────────────────────${RESET}                              ${BOLD}${MAGENTA}║${RESET}"
+    printf "${BOLD}${MAGENTA}║${RESET}  ${BOLD}%-20s ${WHITE}%-5d${RESET}                                  ${BOLD}${MAGENTA}║${RESET}\n" "Total:" "$total"
+    echo -e "${BOLD}${MAGENTA}╚══════════════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+
+    # Desktop notification
+    if command -v notify-send &>/dev/null; then
+        notify-send -i dialog-information "24HG HW Optimizer" \
+            "${APPLIED} optimizations applied, ${ALREADY_OPTIMAL} already optimal, $((SKIPPED + FAILED)) skipped" \
+            2>/dev/null || true
+    fi
+}
+
+confirm_proceed() {
+    local auto="${1:-false}"
+    if [[ "$auto" == "true" ]]; then
+        return 0
+    fi
+    echo ""
+    echo -e "${BOLD}${YELLOW}The following optimizations will be applied to your system.${RESET}"
+    echo -e "${DIM}Some changes require sudo and will persist across reboots.${RESET}"
+    echo ""
+    read -rp "$(echo -e "${BOLD}Proceed? [y/N]:${RESET} ")" answer
+    case "$answer" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        *) echo -e "${YELLOW}Aborted.${RESET}"; exit 0 ;;
+    esac
+}
+
+need_sudo() {
+    if [[ $EUID -ne 0 ]]; then
+        if ! sudo -n true 2>/dev/null; then
+            echo -e "  ${INFO} ${DIM}Sudo required for system-level changes${RESET}"
+            sudo true || { print_result_failed "$1" "sudo not available"; return 1; }
+        fi
+    fi
+    return 0
+}
+
+write_env_var() {
+    local key="$1" value="$2"
+    # Add or update in gpu-env.conf
+    if grep -q "^export ${key}=" "$GPU_ENV_FILE" 2>/dev/null; then
+        sed -i "s|^export ${key}=.*|export ${key}=${value}|" "$GPU_ENV_FILE"
+    else
+        echo "export ${key}=${value}" >> "$GPU_ENV_FILE"
+    fi
+}
+
+write_sysctl() {
+    local key="$1" value="$2"
+    local tmpfile
+    tmpfile=$(mktemp)
+    if [[ -f "$SYSCTL_CONF" ]]; then
+        cp "$SYSCTL_CONF" "$tmpfile"
+    else
+        echo "# 24HG Hardware Optimizer — gaming sysctl tuning" > "$tmpfile"
+        echo "# Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$tmpfile"
+        echo "" >> "$tmpfile"
+    fi
+
+    if grep -q "^${key}" "$tmpfile" 2>/dev/null; then
+        sed -i "s|^${key}.*|${key} = ${value}|" "$tmpfile"
+    else
+        echo "${key} = ${value}" >> "$tmpfile"
+    fi
+    sudo cp "$tmpfile" "$SYSCTL_CONF"
+    sudo sysctl -w "${key}=${value}" &>/dev/null || true
+    rm -f "$tmpfile"
+}
+
+get_current_sysctl() {
+    sysctl -n "$1" 2>/dev/null || echo ""
+}
+
+###############################################################################
+# Detection Functions
+###############################################################################
+detect_gpu_vendor() {
+    # Returns: nvidia, amd, intel, or unknown
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        echo "nvidia"
+    elif lspci 2>/dev/null | grep -iq 'vga.*nvidia'; then
+        echo "nvidia"
+    elif lspci 2>/dev/null | grep -iq 'vga.*amd\|vga.*radeon\|vga.*ati'; then
+        echo "amd"
+    elif lspci 2>/dev/null | grep -iq 'vga.*intel'; then
+        echo "intel"
+    else
+        echo "unknown"
+    fi
+}
+
+detect_gpu_model() {
+    local vendor="$1"
+    case "$vendor" in
+        nvidia)
+            if command -v nvidia-smi &>/dev/null; then
+                nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null | head -1 | xargs
+            else
+                lspci 2>/dev/null | grep -i 'vga.*nvidia' | sed 's/.*: //' | head -1
+            fi
+            ;;
+        amd)
+            lspci 2>/dev/null | grep -iE 'vga.*amd|vga.*radeon|vga.*ati' | sed 's/.*: //' | head -1
+            ;;
+        intel)
+            lspci 2>/dev/null | grep -i 'vga.*intel' | sed 's/.*: //' | head -1
+            ;;
+        *) echo "Unknown GPU" ;;
+    esac
+}
+
+detect_gpu_vram() {
+    if command -v nvidia-smi &>/dev/null; then
+        nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs
+    else
+        echo "N/A"
+    fi
+}
+
+detect_cpu_vendor() {
+    if grep -q 'GenuineIntel' /proc/cpuinfo 2>/dev/null; then
+        echo "intel"
+    elif grep -q 'AuthenticAMD' /proc/cpuinfo 2>/dev/null; then
+        echo "amd"
+    else
+        echo "unknown"
+    fi
+}
+
+detect_cpu_model() {
+    grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | sed 's/.*: //'
+}
+
+detect_cpu_cores() {
+    nproc 2>/dev/null || echo "?"
+}
+
+detect_cpu_gen_intel() {
+    # Extract Intel generation from model name (e.g., "13th Gen" or "Core i7-12700")
+    local model
+    model=$(detect_cpu_model)
+    if [[ "$model" =~ ([0-9]+)th\ Gen ]]; then
+        echo "${BASH_REMATCH[1]}"
+    elif [[ "$model" =~ i[3579]-([0-9]{2}) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        echo "0"
+    fi
+}
+
+detect_cpu_zen_gen() {
+    # Detect AMD Zen generation
+    local model family
+    model=$(detect_cpu_model)
+    family=$(grep -m1 'cpu family' /proc/cpuinfo 2>/dev/null | awk '{print $NF}')
+    if [[ "$model" =~ [Rr]yzen.*([0-9])([0-9]{3}) ]]; then
+        local series="${BASH_REMATCH[1]}"
+        case "$series" in
+            7) echo "zen4" ;;
+            5) echo "zen3" ;;
+            3) echo "zen2" ;;
+            *) echo "zen" ;;
+        esac
+    elif [[ "$family" == "25" ]]; then
+        echo "zen3"
+    elif [[ "$family" == "23" ]]; then
+        echo "zen2"
+    else
+        echo "zen"
+    fi
+}
+
+detect_ram_total_mb() {
+    awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo "0"
+}
+
+detect_ram_speed() {
+    if command -v dmidecode &>/dev/null; then
+        sudo dmidecode -t memory 2>/dev/null | grep -m1 'Speed:.*MHz' | awk '{print $2}' || echo "N/A"
+    else
+        echo "N/A"
+    fi
+}
+
+detect_display_refresh() {
+    local rate=""
+    # Try kscreen-doctor first (Wayland/KDE)
+    if command -v kscreen-doctor &>/dev/null; then
+        rate=$(kscreen-doctor --outputs 2>/dev/null | grep -oP '\d+(\.\d+)?Hz' | head -1 | tr -d 'Hz')
+    fi
+    # Fallback to xrandr
+    if [[ -z "$rate" ]] && command -v xrandr &>/dev/null; then
+        rate=$(xrandr 2>/dev/null | grep '\*' | head -1 | awk '{for(i=1;i<=NF;i++) if($i ~ /\*/) print $i}' | tr -d '*+')
+    fi
+    # Fallback to /sys
+    if [[ -z "$rate" ]]; then
+        for mode in /sys/class/drm/card*-*/modes; do
+            if [[ -f "$mode" ]]; then
+                rate=$(head -1 "$mode" 2>/dev/null | grep -oP '\d+\.\d+' || true)
+                [[ -n "$rate" ]] && break
+            fi
+        done
+    fi
+    echo "${rate:-60}"
+}
+
+detect_display_resolution() {
+    if command -v xrandr &>/dev/null; then
+        xrandr 2>/dev/null | grep '\*' | head -1 | awk '{print $1}'
+    elif command -v kscreen-doctor &>/dev/null; then
+        kscreen-doctor --outputs 2>/dev/null | grep -oP '\d+x\d+' | head -1
+    else
+        echo "N/A"
+    fi
+}
+
+detect_session_type() {
+    echo "${XDG_SESSION_TYPE:-unknown}"
+}
+
+detect_storage_devices() {
+    # Returns list of block devices with type
+    lsblk -d -n -o NAME,ROTA,TYPE 2>/dev/null | while read -r name rota type; do
+        if [[ "$type" == "disk" ]]; then
+            if [[ "$rota" == "0" ]]; then
+                if [[ "$name" == nvme* ]]; then
+                    echo "${name}:nvme"
+                else
+                    echo "${name}:ssd"
+                fi
+            else
+                echo "${name}:hdd"
+            fi
+        fi
+    done
+}
+
+detect_network_interface() {
+    ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1
+}
+
+###############################################################################
+# Optimization Functions
+###############################################################################
+optimize_gpu_nvidia() {
+    print_section "GPU — NVIDIA Optimizations"
+    local model vram
+    model=$(detect_gpu_model "nvidia")
+    vram=$(detect_gpu_vram)
+    print_detect "NVIDIA ${model} (${vram} MB VRAM)"
+    print_divider
+
+    # GSync / VRR environment
+    echo -e "  ${GEAR} ${BOLD}VSync / VRR environment variables${RESET}"
+    print_change "Set __GL_GSYNC_ALLOWED=1, __GL_VRR_ALLOWED=1"
+    print_reason "Enable G-Sync/VRR for tear-free variable refresh rate gaming"
+    local current_gsync="${__GL_GSYNC_ALLOWED:-}"
+    local current_vrr="${__GL_VRR_ALLOWED:-}"
+    if [[ "$current_gsync" == "1" && "$current_vrr" == "1" ]] \
+       && grep -q '__GL_GSYNC_ALLOWED=1' "$GPU_ENV_FILE" 2>/dev/null \
+       && grep -q '__GL_VRR_ALLOWED=1' "$GPU_ENV_FILE" 2>/dev/null; then
+        print_result_optimal "NVIDIA VRR env"
+    else
+        write_env_var "__GL_GSYNC_ALLOWED" "1"
+        write_env_var "__GL_VRR_ALLOWED" "1"
+        print_result_applied "NVIDIA VRR env vars"
+    fi
+    print_divider
+
+    # PowerMizer
+    echo -e "  ${GEAR} ${BOLD}PowerMizer performance mode${RESET}"
+    print_change "Set PowerMizer to 'Prefer Maximum Performance'"
+    print_reason "Prevents GPU from downclocking during games, reduces micro-stutters"
+    if command -v nvidia-settings &>/dev/null; then
+        if nvidia-settings -q '[gpu:0]/GPUPowerMizerMode' 2>/dev/null | grep -q 'Attribute.*1'; then
+            print_result_optimal "PowerMizer already max performance"
+        else
+            nvidia-settings -a '[gpu:0]/GPUPowerMizerMode=1' &>/dev/null \
+                && print_result_applied "PowerMizer max performance" \
+                || print_result_failed "PowerMizer" "nvidia-settings command failed"
+        fi
+    else
+        print_result_skipped "PowerMizer" "nvidia-settings not found"
+    fi
+    print_divider
+
+    # Coolbits
+    echo -e "  ${GEAR} ${BOLD}Coolbits overclocking support${RESET}"
+    print_change "Enable Coolbits=28 in Xorg config for overclocking"
+    print_reason "Unlocks fan control, voltage, and clock offset in nvidia-settings"
+    if [[ -f /etc/X11/xorg.conf.d/20-nvidia.conf ]] && grep -q 'Coolbits.*28' /etc/X11/xorg.conf.d/20-nvidia.conf 2>/dev/null; then
+        print_result_optimal "Coolbits already enabled"
+    elif need_sudo "Coolbits"; then
+        sudo mkdir -p /etc/X11/xorg.conf.d
+        sudo tee /etc/X11/xorg.conf.d/20-24hg-nvidia-coolbits.conf >/dev/null <<'XEOF'
+Section "Device"
+    Identifier     "Device0"
+    Driver         "nvidia"
+    Option         "Coolbits" "28"
+EndSection
+XEOF
+        print_result_applied "Coolbits=28 (requires restart of X/Wayland)"
+    fi
+    print_divider
+
+    # Proton NVAPI
+    echo -e "  ${GEAR} ${BOLD}Proton NVAPI / DXVK NVAPI${RESET}"
+    print_change "Set PROTON_ENABLE_NVAPI=1, DXVK_ENABLE_NVAPI=1"
+    print_reason "Enable DLSS and NVIDIA-specific features in Proton games"
+    if grep -q 'PROTON_ENABLE_NVAPI=1' "$GPU_ENV_FILE" 2>/dev/null \
+       && grep -q 'DXVK_ENABLE_NVAPI=1' "$GPU_ENV_FILE" 2>/dev/null; then
+        print_result_optimal "Proton NVAPI env"
+    else
+        write_env_var "PROTON_ENABLE_NVAPI" "1"
+        write_env_var "DXVK_ENABLE_NVAPI" "1"
+        print_result_applied "Proton NVAPI env vars"
+    fi
+    print_divider
+
+    # MangoHud config
+    echo -e "  ${GEAR} ${BOLD}MangoHud NVIDIA metrics${RESET}"
+    print_change "Configure MangoHud with GPU-specific NVIDIA metrics"
+    print_reason "Show GPU temp, clock, VRAM, power draw in the HUD overlay"
+    local mangohud_conf="${HOME}/.config/MangoHud/MangoHud.conf"
+    if [[ -f "$mangohud_conf" ]] && grep -q 'gpu_stats' "$mangohud_conf" 2>/dev/null; then
+        print_result_optimal "MangoHud NVIDIA config"
+    elif command -v mangohud &>/dev/null; then
+        mkdir -p "${HOME}/.config/MangoHud"
+        cat > "$mangohud_conf" <<'MEOF'
+# 24HG HW Optimizer — NVIDIA MangoHud config
+gpu_stats
+gpu_temp
+gpu_core_clock
+gpu_mem_clock
+gpu_power
+gpu_load_change
+vram
+cpu_stats
+cpu_temp
+cpu_mhz
+fps
+frametime
+frame_timing
+position=top-left
+font_size=20
+background_alpha=0.4
+MEOF
+        print_result_applied "MangoHud NVIDIA config"
+    else
+        print_result_skipped "MangoHud config" "mangohud not installed"
+    fi
+
+    # Wayland DRM modeset check
+    local session
+    session=$(detect_session_type)
+    if [[ "$session" == "wayland" ]]; then
+        print_divider
+        echo -e "  ${GEAR} ${BOLD}NVIDIA DRM modeset (Wayland)${RESET}"
+        print_change "Ensure nvidia-drm.modeset=1 is set in kernel parameters"
+        print_reason "Required for NVIDIA GPUs to work properly under Wayland compositors"
+        if grep -q 'nvidia-drm.modeset=1' /proc/cmdline 2>/dev/null; then
+            print_result_optimal "nvidia-drm.modeset=1 already set"
+        else
+            # Try to add via modprobe conf as a fallback
+            if need_sudo "nvidia-drm modeset"; then
+                echo "options nvidia-drm modeset=1" | sudo tee /etc/modprobe.d/24hg-nvidia-drm.conf >/dev/null
+                print_result_applied "nvidia-drm.modeset=1 via modprobe.d (reboot needed)"
+            fi
+        fi
+    fi
+
+    # ForceCompositionPipeline for tearing
+    print_divider
+    echo -e "  ${GEAR} ${BOLD}ForceCompositionPipeline${RESET}"
+    print_change "Enable ForceCompositionPipeline to reduce tearing"
+    print_reason "Eliminates screen tearing on NVIDIA without traditional VSync penalty"
+    if command -v nvidia-settings &>/dev/null; then
+        if nvidia-settings -q CurrentMetaMode 2>/dev/null | grep -q 'ForceCompositionPipeline=On'; then
+            print_result_optimal "ForceCompositionPipeline already on"
+        else
+            local metamode
+            metamode=$(nvidia-settings -q CurrentMetaMode 2>/dev/null | grep '::' | head -1 | sed 's/.*:: //' | sed 's/ *$//')
+            if [[ -n "$metamode" ]]; then
+                local new_metamode="${metamode}, ForceCompositionPipeline=On"
+                nvidia-settings -a "CurrentMetaMode=${new_metamode}" &>/dev/null \
+                    && print_result_applied "ForceCompositionPipeline enabled" \
+                    || print_result_failed "ForceCompositionPipeline" "nvidia-settings failed"
+            else
+                print_result_skipped "ForceCompositionPipeline" "could not read current MetaMode"
+            fi
+        fi
+    else
+        print_result_skipped "ForceCompositionPipeline" "nvidia-settings not found"
+    fi
+}
+
+optimize_gpu_amd() {
+    print_section "GPU — AMD Optimizations"
+    local model
+    model=$(detect_gpu_model "amd")
+    print_detect "AMD ${model}"
+    print_divider
+
+    # Vulkan ICD
+    echo -e "  ${GEAR} ${BOLD}Vulkan ICD selection${RESET}"
+    print_change "Set AMD_VULKAN_ICD=RADV"
+    print_reason "RADV driver is faster than AMDVLK for gaming in most titles"
+    if grep -q 'AMD_VULKAN_ICD=RADV' "$GPU_ENV_FILE" 2>/dev/null; then
+        print_result_optimal "AMD Vulkan ICD"
+    else
+        write_env_var "AMD_VULKAN_ICD" "RADV"
+        print_result_applied "AMD_VULKAN_ICD=RADV"
+    fi
+    print_divider
+
+    # RADV shader pipeline
+    echo -e "  ${GEAR} ${BOLD}RADV shader pipeline optimization${RESET}"
+    print_change "Set RADV_PERFTEST=gpl"
+    print_reason "Enables Graphics Pipeline Library for faster shader compilation"
+    if grep -q 'RADV_PERFTEST=gpl' "$GPU_ENV_FILE" 2>/dev/null; then
+        print_result_optimal "RADV_PERFTEST=gpl"
+    else
+        write_env_var "RADV_PERFTEST" "gpl"
+        print_result_applied "RADV_PERFTEST=gpl"
+    fi
+    print_divider
+
+    # Remove RADV_DEBUG=llvm if present (ACO is default and faster)
+    echo -e "  ${GEAR} ${BOLD}ACO shader compiler${RESET}"
+    print_change "Remove RADV_DEBUG=llvm if present (ACO is default and faster)"
+    print_reason "ACO compiler produces faster shaders than LLVM backend"
+    if grep -q 'RADV_DEBUG=llvm' "$GPU_ENV_FILE" 2>/dev/null; then
+        sed -i '/RADV_DEBUG=llvm/d' "$GPU_ENV_FILE"
+        print_result_applied "Removed RADV_DEBUG=llvm (ACO is now active)"
+    else
+        print_result_optimal "ACO already active (no LLVM override)"
+    fi
+    print_divider
+
+    # Power profile
+    echo -e "  ${GEAR} ${BOLD}GPU power profile${RESET}"
+    print_change "Set power_dpm_force_performance_level to high"
+    print_reason "Forces GPU to run at maximum clocks during gaming sessions"
+    local dpm_path="/sys/class/drm/card0/device/power_dpm_force_performance_level"
+    if [[ -f "$dpm_path" ]]; then
+        local current
+        current=$(cat "$dpm_path" 2>/dev/null)
+        if [[ "$current" == "high" ]]; then
+            print_result_optimal "AMD power profile already high"
+        elif need_sudo "AMD power profile"; then
+            echo "high" | sudo tee "$dpm_path" >/dev/null 2>&1 \
+                && print_result_applied "AMD power profile set to high" \
+                || print_result_failed "AMD power profile" "write failed"
+        fi
+    else
+        print_result_skipped "AMD power profile" "DPM sysfs not available"
+    fi
+    print_divider
+
+    # MangoHud for AMD
+    echo -e "  ${GEAR} ${BOLD}MangoHud AMD metrics${RESET}"
+    print_change "Configure MangoHud with AMD-specific metrics"
+    print_reason "Show GPU temp, clock, VRAM usage in the HUD overlay"
+    local mangohud_conf="${HOME}/.config/MangoHud/MangoHud.conf"
+    if [[ -f "$mangohud_conf" ]] && grep -q 'gpu_stats' "$mangohud_conf" 2>/dev/null; then
+        print_result_optimal "MangoHud AMD config"
+    elif command -v mangohud &>/dev/null; then
+        mkdir -p "${HOME}/.config/MangoHud"
+        cat > "$mangohud_conf" <<'MEOF'
+# 24HG HW Optimizer — AMD MangoHud config
+gpu_stats
+gpu_temp
+gpu_core_clock
+gpu_mem_clock
+gpu_power
+gpu_load_change
+vram
+cpu_stats
+cpu_temp
+cpu_mhz
+fps
+frametime
+frame_timing
+position=top-left
+font_size=20
+background_alpha=0.4
+MEOF
+        print_result_applied "MangoHud AMD config"
+    else
+        print_result_skipped "MangoHud config" "mangohud not installed"
+    fi
+}
+
+optimize_cpu() {
+    print_section "CPU Optimizations"
+    local vendor model cores
+    vendor=$(detect_cpu_vendor)
+    model=$(detect_cpu_model)
+    cores=$(detect_cpu_cores)
+    print_detect "${model} (${cores} threads)"
+    print_divider
+
+    if [[ "$vendor" == "intel" ]]; then
+        local gen
+        gen=$(detect_cpu_gen_intel)
+        if [[ "$gen" -ge 12 ]]; then
+            echo -e "  ${GEAR} ${BOLD}Intel Hybrid Architecture (P/E cores)${RESET}"
+            print_change "Configure irqbalance to prefer P-cores for gaming"
+            print_reason "Routes game interrupts to performance cores for lower latency"
+            if [[ -f /etc/default/irqbalance ]]; then
+                if grep -q 'IRQBALANCE_BANNED_CPULIST' /etc/default/irqbalance 2>/dev/null; then
+                    print_result_optimal "irqbalance already configured"
+                elif need_sudo "irqbalance config"; then
+                    # On hybrid CPUs, E-cores are typically the higher-numbered ones
+                    local pcores=$((cores / 2))
+                    echo "# 24HG HW Optimizer: prefer P-cores for IRQs on Intel Hybrid" | sudo tee -a /etc/default/irqbalance >/dev/null
+                    echo "IRQBALANCE_ARGS=\"--hintpolicy=subset\"" | sudo tee -a /etc/default/irqbalance >/dev/null
+                    print_result_applied "irqbalance P-core preference"
+                fi
+            else
+                print_result_skipped "irqbalance" "irqbalance config not found"
+            fi
+            print_divider
+        fi
+    fi
+
+    if [[ "$vendor" == "amd" ]]; then
+        local zen_gen
+        zen_gen=$(detect_cpu_zen_gen)
+        echo -e "  ${GEAR} ${BOLD}AMD P-State driver (${zen_gen})${RESET}"
+        print_change "Ensure amd_pstate=active for best frequency scaling"
+        print_reason "Active mode gives the CPU full control for fastest boost response"
+        if grep -q 'amd_pstate' /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null; then
+            print_result_optimal "amd_pstate already active"
+        elif grep -q 'amd.pstate' /proc/cmdline 2>/dev/null; then
+            print_result_optimal "amd_pstate in kernel params"
+        else
+            # Add via modprobe config
+            if need_sudo "amd_pstate"; then
+                echo "options amd_pstate shared_mem=1" | sudo tee /etc/modprobe.d/24hg-amd-pstate.conf >/dev/null 2>&1 \
+                    && print_result_applied "amd_pstate config (reboot required)" \
+                    || print_result_failed "amd_pstate" "write failed"
+            fi
+        fi
+        print_divider
+    fi
+
+    # IO Scheduler for NVMe
+    echo -e "  ${GEAR} ${BOLD}I/O scheduler for NVMe${RESET}"
+    print_change "Set 'none' scheduler for NVMe, 'kyber' for SSD"
+    print_reason "NVMe has internal scheduling; removing kernel scheduler reduces latency"
+    local found_nvme=false
+    for dev in /sys/block/nvme*; do
+        [[ -d "$dev" ]] || continue
+        found_nvme=true
+        local devname sched_path current_sched
+        devname=$(basename "$dev")
+        sched_path="${dev}/queue/scheduler"
+        current_sched=$(cat "$sched_path" 2>/dev/null | grep -oP '\[\K[^\]]+')
+        if [[ "$current_sched" == "none" ]]; then
+            print_result_optimal "${devname} scheduler already 'none'"
+        elif need_sudo "IO scheduler"; then
+            echo "none" | sudo tee "$sched_path" >/dev/null 2>&1 \
+                && print_result_applied "${devname} scheduler → none" \
+                || print_result_failed "${devname} scheduler" "write failed"
+        fi
+    done
+    for dev in /sys/block/sd*; do
+        [[ -d "$dev" ]] || continue
+        local devname sched_path rotational
+        devname=$(basename "$dev")
+        rotational=$(cat "${dev}/queue/rotational" 2>/dev/null)
+        if [[ "$rotational" == "0" ]]; then
+            sched_path="${dev}/queue/scheduler"
+            local current_sched
+            current_sched=$(cat "$sched_path" 2>/dev/null | grep -oP '\[\K[^\]]+')
+            if [[ "$current_sched" == "kyber" ]]; then
+                print_result_optimal "${devname} scheduler already 'kyber'"
+            elif need_sudo "IO scheduler"; then
+                echo "kyber" | sudo tee "$sched_path" >/dev/null 2>&1 \
+                    && print_result_applied "${devname} scheduler → kyber" \
+                    || print_result_skipped "${devname} scheduler" "kyber not available"
+            fi
+        fi
+    done
+    if [[ "$found_nvme" == false ]] && ! ls /sys/block/sd* &>/dev/null; then
+        print_result_skipped "IO scheduler" "no applicable devices found"
+    fi
+    print_divider
+
+    # CPU governor hint for gamemode
+    echo -e "  ${GEAR} ${BOLD}CPU governor for gamemode${RESET}"
+    print_change "Set performance governor hint in gamemode config"
+    print_reason "gamemode switches CPU to performance governor when a game launches"
+    local gamemode_ini="${HOME}/.config/gamemode.ini"
+    if [[ -f "$gamemode_ini" ]] && grep -q 'desiredgov=performance' "$gamemode_ini" 2>/dev/null; then
+        print_result_optimal "gamemode performance governor"
+    elif command -v gamemoded &>/dev/null; then
+        mkdir -p "${HOME}/.config"
+        cat > "$gamemode_ini" <<'GEOF'
+[general]
+renice=10
+inhibit_screensaver=1
+
+[gpu]
+apply_gpu_optimisations=accept-responsibility
+gpu_device=0
+
+[cpu]
+desiredgov=performance
+
+[custom]
+start=notify-send "GameMode" "Optimizations activated"
+end=notify-send "GameMode" "Optimizations deactivated"
+GEOF
+        print_result_applied "gamemode.ini with performance governor"
+    else
+        print_result_skipped "gamemode config" "gamemode not installed"
+    fi
+}
+
+optimize_ram() {
+    print_section "RAM Optimizations"
+    local total_mb ram_speed
+    total_mb=$(detect_ram_total_mb)
+    ram_speed=$(detect_ram_speed)
+    local total_gb=$((total_mb / 1024))
+    print_detect "${total_gb} GB RAM${ram_speed:+ @ ${ram_speed} MHz}"
+    print_divider
+
+    if ! need_sudo "sysctl tuning"; then
+        return
+    fi
+
+    # vm.swappiness
+    echo -e "  ${GEAR} ${BOLD}vm.swappiness${RESET}"
+    print_change "Set vm.swappiness=10"
+    print_reason "Keep game assets in RAM longer, only swap under real memory pressure"
+    local current
+    current=$(get_current_sysctl vm.swappiness)
+    if [[ "$current" == "10" ]]; then
+        print_result_optimal "vm.swappiness already 10"
+    else
+        write_sysctl "vm.swappiness" "10"
+        print_result_applied "vm.swappiness: ${current} → 10"
+    fi
+    print_divider
+
+    # vm.vfs_cache_pressure
+    echo -e "  ${GEAR} ${BOLD}vm.vfs_cache_pressure${RESET}"
+    print_change "Set vm.vfs_cache_pressure=50"
+    print_reason "Retain filesystem metadata cache longer for faster file access"
+    current=$(get_current_sysctl vm.vfs_cache_pressure)
+    if [[ "$current" == "50" ]]; then
+        print_result_optimal "vfs_cache_pressure already 50"
+    else
+        write_sysctl "vm.vfs_cache_pressure" "50"
+        print_result_applied "vfs_cache_pressure: ${current} → 50"
+    fi
+    print_divider
+
+    # vm.dirty_ratio
+    echo -e "  ${GEAR} ${BOLD}vm.dirty_ratio${RESET}"
+    print_change "Set vm.dirty_ratio=20, vm.dirty_background_ratio=5"
+    print_reason "Flush writes more frequently to prevent large IO stalls during gaming"
+    local dr dbr
+    dr=$(get_current_sysctl vm.dirty_ratio)
+    dbr=$(get_current_sysctl vm.dirty_background_ratio)
+    if [[ "$dr" == "20" && "$dbr" == "5" ]]; then
+        print_result_optimal "dirty_ratio already tuned"
+    else
+        write_sysctl "vm.dirty_ratio" "20"
+        write_sysctl "vm.dirty_background_ratio" "5"
+        print_result_applied "dirty_ratio: ${dr}→20, dirty_background_ratio: ${dbr}→5"
+    fi
+    print_divider
+
+    # zram for high RAM systems
+    if [[ "$total_gb" -ge 32 ]]; then
+        echo -e "  ${GEAR} ${BOLD}zram compressed swap${RESET}"
+        print_change "Create zram swap device for overflow"
+        print_reason "With ≥32GB RAM, zram provides fast compressed swap without disk IO"
+        if lsmod 2>/dev/null | grep -q zram; then
+            print_result_optimal "zram already loaded"
+        elif need_sudo "zram setup"; then
+            if sudo modprobe zram 2>/dev/null; then
+                local zram_size=$((total_mb / 4))
+                echo "${zram_size}M" | sudo tee /sys/block/zram0/disksize >/dev/null 2>&1
+                sudo mkswap /dev/zram0 >/dev/null 2>&1
+                sudo swapon -p 5 /dev/zram0 >/dev/null 2>&1 \
+                    && print_result_applied "zram swap (${zram_size}MB)" \
+                    || print_result_failed "zram swap" "swapon failed"
+            else
+                print_result_skipped "zram" "module not available"
+            fi
+        fi
+    fi
+}
+
+optimize_display() {
+    print_section "Display Optimizations"
+    local refresh resolution session
+    refresh=$(detect_display_refresh)
+    resolution=$(detect_display_resolution)
+    session=$(detect_session_type)
+    print_detect "${resolution:-N/A} @ ${refresh}Hz (${session})"
+    print_divider
+
+    local refresh_int=${refresh%%.*}
+    if [[ "$refresh_int" -gt 60 ]]; then
+        echo -e "  ${GEAR} ${BOLD}High refresh rate VRR config${RESET}"
+        print_change "Set MangoHud FPS limit to ${refresh_int}, enable VRR"
+        print_reason "Cap FPS at display refresh rate to reduce power and tearing"
+        local mangohud_conf="${HOME}/.config/MangoHud/MangoHud.conf"
+        if [[ -f "$mangohud_conf" ]]; then
+            if grep -q "fps_limit=${refresh_int}" "$mangohud_conf" 2>/dev/null; then
+                print_result_optimal "MangoHud FPS limit already set"
+            else
+                if grep -q 'fps_limit=' "$mangohud_conf"; then
+                    sed -i "s/fps_limit=.*/fps_limit=${refresh_int}/" "$mangohud_conf"
+                else
+                    echo "fps_limit=${refresh_int}" >> "$mangohud_conf"
+                fi
+                print_result_applied "MangoHud FPS limit → ${refresh_int}"
+            fi
+        else
+            print_result_skipped "MangoHud FPS limit" "MangoHud config not found"
+        fi
+        print_divider
+
+        # VRR compositor
+        echo -e "  ${GEAR} ${BOLD}VRR compositor settings${RESET}"
+        print_change "Configure compositor for variable refresh rate"
+        print_reason "VRR eliminates tearing without the input lag of traditional VSync"
+        if [[ "$session" == "wayland" ]]; then
+            local kwin_rc="${HOME}/.config/kwinrc"
+            if [[ -f "$kwin_rc" ]] && grep -q 'VrrPolicy=1' "$kwin_rc" 2>/dev/null; then
+                print_result_optimal "KWin VRR already enabled"
+            elif [[ -f "$kwin_rc" ]]; then
+                if grep -q '\[Compositing\]' "$kwin_rc"; then
+                    sed -i '/\[Compositing\]/a VrrPolicy=1' "$kwin_rc"
+                else
+                    echo -e "\n[Compositing]\nVrrPolicy=1" >> "$kwin_rc"
+                fi
+                print_result_applied "KWin VRR policy enabled"
+            else
+                print_result_skipped "VRR compositor" "kwinrc not found"
+            fi
+        else
+            print_result_skipped "VRR compositor" "X11 session (use GPU driver VRR)"
+        fi
+    else
+        echo -e "  ${INFO} ${DIM}60Hz display — VRR optimizations not applicable${RESET}"
+        print_result_optimal "Standard 60Hz — no VRR changes needed"
+    fi
+}
+
+optimize_storage() {
+    print_section "Storage Optimizations"
+    local devices
+    devices=$(detect_storage_devices)
+    if [[ -z "$devices" ]]; then
+        print_detect "No block devices found"
+        print_result_skipped "Storage" "no devices detected"
+        return
+    fi
+    while IFS=: read -r name dtype; do
+        print_detect "${name}: ${dtype^^}"
+    done <<< "$devices"
+    print_divider
+
+    # TRIM timer
+    echo -e "  ${GEAR} ${BOLD}SSD TRIM timer${RESET}"
+    print_change "Enable fstrim.timer for periodic TRIM"
+    print_reason "Maintains SSD performance by cleaning up deleted blocks"
+    if systemctl is-active fstrim.timer &>/dev/null; then
+        print_result_optimal "fstrim.timer already active"
+    elif need_sudo "TRIM timer"; then
+        sudo systemctl enable --now fstrim.timer &>/dev/null \
+            && print_result_applied "fstrim.timer enabled" \
+            || print_result_skipped "fstrim.timer" "systemd service not available"
+    fi
+    print_divider
+
+    # Readahead
+    echo -e "  ${GEAR} ${BOLD}Block device readahead${RESET}"
+    print_change "Set readahead to 2048 sectors for game loading"
+    print_reason "Larger readahead prefetches more data, speeding up sequential game loads"
+    while IFS=: read -r name dtype; do
+        local ra_path="/sys/block/${name}/queue/read_ahead_kb"
+        if [[ -f "$ra_path" ]]; then
+            local current_ra
+            current_ra=$(cat "$ra_path" 2>/dev/null)
+            if [[ "$current_ra" == "2048" ]]; then
+                print_result_optimal "${name} readahead already 2048"
+            elif need_sudo "readahead"; then
+                echo "2048" | sudo tee "$ra_path" >/dev/null 2>&1 \
+                    && print_result_applied "${name} readahead: ${current_ra} → 2048" \
+                    || print_result_failed "${name} readahead" "write failed"
+            fi
+        fi
+    done <<< "$devices"
+}
+
+optimize_network() {
+    print_section "Network Optimizations"
+    local iface
+    iface=$(detect_network_interface)
+    print_detect "Primary interface: ${iface:-none}"
+    print_divider
+
+    if ! need_sudo "network sysctl"; then
+        return
+    fi
+
+    # TCP BBR
+    echo -e "  ${GEAR} ${BOLD}TCP BBR congestion control${RESET}"
+    print_change "Set net.ipv4.tcp_congestion_control=bbr"
+    print_reason "BBR reduces latency and improves throughput for game connections"
+    local current_cc
+    current_cc=$(get_current_sysctl net.ipv4.tcp_congestion_control)
+    if [[ "$current_cc" == "bbr" ]]; then
+        print_result_optimal "TCP BBR already active"
+    else
+        if lsmod 2>/dev/null | grep -q tcp_bbr || sudo modprobe tcp_bbr 2>/dev/null; then
+            write_sysctl "net.core.default_qdisc" "fq"
+            write_sysctl "net.ipv4.tcp_congestion_control" "bbr"
+            print_result_applied "TCP congestion: ${current_cc} → bbr"
+        else
+            print_result_skipped "TCP BBR" "bbr module not available"
+        fi
+    fi
+    print_divider
+
+    # Socket buffer sizes
+    echo -e "  ${GEAR} ${BOLD}Network buffer sizes${RESET}"
+    print_change "Increase rmem_max and wmem_max to 16MB"
+    print_reason "Larger buffers reduce packet drops in fast-paced multiplayer games"
+    local rmem wmem target="16777216"
+    rmem=$(get_current_sysctl net.core.rmem_max)
+    wmem=$(get_current_sysctl net.core.wmem_max)
+    if [[ "$rmem" -ge "$target" && "$wmem" -ge "$target" ]] 2>/dev/null; then
+        print_result_optimal "Network buffers already large enough"
+    else
+        write_sysctl "net.core.rmem_max" "$target"
+        write_sysctl "net.core.wmem_max" "$target"
+        write_sysctl "net.core.rmem_default" "1048576"
+        write_sysctl "net.core.wmem_default" "1048576"
+        print_result_applied "Network buffers increased to 16MB"
+    fi
+    print_divider
+
+    # Disable slow start after idle
+    echo -e "  ${GEAR} ${BOLD}TCP slow start after idle${RESET}"
+    print_change "Disable net.ipv4.tcp_slow_start_after_idle"
+    print_reason "Keeps game connections fast after brief idle periods"
+    local ssai
+    ssai=$(get_current_sysctl net.ipv4.tcp_slow_start_after_idle)
+    if [[ "$ssai" == "0" ]]; then
+        print_result_optimal "tcp_slow_start_after_idle already disabled"
+    else
+        write_sysctl "net.ipv4.tcp_slow_start_after_idle" "0"
+        print_result_applied "tcp_slow_start_after_idle disabled"
+    fi
+}
+
+###############################################################################
+# Commands
+###############################################################################
+cmd_scan() {
+    print_header
+    print_section "Hardware Scan Results"
+    echo ""
+
+    # GPU
+    local gpu_vendor gpu_model
+    gpu_vendor=$(detect_gpu_vendor)
+    gpu_model=$(detect_gpu_model "$gpu_vendor")
+    echo -e "  ${BOLD}GPU${RESET}"
+    echo -e "    Vendor:  ${GREEN}${gpu_vendor^^}${RESET}"
+    echo -e "    Model:   ${WHITE}${gpu_model}${RESET}"
+    if [[ "$gpu_vendor" == "nvidia" ]]; then
+        local vram
+        vram=$(detect_gpu_vram)
+        echo -e "    VRAM:    ${WHITE}${vram} MB${RESET}"
+        if command -v nvidia-smi &>/dev/null; then
+            local driver
+            driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+            echo -e "    Driver:  ${WHITE}${driver}${RESET}"
+        fi
+    fi
+    echo ""
+
+    # CPU
+    local cpu_vendor cpu_model cpu_cores
+    cpu_vendor=$(detect_cpu_vendor)
+    cpu_model=$(detect_cpu_model)
+    cpu_cores=$(detect_cpu_cores)
+    echo -e "  ${BOLD}CPU${RESET}"
+    echo -e "    Vendor:  ${GREEN}${cpu_vendor^^}${RESET}"
+    echo -e "    Model:   ${WHITE}${cpu_model}${RESET}"
+    echo -e "    Threads: ${WHITE}${cpu_cores}${RESET}"
+    if [[ "$cpu_vendor" == "intel" ]]; then
+        local gen
+        gen=$(detect_cpu_gen_intel)
+        [[ "$gen" -gt 0 ]] && echo -e "    Gen:     ${WHITE}${gen}th Gen${RESET}"
+    elif [[ "$cpu_vendor" == "amd" ]]; then
+        local zen
+        zen=$(detect_cpu_zen_gen)
+        echo -e "    Arch:    ${WHITE}${zen}${RESET}"
+    fi
+    echo ""
+
+    # RAM
+    local ram_total ram_speed
+    ram_total=$(detect_ram_total_mb)
+    ram_speed=$(detect_ram_speed)
+    echo -e "  ${BOLD}RAM${RESET}"
+    echo -e "    Total:   ${WHITE}$((ram_total / 1024)) GB${RESET}"
+    echo -e "    Speed:   ${WHITE}${ram_speed} MHz${RESET}"
+    echo ""
+
+    # Display
+    local refresh resolution session
+    refresh=$(detect_display_refresh)
+    resolution=$(detect_display_resolution)
+    session=$(detect_session_type)
+    echo -e "  ${BOLD}Display${RESET}"
+    echo -e "    Resolution:   ${WHITE}${resolution:-N/A}${RESET}"
+    echo -e "    Refresh Rate: ${WHITE}${refresh}Hz${RESET}"
+    echo -e "    Session:      ${WHITE}${session}${RESET}"
+    echo ""
+
+    # Storage
+    echo -e "  ${BOLD}Storage${RESET}"
+    local devices
+    devices=$(detect_storage_devices)
+    if [[ -n "$devices" ]]; then
+        while IFS=: read -r name dtype; do
+            local size
+            size=$(lsblk -d -n -o SIZE "/dev/${name}" 2>/dev/null || echo "?")
+            echo -e "    ${WHITE}${name}${RESET}: ${dtype^^} (${size})"
+        done <<< "$devices"
+    else
+        echo -e "    ${DIM}No block devices detected${RESET}"
+    fi
+    echo ""
+
+    # Network
+    local iface
+    iface=$(detect_network_interface)
+    echo -e "  ${BOLD}Network${RESET}"
+    echo -e "    Interface: ${WHITE}${iface:-none}${RESET}"
+    local cc
+    cc=$(get_current_sysctl net.ipv4.tcp_congestion_control)
+    echo -e "    TCP CC:    ${WHITE}${cc}${RESET}"
+    echo ""
+
+    log "scan completed"
+}
+
+cmd_tune() {
+    local auto=false
+    if [[ "${1:-}" == "--auto" ]]; then
+        auto=true
+    fi
+
+    print_header
+    echo -e "  ${BOLD}${WHITE}Preparing to optimize your system for gaming...${RESET}"
+    echo ""
+
+    # Initialize env file
+    ensure_dirs
+    if [[ ! -f "$GPU_ENV_FILE" ]]; then
+        echo "# 24HG Hardware Optimizer — GPU & gaming environment variables" > "$GPU_ENV_FILE"
+        echo "# Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$GPU_ENV_FILE"
+        echo "" >> "$GPU_ENV_FILE"
+    fi
+
+    # Backup existing state
+    if [[ -f "$SYSCTL_CONF" ]]; then
+        cp "$SYSCTL_CONF" "${BACKUP_DIR}/sysctl-$(date +%Y%m%d-%H%M%S).conf.bak"
+    fi
+    if [[ -f "$GPU_ENV_FILE" ]]; then
+        cp "$GPU_ENV_FILE" "${BACKUP_DIR}/gpu-env-$(date +%Y%m%d-%H%M%S).conf.bak"
+    fi
+
+    # Show what we'll do
+    local gpu_vendor
+    gpu_vendor=$(detect_gpu_vendor)
+    echo -e "  ${INFO} Detected GPU: ${BOLD}${gpu_vendor^^}${RESET}"
+    echo -e "  ${INFO} Detected CPU: ${BOLD}$(detect_cpu_vendor | tr '[:lower:]' '[:upper:]')${RESET}"
+    echo -e "  ${INFO} RAM: ${BOLD}$(($(detect_ram_total_mb) / 1024)) GB${RESET}"
+    echo -e "  ${INFO} Session: ${BOLD}$(detect_session_type)${RESET}"
+    echo ""
+    echo -e "  ${DIM}Optimizations will be applied for: GPU, CPU, RAM, Display, Storage, Network${RESET}"
+
+    confirm_proceed "$auto"
+    log "tune started (auto=${auto})"
+
+    # Run all optimizations
+    case "$gpu_vendor" in
+        nvidia) optimize_gpu_nvidia ;;
+        amd)    optimize_gpu_amd ;;
+        *)
+            print_section "GPU Optimizations"
+            print_detect "GPU vendor: ${gpu_vendor}"
+            print_result_skipped "GPU optimizations" "unsupported GPU vendor (${gpu_vendor})"
+            ;;
+    esac
+
+    optimize_cpu
+    optimize_ram
+    optimize_display
+    optimize_storage
+    optimize_network
+
+    # Save state
+    cat > "$STATE_FILE" <<SEOF
+{
+    "last_tune": "$(date -Iseconds)",
+    "gpu_vendor": "${gpu_vendor}",
+    "applied": ${APPLIED},
+    "already_optimal": ${ALREADY_OPTIMAL},
+    "skipped": ${SKIPPED},
+    "failed": ${FAILED},
+    "version": "${VERSION}"
+}
+SEOF
+
+    log "tune completed: applied=${APPLIED} optimal=${ALREADY_OPTIMAL} skipped=${SKIPPED} failed=${FAILED}"
+
+    # Shell integration hint
+    echo ""
+    echo -e "${BOLD}${CYAN}┌─────────────────────────────────────────────────────────────┐${RESET}"
+    echo -e "${BOLD}${CYAN}│${RESET} ${BOLD}${WHITE}Shell Integration${RESET}"
+    echo -e "${BOLD}${CYAN}└─────────────────────────────────────────────────────────────┘${RESET}"
+    if ! grep -q '24hg/gpu-env.conf' "${HOME}/.bashrc" 2>/dev/null \
+       && ! grep -q '24hg/gpu-env.conf' "${HOME}/.zshrc" 2>/dev/null \
+       && ! grep -q '24hg/gpu-env.conf' "${HOME}/.config/environment.d/"* 2>/dev/null; then
+        echo -e "  ${WARN} ${YELLOW}Add this to your shell profile to load GPU env vars:${RESET}"
+        echo -e "  ${DIM}echo 'source ~/.config/24hg/gpu-env.conf' >> ~/.bashrc${RESET}"
+        echo ""
+        echo -e "  ${DIM}Or for systemd user environment:${RESET}"
+        echo -e "  ${DIM}mkdir -p ~/.config/environment.d${RESET}"
+        echo -e "  ${DIM}grep '^export' ~/.config/24hg/gpu-env.conf | sed 's/export //' > ~/.config/environment.d/24hg-gpu.conf${RESET}"
+    else
+        echo -e "  ${CHECK} Shell integration already configured"
+    fi
+
+    print_summary
+}
+
+cmd_report() {
+    print_header
+    print_section "Detailed Hardware Report"
+    echo ""
+
+    local report_file="${HG24_CONFIG_DIR}/hw-report-$(date +%Y%m%d-%H%M%S).txt"
+
+    {
+        echo "======================================"
+        echo "24HG Hardware Report"
+        echo "Generated: $(date)"
+        echo "Hostname: $(hostname)"
+        echo "Kernel: $(uname -r)"
+        echo "======================================"
+        echo ""
+
+        echo "=== GPU ==="
+        local gpu_vendor
+        gpu_vendor=$(detect_gpu_vendor)
+        echo "Vendor: ${gpu_vendor}"
+        echo "Model: $(detect_gpu_model "$gpu_vendor")"
+        if [[ "$gpu_vendor" == "nvidia" ]]; then
+            echo "VRAM: $(detect_gpu_vram) MB"
+            if command -v nvidia-smi &>/dev/null; then
+                echo ""
+                echo "--- nvidia-smi ---"
+                nvidia-smi 2>/dev/null || echo "(nvidia-smi failed)"
+            fi
+        fi
+        if [[ "$gpu_vendor" == "amd" ]]; then
+            local dpm="/sys/class/drm/card0/device/power_dpm_force_performance_level"
+            [[ -f "$dpm" ]] && echo "DPM Level: $(cat "$dpm" 2>/dev/null)"
+        fi
+        echo ""
+
+        echo "=== CPU ==="
+        echo "Vendor: $(detect_cpu_vendor)"
+        echo "Model: $(detect_cpu_model)"
+        echo "Threads: $(detect_cpu_cores)"
+        echo "Governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo 'N/A')"
+        echo "Driver: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null || echo 'N/A')"
+        echo ""
+
+        echo "=== RAM ==="
+        echo "Total: $(($(detect_ram_total_mb) / 1024)) GB"
+        echo "Speed: $(detect_ram_speed) MHz"
+        echo "Swappiness: $(get_current_sysctl vm.swappiness)"
+        echo "VFS Cache Pressure: $(get_current_sysctl vm.vfs_cache_pressure)"
+        echo "Dirty Ratio: $(get_current_sysctl vm.dirty_ratio)"
+        echo "Dirty BG Ratio: $(get_current_sysctl vm.dirty_background_ratio)"
+        echo ""
+        echo "--- free -h ---"
+        free -h 2>/dev/null || echo "(free not available)"
+        echo ""
+
+        echo "=== Display ==="
+        echo "Resolution: $(detect_display_resolution)"
+        echo "Refresh Rate: $(detect_display_refresh)Hz"
+        echo "Session: $(detect_session_type)"
+        echo ""
+
+        echo "=== Storage ==="
+        local devices
+        devices=$(detect_storage_devices)
+        if [[ -n "$devices" ]]; then
+            while IFS=: read -r name dtype; do
+                local sched ra
+                sched=$(cat "/sys/block/${name}/queue/scheduler" 2>/dev/null | grep -oP '\[\K[^\]]+' || echo "N/A")
+                ra=$(cat "/sys/block/${name}/queue/read_ahead_kb" 2>/dev/null || echo "N/A")
+                echo "${name}: ${dtype^^} | scheduler=${sched} | readahead=${ra}KB"
+            done <<< "$devices"
+        fi
+        echo ""
+        echo "--- lsblk ---"
+        lsblk 2>/dev/null || echo "(lsblk not available)"
+        echo ""
+        echo "TRIM timer: $(systemctl is-active fstrim.timer 2>/dev/null || echo 'N/A')"
+        echo ""
+
+        echo "=== Network ==="
+        echo "Interface: $(detect_network_interface)"
+        echo "TCP CC: $(get_current_sysctl net.ipv4.tcp_congestion_control)"
+        echo "rmem_max: $(get_current_sysctl net.core.rmem_max)"
+        echo "wmem_max: $(get_current_sysctl net.core.wmem_max)"
+        echo "slow_start_after_idle: $(get_current_sysctl net.ipv4.tcp_slow_start_after_idle)"
+        echo ""
+
+        echo "=== 24HG Config Files ==="
+        echo "GPU env: ${GPU_ENV_FILE}"
+        if [[ -f "$GPU_ENV_FILE" ]]; then
+            echo "--- contents ---"
+            cat "$GPU_ENV_FILE"
+        fi
+        echo ""
+        echo "Sysctl: ${SYSCTL_CONF}"
+        if [[ -f "$SYSCTL_CONF" ]]; then
+            echo "--- contents ---"
+            cat "$SYSCTL_CONF"
+        fi
+        echo ""
+
+        if [[ -f "$STATE_FILE" ]]; then
+            echo "=== Last Optimization ==="
+            cat "$STATE_FILE"
+            echo ""
+        fi
+
+        echo "======================================"
+        echo "End of Report"
+        echo "======================================"
+    } | tee "$report_file"
+
+    echo ""
+    echo -e "${CHECK} ${GREEN}Report saved to:${RESET} ${report_file}"
+    log "report generated: ${report_file}"
+}
+
+cmd_reset() {
+    print_header
+    print_section "Reset to Defaults"
+    echo ""
+    echo -e "  ${WARN} ${YELLOW}This will revert all 24HG hardware optimizations:${RESET}"
+    echo -e "    ${ARROW} Remove ${SYSCTL_CONF}"
+    echo -e "    ${ARROW} Remove ${GPU_ENV_FILE}"
+    echo -e "    ${ARROW} Reset sysctl values to kernel defaults"
+    echo -e "    ${ARROW} Remove 24HG-generated Xorg/modprobe configs"
+    echo ""
+
+    read -rp "$(echo -e "${BOLD}Are you sure? [y/N]:${RESET} ")" answer
+    case "$answer" in
+        [yY]|[yY][eE][sS]) ;;
+        *) echo -e "${YELLOW}Aborted.${RESET}"; exit 0 ;;
+    esac
+
+    # Backup before removing
+    ensure_dirs
+    [[ -f "$SYSCTL_CONF" ]] && cp "$SYSCTL_CONF" "${BACKUP_DIR}/sysctl-reset-$(date +%Y%m%d-%H%M%S).conf.bak"
+    [[ -f "$GPU_ENV_FILE" ]] && cp "$GPU_ENV_FILE" "${BACKUP_DIR}/gpu-env-reset-$(date +%Y%m%d-%H%M%S).conf.bak"
+
+    # Remove sysctl
+    if [[ -f "$SYSCTL_CONF" ]]; then
+        if need_sudo "sysctl reset"; then
+            sudo rm -f "$SYSCTL_CONF"
+            # Reload defaults
+            sudo sysctl --system &>/dev/null || true
+            echo -e "  ${CHECK} Removed ${SYSCTL_CONF} and reloaded defaults"
+        fi
+    else
+        echo -e "  ${WARN} ${SYSCTL_CONF} not found"
+    fi
+
+    # Remove GPU env
+    if [[ -f "$GPU_ENV_FILE" ]]; then
+        rm -f "$GPU_ENV_FILE"
+        echo -e "  ${CHECK} Removed ${GPU_ENV_FILE}"
+    else
+        echo -e "  ${WARN} ${GPU_ENV_FILE} not found"
+    fi
+
+    # Remove 24HG Xorg/modprobe configs
+    local hg24_files=(
+        "/etc/X11/xorg.conf.d/20-24hg-nvidia-coolbits.conf"
+        "/etc/modprobe.d/24hg-nvidia-drm.conf"
+        "/etc/modprobe.d/24hg-amd-pstate.conf"
+    )
+    for f in "${hg24_files[@]}"; do
+        if [[ -f "$f" ]]; then
+            if need_sudo "remove ${f}"; then
+                sudo rm -f "$f"
+                echo -e "  ${CHECK} Removed ${f}"
+            fi
+        fi
+    done
+
+    # Remove state
+    rm -f "$STATE_FILE"
+
+    echo ""
+    echo -e "  ${CHECK} ${GREEN}All 24HG hardware optimizations have been reverted.${RESET}"
+    echo -e "  ${INFO} ${DIM}Backups saved in ${BACKUP_DIR}${RESET}"
+    echo -e "  ${WARN} ${YELLOW}A reboot is recommended to fully apply defaults.${RESET}"
+    log "reset completed"
+}
+
+cmd_status() {
+    print_header
+    print_section "Current Optimization Status"
+    echo ""
+
+    # Last tune info
+    if [[ -f "$STATE_FILE" ]]; then
+        local last_tune applied optimal skipped failed version
+        last_tune=$(grep '"last_tune"' "$STATE_FILE" 2>/dev/null | grep -oP '"\d{4}-[^"]+' | tr -d '"')
+        applied=$(grep '"applied"' "$STATE_FILE" 2>/dev/null | grep -oP '\d+')
+        optimal=$(grep '"already_optimal"' "$STATE_FILE" 2>/dev/null | grep -oP '\d+')
+        skipped=$(grep '"skipped"' "$STATE_FILE" 2>/dev/null | grep -oP '\d+')
+        failed=$(grep '"failed"' "$STATE_FILE" 2>/dev/null | grep -oP '\d+')
+        version=$(grep '"version"' "$STATE_FILE" 2>/dev/null | grep -oP '[\d.]+')
+        echo -e "  ${BOLD}Last optimization:${RESET} ${last_tune:-unknown}"
+        echo -e "  ${BOLD}Version:${RESET}            ${version:-unknown}"
+        echo -e "  ${CHECK} Applied: ${GREEN}${applied:-0}${RESET} | ${WARN} Optimal: ${YELLOW}${optimal:-0}${RESET} | ${CROSS} Skipped: ${RED}${skipped:-0}${RESET} | Failed: ${RED}${failed:-0}${RESET}"
+    else
+        echo -e "  ${WARN} ${YELLOW}No optimization has been run yet.${RESET}"
+        echo -e "  ${DIM}Run '24hg-hw-optimizer tune' to get started.${RESET}"
+    fi
+    echo ""
+
+    # Check config files
+    echo -e "  ${BOLD}Configuration Files:${RESET}"
+    if [[ -f "$SYSCTL_CONF" ]]; then
+        local sysctl_count
+        sysctl_count=$(grep -c '=' "$SYSCTL_CONF" 2>/dev/null || echo "0")
+        echo -e "    ${CHECK} ${SYSCTL_CONF} (${sysctl_count} settings)"
+    else
+        echo -e "    ${CROSS} ${SYSCTL_CONF} — not created"
+    fi
+
+    if [[ -f "$GPU_ENV_FILE" ]]; then
+        local env_count
+        env_count=$(grep -c '^export' "$GPU_ENV_FILE" 2>/dev/null || echo "0")
+        echo -e "    ${CHECK} ${GPU_ENV_FILE} (${env_count} vars)"
+    else
+        echo -e "    ${CROSS} ${GPU_ENV_FILE} — not created"
+    fi
+    echo ""
+
+    # Check key sysctl values
+    echo -e "  ${BOLD}Active Kernel Tuning:${RESET}"
+    local params=(
+        "vm.swappiness:10"
+        "vm.vfs_cache_pressure:50"
+        "vm.dirty_ratio:20"
+        "vm.dirty_background_ratio:5"
+        "net.ipv4.tcp_congestion_control:bbr"
+        "net.ipv4.tcp_slow_start_after_idle:0"
+    )
+    for entry in "${params[@]}"; do
+        local key="${entry%%:*}" target="${entry##*:}"
+        local current
+        current=$(get_current_sysctl "$key")
+        if [[ "$current" == "$target" ]]; then
+            printf "    ${CHECK} %-42s ${GREEN}%s${RESET} (target: %s)\n" "$key" "$current" "$target"
+        else
+            printf "    ${CROSS} %-42s ${RED}%s${RESET} (target: %s)\n" "$key" "$current" "$target"
+        fi
+    done
+    echo ""
+
+    # GPU vendor status
+    local gpu_vendor
+    gpu_vendor=$(detect_gpu_vendor)
+    echo -e "  ${BOLD}GPU Status (${gpu_vendor^^}):${RESET}"
+    case "$gpu_vendor" in
+        nvidia)
+            for var in __GL_GSYNC_ALLOWED __GL_VRR_ALLOWED PROTON_ENABLE_NVAPI DXVK_ENABLE_NVAPI; do
+                local val="${!var:-unset}"
+                if [[ "$val" == "1" ]]; then
+                    echo -e "    ${CHECK} ${var}=${GREEN}${val}${RESET}"
+                else
+                    echo -e "    ${CROSS} ${var}=${RED}${val}${RESET}"
+                fi
+            done
+            ;;
+        amd)
+            for var in AMD_VULKAN_ICD RADV_PERFTEST; do
+                local val="${!var:-unset}"
+                if [[ "$val" != "unset" ]]; then
+                    echo -e "    ${CHECK} ${var}=${GREEN}${val}${RESET}"
+                else
+                    echo -e "    ${CROSS} ${var}=${RED}${val}${RESET}"
+                fi
+            done
+            ;;
+    esac
+    echo ""
+
+    # Log file
+    if [[ -f "$LOG_FILE" ]]; then
+        local log_lines
+        log_lines=$(wc -l < "$LOG_FILE")
+        echo -e "  ${BOLD}Log:${RESET} ${LOG_FILE} (${log_lines} entries)"
+        echo -e "  ${DIM}Last 3 entries:${RESET}"
+        tail -3 "$LOG_FILE" | while read -r line; do
+            echo -e "    ${DIM}${line}${RESET}"
+        done
+    fi
+    echo ""
+
+    log "status checked"
+}
+
+###############################################################################
+# Main
+###############################################################################
+usage() {
+    print_header
+    echo -e "  ${BOLD}Usage:${RESET} 24hg-hw-optimizer <command> [options]"
+    echo ""
+    echo -e "  ${BOLD}Commands:${RESET}"
+    echo -e "    ${GREEN}scan${RESET}           Detect all hardware and show summary"
+    echo -e "    ${GREEN}tune${RESET}           Apply all optimizations (interactive)"
+    echo -e "    ${GREEN}tune --auto${RESET}    Apply all optimizations non-interactively"
+    echo -e "    ${GREEN}report${RESET}         Generate a detailed hardware report"
+    echo -e "    ${GREEN}reset${RESET}          Revert all optimizations to defaults"
+    echo -e "    ${GREEN}status${RESET}         Show current optimization status"
+    echo ""
+    echo -e "  ${BOLD}Config files:${RESET}"
+    echo -e "    ${DIM}${GPU_ENV_FILE}${RESET}"
+    echo -e "    ${DIM}${SYSCTL_CONF}${RESET}"
+    echo -e "    ${DIM}${LOG_FILE}${RESET}"
+    echo ""
+}
+
+main() {
+    ensure_dirs
+
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        scan)    cmd_scan ;;
+        tune)    cmd_tune "${1:-}" ;;
+        report)  cmd_report ;;
+        reset)   cmd_reset ;;
+        status)  cmd_status ;;
+        --help|-h|help)
+            usage ;;
+        "")
+            usage
+            exit 1 ;;
+        *)
+            echo -e "${RED}Unknown command: ${cmd}${RESET}"
+            echo "Run '24hg-hw-optimizer --help' for usage."
+            exit 1 ;;
+    esac
+}
+
+main "$@"

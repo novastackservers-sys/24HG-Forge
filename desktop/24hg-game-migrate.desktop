@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Game Migrator
+Comment=Migrate games between drives
+Exec=/usr/bin/24hg-game-migrate
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Game;Utility;
+Keywords=migrate;move;drive;transfer;game;

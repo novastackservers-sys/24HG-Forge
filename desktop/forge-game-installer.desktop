@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Game Installer
-Comment=Unified game installer
-Exec=/usr/bin/forge-game-installer
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=Game;PackageManager;
-Keywords=game;install;steam;epic;gog;

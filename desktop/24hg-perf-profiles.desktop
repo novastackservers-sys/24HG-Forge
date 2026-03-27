@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Performance Profiles
+Comment=Per-game performance tuning
+Exec=/usr/bin/24hg-perf-profiles
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Game;System;
+Keywords=performance;profile;tuning;fps;optimization;

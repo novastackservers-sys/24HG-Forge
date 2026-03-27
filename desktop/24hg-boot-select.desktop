@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Boot Selector
+Comment=Switch Desktop/Game mode
+Exec=/usr/bin/24hg-boot-select
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=System;
+Keywords=boot;mode;desktop;game;switch;

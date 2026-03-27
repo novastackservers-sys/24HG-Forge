@@ -1,0 +1,67 @@
+#!/bin/bash
+# 24HG Hub Launcher — Branded Chromium kiosk pointing at hub.24hgaming.com
+# Features: offline detection, Gamescope awareness, Wayland-native
+
+HUB_URL="https://hub.24hgaming.com"
+OFFLINE_PAGE="file:///usr/share/24hg/offline.html"
+APP_NAME="24HG Hub"
+USER_DATA_DIR="${HOME}/.config/24hg-hub"
+
+# Ensure data directory exists
+mkdir -p "${USER_DATA_DIR}"
+
+# ── Connectivity check ──
+check_online() {
+    # Quick DNS + HTTP check (2 second timeout)
+    curl -sf --max-time 2 -o /dev/null "https://hub.24hgaming.com/api/health" 2>/dev/null && return 0
+    # Fallback: raw connectivity
+    ping -c 1 -W 2 8.8.8.8 &>/dev/null && return 0
+    return 1
+}
+
+# Use offline page if no connection
+if check_online; then
+    TARGET_URL="${HUB_URL}"
+else
+    TARGET_URL="${OFFLINE_PAGE}"
+fi
+
+# Detect if running in Gamescope session
+IN_GAMESCOPE=false
+if [ -n "${GAMESCOPE_WAYLAND_DISPLAY}" ] || [ "${XDG_CURRENT_DESKTOP}" = "gamescope" ]; then
+    IN_GAMESCOPE=true
+fi
+
+# Build Chromium flags
+CHROME_FLAGS=(
+    "--app=${TARGET_URL}"
+    "--user-data-dir=${USER_DATA_DIR}"
+    "--class=24hg-hub"
+    "--no-first-run"
+    "--no-default-browser-check"
+    "--disable-translate"
+    "--disable-sync"
+    "--enable-features=UseOzonePlatform,WebRTCPipeWireCapturer,VaapiVideoDecodeLinuxGL"
+    "--enable-gpu-rasterization"
+    "--enable-zero-copy"
+    "--force-dark-mode"
+    "--disable-background-timer-throttling"
+    "--disable-renderer-backgrounding"
+)
+
+# In Gamescope mode, go fullscreen and optimize for gamepad
+if [ "${IN_GAMESCOPE}" = true ]; then
+    CHROME_FLAGS+=(
+        "--start-fullscreen"
+        "--kiosk"
+        "--ozone-platform=wayland"
+    )
+else
+    CHROME_FLAGS+=(
+        "--start-maximized"
+        "--ozone-platform-hint=auto"
+    )
+fi
+
+# Launch Chromium
+exec chromium-browser "${CHROME_FLAGS[@]}" "$@" 2>/dev/null

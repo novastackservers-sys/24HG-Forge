@@ -1,9 +1,9 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=24HG Forge Tools
+Name=24HG Tools
 Comment=Gaming tools and diagnostics
-Exec=konsole -e bash -c 'echo "=== 24HG Forge Gaming Tools ==="; echo ""; echo "  forge-performance  - Switch performance profile"; echo "  forge-server-status - Live server status"; echo "  forge-proton-fix   - Fix game launch issues"; echo "  forge-benchmark    - System benchmark"; echo "  forge-diag         - Full diagnostics"; echo "  forge-achievements - Your achievements"; echo "  forge-game-timer   - Playtime stats"; echo "  forge-tips         - Gaming tips"; echo ""; echo "Type any command to get started."; echo ""; exec bash'
+Exec=konsole -e bash -c 'echo "=== 24HG Gaming Tools ==="; echo ""; echo "  24hg-performance  - Switch performance profile"; echo "  24hg-server-status - Live server status"; echo "  24hg-proton-fix   - Fix game launch issues"; echo "  24hg-benchmark    - System benchmark"; echo "  24hg-diag         - Full diagnostics"; echo "  24hg-achievements - Your achievements"; echo "  24hg-game-timer   - Playtime stats"; echo "  24hg-tips         - Gaming tips"; echo ""; echo "Type any command to get started."; echo ""; exec bash'
 Icon=utilities-terminal
 Terminal=false
 Categories=System;

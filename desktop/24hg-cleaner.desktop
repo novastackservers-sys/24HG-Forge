@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG System Cleaner
+Comment=Clean gaming junk files
+Exec=/usr/bin/24hg-cleaner
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=System;Utility;
+Keywords=clean;cache;junk;shader;temp;

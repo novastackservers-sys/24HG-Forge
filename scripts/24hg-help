@@ -1,0 +1,462 @@
+#!/usr/bin/env bash
+# 24HG Help — Quick reference for all 24HG commands and features.
+#
+# Usage: 24hg-help [topic]
+#   (no args)        Show categorized command overview
+#   getting-started  First steps after install
+#   gaming           Game launching, compatibility, mods
+#   connect          Multiplayer, servers, voice chat
+#   economy          Shop, VIP perks, rewards
+#   performance      FPS tuning, benchmarks, thermals
+#   streaming        Go live on Twitch/YouTube
+#   recording        Clips, replays, screenshots
+#   customization    Themes, wallpapers, overlays
+#   hardware         Peripherals, display, audio, maintenance
+#   smart            Game automation, system intelligence, networking
+#   social           Community, feed, invites
+#   troubleshooting  Fixes for common issues
+
+set -euo pipefail
+
+# ── Colors ──
+
+BOLD='\033[1m'
+DIM='\033[2m'
+CYAN='\033[36m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+MAGENTA='\033[35m'
+BLUE='\033[34m'
+WHITE='\033[97m'
+RESET='\033[0m'
+
+TOPIC="${1:-}"
+
+# ── Helpers ──
+
+header() {
+  echo ""
+  echo -e "${BOLD}${CYAN}═══ $1 ═══${RESET}"
+  echo ""
+}
+
+cmd() {
+  printf "  ${GREEN}%-28s${RESET} %s\n" "$1" "$2"
+}
+
+tip() {
+  echo -e "  ${YELLOW}TIP:${RESET} $1"
+}
+
+section() {
+  echo -e "  ${BOLD}${WHITE}$1${RESET}"
+}
+
+banner() {
+  echo ""
+  echo -e "${BOLD}${MAGENTA}  ╔═══════════════════════════════════════════════════╗${RESET}"
+  echo -e "${BOLD}${MAGENTA}  ║${RESET}  ${BOLD}24HG${RESET} — Gaming Linux by 24 Hour Gaming   ${BOLD}${MAGENTA}║${RESET}"
+  echo -e "${BOLD}${MAGENTA}  ╚═══════════════════════════════════════════════════╝${RESET}"
+}
+
+# ── Topic: Getting Started ──
+
+topic_getting_started() {
+  header "Getting Started"
+  echo -e "  Welcome to 24HG! Here's how to get going fast."
+  echo ""
+  section "First Steps"
+  cmd "24hg-first-boot"       "Run the setup wizard (auto-runs on first login)"
+  cmd "24hg-tour"             "Interactive tour of 24HG features"
+  cmd "24hg-settings"         "Open 24HG settings panel"
+  cmd "24hg-tips"             "Show a random gaming tip"
+  cmd "24hg-neofetch"         "System info with 24HG branding"
+  echo ""
+  section "Installing Games"
+  cmd "steam"                  "Launch Steam (pre-installed)"
+  cmd "lutris"                 "Launch Lutris for non-Steam games"
+  cmd "24hg-games"            "Browse and launch installed games"
+  cmd "24hg-game-setup"       "Guided setup for a specific game"
+  echo ""
+  tip "Run ${GREEN}24hg-rig-score${RESET} to see how your hardware stacks up."
+}
+
+# ── Topic: Gaming ──
+
+topic_gaming() {
+  header "Gaming"
+  section "Launch & Manage"
+  cmd "24hg-games"            "Browse and launch your games"
+  cmd "24hg-launch <game>"    "Launch a game with optimized settings"
+  cmd "24hg-smart-launch"     "Auto-detect best settings for a game"
+  cmd "24hg-game-profiles"    "Per-game performance profiles"
+  echo ""
+  section "Compatibility"
+  cmd "24hg-compat <game>"    "Check Proton/Wine compatibility"
+  cmd "24hg-game-compat"      "Scan all games for issues"
+  cmd "24hg-proton-pick"      "Choose best Proton version for a game"
+  cmd "24hg-proton-fix"       "Fix common Proton issues"
+  cmd "24hg-prefix <game>"    "Manage Wine prefixes"
+  cmd "24hg-windows-import"   "Import games from a Windows install"
+  echo ""
+  section "Mods & Saves"
+  cmd "24hg-mods"             "Browse and install mods"
+  cmd "24hg-mod-manager"      "Manage installed mods"
+  cmd "24hg-save-manager"     "Backup/restore game saves"
+  cmd "24hg-cloud-saves"      "Sync saves across devices"
+  cmd "24hg-game-backup"      "Full game backup/restore"
+  echo ""
+  section "Retro & VR"
+  cmd "24hg-retro"            "Retro game emulation setup"
+  cmd "24hg-vr"               "VR headset setup and launch"
+  echo ""
+  tip "Use ${GREEN}24hg-shader-cache${RESET} to pre-compile shaders and avoid stuttering."
+}
+
+# ── Topic: Connect ──
+
+topic_connect() {
+  header "Connect — Multiplayer & Social"
+  section "Servers"
+  cmd "24hg-server-status"    "Check 24HG server status"
+  cmd "24hg-host"             "Host a game server locally"
+  cmd "24hg-lan-party"        "Set up a LAN party session"
+  cmd "24hg-ping-optimizer"   "Optimize network for low latency"
+  echo ""
+  section "Communication"
+  cmd "24hg-voice"            "Push-to-talk voice chat"
+  cmd "24hg-discord-rpc"      "Enable Discord Rich Presence"
+  cmd "24hg-discord-fix"      "Fix Discord audio/screen issues"
+  cmd "24hg-discord-screen"   "Discord screen share helper"
+  cmd "24hg-invite"           "Invite friends to your session"
+  echo ""
+  section "Network"
+  cmd "24hg-vpn"              "Discovery VPN — find gamers worldwide via virtual LAN"
+  cmd "24hg-vpn status"       "Show VPN connection status and online peers"
+  cmd "24hg-vpn disconnect"   "Disconnect from the Discovery VPN"
+  cmd "24hg-firewall"         "Manage game firewall rules"
+  cmd "24hg-netguard"         "Network security monitor"
+  echo ""
+  tip "Use ${GREEN}24hg-ping-optimizer${RESET} before competitive matches for best latency."
+}
+
+# ── Topic: Economy ──
+
+topic_economy() {
+  header "Economy — Shop, VIP & Rewards"
+  section "Perks & Rewards"
+  cmd "24hg-perks"            "View your current perks and tier"
+  cmd "24hg-deals"            "Current deals and promotions"
+  cmd "24hg-challenges"       "Daily/weekly gaming challenges"
+  cmd "24hg-achievements"     "View your 24HG achievements"
+  echo ""
+  section "Community"
+  cmd "24hgaming.com/shop"     "24HG web shop (VIP tiers, merch)"
+  cmd "24hgaming.com/vip"      "VIP membership details"
+  echo ""
+  tip "Complete daily challenges to earn community points."
+}
+
+# ── Topic: Performance ──
+
+topic_performance() {
+  header "Performance"
+  section "Monitoring"
+  cmd "24hg-overlay"          "Toggle MangoHud FPS overlay (F12)"
+  cmd "24hg-benchmark"        "Run a GPU/CPU benchmark"
+  cmd "24hg-benchmark-compare" "Compare benchmark results"
+  cmd "24hg-rig-score"        "Rate your hardware"
+  cmd "24hg-perflog"          "Log performance over time"
+  echo ""
+  section "Tuning"
+  cmd "24hg-performance"      "Auto-tune system for gaming"
+  cmd "24hg-hw-optimizer"     "Hardware-specific optimizations"
+  cmd "24hg-thermal"          "Fan curves and thermal management"
+  cmd "24hg-hdr"              "HDR display setup"
+  cmd "24hg-display"          "Resolution, refresh rate, scaling"
+  cmd "24hg-shader-cache"     "Pre-compile shader caches"
+  cmd "24hg-focus"            "Gaming focus mode (kill background apps)"
+  echo ""
+  section "Laptop"
+  cmd "24hg-laptop"           "Laptop-specific tweaks (hybrid GPU, etc.)"
+  cmd "24hg-nvidia-wayland"   "Fix NVIDIA + Wayland issues"
+  echo ""
+  tip "Enable ${GREEN}24hg-focus${RESET} to kill background processes during gaming."
+}
+
+# ── Topic: Streaming ──
+
+topic_streaming() {
+  header "Streaming"
+  section "Go Live"
+  cmd "24hg-go-live"          "One-click stream to Twitch/YouTube"
+  cmd "24hg-stream"           "Advanced streaming setup"
+  cmd "24hg-obs-setup"        "Configure OBS Studio for 24HG"
+  cmd "24hg-sunshine-setup"   "Set up Sunshine for game streaming"
+  echo ""
+  section "Extras"
+  cmd "24hg-overlay"          "On-screen overlay with stats"
+  cmd "24hg-audio"            "Audio routing for streams"
+  cmd "24hg-creator-kit"      "Overlays, alerts, and assets for creators"
+  echo ""
+  tip "Use ${GREEN}24hg-go-live${RESET} for quick streaming — it handles scenes and audio automatically."
+}
+
+# ── Topic: Recording ──
+
+topic_recording() {
+  header "Recording — Clips, Replays & Screenshots"
+  section "Capture"
+  cmd "24hg-clip"             "Save last 30s of gameplay"
+  cmd "24hg-record"           "Start/stop recording"
+  cmd "24hg-replay"           "Replay buffer management"
+  cmd "24hg-screenshot"       "Take a screenshot (also: PrintScreen)"
+  cmd "24hg-highlights"       "Auto-capture kill highlights"
+  echo ""
+  section "Manage"
+  cmd "24hg-gallery"          "Browse your captures"
+  cmd "24hg-mirror"           "Mirror captures to cloud/NAS"
+  cmd "24hg-nas"              "NAS storage setup for media"
+  echo ""
+  tip "Press ${GREEN}Ctrl+Shift+R${RESET} to clip the last 30 seconds at any time."
+}
+
+# ── Topic: Customization ──
+
+topic_customization() {
+  header "Customization"
+  section "Look & Feel"
+  cmd "24hg-themes"           "Browse and apply desktop themes"
+  cmd "24hg-wallpaper"        "Set wallpaper (static or live)"
+  cmd "24hg-live-wallpaper"   "Animated wallpaper engine"
+  cmd "24hg-sounds"           "System sound themes"
+  cmd "24hg-nightlight"       "Blue light filter schedule"
+  echo ""
+  section "Gaming UI"
+  cmd "24hg-overlay"          "Customize the in-game overlay"
+  cmd "24hg-notify-style"     "Notification style and position"
+  cmd "24hg-lock-info"        "Lock screen gaming stats"
+  echo ""
+  section "Input"
+  cmd "24hg-controller"       "Controller setup and mapping"
+  cmd "24hg-controllers"      "Multi-controller management"
+  cmd "24hg-input"            "Keyboard/mouse tuning"
+  cmd "24hg-splitscreen"      "Split-screen multi-player setup"
+  echo ""
+  tip "Try ${GREEN}24hg-themes gaming-dark${RESET} for a low-distraction gaming theme."
+}
+
+# ── Topic: Hardware ──
+
+topic_hardware() {
+  header "Hardware Control"
+  section "Peripherals"
+  cmd "24hg-peripherals"       "Mouse DPI, RGB lighting, macros"
+  cmd "24hg-input-lag"         "Measure and optimize input latency"
+  cmd "24hg-controller"        "Controller setup and mapping"
+  cmd "24hg-controllers"       "Multi-controller management"
+  echo ""
+  section "Display & GPU"
+  cmd "24hg-display"           "Resolution, refresh rate, scaling"
+  cmd "24hg-custom-res"        "Create custom display resolutions"
+  cmd "24hg-dual-gpu"          "Switch between integrated/dedicated GPU"
+  cmd "24hg-hdr"               "HDR display setup wizard"
+  cmd "24hg-driver-mgr"        "GPU driver management and updates"
+  echo ""
+  section "Audio & Power"
+  cmd "24hg-audio-router"      "Per-app audio routing"
+  cmd "24hg-audio"             "Low-latency audio setup"
+  cmd "24hg-power-plan"        "Gaming/balanced/powersave modes"
+  cmd "24hg-laptop"            "Laptop-specific tweaks"
+  echo ""
+  section "Maintenance"
+  cmd "24hg-cleaner"           "Clean shader caches, logs, junk files"
+  cmd "24hg-boot-speed"        "Analyze and optimize boot time"
+  cmd "24hg-hw-scout"          "Hardware health monitoring"
+  cmd "24hg-thermal"           "Fan curves and thermal management"
+  echo ""
+  tip "Run ${GREEN}24hg-peripherals scan${RESET} to detect all connected devices."
+}
+
+# ── Topic: Smart OS ──
+
+topic_smart() {
+  header "Smart Gaming OS"
+  section "Game Automation"
+  cmd "24hg-game-ready"        "Auto-optimize new game installs"
+  cmd "24hg-perf-profiles"     "Per-game performance profiles"
+  cmd "24hg-smart-launch"      "Auto-detect best settings per game"
+  cmd "24hg-game-installer"    "Install from Steam, Epic, GOG, Itch"
+  echo ""
+  section "System Intelligence"
+  cmd "24hg-smart-updates"     "Updates wait until you stop gaming"
+  cmd "24hg-quick-resume"      "Save/restore full desktop session"
+  cmd "24hg-hw-scout"          "Continuous hardware monitoring"
+  cmd "24hg-tray-dashboard"    "System stats in the tray"
+  echo ""
+  section "Networking & Migration"
+  cmd "24hg-net-optimizer"     "Optimize network for gaming"
+  cmd "24hg-lan-mode"          "LAN party discovery and play"
+  cmd "24hg-game-migrate"      "Move games between drives"
+  cmd "24hg-one-click-server"  "Host a game server instantly"
+  echo ""
+  section "Security & Modes"
+  cmd "24hg-sandbox"           "Run games in a sandbox"
+  cmd "24hg-boot-select"       "Switch Desktop/Game Mode"
+  cmd "24hg-mod-manager"       "Install and manage game mods"
+  echo ""
+  tip "24HG runs ${GREEN}24hg-game-ready${RESET} automatically when you install a new game."
+}
+
+# ── Topic: Social ──
+
+topic_social() {
+  header "Social — 24HG Community"
+  section "Community"
+  cmd "24hg-feed"             "24HG community activity feed"
+  cmd "24hg-digest"           "Weekly gaming digest"
+  cmd "24hg-invite"           "Invite friends to 24HG"
+  cmd "24hg-tournament"       "Browse and join tournaments"
+  cmd "24hg-radio"            "24HG community radio"
+  echo ""
+  section "Links"
+  echo -e "  ${BLUE}Website:${RESET}  24hgaming.com"
+  echo -e "  ${BLUE}Discord:${RESET}  discord.gg/ymfEjH6EJN"
+  echo ""
+  tip "Join the Discord for LFG channels, giveaways, and support."
+}
+
+# ── Topic: Troubleshooting ──
+
+topic_troubleshooting() {
+  header "Troubleshooting"
+  section "Diagnostics"
+  cmd "24hg-diag"             "Full system diagnostic report"
+  cmd "24hg-crash-report"     "Generate a crash report"
+  cmd "24hg-crash-fix"        "Auto-fix common crash causes"
+  cmd "24hg-crash-recovery"   "Recover from a bad state"
+  echo ""
+  section "Common Fixes"
+  cmd "24hg-proton-fix"       "Fix Proton/Wine game issues"
+  cmd "24hg-flatpak-fix"      "Fix Flatpak permission issues"
+  cmd "24hg-discord-fix"      "Fix Discord audio/screen share"
+  cmd "24hg-nvidia-wayland"   "Fix NVIDIA + Wayland problems"
+  cmd "24hg-audio"            "Fix audio routing issues"
+  echo ""
+  section "System"
+  cmd "24hg-rescue"           "Emergency system rescue mode"
+  cmd "24hg-snapshot"         "Rollback to a previous snapshot"
+  cmd "24hg-update-guard"     "Prevent bad updates from landing"
+  cmd "24hg-dualboot"         "Dual-boot setup and repair"
+  cmd "24hg-migrate"          "Migrate from another distro"
+  echo ""
+  tip "Always run ${GREEN}24hg-diag${RESET} first — it catches 90% of issues automatically."
+}
+
+# ── Main Overview ──
+
+show_overview() {
+  banner
+  echo ""
+  echo -e "  ${DIM}Type${RESET} ${GREEN}24hg-help <topic>${RESET} ${DIM}for detailed info on any topic below.${RESET}"
+
+  header "Command Categories"
+
+  section "Getting Started"
+  cmd "24hg-first-boot"       "Setup wizard"
+  cmd "24hg-tour"             "Interactive feature tour"
+  cmd "24hg-tips"             "Random gaming tips"
+  echo ""
+
+  section "Gaming"
+  cmd "24hg-games"            "Browse and launch games"
+  cmd "24hg-launch <game>"    "Launch with optimal settings"
+  cmd "24hg-mods"             "Mod browser and installer"
+  cmd "24hg-compat <game>"    "Check game compatibility"
+  echo ""
+
+  section "Performance"
+  cmd "24hg-overlay"          "FPS overlay (F12)"
+  cmd "24hg-performance"      "Auto-tune system"
+  cmd "24hg-benchmark"        "Run benchmarks"
+  cmd "24hg-focus"            "Gaming focus mode"
+  echo ""
+
+  section "Recording & Streaming"
+  cmd "24hg-clip"             "Save last 30s of gameplay"
+  cmd "24hg-record"           "Start/stop recording"
+  cmd "24hg-go-live"          "One-click streaming"
+  cmd "24hg-screenshot"       "Take a screenshot"
+  echo ""
+
+  section "Multiplayer & Social"
+  cmd "24hg-server-status"    "24HG server status"
+  cmd "24hg-voice"            "Voice chat"
+  cmd "24hg-invite"           "Invite friends"
+  cmd "24hg-tournament"       "Join tournaments"
+  echo ""
+
+  section "Customization"
+  cmd "24hg-themes"           "Desktop themes"
+  cmd "24hg-controller"       "Controller setup"
+  cmd "24hg-overlay"          "Customize HUD overlay"
+  echo ""
+
+  section "Smart OS"
+  cmd "24hg-game-ready"        "Auto-optimize games on install"
+  cmd "24hg-smart-updates"     "Gaming-aware updates"
+  cmd "24hg-quick-resume"      "Save/restore sessions"
+  cmd "24hg-lan-mode"          "LAN party mode"
+  echo ""
+
+  section "Hardware Control"
+  cmd "24hg-peripherals"       "Mouse DPI, RGB, macros"
+  cmd "24hg-audio-router"      "Per-app audio routing"
+  cmd "24hg-dual-gpu"          "GPU switching"
+  cmd "24hg-cleaner"           "System cleanup"
+  echo ""
+
+  section "Troubleshooting"
+  cmd "24hg-diag"             "System diagnostics"
+  cmd "24hg-crash-fix"        "Auto-fix crashes"
+  cmd "24hg-rescue"           "Emergency rescue mode"
+  echo ""
+
+  echo -e "  ${DIM}──────────────────────────────────────────────────${RESET}"
+  echo -e "  ${DIM}Topics:${RESET} getting-started gaming connect economy"
+  echo -e "  ${DIM}        ${RESET} performance streaming recording"
+  echo -e "  ${DIM}        ${RESET} customization hardware smart"
+  echo -e "  ${DIM}        ${RESET} social troubleshooting"
+  echo ""
+  echo -e "  ${BLUE}24hgaming.com${RESET}  |  ${BLUE}discord.gg/ymfEjH6EJN${RESET}"
+  echo ""
+}
+
+# ── Dispatch ──
+
+case "${TOPIC}" in
+  "")                show_overview ;;
+  getting-started)   topic_getting_started ;;
+  gaming)            topic_gaming ;;
+  connect)           topic_connect ;;
+  economy)           topic_economy ;;
+  performance)       topic_performance ;;
+  streaming)         topic_streaming ;;
+  recording)         topic_recording ;;
+  customization)     topic_customization ;;
+  hardware)        topic_hardware ;;
+  smart)           topic_smart ;;
+  social)            topic_social ;;
+  troubleshooting)   topic_troubleshooting ;;
+  *)
+    echo -e "${YELLOW}Unknown topic:${RESET} ${TOPIC}"
+    echo ""
+    echo -e "Available topics: getting-started gaming connect economy"
+    echo -e "                  performance streaming recording"
+    echo -e "                  customization hardware smart"
+    echo -e "                  social troubleshooting"
+    echo ""
+    echo -e "Run ${GREEN}24hg-help${RESET} with no arguments for a full overview."
+    exit 1
+    ;;
+esac

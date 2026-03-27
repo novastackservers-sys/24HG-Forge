@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=24HG Virtual LAN
+Comment=Connect to the 24HG gaming network
+Exec=24hg-vpn join
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Network;Game;

@@ -5,7 +5,7 @@
 
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("forge", {
+contextBridge.exposeInMainWorld("hg24", {
   // System info
   isDesktopApp: true,
   isGamescope: () => ipcRenderer.invoke("is-gamescope"),
@@ -27,7 +27,7 @@ contextBridge.exposeInMainWorld("forge", {
   platform: {
     os: process.platform,
     arch: process.arch,
-    is24HG Forge: true,
+    is24HG: true,
     version: "1.0.0",
   },
 });

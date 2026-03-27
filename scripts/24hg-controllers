@@ -1,0 +1,1513 @@
+#!/bin/bash
+# 24HG Controller Profile Manager
+# Per-game controller profiles with community sharing, gyro config,
+# macro system, button remapping, and calibration tools.
+#
+# Usage: 24hg-controllers [command] [args...]
+# See:   24hg-controllers help
+
+set -euo pipefail
+
+# ──────────────────────────────────────────────
+# Constants & Directories
+# ──────────────────────────────────────────────
+VERSION="1.0.0"
+PROFILE_DIR="${HOME}/.config/24hg/controllers"
+MACRO_DIR="${PROFILE_DIR}/macros"
+COMMUNITY_CACHE="${PROFILE_DIR}/.community-cache"
+HUB_API="${HG24_HUB_API:-https://hub.24hgaming.com/api/24hg/controllers}"
+HUB_TOKEN="${HG24_HUB_TOKEN:-}"
+
+mkdir -p "$PROFILE_DIR" "$MACRO_DIR" "$COMMUNITY_CACHE"
+
+# ──────────────────────────────────────────────
+# Colors & Output
+# ──────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+info()  { echo -e "${GREEN}[+]${RESET} $*"; }
+warn()  { echo -e "${YELLOW}[!]${RESET} $*"; }
+err()   { echo -e "${RED}[-]${RESET} $*" >&2; }
+head_() { echo -e "\n${BOLD}${CYAN}=== $* ===${RESET}\n"; }
+dim()   { echo -e "${DIM}$*${RESET}"; }
+
+die() {
+    err "$@"
+    exit 1
+}
+
+need_cmd() {
+    command -v "$1" &>/dev/null || die "Required command '$1' not found. Install it first."
+}
+
+# ──────────────────────────────────────────────
+# Controller Vendor Database
+# ──────────────────────────────────────────────
+declare -A VENDOR_NAMES=(
+    ["045e"]="Microsoft Xbox"
+    ["054c"]="Sony PlayStation"
+    ["057e"]="Nintendo"
+    ["2dc8"]="8BitDo"
+    ["28de"]="Valve Steam"
+    ["046d"]="Logitech"
+    ["0738"]="Mad Catz"
+    ["0e6f"]="PDP"
+    ["1038"]="SteelSeries"
+    ["0079"]="DragonRise"
+    ["1532"]="Razer"
+    ["24c6"]="PowerA"
+    ["2563"]="SHANWAN"
+    ["20d6"]="Bensussen Deutsch"
+)
+
+declare -A CONTROLLER_TYPES=(
+    ["045e:028e"]="Xbox 360 Controller"
+    ["045e:02d1"]="Xbox One Controller"
+    ["045e:02dd"]="Xbox One Controller (2015)"
+    ["045e:02ea"]="Xbox One S Controller"
+    ["045e:0b12"]="Xbox Series X|S Controller"
+    ["045e:0b13"]="Xbox Series X|S Controller (BT)"
+    ["054c:05c4"]="DualShock 4 (v1)"
+    ["054c:09cc"]="DualShock 4 (v2)"
+    ["054c:0ce6"]="DualSense"
+    ["054c:0df2"]="DualSense Edge"
+    ["057e:2009"]="Switch Pro Controller"
+    ["057e:2006"]="Joy-Con (L)"
+    ["057e:2007"]="Joy-Con (R)"
+    ["28de:1142"]="Steam Controller"
+    ["28de:1205"]="Steam Deck Controller"
+)
+
+# Controllers known to have gyro
+GYRO_CONTROLLERS="054c:05c4|054c:09cc|054c:0ce6|054c:0df2|057e:2009|057e:2006|057e:2007|28de:1205"
+
+# Controllers known to have touchpad
+TOUCHPAD_CONTROLLERS="054c:05c4|054c:09cc|054c:0ce6|054c:0df2|28de:1142|28de:1205"
+
+# ──────────────────────────────────────────────
+# Controller Detection
+# ──────────────────────────────────────────────
+detect_controllers() {
+    local controllers=()
+    local idx=0
+
+    for input_dir in /sys/class/input/event*; do
+        [[ -d "$input_dir" ]] || continue
+        local event_name
+        event_name=$(basename "$input_dir")
+        local dev="/dev/input/${event_name}"
+        [[ -e "$dev" ]] || continue
+
+        # Check if this is a joystick/gamepad
+        local caps_file="${input_dir}/device/capabilities/ev"
+        [[ -r "$caps_file" ]] || continue
+        local ev_caps
+        ev_caps=$(cat "$caps_file" 2>/dev/null || echo "0")
+
+        # Check for ABS capability (bit 3 = 0x8) which indicates analog axes
+        local ev_dec
+        ev_dec=$((16#${ev_caps##* }))
+        (( ev_dec & 0x8 )) || continue
+
+        # Also check for KEY capability (bit 1 = 0x2) — buttons
+        (( ev_dec & 0x2 )) || continue
+
+        # Get name from sysfs
+        local name_file="${input_dir}/device/name"
+        local name="Unknown Controller"
+        [[ -r "$name_file" ]] && name=$(cat "$name_file" 2>/dev/null)
+
+        # Skip mice, keyboards, and accelerometers
+        local name_lower="${name,,}"
+        [[ "$name_lower" == *"mouse"* || "$name_lower" == *"keyboard"* ]] && continue
+        [[ "$name_lower" == *"accelerometer"* || "$name_lower" == *"touchscreen"* ]] && continue
+
+        # Get vendor/product
+        local vendor="0000" product="0000"
+        local id_vendor="${input_dir}/device/id/vendor"
+        local id_product="${input_dir}/device/id/product"
+        [[ -r "$id_vendor" ]] && vendor=$(cat "$id_vendor" 2>/dev/null)
+        [[ -r "$id_product" ]] && product=$(cat "$id_product" 2>/dev/null)
+
+        local vid_pid="${vendor}:${product}"
+
+        # Determine controller type
+        local type="${CONTROLLER_TYPES[$vid_pid]:-}"
+        if [[ -z "$type" ]]; then
+            local vendor_name="${VENDOR_NAMES[$vendor]:-Generic}"
+            type="${vendor_name} Controller"
+        fi
+
+        # Check capabilities
+        local has_gyro=false has_touchpad=false has_vibration=false
+        [[ "$vid_pid" =~ ^(${GYRO_CONTROLLERS})$ ]] && has_gyro=true
+        [[ "$vid_pid" =~ ^(${TOUCHPAD_CONTROLLERS})$ ]] && has_touchpad=true
+
+        # Check for force feedback (vibration)
+        local ff_file="${input_dir}/device/capabilities/ff"
+        if [[ -r "$ff_file" ]]; then
+            local ff_caps
+            ff_caps=$(cat "$ff_file" 2>/dev/null || echo "0")
+            [[ "$ff_caps" != "0" ]] && has_vibration=true
+        fi
+
+        # Count buttons and axes
+        local abs_file="${input_dir}/device/capabilities/abs"
+        local key_file="${input_dir}/device/capabilities/key"
+        local num_axes=0 num_buttons=0
+
+        if [[ -r "$abs_file" ]]; then
+            local abs_caps
+            abs_caps=$(cat "$abs_file" 2>/dev/null || echo "0")
+            # Count set bits (rough estimate of axes)
+            num_axes=$(echo "$abs_caps" | tr ' ' '\n' | while read -r hex; do
+                printf '%d\n' "$((16#$hex))" 2>/dev/null || echo 0
+            done | awk '{for(i=0;i<32;i++) if(and($1,lshift(1,i))) c++} END{print c+0}')
+        fi
+
+        if [[ -r "$key_file" ]]; then
+            local key_caps
+            key_caps=$(cat "$key_file" 2>/dev/null || echo "0")
+            # Estimate button count from set bits in gamepad range
+            num_buttons=$(echo "$key_caps" | tr ' ' '\n' | while read -r hex; do
+                printf '%d\n' "$((16#$hex))" 2>/dev/null || echo 0
+            done | awk '{for(i=0;i<32;i++) if(and($1,lshift(1,i))) c++} END{print c+0}')
+        fi
+
+        # Get connection type
+        local conn="USB"
+        local uevent="${input_dir}/device/uevent"
+        if [[ -r "$uevent" ]] && grep -q "bluetooth\|hid-generic.*bluetooth" "$uevent" 2>/dev/null; then
+            conn="Bluetooth"
+        fi
+        # Also check parent for BT
+        if [[ -e "${input_dir}/device/device/../../../bluetooth" ]] 2>/dev/null; then
+            conn="Bluetooth"
+        fi
+
+        controllers+=("${idx}|${dev}|${name}|${type}|${vid_pid}|${conn}|${has_gyro}|${has_touchpad}|${has_vibration}|${num_buttons}|${num_axes}")
+        ((idx++))
+    done
+
+    printf '%s\n' "${controllers[@]}" 2>/dev/null
+}
+
+# ──────────────────────────────────────────────
+# Command: list
+# ──────────────────────────────────────────────
+cmd_list() {
+    head_ "Connected Controllers"
+
+    local found=0
+    while IFS='|' read -r idx dev name type vid_pid conn gyro touchpad vibration buttons axes; do
+        [[ -z "$idx" ]] && continue
+        found=1
+
+        echo -e "${BOLD}${GREEN}Controller #${idx}${RESET}"
+        echo -e "  ${CYAN}Name:${RESET}       $name"
+        echo -e "  ${CYAN}Type:${RESET}       $type"
+        echo -e "  ${CYAN}Device:${RESET}     $dev"
+        echo -e "  ${CYAN}VID:PID:${RESET}    $vid_pid"
+        echo -e "  ${CYAN}Connection:${RESET} $conn"
+        echo -e "  ${CYAN}Buttons:${RESET}    ~${buttons}"
+        echo -e "  ${CYAN}Axes:${RESET}       ~${axes}"
+
+        local caps=""
+        [[ "$gyro" == "true" ]] && caps+="${GREEN}Gyro${RESET} "
+        [[ "$touchpad" == "true" ]] && caps+="${BLUE}Touchpad${RESET} "
+        [[ "$vibration" == "true" ]] && caps+="${MAGENTA}Vibration${RESET} "
+        [[ -n "$caps" ]] && echo -e "  ${CYAN}Features:${RESET}   $caps"
+
+        # Show active profile if any
+        local active_game=""
+        for pf in "$PROFILE_DIR"/*.json; do
+            [[ -f "$pf" ]] || continue
+            if command -v jq &>/dev/null; then
+                local pf_active
+                pf_active=$(jq -r '.active // false' "$pf" 2>/dev/null)
+                if [[ "$pf_active" == "true" ]]; then
+                    active_game=$(basename "$pf" .json)
+                    break
+                fi
+            fi
+        done
+        if [[ -n "$active_game" ]]; then
+            echo -e "  ${CYAN}Profile:${RESET}    ${YELLOW}${active_game}${RESET} (active)"
+        fi
+        echo ""
+    done < <(detect_controllers)
+
+    if [[ "$found" -eq 0 ]]; then
+        warn "No controllers detected."
+        dim "  Connect a controller via USB or Bluetooth and try again."
+        dim "  Ensure the kernel modules are loaded: xpad, hid-sony, hid-nintendo"
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: scan
+# ──────────────────────────────────────────────
+cmd_scan() {
+    head_ "Controller Scan"
+    info "Scanning input devices..."
+
+    local found=0
+    echo ""
+    printf "${BOLD}%-6s %-30s %-25s %-10s %-12s${RESET}\n" "DEV" "NAME" "TYPE" "VID:PID" "CONNECTION"
+    printf '%.0s─' {1..90}
+    echo ""
+
+    while IFS='|' read -r idx dev name type vid_pid conn gyro touchpad vibration buttons axes; do
+        [[ -z "$idx" ]] && continue
+        found=1
+
+        local dev_short
+        dev_short=$(basename "$dev")
+        printf "%-6s %-30s %-25s %-10s %-12s\n" "$dev_short" "${name:0:29}" "${type:0:24}" "$vid_pid" "$conn"
+    done < <(detect_controllers)
+
+    echo ""
+    if [[ "$found" -eq 0 ]]; then
+        warn "No controllers found."
+    else
+        info "Found $found controller(s)."
+    fi
+
+    # Check driver status
+    echo ""
+    head_ "Driver Status"
+    local drivers=("xpad" "hid_sony" "hid_nintendo" "hid_steam" "xone" "xpadneo")
+    for drv in "${drivers[@]}"; do
+        if lsmod 2>/dev/null | grep -q "^${drv} "; then
+            echo -e "  ${GREEN}[loaded]${RESET}  $drv"
+        else
+            echo -e "  ${DIM}[absent]${RESET}  $drv"
+        fi
+    done
+
+    # Check for SDL gamecontrollerdb
+    echo ""
+    head_ "SDL Configuration"
+    if [[ -n "${SDL_GAMECONTROLLERCONFIG:-}" ]]; then
+        info "SDL_GAMECONTROLLERCONFIG is set"
+    else
+        dim "  SDL_GAMECONTROLLERCONFIG not set (using defaults)"
+    fi
+
+    local gcdb="/usr/share/games/gamecontrollerdb.txt"
+    if [[ -f "$gcdb" ]]; then
+        local count
+        count=$(wc -l < "$gcdb")
+        info "Game Controller DB: $gcdb ($count entries)"
+    elif [[ -f "${HOME}/.config/SDL/gamecontrollerdb.txt" ]]; then
+        info "User Game Controller DB found"
+    else
+        dim "  No gamecontrollerdb.txt found"
+    fi
+
+    # Check for xboxdrv
+    echo ""
+    head_ "Tool Availability"
+    local tools=("evtest" "jstest" "jscal" "xboxdrv" "evemu-event" "xdotool" "sdl2-gamecontroller" "controllermap")
+    for tool in "${tools[@]}"; do
+        if command -v "$tool" &>/dev/null; then
+            echo -e "  ${GREEN}[found]${RESET}   $tool"
+        else
+            echo -e "  ${DIM}[missing]${RESET} $tool"
+        fi
+    done
+}
+
+# ──────────────────────────────────────────────
+# Profile helpers
+# ──────────────────────────────────────────────
+profile_path() {
+    local game="$1"
+    echo "${PROFILE_DIR}/${game}.json"
+}
+
+default_profile_json() {
+    local game="$1"
+    cat <<JSONEOF
+{
+    "game": "$game",
+    "version": 1,
+    "created": "$(date -Iseconds)",
+    "modified": "$(date -Iseconds)",
+    "active": false,
+    "deadzone": {
+        "left_stick": 0.10,
+        "right_stick": 0.10,
+        "left_trigger": 0.05,
+        "right_trigger": 0.05
+    },
+    "sensitivity": {
+        "left_stick": 1.0,
+        "right_stick": 1.0,
+        "left_trigger": 1.0,
+        "right_trigger": 1.0
+    },
+    "response_curve": "linear",
+    "gyro": {
+        "enabled": false,
+        "mode": "off",
+        "sensitivity": 1.0,
+        "invert_x": false,
+        "invert_y": false
+    },
+    "button_remaps": {},
+    "macros": [],
+    "sdl_config": "",
+    "sdl_hints": {},
+    "notes": ""
+}
+JSONEOF
+}
+
+ensure_jq() {
+    command -v jq &>/dev/null || die "jq is required for profile management. Install: sudo dnf install jq"
+}
+
+# ──────────────────────────────────────────────
+# Command: profile create <game>
+# ──────────────────────────────────────────────
+cmd_profile_create() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-controllers profile create <game>"
+    ensure_jq
+
+    local pf
+    pf=$(profile_path "$game")
+
+    if [[ -f "$pf" ]]; then
+        warn "Profile '$game' already exists at $pf"
+        read -rp "Overwrite? [y/N] " ans
+        [[ "${ans,,}" == "y" ]] || { info "Cancelled."; return; }
+    fi
+
+    default_profile_json "$game" > "$pf"
+    info "Created profile: $pf"
+
+    # Interactive configuration
+    echo ""
+    echo -e "${BOLD}Configure profile for '${game}'?${RESET}"
+    read -rp "Set up now? [Y/n] " ans
+    [[ "${ans,,}" == "n" ]] && { info "Profile saved with defaults. Edit manually or use subcommands."; return; }
+
+    # Deadzone
+    echo ""
+    echo -e "${CYAN}Deadzone settings${RESET} (0.0-1.0, default 0.10):"
+    read -rp "  Left stick deadzone [0.10]: " dz_left
+    read -rp "  Right stick deadzone [0.10]: " dz_right
+
+    dz_left="${dz_left:-0.10}"
+    dz_right="${dz_right:-0.10}"
+
+    jq --arg dl "$dz_left" --arg dr "$dz_right" \
+        '.deadzone.left_stick = ($dl | tonumber) | .deadzone.right_stick = ($dr | tonumber)' \
+        "$pf" > "${pf}.tmp" && mv "${pf}.tmp" "$pf"
+
+    # Sensitivity
+    echo ""
+    echo -e "${CYAN}Sensitivity${RESET} (multiplier, default 1.0):"
+    read -rp "  Left stick sensitivity [1.0]: " sens_l
+    read -rp "  Right stick sensitivity [1.0]: " sens_r
+
+    sens_l="${sens_l:-1.0}"
+    sens_r="${sens_r:-1.0}"
+
+    jq --arg sl "$sens_l" --arg sr "$sens_r" \
+        '.sensitivity.left_stick = ($sl | tonumber) | .sensitivity.right_stick = ($sr | tonumber)' \
+        "$pf" > "${pf}.tmp" && mv "${pf}.tmp" "$pf"
+
+    # Response curve
+    echo ""
+    echo -e "${CYAN}Response curve:${RESET}"
+    echo "  1) linear (default)"
+    echo "  2) aggressive (fast response, competitive)"
+    echo "  3) relaxed (slow ramp, precision)"
+    echo "  4) s-curve (precise center, fast edges)"
+    read -rp "  Choice [1]: " rc
+    case "${rc:-1}" in
+        2) rc="aggressive" ;;
+        3) rc="relaxed" ;;
+        4) rc="s-curve" ;;
+        *) rc="linear" ;;
+    esac
+
+    jq --arg rc "$rc" '.response_curve = $rc' "$pf" > "${pf}.tmp" && mv "${pf}.tmp" "$pf"
+
+    # Gyro
+    echo ""
+    echo -e "${CYAN}Gyro configuration:${RESET}"
+    echo "  1) off (default)"
+    echo "  2) mouse emulation"
+    echo "  3) camera control"
+    echo "  4) flick-stick"
+    read -rp "  Choice [1]: " gc
+    case "${gc:-1}" in
+        2) gc="mouse" ;;
+        3) gc="camera" ;;
+        4) gc="flick-stick" ;;
+        *) gc="off" ;;
+    esac
+
+    if [[ "$gc" != "off" ]]; then
+        jq --arg mode "$gc" '.gyro.enabled = true | .gyro.mode = $mode' \
+            "$pf" > "${pf}.tmp" && mv "${pf}.tmp" "$pf"
+        read -rp "  Gyro sensitivity [1.0]: " gs
+        gs="${gs:-1.0}"
+        jq --arg gs "$gs" '.gyro.sensitivity = ($gs | tonumber)' \
+            "$pf" > "${pf}.tmp" && mv "${pf}.tmp" "$pf"
+    fi
+
+    # Notes
+    echo ""
+    read -rp "Notes for this profile (optional): " notes
+    if [[ -n "$notes" ]]; then
+        jq --arg n "$notes" '.notes = $n' "$pf" > "${pf}.tmp" && mv "${pf}.tmp" "$pf"
+    fi
+
+    # Update modification time
+    jq --arg t "$(date -Iseconds)" '.modified = $t' "$pf" > "${pf}.tmp" && mv "${pf}.tmp" "$pf"
+
+    echo ""
+    info "Profile '${game}' configured and saved."
+    dim "  Apply with: 24hg-controllers profile apply $game"
+}
+
+# ──────────────────────────────────────────────
+# Command: profile apply <game>
+# ──────────────────────────────────────────────
+cmd_profile_apply() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-controllers profile apply <game>"
+    ensure_jq
+
+    local pf
+    pf=$(profile_path "$game")
+    [[ -f "$pf" ]] || die "Profile '$game' not found. Create it first: 24hg-controllers profile create $game"
+
+    head_ "Applying Profile: $game"
+
+    # Deactivate all other profiles
+    for other in "$PROFILE_DIR"/*.json; do
+        [[ -f "$other" ]] || continue
+        jq '.active = false' "$other" > "${other}.tmp" && mv "${other}.tmp" "$other"
+    done
+
+    # Activate this profile
+    jq '.active = true' "$pf" > "${pf}.tmp" && mv "${pf}.tmp" "$pf"
+
+    # Read profile values
+    local dz_left dz_right sens_l sens_r curve
+    dz_left=$(jq -r '.deadzone.left_stick' "$pf")
+    dz_right=$(jq -r '.deadzone.right_stick' "$pf")
+    sens_l=$(jq -r '.sensitivity.left_stick' "$pf")
+    sens_r=$(jq -r '.sensitivity.right_stick' "$pf")
+    curve=$(jq -r '.response_curve' "$pf")
+
+    # Apply SDL controller config if set
+    local sdl_config
+    sdl_config=$(jq -r '.sdl_config // ""' "$pf")
+    if [[ -n "$sdl_config" && "$sdl_config" != "null" ]]; then
+        export SDL_GAMECONTROLLERCONFIG="$sdl_config"
+        info "Applied SDL_GAMECONTROLLERCONFIG"
+    fi
+
+    # Apply SDL hints
+    local hints
+    hints=$(jq -r '.sdl_hints // {} | to_entries[] | "\(.key)=\(.value)"' "$pf" 2>/dev/null)
+    while IFS='=' read -r key val; do
+        [[ -z "$key" ]] && continue
+        export "$key=$val"
+        info "Set $key=$val"
+    done <<< "$hints"
+
+    # Apply gyro settings
+    local gyro_enabled gyro_mode
+    gyro_enabled=$(jq -r '.gyro.enabled // false' "$pf")
+    gyro_mode=$(jq -r '.gyro.mode // "off"' "$pf")
+
+    if [[ "$gyro_enabled" == "true" ]]; then
+        case "$gyro_mode" in
+            mouse)
+                export SDL_JOYSTICK_HIDAPI_PS4_RUMBLE=1
+                export SDL_JOYSTICK_HIDAPI_PS5_RUMBLE=1
+                info "Gyro mode: mouse emulation"
+                ;;
+            camera)
+                info "Gyro mode: camera control (game must support)"
+                ;;
+            flick-stick)
+                info "Gyro mode: flick-stick (requires Steam Input or supported game)"
+                ;;
+        esac
+    fi
+
+    # Apply xboxdrv deadzone if available
+    if command -v xboxdrv &>/dev/null; then
+        local dz_pct
+        dz_pct=$(awk "BEGIN {printf \"%d\", $dz_left * 32767}")
+        info "xboxdrv deadzone: $dz_pct (left), $(awk "BEGIN {printf \"%d\", $dz_right * 32767}") (right)"
+        dim "  Note: xboxdrv must be running as daemon for deadzones to take effect."
+    fi
+
+    # Write env file for game launchers to source
+    local env_file="${PROFILE_DIR}/.active-env"
+    {
+        echo "# Auto-generated by 24hg-controllers — profile: $game"
+        echo "# Source this in game launch scripts"
+        echo "export HG24_CONTROLLER_PROFILE='$game'"
+        echo "export HG24_CONTROLLER_DZ_LEFT='$dz_left'"
+        echo "export HG24_CONTROLLER_DZ_RIGHT='$dz_right'"
+        echo "export HG24_CONTROLLER_SENS_LEFT='$sens_l'"
+        echo "export HG24_CONTROLLER_SENS_RIGHT='$sens_r'"
+        echo "export HG24_CONTROLLER_CURVE='$curve'"
+        [[ -n "$sdl_config" && "$sdl_config" != "null" ]] && \
+            echo "export SDL_GAMECONTROLLERCONFIG='$sdl_config'"
+        [[ "$gyro_enabled" == "true" ]] && {
+            echo "export SDL_JOYSTICK_HIDAPI_PS4_RUMBLE=1"
+            echo "export SDL_JOYSTICK_HIDAPI_PS5_RUMBLE=1"
+        }
+    } > "$env_file"
+
+    echo ""
+    info "Profile '${game}' is now active."
+    echo -e "  ${CYAN}Deadzone:${RESET}  L=${dz_left}  R=${dz_right}"
+    echo -e "  ${CYAN}Sensitivity:${RESET} L=${sens_l}  R=${sens_r}"
+    echo -e "  ${CYAN}Curve:${RESET}     ${curve}"
+    echo -e "  ${CYAN}Gyro:${RESET}      ${gyro_mode}"
+    echo ""
+    dim "  Environment written to: $env_file"
+    dim "  Source in launch scripts: source $env_file"
+}
+
+# ──────────────────────────────────────────────
+# Command: profile list
+# ──────────────────────────────────────────────
+cmd_profile_list() {
+    head_ "Controller Profiles"
+
+    local found=0
+    printf "${BOLD}%-20s %-12s %-10s %-10s %-8s %-20s${RESET}\n" \
+        "GAME" "CURVE" "DZ-LEFT" "DZ-RIGHT" "GYRO" "MODIFIED"
+    printf '%.0s─' {1..85}
+    echo ""
+
+    for pf in "$PROFILE_DIR"/*.json; do
+        [[ -f "$pf" ]] || continue
+        found=1
+
+        local game
+        game=$(basename "$pf" .json)
+
+        if command -v jq &>/dev/null; then
+            local active curve dz_l dz_r gyro modified
+            active=$(jq -r '.active // false' "$pf" 2>/dev/null)
+            curve=$(jq -r '.response_curve // "linear"' "$pf" 2>/dev/null)
+            dz_l=$(jq -r '.deadzone.left_stick // 0.10' "$pf" 2>/dev/null)
+            dz_r=$(jq -r '.deadzone.right_stick // 0.10' "$pf" 2>/dev/null)
+            gyro=$(jq -r '.gyro.mode // "off"' "$pf" 2>/dev/null)
+            modified=$(jq -r '.modified // "unknown"' "$pf" 2>/dev/null)
+            modified="${modified%%T*}"  # Just the date
+
+            local prefix="  "
+            [[ "$active" == "true" ]] && prefix="${GREEN}* ${RESET}"
+
+            printf "${prefix}%-20s %-12s %-10s %-10s %-8s %-20s\n" \
+                "$game" "$curve" "$dz_l" "$dz_r" "$gyro" "$modified"
+        else
+            printf "  %-20s %-12s\n" "$game" "(install jq for details)"
+        fi
+    done
+
+    if [[ "$found" -eq 0 ]]; then
+        dim "  No profiles found."
+        dim "  Create one: 24hg-controllers profile create <game>"
+    else
+        echo ""
+        dim "  * = active profile"
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: profile delete <game>
+# ──────────────────────────────────────────────
+cmd_profile_delete() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-controllers profile delete <game>"
+
+    local pf
+    pf=$(profile_path "$game")
+    [[ -f "$pf" ]] || die "Profile '$game' not found."
+
+    read -rp "Delete profile '$game'? [y/N] " ans
+    [[ "${ans,,}" == "y" ]] || { info "Cancelled."; return; }
+
+    rm -f "$pf"
+    info "Profile '$game' deleted."
+
+    # Also remove macro file if exists
+    local macro_file="${MACRO_DIR}/${game}.json"
+    if [[ -f "$macro_file" ]]; then
+        rm -f "$macro_file"
+        info "Associated macros deleted."
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: profile share <game>
+# ──────────────────────────────────────────────
+cmd_profile_share() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-controllers profile share <game>"
+    ensure_jq
+
+    local pf
+    pf=$(profile_path "$game")
+    [[ -f "$pf" ]] || die "Profile '$game' not found."
+
+    [[ -z "$HUB_TOKEN" ]] && die "Set HG24_HUB_TOKEN to upload profiles. Get one at https://hub.24hgaming.com/settings/tokens"
+
+    head_ "Sharing Profile: $game"
+
+    # Prepare upload payload
+    local payload
+    payload=$(jq --arg author "$(whoami)@$(hostname)" --arg desc "" \
+        '{profile: ., author: $author, description: $desc}' "$pf")
+
+    # Prompt for description
+    read -rp "Description (what makes this profile good?): " desc
+    payload=$(echo "$payload" | jq --arg d "$desc" '.description = $d')
+
+    info "Uploading to Hub community..."
+    local response
+    response=$(curl -sf -X POST "$HUB_API" \
+        -H "Authorization: Bearer $HUB_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$payload" 2>&1) || {
+        err "Upload failed: $response"
+        return 1
+    }
+
+    local profile_id
+    profile_id=$(echo "$response" | jq -r '.id // "unknown"')
+    info "Profile shared successfully!"
+    echo -e "  ${CYAN}ID:${RESET}   $profile_id"
+    echo -e "  ${CYAN}URL:${RESET}  ${HUB_API}/${profile_id}"
+    dim "  Others can download: 24hg-controllers profile download $profile_id"
+}
+
+# ──────────────────────────────────────────────
+# Command: profile browse [game]
+# ──────────────────────────────────────────────
+cmd_profile_browse() {
+    local game="${1:-}"
+    ensure_jq
+
+    head_ "Community Profiles"
+
+    local url="$HUB_API"
+    [[ -n "$game" ]] && url="${url}?game=${game}"
+
+    info "Fetching from Hub..."
+    local response
+    response=$(curl -sf "$url" 2>&1) || {
+        err "Failed to connect to Hub: $response"
+        dim "  Check your internet connection or try again later."
+        return 1
+    }
+
+    local count
+    count=$(echo "$response" | jq -r '.profiles | length' 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        warn "No community profiles found${game:+ for '$game'}."
+        return
+    fi
+
+    printf "\n${BOLD}%-8s %-20s %-15s %-10s %-8s %-30s${RESET}\n" \
+        "ID" "GAME" "AUTHOR" "DOWNLOADS" "RATING" "DESCRIPTION"
+    printf '%.0s─' {1..95}
+    echo ""
+
+    echo "$response" | jq -r '.profiles[] | "\(.id)\t\(.game)\t\(.author)\t\(.downloads)\t\(.rating)\t\(.description)"' 2>/dev/null | \
+    while IFS=$'\t' read -r id pg author downloads rating description; do
+        printf "%-8s %-20s %-15s %-10s %-8s %-30s\n" \
+            "$id" "${pg:0:19}" "${author:0:14}" "$downloads" "$rating" "${description:0:29}"
+    done
+
+    echo ""
+    dim "  Download: 24hg-controllers profile download <id>"
+}
+
+# ──────────────────────────────────────────────
+# Command: profile download <id>
+# ──────────────────────────────────────────────
+cmd_profile_download() {
+    local profile_id="${1:-}"
+    [[ -z "$profile_id" ]] && die "Usage: 24hg-controllers profile download <id>"
+    ensure_jq
+
+    head_ "Downloading Profile"
+
+    info "Fetching profile $profile_id..."
+    local response
+    response=$(curl -sf "${HUB_API}/${profile_id}" 2>&1) || {
+        err "Failed to download profile: $response"
+        return 1
+    }
+
+    local game
+    game=$(echo "$response" | jq -r '.profile.game // "unknown"')
+    local author
+    author=$(echo "$response" | jq -r '.author // "unknown"')
+
+    local pf
+    pf=$(profile_path "$game")
+
+    if [[ -f "$pf" ]]; then
+        warn "Local profile '$game' already exists."
+        read -rp "Overwrite? [y/N] " ans
+        [[ "${ans,,}" == "y" ]] || { info "Cancelled."; return; }
+    fi
+
+    echo "$response" | jq '.profile' > "$pf"
+    info "Downloaded profile '${game}' by ${author}"
+    echo -e "  ${CYAN}Saved to:${RESET} $pf"
+    dim "  Apply with: 24hg-controllers profile apply $game"
+}
+
+# ──────────────────────────────────────────────
+# Command: test
+# ──────────────────────────────────────────────
+cmd_test() {
+    head_ "Controller Test Mode"
+
+    # Find first controller
+    local first_dev=""
+    while IFS='|' read -r idx dev name type vid_pid conn gyro touchpad vibration buttons axes; do
+        [[ -z "$idx" ]] && continue
+        first_dev="$dev"
+        info "Testing: $name ($type)"
+        break
+    done < <(detect_controllers)
+
+    if [[ -z "$first_dev" ]]; then
+        die "No controllers detected. Connect a controller and try again."
+    fi
+
+    # Prefer evtest, fall back to jstest
+    if command -v evtest &>/dev/null; then
+        echo ""
+        info "Using evtest — press Ctrl+C to exit"
+        echo -e "${DIM}Showing all inputs (buttons, axes, gyro, touchpad)...${RESET}"
+        echo ""
+        # Need root for evtest on some systems
+        if [[ -r "$first_dev" ]]; then
+            evtest "$first_dev"
+        else
+            warn "Need elevated permissions for raw input access."
+            echo "  Run: sudo evtest $first_dev"
+            echo ""
+            # Fall back to jstest if available
+            local js_dev="/dev/input/js0"
+            if [[ -e "$js_dev" ]] && command -v jstest &>/dev/null; then
+                info "Falling back to jstest on $js_dev"
+                jstest "$js_dev"
+            fi
+        fi
+    elif command -v jstest &>/dev/null; then
+        local js_dev="/dev/input/js0"
+        [[ -e "$js_dev" ]] || die "No joystick device at $js_dev"
+        echo ""
+        info "Using jstest — press Ctrl+C to exit"
+        echo -e "${DIM}Showing button and axis values...${RESET}"
+        echo ""
+        jstest "$js_dev"
+    else
+        die "No test tool found. Install evtest or joystick package."
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: calibrate
+# ──────────────────────────────────────────────
+cmd_calibrate() {
+    head_ "Analog Stick Calibration"
+
+    # Find first controller
+    local first_dev="" first_name=""
+    while IFS='|' read -r idx dev name type vid_pid conn gyro touchpad vibration buttons axes; do
+        [[ -z "$idx" ]] && continue
+        first_dev="$dev"
+        first_name="$name"
+        break
+    done < <(detect_controllers)
+
+    [[ -z "$first_dev" ]] && die "No controllers detected."
+
+    info "Calibrating: $first_name"
+    echo ""
+    echo -e "${BOLD}Deadzone Detection${RESET}"
+    echo ""
+    echo "This will sample your stick's rest position to determine the optimal deadzone."
+    echo -e "${YELLOW}Leave both analog sticks centered and do not touch the controller.${RESET}"
+    echo ""
+    read -rp "Ready? Press Enter to begin sampling (3 seconds)... "
+
+    # Sample raw values using evtest for 3 seconds
+    local sample_file
+    sample_file=$(mktemp /tmp/24hg-cal-XXXXXX)
+
+    if command -v evtest &>/dev/null && [[ -r "$first_dev" ]]; then
+        timeout 3 evtest "$first_dev" > "$sample_file" 2>/dev/null || true
+
+        # Parse ABS values for drift
+        local max_drift=0
+        while IFS= read -r line; do
+            if [[ "$line" == *"ABS_"*"value"* ]]; then
+                local val
+                val=$(echo "$line" | grep -oP 'value\s+\K[-0-9]+' || echo 0)
+                val=${val#-}  # Absolute value
+                (( val > max_drift )) && max_drift=$val
+            fi
+        done < "$sample_file"
+
+        rm -f "$sample_file"
+
+        # Calculate recommended deadzone (max_drift + 10% margin)
+        local recommended
+        if (( max_drift > 0 )); then
+            recommended=$(awk "BEGIN {printf \"%.2f\", ($max_drift * 1.1) / 32767}")
+        else
+            recommended="0.05"
+        fi
+
+        echo ""
+        info "Sampling complete."
+        echo -e "  ${CYAN}Maximum drift detected:${RESET}   $max_drift / 32767"
+        echo -e "  ${CYAN}Recommended deadzone:${RESET}     $recommended"
+        echo ""
+
+        # Offer to apply
+        read -rp "Apply to current profile? [Y/n] " ans
+        if [[ "${ans,,}" != "n" ]]; then
+            # Find active profile
+            local active_profile=""
+            for pf in "$PROFILE_DIR"/*.json; do
+                [[ -f "$pf" ]] || continue
+                if command -v jq &>/dev/null; then
+                    local is_active
+                    is_active=$(jq -r '.active // false' "$pf" 2>/dev/null)
+                    [[ "$is_active" == "true" ]] && { active_profile="$pf"; break; }
+                fi
+            done
+
+            if [[ -n "$active_profile" ]]; then
+                jq --arg dz "$recommended" \
+                    '.deadzone.left_stick = ($dz | tonumber) | .deadzone.right_stick = ($dz | tonumber)' \
+                    "$active_profile" > "${active_profile}.tmp" && mv "${active_profile}.tmp" "$active_profile"
+                info "Updated deadzone in $(basename "$active_profile" .json)"
+            else
+                warn "No active profile. Create one first: 24hg-controllers profile create <game>"
+                echo -e "  ${DIM}Recommended value: $recommended${RESET}"
+            fi
+        fi
+    elif command -v jstest &>/dev/null; then
+        # Simpler calibration via jscal
+        local js_dev="/dev/input/js0"
+        if [[ -e "$js_dev" ]]; then
+            info "Using jscal for calibration..."
+            if command -v jscal &>/dev/null; then
+                echo "Running jscal -c on $js_dev"
+                echo "Follow the on-screen prompts to calibrate each axis."
+                echo ""
+                jscal -c "$js_dev"
+                echo ""
+                info "Calibration complete. Saving..."
+                local cal_data
+                cal_data=$(jscal -p "$js_dev" 2>/dev/null)
+                echo "$cal_data" > "${PROFILE_DIR}/calibration-$(date +%Y%m%d).dat"
+                info "Calibration saved."
+            else
+                die "jscal not found. Install: sudo dnf install joystick"
+            fi
+        else
+            die "No joystick device found."
+        fi
+    else
+        die "Need evtest or jscal for calibration. Install one and try again."
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: gyro <mode>
+# ──────────────────────────────────────────────
+cmd_gyro() {
+    local mode="${1:-}"
+    [[ -z "$mode" ]] && {
+        echo "Usage: 24hg-controllers gyro <mode>"
+        echo ""
+        echo "Modes:"
+        echo "  off         Disable gyro"
+        echo "  mouse       Gyro controls mouse cursor"
+        echo "  camera      Gyro controls camera (game-dependent)"
+        echo "  flick-stick Flick-stick aiming (right stick = direction, gyro = fine aim)"
+        echo ""
+        echo "Supported controllers: DualShock 4, DualSense, Switch Pro, Steam Deck"
+        return
+    }
+    ensure_jq
+
+    case "$mode" in
+        off|mouse|camera|flick-stick) ;;
+        *) die "Invalid gyro mode '$mode'. Use: off, mouse, camera, flick-stick" ;;
+    esac
+
+    head_ "Gyro Configuration: $mode"
+
+    # Check for gyro-capable controller
+    local gyro_found=false gyro_type=""
+    while IFS='|' read -r idx dev name type vid_pid conn gyro touchpad vibration buttons axes; do
+        [[ -z "$idx" ]] && continue
+        if [[ "$gyro" == "true" ]]; then
+            gyro_found=true
+            gyro_type="$type"
+            info "Gyro-capable controller found: $type"
+            break
+        fi
+    done < <(detect_controllers)
+
+    if [[ "$gyro_found" == "false" ]]; then
+        warn "No gyro-capable controller detected."
+        dim "  Supported: DualShock 4, DualSense, Switch Pro Controller, Steam Deck"
+        dim "  Configuration will be saved anyway for when a controller is connected."
+    fi
+
+    # Apply to active profile or prompt
+    local active_profile=""
+    for pf in "$PROFILE_DIR"/*.json; do
+        [[ -f "$pf" ]] || continue
+        local is_active
+        is_active=$(jq -r '.active // false' "$pf" 2>/dev/null)
+        [[ "$is_active" == "true" ]] && { active_profile="$pf"; break; }
+    done
+
+    if [[ -z "$active_profile" ]]; then
+        warn "No active profile."
+        read -rp "Apply to which game profile? " game
+        [[ -z "$game" ]] && { err "No profile specified."; return; }
+        active_profile=$(profile_path "$game")
+        [[ -f "$active_profile" ]] || die "Profile '$game' not found."
+    fi
+
+    local enabled="true"
+    [[ "$mode" == "off" ]] && enabled="false"
+
+    # Sensitivity
+    local sensitivity="1.0"
+    if [[ "$mode" != "off" ]]; then
+        read -rp "Gyro sensitivity [1.0]: " sensitivity
+        sensitivity="${sensitivity:-1.0}"
+    fi
+
+    jq --arg m "$mode" --argjson e "$enabled" --arg s "$sensitivity" \
+        '.gyro.mode = $m | .gyro.enabled = $e | .gyro.sensitivity = ($s | tonumber)' \
+        "$active_profile" > "${active_profile}.tmp" && mv "${active_profile}.tmp" "$active_profile"
+
+    # Set SDL environment hints
+    case "$mode" in
+        mouse)
+            info "Setting SDL hints for gyro mouse emulation"
+            jq '.sdl_hints["SDL_JOYSTICK_HIDAPI_PS4_RUMBLE"] = "1" |
+                .sdl_hints["SDL_JOYSTICK_HIDAPI_PS5_RUMBLE"] = "1" |
+                .sdl_hints["SDL_HINT_JOYSTICK_HIDAPI_PS4"] = "1" |
+                .sdl_hints["SDL_HINT_JOYSTICK_HIDAPI_PS5"] = "1"' \
+                "$active_profile" > "${active_profile}.tmp" && mv "${active_profile}.tmp" "$active_profile"
+            ;;
+        camera)
+            info "Camera mode relies on game-native gyro support."
+            dim "  Many Steam games support this via Steam Input."
+            ;;
+        flick-stick)
+            info "Flick-stick mode: right stick sets direction, gyro handles aiming."
+            dim "  Best used with Steam Input or a compatible launcher."
+            ;;
+    esac
+
+    local game_name
+    game_name=$(basename "$active_profile" .json)
+    echo ""
+    info "Gyro set to '${mode}' for profile '${game_name}'"
+    [[ "$mode" != "off" ]] && echo -e "  ${CYAN}Sensitivity:${RESET} ${sensitivity}x"
+}
+
+# ──────────────────────────────────────────────
+# Command: remap <button> <action>
+# ──────────────────────────────────────────────
+cmd_remap() {
+    local button="${1:-}"
+    local action="${2:-}"
+
+    if [[ -z "$button" || -z "$action" ]]; then
+        echo "Usage: 24hg-controllers remap <button> <action>"
+        echo ""
+        echo "Buttons: a, b, x, y, lb, rb, lt, rt, start, select, lstick, rstick,"
+        echo "         dpad_up, dpad_down, dpad_left, dpad_right, share, guide"
+        echo ""
+        echo "Actions: Any other button name, or special:"
+        echo "  none         Disable button"
+        echo "  key:<keyname> Map to keyboard key (e.g., key:escape, key:space)"
+        echo "  mouse:<btn>   Map to mouse button (e.g., mouse:left, mouse:right)"
+        echo ""
+        echo "Examples:"
+        echo "  24hg-controllers remap share guide"
+        echo "  24hg-controllers remap a key:space"
+        echo "  24hg-controllers remap lt mouse:right"
+        return
+    fi
+    ensure_jq
+
+    # Validate button name
+    local valid_buttons="a b x y lb rb lt rt start select lstick rstick dpad_up dpad_down dpad_left dpad_right share guide"
+    local button_lower="${button,,}"
+    if ! echo "$valid_buttons" | grep -qw "$button_lower"; then
+        die "Unknown button '$button'. Valid: $valid_buttons"
+    fi
+
+    # Find active profile
+    local active_profile=""
+    for pf in "$PROFILE_DIR"/*.json; do
+        [[ -f "$pf" ]] || continue
+        local is_active
+        is_active=$(jq -r '.active // false' "$pf" 2>/dev/null)
+        [[ "$is_active" == "true" ]] && { active_profile="$pf"; break; }
+    done
+
+    if [[ -z "$active_profile" ]]; then
+        warn "No active profile. Specify a game:"
+        read -rp "Game profile: " game
+        [[ -z "$game" ]] && die "No profile specified."
+        active_profile=$(profile_path "$game")
+        [[ -f "$active_profile" ]] || die "Profile '$game' not found."
+    fi
+
+    # Apply remap
+    jq --arg btn "$button_lower" --arg act "$action" \
+        '.button_remaps[$btn] = $act' \
+        "$active_profile" > "${active_profile}.tmp" && mv "${active_profile}.tmp" "$active_profile"
+
+    local game_name
+    game_name=$(basename "$active_profile" .json)
+
+    # Build SDL mapping string if remapping controller buttons
+    local sdl_config
+    sdl_config=$(build_sdl_config "$active_profile")
+    if [[ -n "$sdl_config" ]]; then
+        jq --arg sc "$sdl_config" '.sdl_config = $sc' \
+            "$active_profile" > "${active_profile}.tmp" && mv "${active_profile}.tmp" "$active_profile"
+    fi
+
+    info "Remapped: ${button_lower} -> ${action} (profile: ${game_name})"
+    dim "  Re-apply profile for changes to take effect: 24hg-controllers profile apply $game_name"
+}
+
+# Build SDL_GAMECONTROLLERCONFIG from button remaps
+build_sdl_config() {
+    local pf="$1"
+
+    # SDL button name mapping
+    declare -A SDL_MAP=(
+        ["a"]="a" ["b"]="b" ["x"]="x" ["y"]="y"
+        ["lb"]="leftshoulder" ["rb"]="rightshoulder"
+        ["lt"]="lefttrigger" ["rt"]="righttrigger"
+        ["start"]="start" ["select"]="back"
+        ["lstick"]="leftstick" ["rstick"]="rightstick"
+        ["dpad_up"]="dpup" ["dpad_down"]="dpdown"
+        ["dpad_left"]="dpleft" ["dpad_right"]="dpright"
+        ["share"]="misc1" ["guide"]="guide"
+    )
+
+    local remaps
+    remaps=$(jq -r '.button_remaps // {} | to_entries[] | "\(.key)=\(.value)"' "$pf" 2>/dev/null)
+    [[ -z "$remaps" ]] && return
+
+    # Only build SDL config for button-to-button remaps (not key: or mouse: mappings)
+    local parts=""
+    while IFS='=' read -r btn act; do
+        [[ -z "$btn" ]] && continue
+        [[ "$act" == key:* || "$act" == mouse:* || "$act" == "none" ]] && continue
+        local sdl_btn="${SDL_MAP[$btn]:-}"
+        local sdl_act="${SDL_MAP[$act]:-}"
+        [[ -n "$sdl_btn" && -n "$sdl_act" ]] && parts+="${sdl_btn}:${sdl_act},"
+    done <<< "$remaps"
+
+    [[ -n "$parts" ]] && echo "03000000000000000000000000000000,24HG Remap,${parts}"
+}
+
+# ──────────────────────────────────────────────
+# Command: macro create <name>
+# ──────────────────────────────────────────────
+cmd_macro_create() {
+    local name="${1:-}"
+    [[ -z "$name" ]] && die "Usage: 24hg-controllers macro create <name>"
+    ensure_jq
+
+    head_ "Create Macro: $name"
+
+    echo "Enter a sequence of button presses with timing."
+    echo "Format: <button> <duration_ms> (one per line, empty line to finish)"
+    echo ""
+    echo "Buttons: a, b, x, y, lb, rb, lt, rt, start, select, lstick, rstick,"
+    echo "         dpad_up, dpad_down, dpad_left, dpad_right"
+    echo ""
+    echo "Example:"
+    echo "  dpad_up 100"
+    echo "  dpad_up 100"
+    echo "  dpad_down 100"
+    echo "  dpad_down 100"
+    echo "  a 200"
+    echo ""
+
+    local steps="[]"
+    local step_count=0
+
+    while true; do
+        read -rp "  Step $((step_count + 1)): " input
+        [[ -z "$input" ]] && break
+
+        local btn duration
+        btn=$(echo "$input" | awk '{print $1}')
+        duration=$(echo "$input" | awk '{print $2}')
+        duration="${duration:-100}"
+
+        steps=$(echo "$steps" | jq --arg b "$btn" --arg d "$duration" \
+            '. + [{"button": $b, "duration_ms": ($d | tonumber)}]')
+        ((step_count++))
+    done
+
+    if [[ "$step_count" -eq 0 ]]; then
+        warn "No steps recorded. Macro not created."
+        return
+    fi
+
+    # Trigger configuration
+    echo ""
+    echo -e "${CYAN}Trigger configuration:${RESET}"
+    echo "  How should this macro be activated?"
+    echo "  Format: <modifier>+<button> (e.g., share+a, select+x)"
+    read -rp "  Trigger [share+a]: " trigger
+    trigger="${trigger:-share+a}"
+
+    # Save macro
+    local macro_file="${MACRO_DIR}/${name}.json"
+    cat > "$macro_file" <<MACROEOF
+{
+    "name": "$name",
+    "created": "$(date -Iseconds)",
+    "trigger": "$trigger",
+    "repeat": false,
+    "steps": $steps
+}
+MACROEOF
+
+    info "Macro '${name}' created with $step_count steps."
+    echo -e "  ${CYAN}Trigger:${RESET}  $trigger"
+    echo -e "  ${CYAN}Steps:${RESET}    $step_count"
+    echo -e "  ${CYAN}File:${RESET}     $macro_file"
+
+    # Link to active profile
+    local active_profile=""
+    for pf in "$PROFILE_DIR"/*.json; do
+        [[ -f "$pf" ]] || continue
+        local is_active
+        is_active=$(jq -r '.active // false' "$pf" 2>/dev/null)
+        [[ "$is_active" == "true" ]] && { active_profile="$pf"; break; }
+    done
+
+    if [[ -n "$active_profile" ]]; then
+        local macro_entry
+        macro_entry=$(jq -n --arg n "$name" --arg t "$trigger" --arg f "$macro_file" \
+            '{name: $n, trigger: $t, file: $f}')
+        jq --argjson m "$macro_entry" '.macros += [$m]' \
+            "$active_profile" > "${active_profile}.tmp" && mv "${active_profile}.tmp" "$active_profile"
+        info "Macro linked to active profile: $(basename "$active_profile" .json)"
+    else
+        dim "  No active profile. Link manually or activate a profile first."
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: macro list
+# ──────────────────────────────────────────────
+cmd_macro_list() {
+    head_ "Controller Macros"
+
+    local found=0
+    printf "${BOLD}%-20s %-15s %-8s %-25s${RESET}\n" "NAME" "TRIGGER" "STEPS" "CREATED"
+    printf '%.0s─' {1..72}
+    echo ""
+
+    for mf in "$MACRO_DIR"/*.json; do
+        [[ -f "$mf" ]] || continue
+        found=1
+
+        if command -v jq &>/dev/null; then
+            local name trigger steps created
+            name=$(jq -r '.name' "$mf" 2>/dev/null)
+            trigger=$(jq -r '.trigger' "$mf" 2>/dev/null)
+            steps=$(jq -r '.steps | length' "$mf" 2>/dev/null)
+            created=$(jq -r '.created' "$mf" 2>/dev/null)
+            created="${created%%T*}"
+
+            printf "  %-20s %-15s %-8s %-25s\n" "$name" "$trigger" "$steps" "$created"
+        else
+            printf "  %-20s\n" "$(basename "$mf" .json)"
+        fi
+    done
+
+    if [[ "$found" -eq 0 ]]; then
+        dim "  No macros found."
+        dim "  Create one: 24hg-controllers macro create <name>"
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: vibrate <pattern>
+# ──────────────────────────────────────────────
+cmd_vibrate() {
+    local pattern="${1:-short}"
+
+    head_ "Vibration Test"
+
+    # Find first controller with vibration
+    local vib_dev="" vib_name=""
+    while IFS='|' read -r idx dev name type vid_pid conn gyro touchpad vibration buttons axes; do
+        [[ -z "$idx" ]] && continue
+        if [[ "$vibration" == "true" ]]; then
+            vib_dev="$dev"
+            vib_name="$name"
+            break
+        fi
+    done < <(detect_controllers)
+
+    if [[ -z "$vib_dev" ]]; then
+        # Try anyway with first controller
+        while IFS='|' read -r idx dev name type rest; do
+            [[ -z "$idx" ]] && continue
+            vib_dev="$dev"
+            vib_name="$name"
+            break
+        done < <(detect_controllers)
+    fi
+
+    [[ -z "$vib_dev" ]] && die "No controllers detected."
+
+    info "Controller: $vib_name"
+    echo -e "  ${CYAN}Pattern:${RESET} $pattern"
+    echo ""
+
+    # Use fftest or evemu-event for vibration
+    if command -v fftest &>/dev/null && [[ -w "$vib_dev" ]]; then
+        case "$pattern" in
+            short)
+                info "Playing: short buzz"
+                echo "1" | timeout 2 fftest "$vib_dev" 2>/dev/null || true
+                ;;
+            long)
+                info "Playing: long rumble"
+                echo "1" | timeout 4 fftest "$vib_dev" 2>/dev/null || true
+                ;;
+            pulse)
+                info "Playing: pulse pattern"
+                for i in 1 2 3; do
+                    echo "1" | timeout 1 fftest "$vib_dev" 2>/dev/null || true
+                    sleep 0.3
+                done
+                ;;
+            custom)
+                echo "Enter vibration intensity (0-65535) and duration (ms):"
+                read -rp "  Intensity [32767]: " intensity
+                read -rp "  Duration [500]: " duration
+                intensity="${intensity:-32767}"
+                duration="${duration:-500}"
+                info "Playing: custom (intensity=$intensity, duration=${duration}ms)"
+                echo "1" | timeout $((duration / 1000 + 1)) fftest "$vib_dev" 2>/dev/null || true
+                ;;
+            *)
+                warn "Unknown pattern '$pattern'. Use: short, long, pulse, custom"
+                ;;
+        esac
+    elif command -v evemu-event &>/dev/null; then
+        info "Using evemu-event for vibration feedback..."
+        case "$pattern" in
+            short)
+                evemu-event "$vib_dev" --type EV_FF --code FF_RUMBLE --value 1 2>/dev/null || true
+                sleep 0.2
+                evemu-event "$vib_dev" --type EV_FF --code FF_RUMBLE --value 0 2>/dev/null || true
+                ;;
+            long)
+                evemu-event "$vib_dev" --type EV_FF --code FF_RUMBLE --value 1 2>/dev/null || true
+                sleep 1
+                evemu-event "$vib_dev" --type EV_FF --code FF_RUMBLE --value 0 2>/dev/null || true
+                ;;
+            pulse)
+                for i in 1 2 3; do
+                    evemu-event "$vib_dev" --type EV_FF --code FF_RUMBLE --value 1 2>/dev/null || true
+                    sleep 0.15
+                    evemu-event "$vib_dev" --type EV_FF --code FF_RUMBLE --value 0 2>/dev/null || true
+                    sleep 0.2
+                done
+                ;;
+            custom)
+                read -rp "  Duration seconds [0.5]: " duration
+                duration="${duration:-0.5}"
+                evemu-event "$vib_dev" --type EV_FF --code FF_RUMBLE --value 1 2>/dev/null || true
+                sleep "$duration"
+                evemu-event "$vib_dev" --type EV_FF --code FF_RUMBLE --value 0 2>/dev/null || true
+                ;;
+            *)
+                warn "Unknown pattern '$pattern'. Use: short, long, pulse, custom"
+                ;;
+        esac
+        info "Vibration test complete."
+    else
+        err "No vibration tool available."
+        dim "  Install fftest (part of input-utils/evtest) or evemu:"
+        dim "    sudo dnf install evemu"
+        echo ""
+        dim "  Alternatively, test vibration through Steam:"
+        dim "    Settings > Controller > Test Controller"
+    fi
+}
+
+# ──────────────────────────────────────────────
+# Command: help
+# ──────────────────────────────────────────────
+cmd_help() {
+    echo ""
+    echo -e "${BOLD}24HG Controller Profile Manager${RESET} v${VERSION}"
+    echo ""
+    echo "Usage: 24hg-controllers <command> [args...]"
+    echo ""
+    echo -e "${BOLD}Detection:${RESET}"
+    echo "  list                      List connected controllers with details"
+    echo "  scan                      Scan for controllers, drivers, and capabilities"
+    echo ""
+    echo -e "${BOLD}Profiles:${RESET}"
+    echo "  profile create <game>     Create a controller profile for a game"
+    echo "  profile apply <game>      Apply a controller profile"
+    echo "  profile list              List all saved profiles"
+    echo "  profile delete <game>     Delete a profile"
+    echo ""
+    echo -e "${BOLD}Community:${RESET}"
+    echo "  profile share <game>      Upload profile to Hub community"
+    echo "  profile browse [game]     Browse community profiles"
+    echo "  profile download <id>     Download a community profile"
+    echo ""
+    echo -e "${BOLD}Input:${RESET}"
+    echo "  test                      Controller test mode (show all inputs live)"
+    echo "  calibrate                 Calibrate analog sticks (deadzone detection)"
+    echo "  remap <button> <action>   Remap a button"
+    echo ""
+    echo -e "${BOLD}Gyro:${RESET}"
+    echo "  gyro <mode>               Configure gyro (off, mouse, camera, flick-stick)"
+    echo ""
+    echo -e "${BOLD}Macros:${RESET}"
+    echo "  macro create <name>       Create a button macro (sequence with timing)"
+    echo "  macro list                List macros"
+    echo ""
+    echo -e "${BOLD}Feedback:${RESET}"
+    echo "  vibrate <pattern>         Test vibration (short, long, pulse, custom)"
+    echo ""
+    echo -e "${BOLD}Configuration:${RESET}"
+    echo "  Profiles stored in: ${PROFILE_DIR}/"
+    echo "  Macros stored in:   ${MACRO_DIR}/"
+    echo ""
+    echo -e "${BOLD}Environment:${RESET}"
+    echo "  HG24_HUB_API    Hub API URL (default: https://hub.24hgaming.com/api/24hg/controllers)"
+    echo "  HG24_HUB_TOKEN  Authentication token for community sharing"
+    echo ""
+    echo -e "${BOLD}Supported Controllers:${RESET}"
+    echo "  Xbox 360, Xbox One, Xbox Series X|S"
+    echo "  DualShock 4, DualSense, DualSense Edge"
+    echo "  Switch Pro Controller, Joy-Con (L/R)"
+    echo "  Steam Controller, Steam Deck"
+    echo "  8BitDo, Logitech, generic HID"
+    echo ""
+    echo -e "${BOLD}Dependencies:${RESET}"
+    echo "  Required: jq"
+    echo "  Optional: evtest, jstest, jscal, xboxdrv, evemu, fftest, xdotool"
+    echo ""
+}
+
+# ──────────────────────────────────────────────
+# Main dispatch
+# ──────────────────────────────────────────────
+ACTION="${1:-list}"
+shift 2>/dev/null || true
+
+case "$ACTION" in
+    list)
+        cmd_list
+        ;;
+    scan)
+        cmd_scan
+        ;;
+    profile)
+        sub="${1:-list}"
+        shift 2>/dev/null || true
+        case "$sub" in
+            create)   cmd_profile_create "$@" ;;
+            apply)    cmd_profile_apply "$@" ;;
+            list)     cmd_profile_list ;;
+            delete)   cmd_profile_delete "$@" ;;
+            share)    cmd_profile_share "$@" ;;
+            browse)   cmd_profile_browse "$@" ;;
+            download) cmd_profile_download "$@" ;;
+            *)        die "Unknown profile command '$sub'. See: 24hg-controllers help" ;;
+        esac
+        ;;
+    test)
+        cmd_test
+        ;;
+    calibrate)
+        cmd_calibrate
+        ;;
+    gyro)
+        cmd_gyro "$@"
+        ;;
+    remap)
+        cmd_remap "$@"
+        ;;
+    macro)
+        sub="${1:-list}"
+        shift 2>/dev/null || true
+        case "$sub" in
+            create) cmd_macro_create "$@" ;;
+            list)   cmd_macro_list ;;
+            *)      die "Unknown macro command '$sub'. See: 24hg-controllers help" ;;
+        esac
+        ;;
+    vibrate)
+        cmd_vibrate "$@"
+        ;;
+    help|-h|--help)
+        cmd_help
+        ;;
+    *)
+        err "Unknown command: $ACTION"
+        cmd_help
+        exit 1
+        ;;
+esac

@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=24HG Cloud Gaming
-Comment=Play Valorant, Fortnite, Warzone and other blocked games via cloud
-Exec=/usr/bin/forge-cloud-gaming gui
-Icon=forge-logo
-Type=Application
-Categories=Game;Network;
-Keywords=cloud;gaming;geforce;now;xbox;xcloud;boosteroid;valorant;fortnite;warzone;stream;
-StartupNotify=true

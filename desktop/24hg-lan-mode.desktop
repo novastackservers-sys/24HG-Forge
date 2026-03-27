@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG LAN Mode
+Comment=LAN party discovery and play
+Exec=/usr/bin/24hg-lan-mode
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Game;Network;
+Keywords=lan;party;multiplayer;discovery;local;

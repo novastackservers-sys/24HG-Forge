@@ -1,0 +1,1110 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Achievements — Unlock badges and earn rewards through gaming
+
+# ── Configuration ──
+CONFIG_DIR="${HOME}/.config/24hg"
+DATA_DIR="${HOME}/.local/share/24hg"
+STATE_FILE="${CONFIG_DIR}/achievements.json"
+HUB_TOKEN_FILE="${CONFIG_DIR}/hub-token"
+HUB_API="https://hub.24hgaming.com/api/achievements"
+GAME_TIMER_FILE="${DATA_DIR}/game-timer.json"
+BENCHMARK_FILE="${DATA_DIR}/benchmark.json"
+WATCH_INTERVAL=900  # 15 minutes
+
+# ── Colors ──
+if [[ -t 1 ]]; then
+    BOLD="\033[1m"
+    DIM="\033[2m"
+    RESET="\033[0m"
+    RED="\033[31m"
+    GREEN="\033[32m"
+    YELLOW="\033[33m"
+    BLUE="\033[34m"
+    MAGENTA="\033[35m"
+    CYAN="\033[36m"
+    WHITE="\033[37m"
+    GOLD="\033[38;5;220m"
+    ORANGE="\033[38;5;208m"
+    GRAY="\033[38;5;242m"
+else
+    BOLD="" DIM="" RESET="" RED="" GREEN="" YELLOW="" BLUE=""
+    MAGENTA="" CYAN="" WHITE="" GOLD="" ORANGE="" GRAY=""
+fi
+
+# ── Achievement Definitions ──
+# Format: ID|Name|Description|Category|Icon|Points
+read -r -d '' ACHIEVEMENTS_RAW << 'ACHEOF' || true
+first_boot|First Boot|Install and boot 24HG for the first time|Getting Started|🚀|10
+hub_connected|Hub Connected|Log into the 24HG Hub|Getting Started|🔗|15
+first_launch|First Launch|Launch your first game|Getting Started|🎮|10
+friendly|Friendly|Add 5 friends on the Hub|Social|🤝|20
+influencer|Influencer|Invite 3 friends to install 24HG|Social|📣|30
+party_animal|Party Animal|Join a LAN party with 3+ people|Social|🎉|25
+radio_dj|Radio DJ|Listen to 1 hour of radio|Social|📻|15
+marathon|Marathon|Play for 10 hours total|Gaming|🏃|25
+collector|Collector|Install 10 games|Gaming|📚|20
+speedrunner|Speedrunner|Play 5 different games in a single day|Gaming|⚡|30
+night_owl|Night Owl|Game past midnight|Gaming|🦉|10
+variety_gamer|Variety Gamer|Play 20 different games|Gaming|🎲|35
+weekend_warrior|Weekend Warrior|Game for 8+ hours on a weekend|Gaming|🛡️|20
+centurion|Centurion|Reach 100 total hours played|Gaming|💯|40
+clip_creator|Clip Creator|Share your first clip|Community|🎬|15
+viral|Viral|Get 10 views on a clip|Community|🔥|25
+helpful|Helpful|Submit 5 game compatibility ratings|Community|⭐|20
+tournament_fighter|Tournament Fighter|Join your first tournament|Community|⚔️|20
+champion|Champion|Win a tournament|Community|🏆|50
+bug_hunter|Bug Hunter|Report 3 bugs via the Hub|Community|🐛|15
+wiki_editor|Wiki Editor|Contribute to the community wiki|Community|📝|15
+overclocker|Overclocker|Run 24hg hw-optimizer|System|🔧|10
+benchmarker|Benchmarker|Run 24hg rig-score|System|📊|10
+diamond_rig|Diamond Rig|Score 9000+ on rig-score|System|💎|50
+streamer|Streamer|Set up Sunshine streaming|System|📡|20
+customizer|Customizer|Change your wallpaper 5 times|System|🎨|15
+clean_machine|Clean Machine|Run a system cleanup|System|🧹|10
+veteran|Veteran|Use 24HG for 30 days|Milestones|🎖️|25
+dedicated|Dedicated|Reach 100 hours total gaming|Milestones|🏅|40
+legend|Legend|Use 24HG for 365 days|Milestones|👑|100
+ACHEOF
+
+# Category display colors
+declare -A CAT_COLORS=(
+    ["Getting Started"]="${GREEN}"
+    ["Social"]="${MAGENTA}"
+    ["Gaming"]="${BLUE}"
+    ["Community"]="${CYAN}"
+    ["System"]="${ORANGE}"
+    ["Milestones"]="${GOLD}"
+)
+
+CATEGORY_ORDER=("Getting Started" "Social" "Gaming" "Community" "System" "Milestones")
+
+# ── Helpers ──
+
+log() {
+    logger -t 24hg-achievements "$*"
+}
+
+ensure_state() {
+    mkdir -p "${CONFIG_DIR}" "${DATA_DIR}"
+    if [[ ! -f "${STATE_FILE}" ]]; then
+        cat > "${STATE_FILE}" << 'EOF'
+{
+  "unlocked": {},
+  "install_date": "",
+  "wallpaper_changes": 0,
+  "last_check": ""
+}
+EOF
+        # Record install date
+        local now
+        now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        local tmp
+        tmp=$(jq --arg d "${now}" '.install_date = $d' "${STATE_FILE}")
+        echo "${tmp}" > "${STATE_FILE}"
+        log "Initialized achievement state"
+    fi
+}
+
+get_hub_token() {
+    if [[ -f "${HUB_TOKEN_FILE}" ]]; then
+        cat "${HUB_TOKEN_FILE}"
+    else
+        echo ""
+    fi
+}
+
+# Read a field from state JSON
+state_get() {
+    jq -r "$1" "${STATE_FILE}" 2>/dev/null || echo ""
+}
+
+# Write state JSON via jq
+state_set() {
+    local tmp
+    tmp=$(jq "$@" "${STATE_FILE}")
+    echo "${tmp}" > "${STATE_FILE}"
+}
+
+is_unlocked() {
+    local id="$1"
+    local val
+    val=$(jq -r --arg id "${id}" '.unlocked[$id] // empty' "${STATE_FILE}" 2>/dev/null)
+    [[ -n "${val}" ]]
+}
+
+count_unlocked() {
+    jq '.unlocked | length' "${STATE_FILE}" 2>/dev/null || echo 0
+}
+
+total_points() {
+    local total=0
+    while IFS='|' read -r id name desc cat icon pts; do
+        [[ -z "${id}" ]] && continue
+        if is_unlocked "${id}"; then
+            total=$((total + pts))
+        fi
+    done <<< "${ACHIEVEMENTS_RAW}"
+    echo "${total}"
+}
+
+get_rank() {
+    local pts=$1
+    if (( pts >= 5000 )); then echo "Legend"
+    elif (( pts >= 1500 )); then echo "Elite"
+    elif (( pts >= 500 )); then echo "Pro"
+    elif (( pts >= 100 )); then echo "Gamer"
+    else echo "Rookie"
+    fi
+}
+
+get_rank_color() {
+    local rank="$1"
+    case "${rank}" in
+        Legend) echo "${GOLD}" ;;
+        Elite)  echo "${MAGENTA}" ;;
+        Pro)    echo "${CYAN}" ;;
+        Gamer)  echo "${GREEN}" ;;
+        *)      echo "${GRAY}" ;;
+    esac
+}
+
+# ── Progress Bar ──
+
+progress_bar() {
+    local current=$1
+    local total=$2
+    local width=${3:-30}
+
+    if (( total == 0 )); then
+        local ratio=0
+    else
+        local ratio=$((current * 100 / total))
+    fi
+
+    local filled=$((width * current / (total > 0 ? total : 1)))
+    (( filled > width )) && filled=${width}
+    local empty=$((width - filled))
+
+    local color
+    if (( ratio >= 100 )); then color="${GOLD}"
+    elif (( ratio >= 70 )); then color="${GREEN}"
+    elif (( ratio >= 40 )); then color="${YELLOW}"
+    else color="${CYAN}"
+    fi
+
+    local bar=""
+    for ((i = 0; i < filled; i++)); do bar+="█"; done
+    for ((i = 0; i < empty; i++)); do bar+="░"; done
+
+    printf "%b%s%b%s%b %d/%d" "${color}" "${bar:0:${filled}}" "${DIM}" "${bar:${filled}}" "${RESET}" "${current}" "${total}"
+}
+
+# ── Achievement Unlock ──
+
+do_unlock() {
+    local id="$1"
+    local name="$2"
+    local desc="$3"
+    local pts="$4"
+    local icon="$5"
+    local quiet="${6:-false}"
+
+    if is_unlocked "${id}"; then
+        return 1
+    fi
+
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Update state
+    local tmp
+    tmp=$(jq --arg id "${id}" --arg ts "${now}" \
+        '.unlocked[$id] = $ts | .last_check = $ts' "${STATE_FILE}")
+    echo "${tmp}" > "${STATE_FILE}"
+
+    log "Achievement unlocked: ${name} (${id}) +${pts}pts"
+
+    if [[ "${quiet}" != "true" ]]; then
+        echo ""
+        printf "  %b%b════════════════════════════════════════════════%b\n" "${GOLD}" "${BOLD}" "${RESET}"
+        printf "  %b%b  %s  ACHIEVEMENT UNLOCKED!  %s%b\n" "${GOLD}" "${BOLD}" "${icon}" "${icon}" "${RESET}"
+        printf "  %b%b════════════════════════════════════════════════%b\n" "${GOLD}" "${BOLD}" "${RESET}"
+        printf "  %b%b  %s%b  %b+%d Hub Points%b\n" "${WHITE}" "${BOLD}" "${name}" "${RESET}" "${YELLOW}" "${pts}" "${RESET}"
+        printf "  %b  %s%b\n" "${CYAN}" "${desc}" "${RESET}"
+        printf "  %b%b════════════════════════════════════════════════%b\n" "${GOLD}" "${BOLD}" "${RESET}"
+        echo ""
+    fi
+
+    # Desktop notification
+    if command -v notify-send &>/dev/null; then
+        notify-send -i 24hg-logo \
+            "Achievement Unlocked!" \
+            "${icon} ${name} -- ${desc}\n+${pts} Hub Points" \
+            2>/dev/null || true
+    fi
+
+    # Sync to Hub
+    sync_to_hub "${id}" "${pts}" "${now}"
+
+    return 0
+}
+
+sync_to_hub() {
+    local id="$1"
+    local pts="$2"
+    local ts="$3"
+    local token
+    token=$(get_hub_token)
+    [[ -z "${token}" ]] && return 0
+
+    curl -s -o /dev/null --max-time 10 \
+        -X POST "${HUB_API}/unlock" \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -d "{\"achievement_id\":\"${id}\",\"points\":${pts},\"unlocked_at\":\"${ts}\"}" \
+        2>/dev/null || true
+}
+
+# ── Achievement Checkers ──
+
+get_total_playtime_hours() {
+    if [[ -f "${GAME_TIMER_FILE}" ]]; then
+        jq '[.sessions[]?.duration // 0] | add // 0 | . / 3600 | floor' "${GAME_TIMER_FILE}" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+get_games_installed() {
+    local count=0
+    # Check Steam library
+    local steam_apps="${HOME}/.local/share/Steam/steamapps"
+    if [[ -d "${steam_apps}" ]]; then
+        count=$(find "${steam_apps}" -maxdepth 1 -name "appmanifest_*.acf" 2>/dev/null | wc -l)
+    fi
+    # Check Flatpak Steam
+    local flatpak_apps="${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps"
+    if [[ -d "${flatpak_apps}" ]]; then
+        local fc
+        fc=$(find "${flatpak_apps}" -maxdepth 1 -name "appmanifest_*.acf" 2>/dev/null | wc -l)
+        count=$((count + fc))
+    fi
+    echo "${count}"
+}
+
+get_games_today() {
+    if [[ -f "${GAME_TIMER_FILE}" ]]; then
+        local today
+        today=$(date +"%Y-%m-%d")
+        jq -r --arg d "${today}" \
+            '[.sessions[]? | select(.start_time // "" | startswith($d)) | .game_id // .app_id] | unique | length' \
+            "${GAME_TIMER_FILE}" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+get_friend_count() {
+    local token
+    token=$(get_hub_token)
+    [[ -z "${token}" ]] && echo 0 && return
+    local resp
+    resp=$(curl -s --max-time 10 \
+        -H "Authorization: Bearer ${token}" \
+        "${HUB_API}/../friends/count" 2>/dev/null || echo "")
+    echo "${resp}" | jq -r '.count // 0' 2>/dev/null || echo 0
+}
+
+get_invite_count() {
+    local token
+    token=$(get_hub_token)
+    [[ -z "${token}" ]] && echo 0 && return
+    local resp
+    resp=$(curl -s --max-time 10 \
+        -H "Authorization: Bearer ${token}" \
+        "${HUB_API}/../invites/accepted" 2>/dev/null || echo "")
+    echo "${resp}" | jq -r '.count // 0' 2>/dev/null || echo 0
+}
+
+get_clip_count() {
+    local clips_dir="${HOME}/Videos/Clips"
+    if [[ -d "${clips_dir}" ]]; then
+        find "${clips_dir}" -maxdepth 1 -type f \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" \) 2>/dev/null | wc -l
+    else
+        echo 0
+    fi
+}
+
+get_clip_views() {
+    local token
+    token=$(get_hub_token)
+    [[ -z "${token}" ]] && echo 0 && return
+    local resp
+    resp=$(curl -s --max-time 10 \
+        -H "Authorization: Bearer ${token}" \
+        "${HUB_API}/../clips/max-views" 2>/dev/null || echo "")
+    echo "${resp}" | jq -r '.max_views // 0' 2>/dev/null || echo 0
+}
+
+get_compat_ratings() {
+    local token
+    token=$(get_hub_token)
+    [[ -z "${token}" ]] && echo 0 && return
+    local resp
+    resp=$(curl -s --max-time 10 \
+        -H "Authorization: Bearer ${token}" \
+        "${HUB_API}/../compat/ratings-count" 2>/dev/null || echo "")
+    echo "${resp}" | jq -r '.count // 0' 2>/dev/null || echo 0
+}
+
+get_wallpaper_changes() {
+    jq -r '.wallpaper_changes // 0' "${STATE_FILE}" 2>/dev/null || echo 0
+}
+
+get_days_since_install() {
+    local install_date
+    install_date=$(jq -r '.install_date // empty' "${STATE_FILE}" 2>/dev/null)
+    [[ -z "${install_date}" ]] && echo 0 && return
+    local install_epoch now_epoch
+    install_epoch=$(date -d "${install_date}" +%s 2>/dev/null || echo 0)
+    now_epoch=$(date +%s)
+    if (( install_epoch > 0 )); then
+        echo $(( (now_epoch - install_epoch) / 86400 ))
+    else
+        echo 0
+    fi
+}
+
+get_rig_score() {
+    if [[ -f "${BENCHMARK_FILE}" ]]; then
+        jq -r '.score // 0' "${BENCHMARK_FILE}" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+get_radio_minutes() {
+    local radio_file="${DATA_DIR}/radio-stats.json"
+    if [[ -f "${radio_file}" ]]; then
+        jq -r '.total_minutes // 0' "${radio_file}" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+get_bug_reports() {
+    local token
+    token=$(get_hub_token)
+    [[ -z "${token}" ]] && echo 0 && return
+    local resp
+    resp=$(curl -s --max-time 10 \
+        -H "Authorization: Bearer ${token}" \
+        "${HUB_API}/../bugs/count" 2>/dev/null || echo "")
+    echo "${resp}" | jq -r '.count // 0' 2>/dev/null || echo 0
+}
+
+check_achievements() {
+    local newly_unlocked=0
+
+    # Getting Started
+    if [[ -f "${CONFIG_DIR}/first-boot-done" ]]; then
+        if do_unlock "first_boot" "First Boot" "Install and boot 24HG for the first time" 10 "🚀"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    if [[ -f "${HUB_TOKEN_FILE}" ]]; then
+        if do_unlock "hub_connected" "Hub Connected" "Log into the 24HG Hub" 15 "🔗"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local playtime
+    playtime=$(get_total_playtime_hours)
+    if (( playtime > 0 )); then
+        if do_unlock "first_launch" "First Launch" "Launch your first game" 10 "🎮"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    # Social
+    local friends
+    friends=$(get_friend_count)
+    if (( friends >= 5 )); then
+        if do_unlock "friendly" "Friendly" "Add 5 friends on the Hub" 20 "🤝"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local invites
+    invites=$(get_invite_count)
+    if (( invites >= 3 )); then
+        if do_unlock "influencer" "Influencer" "Invite 3 friends to install 24HG" 30 "📣"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    # LAN party detection via Hub
+    local lan_marker="${DATA_DIR}/lan-party-detected"
+    if [[ -f "${lan_marker}" ]]; then
+        if do_unlock "party_animal" "Party Animal" "Join a LAN party with 3+ people" 25 "🎉"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local radio_min
+    radio_min=$(get_radio_minutes)
+    if (( radio_min >= 60 )); then
+        if do_unlock "radio_dj" "Radio DJ" "Listen to 1 hour of radio" 15 "📻"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    # Gaming
+    if (( playtime >= 10 )); then
+        if do_unlock "marathon" "Marathon" "Play for 10 hours total" 25 "🏃"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local games_installed
+    games_installed=$(get_games_installed)
+    if (( games_installed >= 10 )); then
+        if do_unlock "collector" "Collector" "Install 10 games" 20 "📚"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local games_today
+    games_today=$(get_games_today)
+    if (( games_today >= 5 )); then
+        if do_unlock "speedrunner" "Speedrunner" "Play 5 different games in a single day" 30 "⚡"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local hour
+    hour=$(date +%H)
+    if (( hour >= 0 && hour < 5 )); then
+        # Check if a game is currently running
+        if pgrep -f "steam.*game" &>/dev/null || [[ -f "${DATA_DIR}/game-active" ]]; then
+            if do_unlock "night_owl" "Night Owl" "Game past midnight" 10 "🦉"; then
+                newly_unlocked=$((newly_unlocked + 1))
+            fi
+        fi
+    fi
+
+    local diff_games=0
+    if [[ -f "${GAME_TIMER_FILE}" ]]; then
+        diff_games=$(jq '[.sessions[]?.game_id // .sessions[]?.app_id] | unique | length' "${GAME_TIMER_FILE}" 2>/dev/null || echo 0)
+    fi
+    if (( diff_games >= 20 )); then
+        if do_unlock "variety_gamer" "Variety Gamer" "Play 20 different games" 35 "🎲"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    # Weekend warrior — check if today is weekend and playtime today > 8h
+    local dow
+    dow=$(date +%u)
+    if (( dow >= 6 )); then
+        local today_playtime=0
+        if [[ -f "${GAME_TIMER_FILE}" ]]; then
+            local today_date
+            today_date=$(date +"%Y-%m-%d")
+            today_playtime=$(jq -r --arg d "${today_date}" \
+                '[.sessions[]? | select(.start_time // "" | startswith($d)) | .duration // 0] | add // 0 | . / 3600 | floor' \
+                "${GAME_TIMER_FILE}" 2>/dev/null || echo 0)
+        fi
+        if (( today_playtime >= 8 )); then
+            if do_unlock "weekend_warrior" "Weekend Warrior" "Game for 8+ hours on a weekend" 20 "🛡️"; then
+                newly_unlocked=$((newly_unlocked + 1))
+            fi
+        fi
+    fi
+
+    if (( playtime >= 100 )); then
+        if do_unlock "centurion" "Centurion" "Reach 100 total hours played" 40 "💯"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    # Community
+    local clips
+    clips=$(get_clip_count)
+    if (( clips >= 1 )); then
+        if do_unlock "clip_creator" "Clip Creator" "Share your first clip" 15 "🎬"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local views
+    views=$(get_clip_views)
+    if (( views >= 10 )); then
+        if do_unlock "viral" "Viral" "Get 10 views on a clip" 25 "🔥"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local ratings
+    ratings=$(get_compat_ratings)
+    if (( ratings >= 5 )); then
+        if do_unlock "helpful" "Helpful" "Submit 5 game compatibility ratings" 20 "⭐"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local tourney_marker="${DATA_DIR}/tournament-joined"
+    if [[ -f "${tourney_marker}" ]]; then
+        if do_unlock "tournament_fighter" "Tournament Fighter" "Join your first tournament" 20 "⚔️"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local champ_marker="${DATA_DIR}/tournament-won"
+    if [[ -f "${champ_marker}" ]]; then
+        if do_unlock "champion" "Champion" "Win a tournament" 50 "🏆"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local bugs
+    bugs=$(get_bug_reports)
+    if (( bugs >= 3 )); then
+        if do_unlock "bug_hunter" "Bug Hunter" "Report 3 bugs via the Hub" 15 "🐛"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local wiki_marker="${DATA_DIR}/wiki-contributed"
+    if [[ -f "${wiki_marker}" ]]; then
+        if do_unlock "wiki_editor" "Wiki Editor" "Contribute to the community wiki" 15 "📝"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    # System
+    local hw_opt_marker="${DATA_DIR}/hw-optimizer-ran"
+    if [[ -f "${hw_opt_marker}" ]]; then
+        if do_unlock "overclocker" "Overclocker" "Run 24hg hw-optimizer" 10 "🔧"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    if [[ -f "${BENCHMARK_FILE}" ]]; then
+        if do_unlock "benchmarker" "Benchmarker" "Run 24hg rig-score" 10 "📊"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local rig_score
+    rig_score=$(get_rig_score)
+    if (( rig_score >= 9000 )); then
+        if do_unlock "diamond_rig" "Diamond Rig" "Score 9000+ on rig-score" 50 "💎"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local sunshine_marker="${DATA_DIR}/sunshine-configured"
+    if [[ -f "${sunshine_marker}" ]] || systemctl --user is-active sunshine &>/dev/null 2>&1; then
+        if do_unlock "streamer" "Streamer" "Set up Sunshine streaming" 20 "📡"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local wp_changes
+    wp_changes=$(get_wallpaper_changes)
+    if (( wp_changes >= 5 )); then
+        if do_unlock "customizer" "Customizer" "Change your wallpaper 5 times" 15 "🎨"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    local cleanup_marker="${DATA_DIR}/cleanup-ran"
+    if [[ -f "${cleanup_marker}" ]]; then
+        if do_unlock "clean_machine" "Clean Machine" "Run a system cleanup" 10 "🧹"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    # Milestones
+    local days_used
+    days_used=$(get_days_since_install)
+    if (( days_used >= 30 )); then
+        if do_unlock "veteran" "Veteran" "Use 24HG for 30 days" 25 "🎖️"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    if (( playtime >= 100 )); then
+        if do_unlock "dedicated" "Dedicated" "Reach 100 hours total gaming" 40 "🏅"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    if (( days_used >= 365 )); then
+        if do_unlock "legend" "Legend" "Use 24HG for 365 days" 100 "👑"; then
+            newly_unlocked=$((newly_unlocked + 1))
+        fi
+    fi
+
+    # Update last check
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local tmp
+    tmp=$(jq --arg d "${now}" '.last_check = $d' "${STATE_FILE}")
+    echo "${tmp}" > "${STATE_FILE}"
+
+    echo "${newly_unlocked}"
+}
+
+# ── Progress Data for Multi-Step Achievements ──
+
+get_achievement_progress() {
+    local id="$1"
+    local current=0
+    local target=0
+
+    case "${id}" in
+        friendly)
+            current=$(get_friend_count)
+            target=5
+            ;;
+        influencer)
+            current=$(get_invite_count)
+            target=3
+            ;;
+        radio_dj)
+            current=$(get_radio_minutes)
+            target=60
+            ;;
+        marathon)
+            current=$(get_total_playtime_hours)
+            target=10
+            ;;
+        collector)
+            current=$(get_games_installed)
+            target=10
+            ;;
+        speedrunner)
+            current=$(get_games_today)
+            target=5
+            ;;
+        variety_gamer)
+            if [[ -f "${GAME_TIMER_FILE}" ]]; then
+                current=$(jq '[.sessions[]?.game_id // .sessions[]?.app_id] | unique | length' "${GAME_TIMER_FILE}" 2>/dev/null || echo 0)
+            fi
+            target=20
+            ;;
+        centurion|dedicated)
+            current=$(get_total_playtime_hours)
+            target=100
+            ;;
+        clip_creator)
+            current=$(get_clip_count)
+            target=1
+            ;;
+        viral)
+            current=$(get_clip_views)
+            target=10
+            ;;
+        helpful)
+            current=$(get_compat_ratings)
+            target=5
+            ;;
+        bug_hunter)
+            current=$(get_bug_reports)
+            target=3
+            ;;
+        customizer)
+            current=$(get_wallpaper_changes)
+            target=5
+            ;;
+        veteran)
+            current=$(get_days_since_install)
+            target=30
+            ;;
+        legend)
+            current=$(get_days_since_install)
+            target=365
+            ;;
+        diamond_rig)
+            current=$(get_rig_score)
+            target=9000
+            ;;
+        *)
+            echo ""
+            return
+            ;;
+    esac
+
+    (( current > target )) && current=${target}
+    echo "${current}|${target}"
+}
+
+# ── Commands ──
+
+cmd_list() {
+    ensure_state
+
+    echo ""
+    printf "  %b%b╔══════════════════════════════════════════════════════════╗%b\n" "${GOLD}" "${BOLD}" "${RESET}"
+    printf "  %b%b║         24HG Achievements                        ║%b\n" "${GOLD}" "${BOLD}" "${RESET}"
+    printf "  %b%b╚══════════════════════════════════════════════════════════╝%b\n" "${GOLD}" "${BOLD}" "${RESET}"
+    echo ""
+
+    local current_cat=""
+
+    for cat_name in "${CATEGORY_ORDER[@]}"; do
+        local cat_color="${CAT_COLORS[${cat_name}]:-${WHITE}}"
+        local cat_unlocked=0
+        local cat_total=0
+
+        # Count achievements in this category
+        while IFS='|' read -r id name desc cat icon pts; do
+            [[ -z "${id}" ]] && continue
+            [[ "${cat}" != "${cat_name}" ]] && continue
+            cat_total=$((cat_total + 1))
+            if is_unlocked "${id}"; then
+                cat_unlocked=$((cat_unlocked + 1))
+            fi
+        done <<< "${ACHIEVEMENTS_RAW}"
+
+        printf "  %b%b── %s (%d/%d) ──%b\n\n" "${cat_color}" "${BOLD}" "${cat_name}" "${cat_unlocked}" "${cat_total}" "${RESET}"
+
+        while IFS='|' read -r id name desc cat icon pts; do
+            [[ -z "${id}" ]] && continue
+            [[ "${cat}" != "${cat_name}" ]] && continue
+
+            if is_unlocked "${id}"; then
+                local unlock_ts
+                unlock_ts=$(jq -r --arg id "${id}" '.unlocked[$id] // ""' "${STATE_FILE}" 2>/dev/null)
+                local date_str=""
+                if [[ -n "${unlock_ts}" ]]; then
+                    date_str=$(date -d "${unlock_ts}" +"%b %d, %Y" 2>/dev/null || echo "")
+                fi
+                printf "    %b✓%b %s  %b%b%s%b  %b(%d pts)%b\n" "${GREEN}" "${RESET}" "${icon}" "${WHITE}" "${BOLD}" "${name}" "${RESET}" "${DIM}" "${pts}" "${RESET}"
+                printf "       %b%s%b\n" "${CYAN}" "${desc}" "${RESET}"
+                if [[ -n "${date_str}" ]]; then
+                    printf "       %bUnlocked %s%b\n" "${DIM}" "${date_str}" "${RESET}"
+                fi
+            else
+                printf "    %b○  🔒  %s  (%d pts)%b\n" "${DIM}" "${name}" "${pts}" "${RESET}"
+                printf "       %b%s%b\n" "${DIM}" "${desc}" "${RESET}"
+            fi
+            echo ""
+        done <<< "${ACHIEVEMENTS_RAW}"
+    done
+
+    # Summary
+    local total_u
+    total_u=$(count_unlocked)
+    local total_a=0
+    while IFS='|' read -r id name desc cat icon pts; do
+        [[ -z "${id}" ]] && continue
+        total_a=$((total_a + 1))
+    done <<< "${ACHIEVEMENTS_RAW}"
+    local pts
+    pts=$(total_points)
+    printf "  %b%d/%d unlocked  ·  %d points%b\n\n" "${BOLD}" "${total_u}" "${total_a}" "${pts}" "${RESET}"
+}
+
+cmd_progress() {
+    ensure_state
+
+    echo ""
+    printf "  %b%bProgress Toward Next Achievements%b\n" "${CYAN}" "${BOLD}" "${RESET}"
+    printf "  %b%b──────────────────────────────────%b\n\n" "${CYAN}" "${BOLD}" "${RESET}"
+
+    local shown=0
+
+    while IFS='|' read -r id name desc cat icon pts; do
+        [[ -z "${id}" ]] && continue
+        is_unlocked "${id}" && continue
+
+        local prog
+        prog=$(get_achievement_progress "${id}")
+        [[ -z "${prog}" ]] && continue
+
+        local current target
+        current=$(echo "${prog}" | cut -d'|' -f1)
+        target=$(echo "${prog}" | cut -d'|' -f2)
+
+        # Only show if some progress made
+        if (( current > 0 )) || [[ "${id}" == "marathon" ]] || [[ "${id}" == "collector" ]] || [[ "${id}" == "veteran" ]]; then
+            printf "    %s  %b%b%s%b  %b(%s)%b\n" "${icon}" "${WHITE}" "${BOLD}" "${name}" "${RESET}" "${DIM}" "${cat}" "${RESET}"
+            printf "       %s\n" "${desc}"
+            printf "       "
+            progress_bar "${current}" "${target}" 25
+            echo ""
+            echo ""
+            shown=$((shown + 1))
+        fi
+    done <<< "${ACHIEVEMENTS_RAW}"
+
+    if (( shown == 0 )); then
+        printf "    %bNo achievements in progress yet. Start using 24HG to begin!%b\n\n" "${DIM}" "${RESET}"
+    fi
+}
+
+cmd_recent() {
+    ensure_state
+
+    echo ""
+    printf "  %b%bRecently Unlocked Achievements%b\n" "${GREEN}" "${BOLD}" "${RESET}"
+    printf "  %b%b──────────────────────────────%b\n\n" "${GREEN}" "${BOLD}" "${RESET}"
+
+    # Get all unlocked achievements sorted by timestamp (most recent first)
+    local unlocked_list
+    unlocked_list=$(jq -r '.unlocked | to_entries | sort_by(.value) | reverse | .[0:10] | .[] | "\(.key)|\(.value)"' "${STATE_FILE}" 2>/dev/null || echo "")
+
+    if [[ -z "${unlocked_list}" ]]; then
+        printf "    %bNo achievements unlocked yet. Run '24hg-achievements check' to scan!%b\n\n" "${DIM}" "${RESET}"
+        return
+    fi
+
+    local count=0
+    while IFS='|' read -r uid ts; do
+        [[ -z "${uid}" ]] && continue
+
+        # Look up achievement details
+        while IFS='|' read -r id name desc cat icon pts; do
+            [[ -z "${id}" ]] && continue
+            if [[ "${id}" == "${uid}" ]]; then
+                local date_str=""
+                if [[ -n "${ts}" ]]; then
+                    date_str=$(date -d "${ts}" +"%b %d, %Y at %H:%M" 2>/dev/null || echo "${ts}")
+                fi
+                printf "    %b✓%b %s  %b%b%s%b  %b+%d pts%b\n" "${GREEN}" "${RESET}" "${icon}" "${WHITE}" "${BOLD}" "${name}" "${RESET}" "${YELLOW}" "${pts}" "${RESET}"
+                printf "       %b%s%b\n" "${CYAN}" "${desc}" "${RESET}"
+                printf "       %b%s%b\n\n" "${DIM}" "${date_str}" "${RESET}"
+                count=$((count + 1))
+                break
+            fi
+        done <<< "${ACHIEVEMENTS_RAW}"
+    done <<< "${unlocked_list}"
+
+    if (( count == 0 )); then
+        printf "    %bNo achievements unlocked yet.%b\n\n" "${DIM}" "${RESET}"
+    fi
+}
+
+cmd_check() {
+    ensure_state
+
+    printf "  %bScanning system for new achievements...%b\n" "${CYAN}" "${RESET}"
+    log "Running achievement check"
+
+    local count
+    count=$(check_achievements)
+
+    if (( count == 0 )); then
+        local total_u
+        total_u=$(count_unlocked)
+        local total_a=0
+        while IFS='|' read -r id name desc cat icon pts; do
+            [[ -z "${id}" ]] && continue
+            total_a=$((total_a + 1))
+        done <<< "${ACHIEVEMENTS_RAW}"
+        printf "  %bNo new achievements. (%d/%d unlocked)%b\n" "${DIM}" "${total_u}" "${total_a}" "${RESET}"
+    else
+        printf "\n  %b%bUnlocked %d new achievement%s!%b\n" "${GREEN}" "${BOLD}" "${count}" "$([ "${count}" -ne 1 ] && echo 's')" "${RESET}"
+    fi
+    echo ""
+}
+
+cmd_stats() {
+    ensure_state
+
+    echo ""
+    printf "  %b%b╔══════════════════════════════════════════════════════════╗%b\n" "${GOLD}" "${BOLD}" "${RESET}"
+    printf "  %b%b║           Achievement Stats                            ║%b\n" "${GOLD}" "${BOLD}" "${RESET}"
+    printf "  %b%b╚══════════════════════════════════════════════════════════╝%b\n" "${GOLD}" "${BOLD}" "${RESET}"
+    echo ""
+
+    local total_u
+    total_u=$(count_unlocked)
+    local total_a=0
+    while IFS='|' read -r id name desc cat icon pts; do
+        [[ -z "${id}" ]] && continue
+        total_a=$((total_a + 1))
+    done <<< "${ACHIEVEMENTS_RAW}"
+    local pts
+    pts=$(total_points)
+
+    local max_pts=0
+    while IFS='|' read -r id name desc cat icon p; do
+        [[ -z "${id}" ]] && continue
+        max_pts=$((max_pts + p))
+    done <<< "${ACHIEVEMENTS_RAW}"
+
+    local rank
+    rank=$(get_rank "${pts}")
+    local rank_color
+    rank_color=$(get_rank_color "${rank}")
+
+    # Rank display
+    printf "    %b%bRank:%b  %b%b%s%b\n\n" "${WHITE}" "${BOLD}" "${RESET}" "${rank_color}" "${BOLD}" "${rank}" "${RESET}"
+
+    # Points
+    printf "    %b%bPoints:%b   %d / %d\n" "${WHITE}" "${BOLD}" "${RESET}" "${pts}" "${max_pts}"
+    printf "    "
+    progress_bar "${pts}" "${max_pts}" 35
+    echo ""
+    echo ""
+
+    # Achievements
+    printf "    %b%bUnlocked:%b %d / %d\n" "${WHITE}" "${BOLD}" "${RESET}" "${total_u}" "${total_a}"
+    printf "    "
+    progress_bar "${total_u}" "${total_a}" 35
+    echo ""
+    echo ""
+
+    # Per-category
+    printf "    %b%bBy Category:%b\n\n" "${WHITE}" "${BOLD}" "${RESET}"
+    for cat_name in "${CATEGORY_ORDER[@]}"; do
+        local cat_color="${CAT_COLORS[${cat_name}]:-${WHITE}}"
+        local cat_unlocked=0
+        local cat_total=0
+
+        while IFS='|' read -r id name desc cat icon p; do
+            [[ -z "${id}" ]] && continue
+            [[ "${cat}" != "${cat_name}" ]] && continue
+            cat_total=$((cat_total + 1))
+            if is_unlocked "${id}"; then
+                cat_unlocked=$((cat_unlocked + 1))
+            fi
+        done <<< "${ACHIEVEMENTS_RAW}"
+
+        printf "      %b%-18s%b " "${cat_color}" "${cat_name}" "${RESET}"
+        progress_bar "${cat_unlocked}" "${cat_total}" 20
+        echo ""
+    done
+    echo ""
+
+    # Rank progression
+    printf "    %b%bRank Progression:%b\n" "${WHITE}" "${BOLD}" "${RESET}"
+    local ranks=("Rookie:0" "Gamer:100" "Pro:500" "Elite:1500" "Legend:5000")
+    for entry in "${ranks[@]}"; do
+        local r_name r_threshold
+        r_name="${entry%%:*}"
+        r_threshold="${entry#*:}"
+        local r_color
+        r_color=$(get_rank_color "${r_name}")
+        if [[ "${r_name}" == "${rank}" ]]; then
+            printf "      %b%b> %-8s%b  %d pts\n" "${r_color}" "${BOLD}" "${r_name}" "${RESET}" "${r_threshold}"
+        elif (( pts >= r_threshold )); then
+            printf "      %b  %-8s%b  %b%d pts  ✓%b\n" "${r_color}" "${r_name}" "${RESET}" "${DIM}" "${r_threshold}" "${RESET}"
+        else
+            printf "      %b  %-8s  %d pts%b\n" "${DIM}" "${r_name}" "${r_threshold}" "${RESET}"
+        fi
+    done
+    echo ""
+
+    # Days since install
+    local days
+    days=$(get_days_since_install)
+    if (( days > 0 )); then
+        printf "    %b%bDays on 24HG:%b  %d\n" "${WHITE}" "${BOLD}" "${RESET}" "${days}"
+    fi
+
+    # Total playtime
+    local playtime
+    playtime=$(get_total_playtime_hours)
+    if (( playtime > 0 )); then
+        printf "    %b%bTotal Playtime:%b %d hours\n" "${WHITE}" "${BOLD}" "${RESET}" "${playtime}"
+    fi
+    echo ""
+
+    # Hub sync status
+    local token
+    token=$(get_hub_token)
+    if [[ -n "${token}" ]]; then
+        printf "    %b%bHub Sync:%b  %b✓ Connected%b\n" "${WHITE}" "${BOLD}" "${RESET}" "${GREEN}" "${RESET}"
+
+        # Try to fetch Hub stats
+        local hub_resp
+        hub_resp=$(curl -s --max-time 10 \
+            -H "Authorization: Bearer ${token}" \
+            "${HUB_API}/stats" 2>/dev/null || echo "")
+        if [[ -n "${hub_resp}" ]]; then
+            local hub_rank hub_pts
+            hub_rank=$(echo "${hub_resp}" | jq -r '.rank // empty' 2>/dev/null)
+            hub_pts=$(echo "${hub_resp}" | jq -r '.points // empty' 2>/dev/null)
+            if [[ -n "${hub_rank}" ]]; then
+                printf "    %b%bHub Rank:%b   #%s\n" "${WHITE}" "${BOLD}" "${RESET}" "${hub_rank}"
+            fi
+            if [[ -n "${hub_pts}" ]]; then
+                printf "    %b%bHub Points:%b %s\n" "${WHITE}" "${BOLD}" "${RESET}" "${hub_pts}"
+            fi
+        fi
+    else
+        printf "    %b%bHub Sync:%b  %b○ Not connected%b  %b(run 24hg-hub login)%b\n" "${WHITE}" "${BOLD}" "${RESET}" "${DIM}" "${RESET}" "${DIM}" "${RESET}"
+    fi
+    echo ""
+}
+
+cmd_watch() {
+    log "Starting achievement watch daemon (interval: ${WATCH_INTERVAL}s)"
+    printf "  %b24HG Achievement Watcher started (checking every %d minutes)%b\n" "${CYAN}" "$((WATCH_INTERVAL / 60))" "${RESET}"
+    printf "  %bPress Ctrl+C to stop%b\n\n" "${DIM}" "${RESET}"
+
+    while true; do
+        log "Watch cycle: checking achievements"
+
+        local count
+        count=$(check_achievements 2>/dev/null || echo 0)
+
+        if (( count > 0 )); then
+            log "Watch cycle: ${count} new achievements unlocked"
+        fi
+
+        sleep "${WATCH_INTERVAL}"
+    done
+}
+
+cmd_help() {
+    echo ""
+    printf "  %b%b24HG Achievements%b\n" "${GOLD}" "${BOLD}" "${RESET}"
+    printf "  %bUnlock badges and earn rewards through gaming%b\n\n" "${DIM}" "${RESET}"
+
+    printf "  %b%bCommands:%b\n" "${WHITE}" "${BOLD}" "${RESET}"
+    printf "    %blist%b        Show all achievements with locked/unlocked status\n" "${CYAN}" "${RESET}"
+    printf "    %bprogress%b    Show progress toward next achievements\n" "${CYAN}" "${RESET}"
+    printf "    %brecent%b      Show recently unlocked achievements\n" "${CYAN}" "${RESET}"
+    printf "    %bcheck%b       Check for newly earned achievements\n" "${CYAN}" "${RESET}"
+    printf "    %bstats%b       Show overall stats (unlocked, points, rank)\n" "${CYAN}" "${RESET}"
+    printf "    %bwatch%b       Daemon that periodically checks and sends notifications\n" "${CYAN}" "${RESET}"
+    printf "    %bhelp%b        Show this help message\n" "${CYAN}" "${RESET}"
+    echo ""
+
+    printf "  %b%bRanks:%b  Rookie (0) → Gamer (100) → Pro (500) → Elite (1500) → Legend (5000)\n\n" "${WHITE}" "${BOLD}" "${RESET}"
+
+    printf "  %bState: %s%b\n" "${DIM}" "${STATE_FILE}" "${RESET}"
+    printf "  %bHub API: %s%b\n\n" "${DIM}" "${HUB_API}" "${RESET}"
+}
+
+# ── Main ──
+
+main() {
+    local cmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    case "${cmd}" in
+        list)     cmd_list ;;
+        progress) cmd_progress ;;
+        recent)   cmd_recent ;;
+        check)    cmd_check ;;
+        stats)    cmd_stats ;;
+        watch)    cmd_watch ;;
+        help|-h|--help) cmd_help ;;
+        *)
+            printf "  %bUnknown command: %s%b\n" "${RED}" "${cmd}" "${RESET}"
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

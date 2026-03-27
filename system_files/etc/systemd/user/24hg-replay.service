@@ -1,0 +1,13 @@
+[Unit]
+Description=24HG Instant Replay Buffer
+Documentation=https://os.24hgaming.com
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/24hg-replay start
+ExecStop=/usr/bin/24hg-replay stop
+Restart=no
+
+[Install]
+WantedBy=default.target

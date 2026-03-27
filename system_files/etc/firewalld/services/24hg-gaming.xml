@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>24HG Gaming</short>
+  <description>Ports used by 24HG game servers and gaming clients</description>
+
+  <!-- Steam client -->
+  <port protocol="udp" port="27000-27100"/>
+  <port protocol="tcp" port="27015-27050"/>
+
+  <!-- Steam voice chat -->
+  <port protocol="udp" port="3478"/>
+  <port protocol="udp" port="4379-4380"/>
+
+  <!-- Rust client (EAC) -->
+  <port protocol="udp" port="7777-7778"/>
+
+  <!-- FiveM client -->
+  <port protocol="udp" port="30120"/>
+
+  <!-- LiveKit WebRTC (TURN/STUN) -->
+  <port protocol="udp" port="3478"/>
+  <port protocol="tcp" port="443"/>
+  <port protocol="udp" port="50000-60000"/>
+</service>

@@ -1,0 +1,1237 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Digest — Weekly activity digest generator for 24HG
+#
+# Collects gaming stats, achievements, system health, and community activity
+# into a formatted weekly report. Can display in terminal, submit to Hub API,
+# or send a desktop notification summary.
+#
+# Commands:
+#   generate       Generate this week's digest and display it
+#   send           Generate and send to Hub API (for email/notification delivery)
+#   history        Show past digests
+#   daemon         Run as weekly timer (creates systemd timer)
+#   help           Show this help text
+#
+# Data sources:
+#   Playtime:      ~/.local/share/24hg/playtime/*.json, game-timer.json
+#   Achievements:  ~/.local/share/24hg/achievements.json
+#   Clips:         ~/Videos/Clips/
+#   System:        /tmp/24hg-thermal-*, journalctl --user
+#   Community:     Hub API (if authenticated)
+
+# ── Configuration ──
+
+CONFIG_DIR="${HOME}/.config/24hg"
+DATA_DIR="${HOME}/.local/share/24hg"
+DIGEST_DIR="${DATA_DIR}/digests"
+PLAYTIME_DIR="${DATA_DIR}/playtime"
+GAME_TIMER_FILE="${DATA_DIR}/game-timer.json"
+ACHIEVEMENTS_FILE="${DATA_DIR}/achievements.json"
+CLIPS_DIR="${HOME}/Videos/Clips"
+HUB_TOKEN_FILE="${CONFIG_DIR}/hub-token"
+HUB_API="https://hub.24hgaming.com/api"
+DIGEST_API="${HUB_API}/24hg/digest"
+FRIENDS_API="${HUB_API}/24hg/friends/activity"
+RIG_SCORE_FILE="${DATA_DIR}/benchmark.json"
+THERMAL_GLOB="/tmp/24hg-thermal-*"
+VERSION="1.0.0"
+
+# Week boundaries (Monday 00:00 to Sunday 23:59)
+WEEK_START=$(date -d "last monday" +%s 2>/dev/null || date -d "monday - 7 days" +%s 2>/dev/null || date +%s)
+WEEK_END=$(( WEEK_START + 604800 ))
+WEEK_LABEL=$(date -d "@${WEEK_START}" +"%b %d" 2>/dev/null || date +"%b %d")
+WEEK_END_LABEL=$(date -d "@$(( WEEK_END - 86400 ))" +"%b %d, %Y" 2>/dev/null || date +"%b %d, %Y")
+
+# ── Colors ──
+
+if [[ -t 1 ]]; then
+    BOLD="\033[1m"
+    DIM="\033[2m"
+    RESET="\033[0m"
+    RED="\033[31m"
+    GREEN="\033[32m"
+    YELLOW="\033[33m"
+    BLUE="\033[34m"
+    MAGENTA="\033[35m"
+    CYAN="\033[36m"
+    WHITE="\033[37m"
+    GOLD="\033[38;5;220m"
+    ORANGE="\033[38;5;208m"
+    GRAY="\033[38;5;242m"
+    BG_BLUE="\033[44m"
+    BG_GREEN="\033[42m"
+    BG_RED="\033[41m"
+else
+    BOLD="" DIM="" RESET="" RED="" GREEN="" YELLOW="" BLUE=""
+    MAGENTA="" CYAN="" WHITE="" GOLD="" ORANGE="" GRAY=""
+    BG_BLUE="" BG_GREEN="" BG_RED=""
+fi
+
+# ── Utilities ──
+
+log() { echo -e "${DIM}[digest]${RESET} $*"; }
+err() { echo -e "${RED}[error]${RESET} $*" >&2; }
+warn() { echo -e "${YELLOW}[warn]${RESET} $*" >&2; }
+
+has_cmd() { command -v "$1" &>/dev/null; }
+
+json_extract() {
+    # Simple JSON value extraction: json_extract "key" < file
+    # For nested keys use jq if available, otherwise python3
+    local key="$1"
+    if has_cmd jq; then
+        jq -r "$key" 2>/dev/null
+    elif has_cmd python3; then
+        python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+keys = '''$key'''.strip('.').split('.')
+val = data
+for k in keys:
+    if isinstance(val, dict):
+        val = val.get(k, '')
+    elif isinstance(val, list) and k.isdigit():
+        val = val[int(k)] if int(k) < len(val) else ''
+    else:
+        val = ''
+        break
+print(val if val is not None else '')
+" 2>/dev/null
+    else
+        err "Neither jq nor python3 found"
+        return 1
+    fi
+}
+
+ensure_dirs() {
+    mkdir -p "${DIGEST_DIR}" "${CONFIG_DIR}"
+}
+
+hub_authenticated() {
+    [[ -f "${HUB_TOKEN_FILE}" ]] && [[ -s "${HUB_TOKEN_FILE}" ]]
+}
+
+hub_token() {
+    cat "${HUB_TOKEN_FILE}" 2>/dev/null
+}
+
+format_hours() {
+    local seconds="${1:-0}"
+    local hours=$(( seconds / 3600 ))
+    local mins=$(( (seconds % 3600) / 60 ))
+    if (( hours > 0 )); then
+        printf "%dh %dm" "$hours" "$mins"
+    else
+        printf "%dm" "$mins"
+    fi
+}
+
+format_size() {
+    local bytes="${1:-0}"
+    if (( bytes >= 1073741824 )); then
+        printf "%.1f GB" "$(echo "scale=1; $bytes / 1073741824" | bc 2>/dev/null || echo 0)"
+    elif (( bytes >= 1048576 )); then
+        printf "%.1f MB" "$(echo "scale=1; $bytes / 1048576" | bc 2>/dev/null || echo 0)"
+    elif (( bytes >= 1024 )); then
+        printf "%.1f KB" "$(echo "scale=1; $bytes / 1024" | bc 2>/dev/null || echo 0)"
+    else
+        printf "%d B" "$bytes"
+    fi
+}
+
+progress_bar() {
+    # progress_bar <current> <max> <width> <color>
+    local current="${1:-0}" max="${2:-100}" width="${3:-30}" color="${4:-$GREEN}"
+    local filled empty pct
+    if (( max == 0 )); then
+        pct=0
+    else
+        pct=$(( current * 100 / max ))
+    fi
+    (( pct > 100 )) && pct=100
+    filled=$(( pct * width / 100 ))
+    empty=$(( width - filled ))
+    printf "%s" "${color}"
+    printf '%0.s|' $(seq 1 "$filled" 2>/dev/null) || true
+    printf "%s" "${GRAY}"
+    printf '%0.s.' $(seq 1 "$empty" 2>/dev/null) || true
+    printf "%s %3d%%" "${RESET}" "$pct"
+}
+
+horizontal_rule() {
+    local char="${1:--}" width="${2:-60}" color="${3:-$GRAY}"
+    printf "%s" "${color}"
+    printf '%*s' "$width" '' | tr ' ' "$char"
+    printf "%s\n" "${RESET}"
+}
+
+section_header() {
+    local title="$1" icon="${2:->>}"
+    echo ""
+    printf "  %s${BOLD}${CYAN} %s %s${RESET}\n" "$icon" "$title" "$icon"
+    printf "  ${GRAY}"
+    printf '%*s' 56 '' | tr ' ' '-'
+    printf "${RESET}\n"
+}
+
+# ── Data Collection: Playtime ──
+
+collect_playtime() {
+    # Returns JSON array of {game, seconds, sessions} for this week
+    # Reads from both game-timer.json and playtime/*.json files
+    local result="[]"
+
+    if has_cmd python3; then
+        result=$(python3 << 'PYEOF'
+import json, os, glob, sys
+from datetime import datetime
+
+data_dir = os.path.expanduser("~/.local/share/24hg")
+game_timer = os.path.join(data_dir, "game-timer.json")
+playtime_dir = os.path.join(data_dir, "playtime")
+week_start = int(os.environ.get("WEEK_START", 0))
+week_end = int(os.environ.get("WEEK_END", 0))
+
+games = {}  # game_name -> {seconds: int, sessions: int}
+
+# Source 1: game-timer.json (primary)
+if os.path.exists(game_timer):
+    try:
+        with open(game_timer) as f:
+            data = json.load(f)
+        for session in data.get("sessions", []):
+            start_ts = session.get("start", 0)
+            end_ts = session.get("end", 0)
+            game = session.get("game", session.get("name", "Unknown"))
+            if isinstance(start_ts, str):
+                try:
+                    start_ts = int(datetime.fromisoformat(start_ts).timestamp())
+                except (ValueError, TypeError):
+                    continue
+            if isinstance(end_ts, str):
+                try:
+                    end_ts = int(datetime.fromisoformat(end_ts).timestamp())
+                except (ValueError, TypeError):
+                    continue
+            if end_ts > week_start and start_ts < week_end:
+                effective_start = max(start_ts, week_start)
+                effective_end = min(end_ts, week_end)
+                duration = max(0, effective_end - effective_start)
+                if game not in games:
+                    games[game] = {"seconds": 0, "sessions": 0}
+                games[game]["seconds"] += duration
+                games[game]["sessions"] += 1
+    except (json.JSONDecodeError, IOError):
+        pass
+
+# Source 2: playtime/*.json (per-game files)
+if os.path.isdir(playtime_dir):
+    for path in glob.glob(os.path.join(playtime_dir, "*.json")):
+        try:
+            with open(path) as f:
+                pdata = json.load(f)
+            game = pdata.get("game", os.path.basename(path).replace(".json", ""))
+            for session in pdata.get("sessions", []):
+                start_ts = session.get("start", 0)
+                end_ts = session.get("end", 0)
+                if isinstance(start_ts, str):
+                    try:
+                        start_ts = int(datetime.fromisoformat(start_ts).timestamp())
+                    except (ValueError, TypeError):
+                        continue
+                if isinstance(end_ts, str):
+                    try:
+                        end_ts = int(datetime.fromisoformat(end_ts).timestamp())
+                    except (ValueError, TypeError):
+                        continue
+                if end_ts > week_start and start_ts < week_end:
+                    effective_start = max(start_ts, week_start)
+                    effective_end = min(end_ts, week_end)
+                    duration = max(0, effective_end - effective_start)
+                    if game not in games:
+                        games[game] = {"seconds": 0, "sessions": 0}
+                    games[game]["seconds"] += duration
+                    games[game]["sessions"] += 1
+        except (json.JSONDecodeError, IOError):
+            continue
+
+result = []
+for name, stats in sorted(games.items(), key=lambda x: x[1]["seconds"], reverse=True):
+    result.append({"game": name, "seconds": stats["seconds"], "sessions": stats["sessions"]})
+
+json.dump(result, sys.stdout)
+PYEOF
+        ) || result="[]"
+    fi
+
+    echo "$result"
+}
+
+get_total_playtime_seconds() {
+    local playtime_json="$1"
+    if has_cmd jq; then
+        echo "$playtime_json" | jq '[.[].seconds] | add // 0' 2>/dev/null || echo 0
+    elif has_cmd python3; then
+        echo "$playtime_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(sum(g.get('seconds', 0) for g in data))
+" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+get_top_games() {
+    # get_top_games <json> <count>
+    local playtime_json="$1" count="${2:-3}"
+    if has_cmd python3; then
+        echo "$playtime_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for g in data[:${count}]:
+    secs = g.get('seconds', 0)
+    hrs = secs // 3600
+    mins = (secs % 3600) // 60
+    sessions = g.get('sessions', 0)
+    time_str = f'{hrs}h {mins}m' if hrs > 0 else f'{mins}m'
+    print(f'{g[\"game\"]}|{time_str}|{sessions}|{secs}')
+" 2>/dev/null
+    fi
+}
+
+get_game_count() {
+    local playtime_json="$1"
+    if has_cmd jq; then
+        echo "$playtime_json" | jq 'length' 2>/dev/null || echo 0
+    elif has_cmd python3; then
+        echo "$playtime_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+# ── Data Collection: Achievements ──
+
+collect_achievements() {
+    # Returns JSON of achievements unlocked this week
+    if [[ ! -f "${ACHIEVEMENTS_FILE}" ]]; then
+        echo "[]"
+        return
+    fi
+
+    if has_cmd python3; then
+        python3 << 'PYEOF'
+import json, os, sys
+from datetime import datetime
+
+ach_file = os.path.expanduser("~/.local/share/24hg/achievements.json")
+week_start = int(os.environ.get("WEEK_START", 0))
+week_end = int(os.environ.get("WEEK_END", 0))
+
+try:
+    with open(ach_file) as f:
+        data = json.load(f)
+except (json.JSONDecodeError, IOError, FileNotFoundError):
+    print("[]")
+    sys.exit(0)
+
+new_achievements = []
+unlocked = data.get("unlocked", data.get("achievements", []))
+
+if isinstance(unlocked, dict):
+    for ach_id, info in unlocked.items():
+        ts = info.get("unlocked_at", info.get("timestamp", 0))
+        if isinstance(ts, str):
+            try:
+                ts = int(datetime.fromisoformat(ts).timestamp())
+            except (ValueError, TypeError):
+                continue
+        if week_start <= ts < week_end:
+            new_achievements.append({
+                "id": ach_id,
+                "name": info.get("name", ach_id),
+                "points": info.get("points", 0),
+                "category": info.get("category", "Unknown")
+            })
+elif isinstance(unlocked, list):
+    for info in unlocked:
+        ts = info.get("unlocked_at", info.get("timestamp", 0))
+        if isinstance(ts, str):
+            try:
+                ts = int(datetime.fromisoformat(ts).timestamp())
+            except (ValueError, TypeError):
+                continue
+        if week_start <= ts < week_end:
+            new_achievements.append({
+                "id": info.get("id", "unknown"),
+                "name": info.get("name", "Unknown"),
+                "points": info.get("points", 0),
+                "category": info.get("category", "Unknown")
+            })
+
+json.dump(new_achievements, sys.stdout)
+PYEOF
+    else
+        echo "[]"
+    fi
+}
+
+# ── Data Collection: Rig Score ──
+
+collect_rig_score() {
+    # Returns JSON: {score, rank, percentile}
+    if [[ ! -f "${RIG_SCORE_FILE}" ]]; then
+        echo '{"score":0,"rank":"--","percentile":0}'
+        return
+    fi
+
+    if has_cmd python3; then
+        python3 << 'PYEOF'
+import json, os, sys
+
+bench_file = os.path.expanduser("~/.local/share/24hg/benchmark.json")
+try:
+    with open(bench_file) as f:
+        data = json.load(f)
+    score = data.get("total_score", data.get("score", data.get("rig_score", 0)))
+    rank = data.get("rank", data.get("leaderboard_position", "--"))
+    percentile = data.get("percentile", 0)
+    json.dump({"score": score, "rank": rank, "percentile": percentile}, sys.stdout)
+except (json.JSONDecodeError, IOError, FileNotFoundError):
+    print('{"score":0,"rank":"--","percentile":0}')
+PYEOF
+    else
+        echo '{"score":0,"rank":"--","percentile":0}'
+    fi
+}
+
+# ── Data Collection: Clips ──
+
+collect_clips() {
+    # Returns JSON: {count, total_bytes, this_week_count, this_week_bytes}
+    local count=0 total_bytes=0 week_count=0 week_bytes=0
+
+    if [[ -d "${CLIPS_DIR}" ]]; then
+        while IFS= read -r -d '' file; do
+            local fsize fmtime
+            fsize=$(stat -c %s "$file" 2>/dev/null || echo 0)
+            fmtime=$(stat -c %Y "$file" 2>/dev/null || echo 0)
+            count=$(( count + 1 ))
+            total_bytes=$(( total_bytes + fsize ))
+            if (( fmtime >= WEEK_START && fmtime < WEEK_END )); then
+                week_count=$(( week_count + 1 ))
+                week_bytes=$(( week_bytes + fsize ))
+            fi
+        done < <(find "${CLIPS_DIR}" -type f \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" -o -name "*.avi" \) -print0 2>/dev/null)
+    fi
+
+    printf '{"count":%d,"total_bytes":%d,"this_week_count":%d,"this_week_bytes":%d}' \
+        "$count" "$total_bytes" "$week_count" "$week_bytes"
+}
+
+# ── Data Collection: Community ──
+
+collect_community() {
+    # Returns JSON: {voice_hours, lan_sessions, tournaments}
+    # Reads from Hub API if authenticated, otherwise returns zeros
+    local voice_hours=0 lan_sessions=0 tournaments=0
+
+    if hub_authenticated; then
+        local token
+        token=$(hub_token)
+        local response
+        response=$(curl -sf -H "Authorization: Bearer ${token}" \
+            "${HUB_API}/24hg/community/weekly?since=${WEEK_START}" 2>/dev/null) || response=""
+
+        if [[ -n "$response" ]]; then
+            if has_cmd jq; then
+                voice_hours=$(echo "$response" | jq -r '.voice_hours // 0' 2>/dev/null || echo 0)
+                lan_sessions=$(echo "$response" | jq -r '.lan_sessions // 0' 2>/dev/null || echo 0)
+                tournaments=$(echo "$response" | jq -r '.tournaments // 0' 2>/dev/null || echo 0)
+            elif has_cmd python3; then
+                eval "$(echo "$response" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(f'voice_hours={d.get(\"voice_hours\", 0)}')
+print(f'lan_sessions={d.get(\"lan_sessions\", 0)}')
+print(f'tournaments={d.get(\"tournaments\", 0)}')
+" 2>/dev/null)" || true
+            fi
+        fi
+    fi
+
+    printf '{"voice_hours":%s,"lan_sessions":%d,"tournaments":%d}' \
+        "$voice_hours" "$lan_sessions" "$tournaments"
+}
+
+# ── Data Collection: System Health ──
+
+collect_system_health() {
+    # Returns JSON: {avg_cpu_temp, disk_usage_pct, disk_trend, crashes}
+    local avg_temp=0 temp_count=0 temp_sum=0
+    local disk_pct=0 disk_trend="stable"
+    local crashes=0
+
+    # CPU temperature from thermal files
+    for tfile in ${THERMAL_GLOB}; do
+        if [[ -f "$tfile" ]]; then
+            local temp
+            temp=$(tail -1 "$tfile" 2>/dev/null | grep -oP '\d+' | head -1) || true
+            if [[ -n "$temp" ]] && (( temp > 0 && temp < 120 )); then
+                temp_sum=$(( temp_sum + temp ))
+                temp_count=$(( temp_count + 1 ))
+            fi
+        fi
+    done
+
+    # Try hwmon if no 24hg thermal data
+    if (( temp_count == 0 )); then
+        for hwmon in /sys/class/hwmon/hwmon*/temp*_input; do
+            if [[ -f "$hwmon" ]]; then
+                local raw
+                raw=$(cat "$hwmon" 2>/dev/null) || continue
+                local temp=$(( raw / 1000 ))
+                if (( temp > 0 && temp < 120 )); then
+                    temp_sum=$(( temp_sum + temp ))
+                    temp_count=$(( temp_count + 1 ))
+                fi
+            fi
+        done
+    fi
+
+    if (( temp_count > 0 )); then
+        avg_temp=$(( temp_sum / temp_count ))
+    fi
+
+    # Disk usage for home partition
+    disk_pct=$(df -h "${HOME}" 2>/dev/null | awk 'NR==2 {gsub(/%/,""); print $5}') || disk_pct=0
+    [[ -z "$disk_pct" ]] && disk_pct=0
+
+    # Disk trend: compare with last week's digest if available
+    local last_digest
+    last_digest=$(ls -t "${DIGEST_DIR}"/digest-*.json 2>/dev/null | head -1) || true
+    if [[ -n "$last_digest" ]] && [[ -f "$last_digest" ]]; then
+        local last_disk
+        if has_cmd jq; then
+            last_disk=$(jq -r '.system_health.disk_usage_pct // 0' "$last_digest" 2>/dev/null) || last_disk=0
+        else
+            last_disk=0
+        fi
+        if (( disk_pct > last_disk + 3 )); then
+            disk_trend="increasing"
+        elif (( disk_pct < last_disk - 3 )); then
+            disk_trend="decreasing"
+        fi
+    fi
+
+    # Crash detection from journalctl (SIGSEGV, SIGABRT, coredump)
+    crashes=$(journalctl --user --since="@${WEEK_START}" --until="@${WEEK_END}" \
+        --no-pager -q 2>/dev/null | \
+        grep -ciE '(segfault|sigsegv|sigabrt|coredump|core dump|crashed|fatal error)' 2>/dev/null) || crashes=0
+
+    printf '{"avg_cpu_temp":%d,"disk_usage_pct":%d,"disk_trend":"%s","crashes":%d}' \
+        "$avg_temp" "$disk_pct" "$disk_trend" "$crashes"
+}
+
+# ── Data Collection: Friends Activity ──
+
+collect_friends() {
+    # Returns JSON: {most_online, new_friends, total_online}
+    if ! hub_authenticated; then
+        echo '{"most_online":"--","new_friends":[],"total_online":0}'
+        return
+    fi
+
+    local token
+    token=$(hub_token)
+    local response
+    response=$(curl -sf -H "Authorization: Bearer ${token}" \
+        "${FRIENDS_API}?since=${WEEK_START}" 2>/dev/null) || response=""
+
+    if [[ -z "$response" ]]; then
+        echo '{"most_online":"--","new_friends":[],"total_online":0}'
+        return
+    fi
+
+    if has_cmd jq; then
+        echo "$response" | jq '{
+            most_online: (.most_online // "--"),
+            new_friends: (.new_friends // []),
+            total_online: (.total_online // 0)
+        }' 2>/dev/null || echo '{"most_online":"--","new_friends":[],"total_online":0}'
+    else
+        echo "$response"
+    fi
+}
+
+# ── Digest Assembly ──
+
+assemble_digest() {
+    # Collect all sections and return complete digest JSON
+    local playtime achievements rig_score clips community system_health friends
+
+    log "Collecting playtime data..."
+    playtime=$(collect_playtime)
+
+    log "Checking achievements..."
+    achievements=$(collect_achievements)
+
+    log "Reading rig score..."
+    rig_score=$(collect_rig_score)
+
+    log "Scanning clips..."
+    clips=$(collect_clips)
+
+    log "Fetching community data..."
+    community=$(collect_community)
+
+    log "Analyzing system health..."
+    system_health=$(collect_system_health)
+
+    log "Checking friends activity..."
+    friends=$(collect_friends)
+
+    local total_seconds
+    total_seconds=$(get_total_playtime_seconds "$playtime")
+    local game_count
+    game_count=$(get_game_count "$playtime")
+
+    local ach_count=0
+    if has_cmd jq; then
+        ach_count=$(echo "$achievements" | jq 'length' 2>/dev/null || echo 0)
+    elif has_cmd python3; then
+        ach_count=$(echo "$achievements" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
+    fi
+
+    local digest_ts
+    digest_ts=$(date +%s)
+
+    if has_cmd python3; then
+        python3 << PYEOF
+import json, sys
+
+digest = {
+    "version": "${VERSION}",
+    "generated_at": ${digest_ts},
+    "week_start": ${WEEK_START},
+    "week_end": ${WEEK_END},
+    "week_label": "${WEEK_LABEL} - ${WEEK_END_LABEL}",
+    "playtime": {
+        "total_seconds": ${total_seconds},
+        "games_played": ${game_count},
+        "breakdown": json.loads('''${playtime}''')
+    },
+    "achievements": json.loads('''${achievements}'''),
+    "rig_score": json.loads('''${rig_score}'''),
+    "clips": json.loads('''${clips}'''),
+    "community": json.loads('''${community}'''),
+    "system_health": json.loads('''${system_health}'''),
+    "friends": json.loads('''${friends}''')
+}
+
+print(json.dumps(digest, indent=2))
+PYEOF
+    else
+        # Fallback: construct JSON manually
+        cat << JSONEOF
+{
+  "version": "${VERSION}",
+  "generated_at": ${digest_ts},
+  "week_start": ${WEEK_START},
+  "week_end": ${WEEK_END},
+  "week_label": "${WEEK_LABEL} - ${WEEK_END_LABEL}",
+  "playtime": {
+    "total_seconds": ${total_seconds},
+    "games_played": ${game_count},
+    "breakdown": ${playtime}
+  },
+  "achievements": ${achievements},
+  "rig_score": ${rig_score},
+  "clips": ${clips},
+  "community": ${community},
+  "system_health": ${system_health},
+  "friends": ${friends}
+}
+JSONEOF
+    fi
+}
+
+save_digest() {
+    local digest_json="$1"
+    ensure_dirs
+    local filename="digest-$(date -d "@${WEEK_START}" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d).json"
+    local filepath="${DIGEST_DIR}/${filename}"
+    echo "$digest_json" > "$filepath"
+    log "Digest saved to ${filepath}"
+    echo "$filepath"
+}
+
+# ── Terminal Rendering ──
+
+render_terminal() {
+    local digest_json="$1"
+
+    echo ""
+    horizontal_rule "=" 60 "${CYAN}"
+    printf "  ${BOLD}${WHITE}  24HG HG24 -- WEEKLY DIGEST${RESET}\n"
+    printf "  ${DIM}  %s${RESET}\n" "${WEEK_LABEL} - ${WEEK_END_LABEL}"
+    horizontal_rule "=" 60 "${CYAN}"
+
+    # ── 1. Playtime Summary ──
+    section_header "PLAYTIME SUMMARY" "::"
+
+    local total_seconds
+    total_seconds=$(echo "$digest_json" | json_extract '.playtime.total_seconds' || echo 0)
+    local games_played
+    games_played=$(echo "$digest_json" | json_extract '.playtime.games_played' || echo 0)
+    local total_hours_str
+    total_hours_str=$(format_hours "$total_seconds")
+
+    printf "  ${BOLD}Total Play Time:${RESET}  ${GREEN}%s${RESET}\n" "$total_hours_str"
+    printf "  ${BOLD}Games Played:${RESET}     ${BLUE}%s${RESET}\n" "$games_played"
+    echo ""
+
+    # Top 3 games
+    local playtime_data
+    playtime_data=$(echo "$digest_json" | json_extract '.playtime.breakdown' || echo "[]")
+    local top_games
+    top_games=$(get_top_games "$playtime_data" 3)
+
+    if [[ -n "$top_games" ]]; then
+        printf "  ${BOLD}Top Games:${RESET}\n"
+        local rank=1
+        local max_secs=0
+        # Get max for bar scaling
+        while IFS='|' read -r _name _time _sess secs; do
+            if (( secs > max_secs )); then max_secs=$secs; fi
+        done <<< "$top_games"
+        (( max_secs == 0 )) && max_secs=1
+
+        while IFS='|' read -r gname gtime gsessions gsecs; do
+            [[ -z "$gname" ]] && continue
+            local bar_color
+            case $rank in
+                1) bar_color="${GOLD}" ;;
+                2) bar_color="${CYAN}" ;;
+                3) bar_color="${GREEN}" ;;
+                *) bar_color="${GRAY}" ;;
+            esac
+            printf "    ${BOLD}%d.${RESET} %-24s ${DIM}%s (%d sessions)${RESET}\n" \
+                "$rank" "$gname" "$gtime" "$gsessions"
+            printf "       "
+            progress_bar "$gsecs" "$max_secs" 35 "$bar_color"
+            echo ""
+            rank=$(( rank + 1 ))
+        done <<< "$top_games"
+    else
+        printf "  ${DIM}No games played this week${RESET}\n"
+    fi
+
+    # ── 2. Achievements ──
+    section_header "ACHIEVEMENTS" "::"
+
+    local ach_data
+    ach_data=$(echo "$digest_json" | json_extract '.achievements' || echo "[]")
+    local ach_count=0
+    local ach_points=0
+
+    if has_cmd python3; then
+        eval "$(echo "$ach_data" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(f'ach_count={len(data)}')
+print(f'ach_points={sum(a.get(\"points\", 0) for a in data)}')
+for a in data:
+    name = a.get('name', 'Unknown').replace(\"'\", \"\")
+    cat = a.get('category', '').replace(\"'\", \"\")
+    pts = a.get('points', 0)
+    print(f'# {name}|{cat}|{pts}')
+" 2>/dev/null)" || true
+    fi
+
+    if (( ach_count > 0 )); then
+        printf "  ${GOLD}%d new achievement%s unlocked!${RESET}  ${DIM}(+%d points)${RESET}\n" \
+            "$ach_count" "$([ "$ach_count" -ne 1 ] && echo 's')" "$ach_points"
+        echo ""
+
+        # Print each achievement
+        echo "$ach_data" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for a in data:
+    name = a.get('name', 'Unknown')
+    cat = a.get('category', '')
+    pts = a.get('points', 0)
+    print(f'    [*] {name}  ({cat}, +{pts} pts)')
+" 2>/dev/null || true
+    else
+        printf "  ${DIM}No new achievements this week${RESET}\n"
+    fi
+
+    # ── 3. Rig Score ──
+    section_header "RIG SCORE" "::"
+
+    local score rank percentile
+    score=$(echo "$digest_json" | json_extract '.rig_score.score' || echo 0)
+    rank=$(echo "$digest_json" | json_extract '.rig_score.rank' || echo "--")
+    percentile=$(echo "$digest_json" | json_extract '.rig_score.percentile' || echo 0)
+
+    if [[ "$score" != "0" ]] && [[ -n "$score" ]]; then
+        local score_color="${GREEN}"
+        (( score >= 7000 )) && score_color="${GOLD}"
+        (( score >= 9000 )) && score_color="${MAGENTA}"
+        printf "  ${BOLD}Score:${RESET}       ${score_color}%s${RESET}\n" "$score"
+        printf "  ${BOLD}Leaderboard:${RESET} #%s" "$rank"
+        if [[ "$percentile" != "0" ]] && [[ -n "$percentile" ]]; then
+            printf "  ${DIM}(top %s%%)${RESET}" "$percentile"
+        fi
+        echo ""
+        printf "  "
+        progress_bar "${score%%.*}" 10000 40 "$score_color"
+        echo ""
+    else
+        printf "  ${DIM}No benchmark data -- run '24hg rig-score' to get rated${RESET}\n"
+    fi
+
+    # ── 4. Clips ──
+    section_header "CLIPS" "::"
+
+    local clip_week_count clip_week_bytes clip_total clip_total_bytes
+    clip_week_count=$(echo "$digest_json" | json_extract '.clips.this_week_count' || echo 0)
+    clip_week_bytes=$(echo "$digest_json" | json_extract '.clips.this_week_bytes' || echo 0)
+    clip_total=$(echo "$digest_json" | json_extract '.clips.count' || echo 0)
+    clip_total_bytes=$(echo "$digest_json" | json_extract '.clips.total_bytes' || echo 0)
+
+    if (( clip_week_count > 0 )); then
+        printf "  ${BOLD}This Week:${RESET}  ${GREEN}%d clip%s${RESET} (%s)\n" \
+            "$clip_week_count" "$([ "$clip_week_count" -ne 1 ] && echo 's')" \
+            "$(format_size "$clip_week_bytes")"
+    else
+        printf "  ${BOLD}This Week:${RESET}  ${DIM}No new clips${RESET}\n"
+    fi
+    printf "  ${BOLD}Library:${RESET}    %d total (%s)\n" "$clip_total" "$(format_size "$clip_total_bytes")"
+
+    # ── 5. Community ──
+    section_header "COMMUNITY" "::"
+
+    local voice_hours lan_sessions tournaments
+    voice_hours=$(echo "$digest_json" | json_extract '.community.voice_hours' || echo 0)
+    lan_sessions=$(echo "$digest_json" | json_extract '.community.lan_sessions' || echo 0)
+    tournaments=$(echo "$digest_json" | json_extract '.community.tournaments' || echo 0)
+
+    if hub_authenticated; then
+        printf "  ${BOLD}Voice Chat:${RESET}    %sh\n" "$voice_hours"
+        printf "  ${BOLD}LAN Sessions:${RESET}  %d\n" "$lan_sessions"
+        printf "  ${BOLD}Tournaments:${RESET}   %d\n" "$tournaments"
+    else
+        printf "  ${DIM}Connect to Hub for community stats: 24hg hub login${RESET}\n"
+    fi
+
+    # ── 6. System Health ──
+    section_header "SYSTEM HEALTH" "::"
+
+    local avg_temp disk_pct disk_trend crash_count
+    avg_temp=$(echo "$digest_json" | json_extract '.system_health.avg_cpu_temp' || echo 0)
+    disk_pct=$(echo "$digest_json" | json_extract '.system_health.disk_usage_pct' || echo 0)
+    disk_trend=$(echo "$digest_json" | json_extract '.system_health.disk_trend' || echo "stable")
+    crash_count=$(echo "$digest_json" | json_extract '.system_health.crashes' || echo 0)
+
+    # Temperature
+    if (( avg_temp > 0 )); then
+        local temp_color="${GREEN}"
+        (( avg_temp >= 70 )) && temp_color="${YELLOW}"
+        (( avg_temp >= 85 )) && temp_color="${RED}"
+        printf "  ${BOLD}Avg CPU Temp:${RESET}  ${temp_color}%d C${RESET}" "$avg_temp"
+        if (( avg_temp >= 85 )); then
+            printf "  ${RED}[HIGH -- check cooling]${RESET}"
+        elif (( avg_temp >= 70 )); then
+            printf "  ${YELLOW}[warm]${RESET}"
+        else
+            printf "  ${GREEN}[OK]${RESET}"
+        fi
+        echo ""
+    else
+        printf "  ${BOLD}Avg CPU Temp:${RESET}  ${DIM}no data${RESET}\n"
+    fi
+
+    # Disk usage
+    local disk_color="${GREEN}"
+    (( disk_pct >= 70 )) && disk_color="${YELLOW}"
+    (( disk_pct >= 90 )) && disk_color="${RED}"
+    printf "  ${BOLD}Disk Usage:${RESET}    "
+    progress_bar "$disk_pct" 100 30 "$disk_color"
+
+    local trend_arrow="~"
+    local trend_color="${GRAY}"
+    case "$disk_trend" in
+        increasing) trend_arrow=">>"; trend_color="${YELLOW}" ;;
+        decreasing) trend_arrow="<<"; trend_color="${GREEN}" ;;
+    esac
+    printf "  ${trend_color}%s %s${RESET}\n" "$trend_arrow" "$disk_trend"
+
+    # Crashes
+    if (( crash_count > 0 )); then
+        printf "  ${BOLD}Crashes:${RESET}       ${RED}%d detected${RESET}" "$crash_count"
+        printf "  ${DIM}(check '24hg crash-fix' for help)${RESET}\n"
+    else
+        printf "  ${BOLD}Crashes:${RESET}       ${GREEN}None detected${RESET}\n"
+    fi
+
+    # ── 7. Friends Activity ──
+    section_header "FRIENDS ACTIVITY" "::"
+
+    if hub_authenticated; then
+        local most_online total_online
+        most_online=$(echo "$digest_json" | json_extract '.friends.most_online' || echo "--")
+        total_online=$(echo "$digest_json" | json_extract '.friends.total_online' || echo 0)
+
+        printf "  ${BOLD}Most Active:${RESET}   %s\n" "$most_online"
+        printf "  ${BOLD}Friends Online:${RESET} %d this week\n" "$total_online"
+
+        local new_friends
+        new_friends=$(echo "$digest_json" | json_extract '.friends.new_friends' || echo "[]")
+        local new_count=0
+        if has_cmd jq; then
+            new_count=$(echo "$new_friends" | jq 'length' 2>/dev/null || echo 0)
+        elif has_cmd python3; then
+            new_count=$(echo "$new_friends" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else 0)" 2>/dev/null || echo 0)
+        fi
+
+        if (( new_count > 0 )); then
+            printf "  ${BOLD}New Friends:${RESET}   ${GREEN}+%d${RESET}  " "$new_count"
+            if has_cmd python3; then
+                echo "$new_friends" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+if isinstance(data, list):
+    names = [str(f.get('name', f) if isinstance(f, dict) else f) for f in data[:5]]
+    print(', '.join(names))
+" 2>/dev/null || true
+            fi
+        fi
+    else
+        printf "  ${DIM}Connect to Hub for friends activity: 24hg hub login${RESET}\n"
+    fi
+
+    # ── Footer ──
+    echo ""
+    horizontal_rule "=" 60 "${CYAN}"
+    printf "  ${DIM}Generated by 24hg-digest v%s on %s${RESET}\n" \
+        "${VERSION}" "$(date '+%Y-%m-%d %H:%M')"
+    printf "  ${DIM}View past digests: 24hg digest history${RESET}\n"
+    horizontal_rule "=" 60 "${CYAN}"
+    echo ""
+}
+
+# ── Desktop Notification ──
+
+send_notification() {
+    local digest_json="$1"
+
+    if ! has_cmd notify-send; then
+        warn "notify-send not found, skipping desktop notification"
+        return 1
+    fi
+
+    local total_seconds games_played ach_count
+    total_seconds=$(echo "$digest_json" | json_extract '.playtime.total_seconds' || echo 0)
+    games_played=$(echo "$digest_json" | json_extract '.playtime.games_played' || echo 0)
+
+    if has_cmd jq; then
+        ach_count=$(echo "$digest_json" | jq '.achievements | length' 2>/dev/null || echo 0)
+    else
+        ach_count=0
+    fi
+
+    local total_time
+    total_time=$(format_hours "$total_seconds")
+
+    local body="Play time: ${total_time} across ${games_played} games"
+    if (( ach_count > 0 )); then
+        body="${body}\n${ach_count} new achievement(s) unlocked!"
+    fi
+
+    notify-send -a "24HG" \
+        -i "applications-games" \
+        "24HG -- Weekly Digest" \
+        "$body" 2>/dev/null || true
+}
+
+# ── Hub API Submission ──
+
+submit_to_hub() {
+    local digest_json="$1"
+
+    if ! hub_authenticated; then
+        err "Not authenticated with Hub. Run '24hg hub login' first."
+        return 1
+    fi
+
+    local token
+    token=$(hub_token)
+
+    log "Submitting digest to Hub API..."
+
+    local http_code
+    http_code=$(curl -sf -o /dev/null -w "%{http_code}" \
+        -X POST "${DIGEST_API}" \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -d "$digest_json" 2>/dev/null) || http_code="000"
+
+    case "$http_code" in
+        200|201|202)
+            log "Digest submitted successfully (HTTP ${http_code})"
+            return 0
+            ;;
+        401|403)
+            err "Authentication failed (HTTP ${http_code}). Try '24hg hub login' again."
+            return 1
+            ;;
+        *)
+            err "Hub API returned HTTP ${http_code}"
+            return 1
+            ;;
+    esac
+}
+
+# ── Commands ──
+
+cmd_generate() {
+    local digest_json
+    digest_json=$(assemble_digest)
+
+    local filepath
+    filepath=$(save_digest "$digest_json")
+
+    render_terminal "$digest_json"
+    send_notification "$digest_json"
+
+    log "Full digest data: ${filepath}"
+}
+
+cmd_send() {
+    local digest_json
+    digest_json=$(assemble_digest)
+
+    local filepath
+    filepath=$(save_digest "$digest_json")
+
+    render_terminal "$digest_json"
+
+    if submit_to_hub "$digest_json"; then
+        log "Digest delivered to Hub for email/notification dispatch"
+    else
+        warn "Digest saved locally but Hub submission failed"
+        warn "You can retry with: 24hg digest send"
+    fi
+}
+
+cmd_history() {
+    ensure_dirs
+
+    local digest_files
+    digest_files=$(ls -t "${DIGEST_DIR}"/digest-*.json 2>/dev/null) || true
+
+    if [[ -z "$digest_files" ]]; then
+        echo ""
+        printf "  ${DIM}No past digests found.${RESET}\n"
+        printf "  ${DIM}Generate your first digest with: 24hg digest generate${RESET}\n"
+        echo ""
+        return 0
+    fi
+
+    echo ""
+    printf "  ${BOLD}${CYAN}Past Digests${RESET}\n"
+    horizontal_rule "-" 60 "${GRAY}"
+
+    local count=0
+    while IFS= read -r dfile; do
+        (( count >= 12 )) && break
+        count=$(( count + 1 ))
+
+        local week_label total_secs games ach_count
+        if has_cmd jq; then
+            week_label=$(jq -r '.week_label // "Unknown"' "$dfile" 2>/dev/null)
+            total_secs=$(jq -r '.playtime.total_seconds // 0' "$dfile" 2>/dev/null)
+            games=$(jq -r '.playtime.games_played // 0' "$dfile" 2>/dev/null)
+            ach_count=$(jq '.achievements | length' "$dfile" 2>/dev/null || echo 0)
+        elif has_cmd python3; then
+            eval "$(python3 -c "
+import json
+with open('$dfile') as f:
+    d = json.load(f)
+print(f'week_label=\"{d.get(\"week_label\", \"Unknown\")}\"')
+print(f'total_secs={d.get(\"playtime\", {}).get(\"total_seconds\", 0)}')
+print(f'games={d.get(\"playtime\", {}).get(\"games_played\", 0)}')
+ach = d.get('achievements', [])
+print(f'ach_count={len(ach) if isinstance(ach, list) else 0}')
+" 2>/dev/null)" || continue
+        else
+            continue
+        fi
+
+        local time_str
+        time_str=$(format_hours "$total_secs")
+
+        printf "  ${BOLD}%-28s${RESET}" "$week_label"
+        printf "  ${GREEN}%8s${RESET}" "$time_str"
+        printf "  ${BLUE}%2d games${RESET}" "$games"
+        if (( ach_count > 0 )); then
+            printf "  ${GOLD}+%d ach${RESET}" "$ach_count"
+        fi
+        echo ""
+    done <<< "$digest_files"
+
+    echo ""
+    printf "  ${DIM}Showing last %d weeks. Full data in %s${RESET}\n" "$count" "${DIGEST_DIR}"
+    echo ""
+}
+
+cmd_daemon() {
+    # Install/enable the systemd timer for weekly execution
+    local service_dir="${HOME}/.config/systemd/user"
+    mkdir -p "${service_dir}"
+
+    local service_file="${service_dir}/24hg-digest.service"
+    local timer_file="${service_dir}/24hg-digest.timer"
+
+    # Write the service unit
+    cat > "$service_file" << 'SVCEOF'
+[Unit]
+Description=24HG Weekly Digest Generator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/24hg-digest send
+Environment=HOME=%h
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+SVCEOF
+
+    # Write the timer unit
+    cat > "$timer_file" << 'TMREOF'
+[Unit]
+Description=24HG Weekly Digest Timer
+
+[Timer]
+OnCalendar=Sun *-*-* 10:00:00
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TMREOF
+
+    log "Installed systemd units:"
+    log "  ${service_file}"
+    log "  ${timer_file}"
+
+    # Enable and start the timer
+    if systemctl --user daemon-reload 2>/dev/null; then
+        if systemctl --user enable --now 24hg-digest.timer 2>/dev/null; then
+            log "Timer enabled and started"
+            echo ""
+            printf "  ${GREEN}Weekly digest timer is active.${RESET}\n"
+            printf "  ${DIM}Runs every Sunday at 10:00 AM (with up to 30min jitter)${RESET}\n"
+            echo ""
+            systemctl --user status 24hg-digest.timer --no-pager 2>/dev/null || true
+        else
+            warn "Could not enable timer (systemd user session may not be available)"
+            log "You can enable it manually: systemctl --user enable --now 24hg-digest.timer"
+        fi
+    else
+        warn "Could not reload systemd (not in a user session?)"
+        log "Enable manually when in a desktop session:"
+        log "  systemctl --user daemon-reload"
+        log "  systemctl --user enable --now 24hg-digest.timer"
+    fi
+}
+
+cmd_help() {
+    cat << 'HELPEOF'
+24HG Digest -- Weekly Activity Report
+
+USAGE
+    24hg digest <command>
+
+COMMANDS
+    generate       Generate this week's digest and display in terminal
+    send           Generate, display, and submit to Hub API
+    history        Show past weekly digests
+    daemon         Install systemd timer for automatic weekly delivery
+    help           Show this help
+
+DIGEST SECTIONS
+    Playtime       Total hours, top 3 games, session counts
+    Achievements   Newly unlocked badges and points earned
+    Rig Score      Benchmark score and leaderboard position
+    Clips          Video clips captured this week
+    Community      Voice chat, LAN sessions, tournaments
+    System Health  CPU temps, disk usage, crash detection
+    Friends        Most active friend, new connections
+
+DATA SOURCES
+    ~/.local/share/24hg/game-timer.json     Game session tracking
+    ~/.local/share/24hg/playtime/*.json      Per-game playtime files
+    ~/.local/share/24hg/achievements.json    Achievement state
+    ~/.local/share/24hg/benchmark.json       Rig score data
+    ~/Videos/Clips/                           Captured clips
+    /tmp/24hg-thermal-*                      Temperature readings
+    Hub API                                   Community + friends data
+
+OUTPUT
+    Terminal    Colorful formatted report with progress bars
+    JSON        Stored in ~/.local/share/24hg/digests/
+    Notify      Desktop notification with key stats
+    Hub API     POST /api/24hg/digest (with 'send' command)
+
+EXAMPLES
+    24hg digest generate     # View this week's report
+    24hg digest send         # Generate and push to Hub
+    24hg digest history      # Browse past reports
+    24hg digest daemon       # Set up weekly auto-delivery
+
+HELPEOF
+}
+
+# ── Main ──
+
+main() {
+    local cmd="${1:-help}"
+
+    case "$cmd" in
+        generate|gen|g)
+            cmd_generate
+            ;;
+        send|submit|push)
+            cmd_send
+            ;;
+        history|hist|h)
+            cmd_history
+            ;;
+        daemon|timer|install)
+            cmd_daemon
+            ;;
+        help|--help|-h)
+            cmd_help
+            ;;
+        version|--version|-v)
+            echo "24hg-digest v${VERSION}"
+            ;;
+        *)
+            err "Unknown command: ${cmd}"
+            echo "Run '24hg digest help' for usage information."
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

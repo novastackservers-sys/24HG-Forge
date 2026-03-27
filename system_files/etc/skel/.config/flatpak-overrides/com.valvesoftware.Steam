@@ -1,5 +1,5 @@
 [Context]
-filesystems=xdg-config/MangoHud:ro;/usr/lib/forge:ro;xdg-run/gamescope-0:rw
+filesystems=xdg-config/MangoHud:ro;/usr/lib/24hg:ro;xdg-run/gamescope-0:rw
 shared=network;ipc
 
 [Environment]

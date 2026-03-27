@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Mod Handler
+Comment=Handle Nexus Mod download links
+Exec=24hg-mods install-nxm %u
+Icon=24hg-logo
+Terminal=true
+Type=Application
+MimeType=x-scheme-handler/nxm;
+NoDisplay=true

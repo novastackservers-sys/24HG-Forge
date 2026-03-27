@@ -1,18 +1,18 @@
 # Keyboard Shortcuts
 
-24HG Forge ships with pre-configured keyboard shortcuts for gaming, screenshots, recording, and system control. These are set during installation and work out of the box.
+24HG ships with pre-configured keyboard shortcuts for gaming, screenshots, recording, and system control. These are set during installation and work out of the box.
 
-## 24HG Forge Custom Shortcuts
+## 24HG Custom Shortcuts
 
-These are unique to 24HG Forge and are configured in `~/.config/kglobalshortcutsrc.d/forge.conf`:
+These are unique to 24HG and are configured in `~/.config/kglobalshortcutsrc.d/24hg.conf`:
 
 | Shortcut | Action | Tool |
 |----------|--------|------|
-| `Print` | Full-screen screenshot | `forge-screenshot full` |
-| `Shift+Print` | Select area screenshot | `forge-screenshot area` |
-| `Meta+Print` | Active window screenshot | `forge-screenshot window` |
-| `F9` | Save instant replay clip | `forge-replay save` |
-| `Meta+N` | Toggle night light | `forge-nightlight toggle` |
+| `Print` | Full-screen screenshot | `24hg-screenshot full` |
+| `Shift+Print` | Select area screenshot | `24hg-screenshot area` |
+| `Meta+Print` | Active window screenshot | `24hg-screenshot window` |
+| `F9` | Save instant replay clip | `24hg-replay save` |
+| `Meta+N` | Toggle night light | `24hg-nightlight toggle` |
 
 ## KDE Plasma Defaults
 
@@ -47,7 +47,7 @@ These shortcuts control gaming overlays and are configured through the respectiv
 
 ## OBS Studio Shortcuts
 
-If you use `forge-stream` with OBS Studio, these are the default scene/recording shortcuts:
+If you use `24hg-stream` with OBS Studio, these are the default scene/recording shortcuts:
 
 | Shortcut | Action |
 |----------|--------|
@@ -57,7 +57,7 @@ If you use `forge-stream` with OBS Studio, these are the default scene/recording
 
 ## GameMode
 
-GameMode does not have keyboard shortcuts -- it activates automatically when a game launches (via `forge-smart-launch` daemon) and deactivates when the game closes. You can check its status:
+GameMode does not have keyboard shortcuts -- it activates automatically when a game launches (via `24hg-smart-launch` daemon) and deactivates when the game closes. You can check its status:
 
 ```bash
 gamemoded -s     # Check if GameMode is active
@@ -69,17 +69,17 @@ gamemoded -s     # Check if GameMode is active
 
 1. Open **System Settings** (right-click desktop, or `Meta` then search).
 2. Go to **Keyboard** -> **Shortcuts**.
-3. Find 24HG Forge shortcuts under **Custom Shortcuts**.
+3. Find 24HG shortcuts under **Custom Shortcuts**.
 4. Click any shortcut to rebind it.
 
 ### Via Config File
 
-Edit `~/.config/kglobalshortcutsrc.d/forge.conf` directly:
+Edit `~/.config/kglobalshortcutsrc.d/24hg.conf` directly:
 
 ```ini
-[forge-replay-save]
+[24hg-replay-save]
 Comment=Save Instant Replay Clip
-Exec=/usr/bin/forge-replay save
+Exec=/usr/bin/24hg-replay save
 Name=Save Replay
 Shortcut=F9
 ```
@@ -88,7 +88,7 @@ Change the `Shortcut=` line to your preferred key combo, then log out and back i
 
 ## Tips
 
-- **Screenshot location:** Screenshots are saved to `~/Pictures/24HG Forge Screenshots/` by default.
-- **Replay clips:** Replay clips are saved to `~/Videos/24HG Forge Clips/`.
+- **Screenshot location:** Screenshots are saved to `~/Pictures/24HG Screenshots/` by default.
+- **Replay clips:** Replay clips are saved to `~/Videos/24HG Clips/`.
 - **MangoHud config:** Edit `~/.config/MangoHud/MangoHud.conf` to customize what the overlay shows.
 - **Night light:** The night light reduces blue light in the evening. Toggle it anytime with `Meta+N`.

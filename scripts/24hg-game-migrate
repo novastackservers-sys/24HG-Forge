@@ -1,0 +1,954 @@
+#!/usr/bin/env bash
+# 24HG Game Migration Tool
+# Transfer games, saves, configs, and mods from another PC or Windows partition.
+# Supports Windows partition scanning, network discovery via mDNS, Steam/Epic/GOG
+# library import, save game detection, config import, and mod migration.
+#
+# Usage: 24hg-game-migrate [command] [args]
+# Commands: scan, scan-network, list, import, saves, configs, status
+
+set -euo pipefail
+
+# ── Global Configuration ─────────────────────────────────────────────────────
+
+readonly VERSION="1.0.0"
+readonly SCRIPT_NAME="24hg-game-migrate"
+readonly STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/24hg/game-migrate"
+readonly MOUNT_BASE="/tmp/24hg-game-migrate"
+readonly STEAM_LOCAL="$HOME/.local/share/Steam"
+readonly STEAM_APPS="$STEAM_LOCAL/steamapps"
+readonly STEAM_COMMON="$STEAM_APPS/common"
+readonly GAMES_DIR="$HOME/Games"
+readonly MIGRATE_LOG="$STATE_DIR/migrate.log"
+readonly SOURCE_CACHE="$STATE_DIR/sources.json"
+readonly GAMES_CACHE="$STATE_DIR/detected-games.json"
+readonly PROGRESS_FILE="$STATE_DIR/progress.json"
+readonly CHECKSUM_DIR="$STATE_DIR/checksums"
+
+# Known Windows save game locations (relative to user profile)
+declare -A SAVE_PATHS=(
+    ["Elden Ring"]="AppData/Roaming/EldenRing"
+    ["Cyberpunk 2077"]="Saved Games/CD Projekt Red/Cyberpunk 2077"
+    ["The Witcher 3"]="Documents/The Witcher 3"
+    ["Dark Souls III"]="AppData/Roaming/DarkSoulsIII"
+    ["Skyrim"]="Documents/My Games/Skyrim Special Edition"
+    ["Fallout 4"]="Documents/My Games/Fallout4"
+    ["Baldurs Gate 3"]="AppData/Local/Larian Studios/Baldur's Gate 3"
+    ["Stardew Valley"]="AppData/Roaming/StardewValley/Saves"
+    ["Terraria"]="Documents/My Games/Terraria"
+    ["Minecraft"]="AppData/Roaming/.minecraft/saves"
+    ["No Mans Sky"]="AppData/Roaming/HelloGames/NMS"
+    ["Valheim"]="AppData/LocalLow/IronGate/Valheim"
+    ["Satisfactory"]="AppData/Local/FactoryGame/Saved/SaveGames"
+    ["Palworld"]="AppData/Local/Pal/Saved/SaveGames"
+    ["Lethal Company"]="AppData/LocalLow/ZeekerssRBLX/Lethal Company"
+    ["GTA V"]="Documents/Rockstar Games/GTA V"
+    ["Red Dead Redemption 2"]="Documents/Rockstar Games/Red Dead Redemption 2"
+    ["Civilization VI"]="Documents/My Games/Sid Meier's Civilization VI/Saves"
+    ["Cities Skylines"]="AppData/Local/Colossal Order/Cities_Skylines"
+    ["Stellaris"]="Documents/Paradox Interactive/Stellaris"
+)
+
+# Known mod directories (relative to game install)
+declare -A MOD_PATHS=(
+    ["Skyrim"]="Data"
+    ["Fallout 4"]="Data"
+    ["Minecraft"]=".minecraft/mods"
+    ["Cyberpunk 2077"]="archive/pc/mod"
+    ["The Witcher 3"]="Mods"
+    ["Stardew Valley"]="Mods"
+    ["Terraria"]="tModLoader/Mods"
+    ["Cities Skylines"]="Addons/Mods"
+    ["Valheim"]="BepInEx/plugins"
+    ["GTA V"]="mods"
+    ["Baldurs Gate 3"]="Mods"
+)
+
+# ── Colors & Formatting ──────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+if [[ ! -t 1 ]]; then
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' MAGENTA='' BOLD='' DIM='' NC=''
+fi
+
+# ── Logging Helpers ───────────────────────────────────────────────────────────
+
+info()    { echo -e "${BLUE}[INFO]${NC}    $*"; }
+ok()      { echo -e "${GREEN}[OK]${NC}      $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC}    $*"; }
+err()     { echo -e "${RED}[ERROR]${NC}   $*"; }
+header()  { echo -e "\n${BOLD}${CYAN}-- $* --${NC}"; }
+detail()  { echo -e "  ${DIM}$*${NC}"; }
+bullet()  { echo -e "  ${MAGENTA}*${NC} $*"; }
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$MIGRATE_LOG"
+}
+
+die() { err "$@"; exit 1; }
+
+# ── Init ──────────────────────────────────────────────────────────────────────
+
+init_state() {
+    mkdir -p "$STATE_DIR" "$CHECKSUM_DIR" "$MOUNT_BASE"
+    touch "$MIGRATE_LOG"
+    [[ -f "$SOURCE_CACHE" ]]   || echo '{}' > "$SOURCE_CACHE"
+    [[ -f "$GAMES_CACHE" ]]    || echo '[]' > "$GAMES_CACHE"
+    [[ -f "$PROGRESS_FILE" ]]  || echo '{}' > "$PROGRESS_FILE"
+}
+
+require_cmd() {
+    for cmd in "$@"; do
+        command -v "$cmd" &>/dev/null || die "Required command not found: $cmd"
+    done
+}
+
+# ── Progress Tracking ─────────────────────────────────────────────────────────
+
+progress_start() {
+    local name="$1" total_bytes="$2"
+    local now
+    now=$(date +%s)
+    cat > "$PROGRESS_FILE" <<PEOF
+{"name":"$name","total":$total_bytes,"transferred":0,"started":$now,"status":"running"}
+PEOF
+}
+
+progress_update() {
+    local transferred="$1"
+    local total started elapsed rate eta
+    total=$(jq -r '.total' "$PROGRESS_FILE")
+    started=$(jq -r '.started' "$PROGRESS_FILE")
+    elapsed=$(( $(date +%s) - started ))
+    if (( elapsed > 0 )); then
+        rate=$(( transferred / elapsed ))
+    else
+        rate=0
+    fi
+    if (( rate > 0 )); then
+        eta=$(( (total - transferred) / rate ))
+    else
+        eta=0
+    fi
+    local pct=0
+    (( total > 0 )) && pct=$(( transferred * 100 / total ))
+    local bar_len=40
+    local filled=$(( pct * bar_len / 100 ))
+    local empty=$(( bar_len - filled ))
+    local bar
+    bar=$(printf '%0.s#' $(seq 1 "$filled" 2>/dev/null) ; printf '%0.s-' $(seq 1 "$empty" 2>/dev/null))
+    local hr=$((eta / 3600)) mn=$(( (eta % 3600) / 60 )) sc=$((eta % 60))
+    printf "\r  ${CYAN}[%-${bar_len}s]${NC} %3d%%  %s transferred  ETA: %02d:%02d:%02d " \
+        "$bar" "$pct" "$(numfmt --to=iec "$transferred" 2>/dev/null || echo "${transferred}B")" \
+        "$hr" "$mn" "$sc"
+    jq --argjson t "$transferred" '.transferred=$t' "$PROGRESS_FILE" > "${PROGRESS_FILE}.tmp" \
+        && mv "${PROGRESS_FILE}.tmp" "$PROGRESS_FILE"
+}
+
+progress_done() {
+    jq '.status="complete"' "$PROGRESS_FILE" > "${PROGRESS_FILE}.tmp" \
+        && mv "${PROGRESS_FILE}.tmp" "$PROGRESS_FILE"
+    echo ""
+    ok "Transfer complete"
+}
+
+# ── Rsync with Progress ──────────────────────────────────────────────────────
+
+rsync_with_progress() {
+    local src="$1" dst="$2" label="${3:-Transfer}" total_bytes
+    total_bytes=$(du -sb "$src" 2>/dev/null | awk '{print $1}')
+    [[ -z "$total_bytes" || "$total_bytes" == "0" ]] && total_bytes=1
+    progress_start "$label" "$total_bytes"
+    log "rsync: $src -> $dst ($total_bytes bytes)"
+    rsync -a --info=progress2 --no-inc-recursive "$src" "$dst" 2>/dev/null | \
+        while IFS= read -r line; do
+            local bytes
+            bytes=$(echo "$line" | grep -oP '^\s*[\d,]+' | tr -d ', ' || true)
+            [[ -n "$bytes" ]] && progress_update "$bytes"
+        done
+    progress_done
+}
+
+# ── Checksum Verification ────────────────────────────────────────────────────
+
+generate_checksums() {
+    local dir="$1" output="$2"
+    header "Generating checksums"
+    info "Hashing files in $(basename "$dir")..."
+    find "$dir" -type f -print0 | xargs -0 sha256sum > "$output" 2>/dev/null
+    ok "Checksums saved: $output"
+    log "Generated checksums for $dir -> $output"
+}
+
+verify_checksums() {
+    local checksum_file="$1" base_dir="$2"
+    header "Verifying file integrity"
+    local total failed=0
+    total=$(wc -l < "$checksum_file")
+    info "Checking $total files..."
+    while IFS='  ' read -r expected_hash filepath; do
+        local local_path="${base_dir}/$(basename "$filepath")"
+        [[ -f "$filepath" ]] && local_path="$filepath"
+        if [[ -f "$local_path" ]]; then
+            local actual_hash
+            actual_hash=$(sha256sum "$local_path" | awk '{print $1}')
+            if [[ "$actual_hash" != "$expected_hash" ]]; then
+                warn "Mismatch: $local_path"
+                ((failed++))
+            fi
+        else
+            warn "Missing: $local_path"
+            ((failed++))
+        fi
+    done < "$checksum_file"
+    if (( failed == 0 )); then
+        ok "All $total files verified successfully"
+    else
+        warn "$failed/$total files failed verification"
+    fi
+    return "$failed"
+}
+
+# ── Windows Partition Scan ────────────────────────────────────────────────────
+
+cmd_scan() {
+    header "Scanning for Windows partitions"
+    require_cmd lsblk blkid
+
+    local found=0
+    local results='{"partitions":[],"games":[]}'
+
+    while IFS= read -r dev; do
+        local fstype
+        fstype=$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)
+        [[ "$fstype" == "ntfs" || "$fstype" == "ntfs3" || "$fstype" == "vfat" ]] || continue
+
+        local label size
+        label=$(blkid -o value -s LABEL "$dev" 2>/dev/null || echo "Unknown")
+        size=$(lsblk -bno SIZE "$dev" 2>/dev/null | head -1)
+        size=$(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")
+
+        bullet "${BOLD}$dev${NC} - $label ($fstype, $size)"
+
+        local mnt="${MOUNT_BASE}/$(basename "$dev")"
+        mkdir -p "$mnt"
+        if ! mountpoint -q "$mnt"; then
+            if ! sudo mount -o ro,noexec "$dev" "$mnt" 2>/dev/null; then
+                warn "Could not mount $dev"
+                continue
+            fi
+        fi
+
+        results=$(echo "$results" | jq --arg d "$dev" --arg l "$label" --arg f "$fstype" --arg m "$mnt" \
+            '.partitions += [{"device":$d,"label":$l,"fstype":$f,"mount":$m}]')
+
+        # Scan for Steam
+        local steam_paths=("Program Files (x86)/Steam" "Program Files/Steam" "Steam" "SteamLibrary")
+        for sp in "${steam_paths[@]}"; do
+            local steam_root="$mnt/$sp"
+            if [[ -d "$steam_root/steamapps/common" ]]; then
+                ok "Found Steam: $steam_root"
+                while IFS= read -r -d '' gamedir; do
+                    local gname
+                    gname=$(basename "$gamedir")
+                    local gsize
+                    gsize=$(du -sh "$gamedir" 2>/dev/null | awk '{print $1}')
+                    detail "$gname ($gsize)"
+                    results=$(echo "$results" | jq --arg n "$gname" --arg p "$gamedir" \
+                        --arg s "$gsize" --arg src "steam" --arg dev "$dev" \
+                        '.games += [{"name":$n,"path":$p,"size":$s,"source":$src,"device":$dev}]')
+                    ((found++))
+                done < <(find "$steam_root/steamapps/common" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+            fi
+        done
+
+        # Scan for Epic Games
+        local epic_paths=("Program Files/Epic Games" "Program Files (x86)/Epic Games" "Epic Games")
+        for ep in "${epic_paths[@]}"; do
+            local epic_root="$mnt/$ep"
+            if [[ -d "$epic_root" ]]; then
+                ok "Found Epic Games: $epic_root"
+                while IFS= read -r -d '' gamedir; do
+                    local gname
+                    gname=$(basename "$gamedir")
+                    [[ "$gname" == "Launcher" || "$gname" == "DirectXRedist" ]] && continue
+                    local gsize
+                    gsize=$(du -sh "$gamedir" 2>/dev/null | awk '{print $1}')
+                    detail "$gname ($gsize)"
+                    results=$(echo "$results" | jq --arg n "$gname" --arg p "$gamedir" \
+                        --arg s "$gsize" --arg src "epic" --arg dev "$dev" \
+                        '.games += [{"name":$n,"path":$p,"size":$s,"source":$src,"device":$dev}]')
+                    ((found++))
+                done < <(find "$epic_root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+            fi
+        done
+
+        # Scan for GOG
+        local gog_paths=("GOG Games" "Program Files (x86)/GOG Galaxy/Games" "Program Files/GOG Galaxy/Games")
+        for gp in "${gog_paths[@]}"; do
+            local gog_root="$mnt/$gp"
+            if [[ -d "$gog_root" ]]; then
+                ok "Found GOG: $gog_root"
+                while IFS= read -r -d '' gamedir; do
+                    local gname
+                    gname=$(basename "$gamedir")
+                    local gsize
+                    gsize=$(du -sh "$gamedir" 2>/dev/null | awk '{print $1}')
+                    detail "$gname ($gsize)"
+                    results=$(echo "$results" | jq --arg n "$gname" --arg p "$gamedir" \
+                        --arg s "$gsize" --arg src "gog" --arg dev "$dev" \
+                        '.games += [{"name":$n,"path":$p,"size":$s,"source":$src,"device":$dev}]')
+                    ((found++))
+                done < <(find "$gog_root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+            fi
+        done
+
+        # Scan for save games (find Windows Users)
+        for userdir in "$mnt/Users"/*; do
+            [[ -d "$userdir" ]] || continue
+            local uname
+            uname=$(basename "$userdir")
+            [[ "$uname" == "Public" || "$uname" == "Default" || "$uname" == "Default User" || "$uname" == "All Users" ]] && continue
+            local save_count=0
+            for game in "${!SAVE_PATHS[@]}"; do
+                local spath="${userdir}/${SAVE_PATHS[$game]}"
+                if [[ -d "$spath" ]]; then
+                    ((save_count++))
+                fi
+            done
+            if (( save_count > 0 )); then
+                info "User '$uname': $save_count save game locations detected"
+            fi
+        done
+    done < <(lsblk -lnpo NAME,TYPE 2>/dev/null | awk '$2=="part"{print $1}')
+
+    echo "$results" | jq '.' > "$GAMES_CACHE"
+    echo ""
+    if (( found > 0 )); then
+        ok "Found $found games across all partitions"
+        info "Run '${SCRIPT_NAME} list local' to see full details"
+    else
+        warn "No games found on local partitions"
+    fi
+    log "Scan complete: $found games found"
+}
+
+# ── Network Scan ──────────────────────────────────────────────────────────────
+
+cmd_scan_network() {
+    header "Scanning network for 24HG machines"
+
+    local found=0
+    local results='[]'
+
+    # Try mDNS / Avahi first
+    if command -v avahi-browse &>/dev/null; then
+        info "Scanning via mDNS (avahi)..."
+        while IFS=';' read -r _ _ _ name _ host addr port _; do
+            [[ -z "$addr" ]] && continue
+            bullet "${BOLD}$name${NC} at $addr ($host)"
+            results=$(echo "$results" | jq --arg n "$name" --arg h "$host" --arg a "$addr" --arg p "$port" \
+                '. += [{"name":$n,"host":$h,"address":$a,"port":($p // "22"),"method":"mdns"}]')
+            ((found++))
+        done < <(avahi-browse -rtpk _24hg-migrate._tcp 2>/dev/null | grep '=;' || true)
+    fi
+
+    # Fall back to SSH scan on local subnet
+    if (( found == 0 )); then
+        info "No mDNS services found. Scanning for SSH hosts on local subnet..."
+        local subnet
+        subnet=$(ip route show default 2>/dev/null | awk '{print $3}' | head -1)
+        if [[ -n "$subnet" ]]; then
+            local net_prefix
+            net_prefix=$(echo "$subnet" | sed 's/\.[0-9]*$/.0\/24/')
+            if command -v nmap &>/dev/null; then
+                while IFS= read -r host; do
+                    bullet "${BOLD}$host${NC} (SSH open)"
+                    results=$(echo "$results" | jq --arg a "$host" \
+                        '. += [{"name":"unknown","host":$a,"address":$a,"port":"22","method":"nmap"}]')
+                    ((found++))
+                done < <(nmap -p22 --open -sn "$net_prefix" 2>/dev/null | grep -oP '\d+\.\d+\.\d+\.\d+' || true)
+            else
+                warn "nmap not available. Install nmap for subnet scanning."
+                info "You can manually specify a host: ${SCRIPT_NAME} list ssh://user@host"
+            fi
+        fi
+    fi
+
+    echo "$results" | jq '.' > "${STATE_DIR}/network-hosts.json"
+    echo ""
+    if (( found > 0 )); then
+        ok "Found $found reachable hosts"
+        info "Use '${SCRIPT_NAME} list ssh://user@<address>' to list games on a remote host"
+    else
+        warn "No hosts found on the network"
+    fi
+    log "Network scan complete: $found hosts found"
+}
+
+# ── List Games ────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    local source="${1:-local}"
+
+    if [[ "$source" == "local" ]]; then
+        header "Games detected on local partitions"
+        if [[ ! -f "$GAMES_CACHE" ]] || [[ $(jq '.games | length' "$GAMES_CACHE" 2>/dev/null) == "0" ]]; then
+            warn "No scan data. Run '${SCRIPT_NAME} scan' first."
+            return 1
+        fi
+        local total
+        total=$(jq '.games | length' "$GAMES_CACHE")
+        echo ""
+        printf "  ${BOLD}%-4s %-40s %-8s %-8s %s${NC}\n" "#" "Game" "Size" "Source" "Device"
+        printf "  %-4s %-40s %-8s %-8s %s\n" "----" "----------------------------------------" "--------" "--------" "----------"
+        for (( i=0; i<total; i++ )); do
+            local name size src dev
+            name=$(jq -r ".games[$i].name" "$GAMES_CACHE")
+            size=$(jq -r ".games[$i].size" "$GAMES_CACHE")
+            src=$(jq -r ".games[$i].source" "$GAMES_CACHE")
+            dev=$(jq -r ".games[$i].device" "$GAMES_CACHE")
+            printf "  %-4d %-40s %-8s %-8s %s\n" "$((i+1))" "$name" "$size" "$src" "$dev"
+        done
+        echo ""
+        info "$total games available for import"
+
+    elif [[ "$source" == ssh://* ]]; then
+        header "Scanning remote host for games"
+        local remote="${source#ssh://}"
+        local user host
+        if [[ "$remote" == *@* ]]; then
+            user="${remote%%@*}"
+            host="${remote#*@}"
+        else
+            user="$USER"
+            host="$remote"
+        fi
+        info "Connecting to $user@$host..."
+        local remote_steam="$user@$host:.local/share/Steam/steamapps/common"
+        ssh -o ConnectTimeout=5 "$user@$host" \
+            "ls -1 ~/.local/share/Steam/steamapps/common/ 2>/dev/null" | \
+            while IFS= read -r game; do
+                bullet "$game (Steam)"
+            done
+        ssh -o ConnectTimeout=5 "$user@$host" \
+            "ls -1 ~/Games/ 2>/dev/null" | \
+            while IFS= read -r game; do
+                bullet "$game (Games/)"
+            done
+    else
+        die "Unknown source: $source. Use 'local' or 'ssh://user@host'"
+    fi
+}
+
+# ── Import Games ──────────────────────────────────────────────────────────────
+
+cmd_import() {
+    local source="${1:-local}" game_filter="${2:-}"
+    require_cmd rsync
+
+    if [[ "$source" == "local" ]]; then
+        header "Importing games from local partition"
+        if [[ ! -f "$GAMES_CACHE" ]]; then
+            die "No scan data. Run '${SCRIPT_NAME} scan' first."
+        fi
+        local total
+        total=$(jq '.games | length' "$GAMES_CACHE")
+        (( total == 0 )) && die "No games found in scan cache."
+
+        for (( i=0; i<total; i++ )); do
+            local name src_path src_type
+            name=$(jq -r ".games[$i].name" "$GAMES_CACHE")
+            src_path=$(jq -r ".games[$i].path" "$GAMES_CACHE")
+            src_type=$(jq -r ".games[$i].source" "$GAMES_CACHE")
+
+            # Filter by game name if specified
+            if [[ -n "$game_filter" && "$name" != *"$game_filter"* ]]; then
+                continue
+            fi
+
+            local dest
+            case "$src_type" in
+                steam) dest="$STEAM_COMMON/$name" ;;
+                *)     dest="$GAMES_DIR/$name" ;;
+            esac
+
+            if [[ -d "$dest" ]]; then
+                warn "Skipping '$name' (already exists at $dest)"
+                continue
+            fi
+
+            header "Importing: $name"
+            info "Source: $src_path"
+            info "Destination: $dest"
+            mkdir -p "$dest"
+
+            # Generate source checksums
+            local cksum_file="$CHECKSUM_DIR/${name//[^a-zA-Z0-9]/_}.sha256"
+            generate_checksums "$src_path" "$cksum_file"
+
+            # Copy with progress
+            rsync_with_progress "$src_path/" "$dest/" "$name"
+
+            # Verify
+            verify_checksums "$cksum_file" "$dest" || warn "Some files did not verify for $name"
+
+            # For Steam games, check for appmanifest
+            if [[ "$src_type" == "steam" ]]; then
+                local steam_base
+                steam_base=$(dirname "$(dirname "$src_path")")
+                local manifest
+                manifest=$(find "$steam_base" -maxdepth 1 -name "appmanifest_*.acf" \
+                    -exec grep -l "\"installdir\".*\"$name\"" {} \; 2>/dev/null | head -1)
+                if [[ -n "$manifest" ]]; then
+                    cp "$manifest" "$STEAM_APPS/" 2>/dev/null && \
+                        ok "Copied Steam manifest: $(basename "$manifest")"
+                fi
+            fi
+
+            log "Imported: $name ($src_type) -> $dest"
+            ok "Imported: $name"
+        done
+
+    elif [[ "$source" == ssh://* ]]; then
+        header "Importing games from remote host"
+        local remote="${source#ssh://}"
+        local user host
+        if [[ "$remote" == *@* ]]; then
+            user="${remote%%@*}"
+            host="${remote#*@}"
+        else
+            user="$USER"
+            host="$remote"
+        fi
+
+        local remote_games
+        if [[ -n "$game_filter" ]]; then
+            remote_games=("$game_filter")
+        else
+            mapfile -t remote_games < <(ssh -o ConnectTimeout=5 "$user@$host" \
+                "ls -1 ~/.local/share/Steam/steamapps/common/ 2>/dev/null")
+        fi
+
+        for game in "${remote_games[@]}"; do
+            [[ -z "$game" ]] && continue
+            local dest="$STEAM_COMMON/$game"
+            if [[ -d "$dest" ]]; then
+                warn "Skipping '$game' (already exists)"
+                continue
+            fi
+            header "Importing: $game"
+            mkdir -p "$dest"
+            info "Transferring from $user@$host via rsync..."
+            rsync -avz --progress -e "ssh -o ConnectTimeout=10" \
+                "$user@$host:.local/share/Steam/steamapps/common/$game/" "$dest/" 2>&1 | \
+                tail -1
+            ok "Imported: $game"
+            log "Network import: $game from $user@$host -> $dest"
+        done
+    else
+        die "Unknown source: $source"
+    fi
+}
+
+# ── Save Game Import ──────────────────────────────────────────────────────────
+
+cmd_saves() {
+    local source="${1:-local}"
+    header "Importing save games"
+
+    local save_dest="$HOME/.local/share/24hg/saves-backup"
+    mkdir -p "$save_dest"
+
+    if [[ "$source" == "local" ]]; then
+        # Find Windows user profiles on mounted partitions
+        local found=0
+        for mnt in "$MOUNT_BASE"/*/; do
+            [[ -d "$mnt" ]] || continue
+            for userdir in "${mnt}Users"/*/; do
+                [[ -d "$userdir" ]] || continue
+                local uname
+                uname=$(basename "$userdir")
+                [[ "$uname" == "Public" || "$uname" == "Default" || "$uname" == "Default User" ]] && continue
+
+                for game in "${!SAVE_PATHS[@]}"; do
+                    local spath="${userdir}${SAVE_PATHS[$game]}"
+                    if [[ -d "$spath" ]]; then
+                        local dest_dir="$save_dest/${game}"
+                        mkdir -p "$dest_dir"
+                        info "Copying saves: $game (from user $uname)"
+                        rsync -a "$spath/" "$dest_dir/" 2>/dev/null
+                        local count
+                        count=$(find "$dest_dir" -type f | wc -l)
+                        ok "$game: $count files copied"
+                        ((found++))
+                        log "Save import: $game from $spath -> $dest_dir ($count files)"
+                    fi
+                done
+            done
+        done
+        if (( found == 0 )); then
+            warn "No save games found. Run '${SCRIPT_NAME} scan' first to mount partitions."
+        else
+            echo ""
+            ok "Imported saves for $found games to $save_dest"
+            info "Games with Proton/Wine support can use these saves automatically."
+            info "Check per-game compatibility at protondb.com"
+        fi
+
+    elif [[ "$source" == ssh://* ]]; then
+        local remote="${source#ssh://}"
+        local user host
+        if [[ "$remote" == *@* ]]; then
+            user="${remote%%@*}"
+            host="${remote#*@}"
+        else
+            user="$USER"
+            host="$remote"
+        fi
+        info "Pulling save data from $user@$host..."
+
+        # Pull Linux Steam saves (compatdata prefixes)
+        local remote_compat="$user@$host:.local/share/Steam/steamapps/compatdata/"
+        if ssh -o ConnectTimeout=5 "$user@$host" "test -d ~/.local/share/Steam/steamapps/compatdata"; then
+            info "Syncing Steam compatdata (Proton save data)..."
+            rsync -avz --progress -e "ssh -o ConnectTimeout=10" \
+                "$remote_compat" "$STEAM_APPS/compatdata/" 2>&1 | tail -3
+            ok "Compatdata synced"
+        fi
+
+        # Pull native Linux saves
+        local remote_saves=(".local/share" ".config" "Games")
+        for rdir in "${remote_saves[@]}"; do
+            if ssh -o ConnectTimeout=5 "$user@$host" "test -d ~/$rdir"; then
+                info "Checking ~/$rdir for game saves..."
+                rsync -avz --ignore-existing -e "ssh -o ConnectTimeout=10" \
+                    "$user@$host:~/$rdir/" "$HOME/$rdir/" 2>&1 | tail -1
+            fi
+        done
+        ok "Save sync from remote complete"
+    fi
+}
+
+# ── Config Import ─────────────────────────────────────────────────────────────
+
+cmd_configs() {
+    local source="${1:-local}"
+    header "Importing game configurations"
+
+    local config_dest="$HOME/.local/share/24hg/configs-backup"
+    mkdir -p "$config_dest"
+
+    if [[ "$source" == "local" ]]; then
+        local found=0
+        for mnt in "$MOUNT_BASE"/*/; do
+            [[ -d "$mnt" ]] || continue
+
+            # Steam configs (userdata contains per-game configs and controller bindings)
+            for steam_dir in "$mnt/Program Files (x86)/Steam" "$mnt/Program Files/Steam" "$mnt/Steam"; do
+                if [[ -d "$steam_dir/userdata" ]]; then
+                    info "Found Steam userdata: $steam_dir/userdata"
+                    rsync -a "$steam_dir/userdata/" "$config_dest/steam-userdata/" 2>/dev/null
+                    ok "Steam user configs imported (controller bindings, cloud saves)"
+                    ((found++))
+                fi
+                # Steam controller configs
+                if [[ -d "$steam_dir/controller_base" ]]; then
+                    rsync -a "$steam_dir/controller_base/" "$config_dest/steam-controllers/" 2>/dev/null
+                    ok "Steam controller configs imported"
+                    ((found++))
+                fi
+            done
+
+            # Per-user AppData configs
+            for userdir in "${mnt}Users"/*/; do
+                [[ -d "$userdir" ]] || continue
+                local uname
+                uname=$(basename "$userdir")
+                [[ "$uname" == "Public" || "$uname" == "Default" || "$uname" == "Default User" ]] && continue
+
+                # Common config locations
+                local config_dirs=(
+                    "AppData/Local"
+                    "AppData/Roaming"
+                    "Documents/My Games"
+                )
+                for cdir in "${config_dirs[@]}"; do
+                    local cpath="${userdir}${cdir}"
+                    [[ -d "$cpath" ]] || continue
+                    # Only grab known config files, not entire dirs
+                    while IFS= read -r -d '' cfg; do
+                        local rel
+                        rel="${cfg#"$cpath/"}"
+                        local dest_file="$config_dest/$uname/$cdir/$rel"
+                        mkdir -p "$(dirname "$dest_file")"
+                        cp "$cfg" "$dest_file" 2>/dev/null
+                        ((found++))
+                    done < <(find "$cpath" -maxdepth 4 -type f \( \
+                        -iname "*.ini" -o -iname "*.cfg" -o -iname "*.xml" \
+                        -o -iname "*.json" -o -iname "*.conf" -o -iname "*.config" \
+                        -o -iname "*.yaml" -o -iname "*.yml" -o -iname "input*.txt" \
+                        -o -iname "keybinds*" -o -iname "controls*" \
+                        -o -iname "graphics*" -o -iname "video*" -o -iname "display*" \
+                        \) -print0 2>/dev/null)
+                done
+            done
+        done
+        echo ""
+        if (( found > 0 )); then
+            ok "Imported $found config items to $config_dest"
+            info "Configs can be applied to Proton prefixes or native game directories."
+        else
+            warn "No configs found. Run '${SCRIPT_NAME} scan' first to mount partitions."
+        fi
+
+    elif [[ "$source" == ssh://* ]]; then
+        local remote="${source#ssh://}"
+        local user host
+        if [[ "$remote" == *@* ]]; then
+            user="${remote%%@*}"
+            host="${remote#*@}"
+        else
+            user="$USER"
+            host="$remote"
+        fi
+        info "Pulling configs from $user@$host..."
+        # Sync Steam userdata
+        if ssh -o ConnectTimeout=5 "$user@$host" "test -d ~/.local/share/Steam/userdata"; then
+            rsync -avz -e "ssh -o ConnectTimeout=10" \
+                "$user@$host:.local/share/Steam/userdata/" "$STEAM_LOCAL/userdata/" 2>&1 | tail -1
+            ok "Steam userdata synced"
+        fi
+        # Sync game-specific configs from .config and .local/share
+        for rdir in ".config" ".local/share"; do
+            if ssh -o ConnectTimeout=5 "$user@$host" "test -d ~/$rdir"; then
+                rsync -avz --ignore-existing --include='*/' \
+                    --include='*.ini' --include='*.cfg' --include='*.conf' \
+                    --include='*.json' --include='*.xml' --include='*.yaml' \
+                    --exclude='*' \
+                    -e "ssh -o ConnectTimeout=10" \
+                    "$user@$host:~/$rdir/" "$HOME/$rdir/" 2>&1 | tail -1
+            fi
+        done
+        ok "Config sync from remote complete"
+    fi
+}
+
+# ── Mod Import (local partitions only) ────────────────────────────────────────
+
+cmd_mods() {
+    local source="${1:-local}" game_filter="${2:-}"
+    header "Scanning for game mods"
+
+    if [[ "$source" != "local" ]]; then
+        die "Mod import currently supports local partitions only."
+    fi
+
+    local mod_dest="$HOME/.local/share/24hg/mods-backup"
+    mkdir -p "$mod_dest"
+    local found=0
+
+    if [[ ! -f "$GAMES_CACHE" ]]; then
+        die "No scan data. Run '${SCRIPT_NAME} scan' first."
+    fi
+
+    local total
+    total=$(jq '.games | length' "$GAMES_CACHE")
+    for (( i=0; i<total; i++ )); do
+        local name src_path
+        name=$(jq -r ".games[$i].name" "$GAMES_CACHE")
+        src_path=$(jq -r ".games[$i].path" "$GAMES_CACHE")
+        [[ -n "$game_filter" && "$name" != *"$game_filter"* ]] && continue
+
+        for mod_game in "${!MOD_PATHS[@]}"; do
+            if [[ "$name" == *"$mod_game"* ]]; then
+                local mod_dir="$src_path/${MOD_PATHS[$mod_game]}"
+                if [[ -d "$mod_dir" ]]; then
+                    local mod_count
+                    mod_count=$(find "$mod_dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
+                    if (( mod_count > 0 )); then
+                        local dest="$mod_dest/$name"
+                        mkdir -p "$dest"
+                        bullet "${BOLD}$name${NC}: $mod_count mod files in ${MOD_PATHS[$mod_game]}"
+                        rsync -a "$mod_dir/" "$dest/" 2>/dev/null
+                        ok "Copied mods for $name"
+                        ((found++))
+                        log "Mod import: $name ($mod_count files) -> $dest"
+                    fi
+                fi
+            fi
+        done
+    done
+
+    echo ""
+    if (( found > 0 )); then
+        ok "Imported mods for $found games to $mod_dest"
+    else
+        warn "No mods detected in scanned game directories"
+    fi
+}
+
+# ── Status ────────────────────────────────────────────────────────────────────
+
+cmd_status() {
+    header "Migration Status"
+
+    # Current transfer
+    if [[ -f "$PROGRESS_FILE" ]]; then
+        local status name transferred total
+        status=$(jq -r '.status // "idle"' "$PROGRESS_FILE")
+        name=$(jq -r '.name // "none"' "$PROGRESS_FILE")
+        if [[ "$status" == "running" ]]; then
+            transferred=$(jq -r '.transferred // 0' "$PROGRESS_FILE")
+            total=$(jq -r '.total // 0' "$PROGRESS_FILE")
+            local pct=0
+            (( total > 0 )) && pct=$(( transferred * 100 / total ))
+            info "Active transfer: $name ($pct%)"
+        elif [[ "$status" == "complete" ]]; then
+            ok "Last transfer ($name) completed successfully"
+        fi
+    fi
+
+    # Scan cache stats
+    if [[ -f "$GAMES_CACHE" ]]; then
+        local game_count
+        game_count=$(jq '.games | length' "$GAMES_CACHE" 2>/dev/null || echo 0)
+        local part_count
+        part_count=$(jq '.partitions | length' "$GAMES_CACHE" 2>/dev/null || echo 0)
+        info "Cached: $game_count games on $part_count partitions"
+    else
+        detail "No scan data (run '${SCRIPT_NAME} scan')"
+    fi
+
+    # Network hosts
+    if [[ -f "${STATE_DIR}/network-hosts.json" ]]; then
+        local host_count
+        host_count=$(jq 'length' "${STATE_DIR}/network-hosts.json" 2>/dev/null || echo 0)
+        info "Network hosts discovered: $host_count"
+    fi
+
+    # Imported data summary
+    echo ""
+    local steam_count=0
+    [[ -d "$STEAM_COMMON" ]] && steam_count=$(find "$STEAM_COMMON" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    local other_count=0
+    [[ -d "$GAMES_DIR" ]] && other_count=$(find "$GAMES_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    info "Local Steam games: $steam_count"
+    info "Local other games: $other_count"
+
+    local saves_dir="$HOME/.local/share/24hg/saves-backup"
+    if [[ -d "$saves_dir" ]]; then
+        local save_games
+        save_games=$(find "$saves_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        info "Backed-up save sets: $save_games"
+    fi
+
+    local configs_dir="$HOME/.local/share/24hg/configs-backup"
+    if [[ -d "$configs_dir" ]]; then
+        local cfg_files
+        cfg_files=$(find "$configs_dir" -type f 2>/dev/null | wc -l)
+        info "Imported config files: $cfg_files"
+    fi
+
+    local mods_dir="$HOME/.local/share/24hg/mods-backup"
+    if [[ -d "$mods_dir" ]]; then
+        local mod_games
+        mod_games=$(find "$mods_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        info "Games with imported mods: $mod_games"
+    fi
+
+    # Recent log entries
+    if [[ -f "$MIGRATE_LOG" ]]; then
+        echo ""
+        detail "Recent activity:"
+        tail -5 "$MIGRATE_LOG" | while IFS= read -r line; do
+            detail "  $line"
+        done
+    fi
+}
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+
+cmd_cleanup() {
+    header "Cleaning up mounted partitions"
+    for mnt in "$MOUNT_BASE"/*/; do
+        [[ -d "$mnt" ]] || continue
+        if mountpoint -q "$mnt" 2>/dev/null; then
+            sudo umount "$mnt" 2>/dev/null && ok "Unmounted: $mnt"
+        fi
+        rmdir "$mnt" 2>/dev/null || true
+    done
+    ok "Cleanup complete"
+}
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<USAGE
+${BOLD}${CYAN}24HG Game Migration Tool${NC} v${VERSION}
+
+${BOLD}USAGE:${NC}
+    ${SCRIPT_NAME} <command> [options]
+
+${BOLD}COMMANDS:${NC}
+    scan                        Scan for Windows partitions and game installs
+    scan-network                Discover other PCs on the network via mDNS/SSH
+    list <source>               List games on a source (local | ssh://user@host)
+    import <source> [game]      Import games from source (optional game filter)
+    saves <source>              Import only save files from source
+    configs <source>            Import only configs and keybinds
+    mods [local] [game]         Import mod folders from local partitions
+    status                      Show migration progress and summary
+    cleanup                     Unmount scanned partitions
+
+${BOLD}SOURCES:${NC}
+    local                       Windows partitions on this machine (run scan first)
+    ssh://user@host             Another PC accessible via SSH
+
+${BOLD}EXAMPLES:${NC}
+    ${SCRIPT_NAME} scan
+    ${SCRIPT_NAME} list local
+    ${SCRIPT_NAME} import local "Elden Ring"
+    ${SCRIPT_NAME} import ssh://me@192.168.1.50
+    ${SCRIPT_NAME} saves local
+    ${SCRIPT_NAME} configs ssh://me@otherpc
+    ${SCRIPT_NAME} mods local Skyrim
+    ${SCRIPT_NAME} status
+
+${BOLD}STATE:${NC}
+    ${DIM}${STATE_DIR}/${NC}
+USAGE
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+    init_state
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        scan)          cmd_scan "$@" ;;
+        scan-network)  cmd_scan_network "$@" ;;
+        list)          cmd_list "$@" ;;
+        import)        cmd_import "$@" ;;
+        saves)         cmd_saves "$@" ;;
+        configs)       cmd_configs "$@" ;;
+        mods)          cmd_mods "$@" ;;
+        status)        cmd_status "$@" ;;
+        cleanup)       cmd_cleanup "$@" ;;
+        help|--help|-h) usage ;;
+        *)             err "Unknown command: $cmd"; usage; exit 1 ;;
+    esac
+}
+
+main "$@"

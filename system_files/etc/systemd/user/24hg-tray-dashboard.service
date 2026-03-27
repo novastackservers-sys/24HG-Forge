@@ -1,0 +1,12 @@
+[Unit]
+Description=24HG Tray Dashboard — System tray data feed
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/24hg-tray-dashboard widget
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

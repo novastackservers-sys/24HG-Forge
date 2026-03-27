@@ -41,7 +41,7 @@ PlasmoidItem {
 
     // ── Token loading ──
     function loadToken() {
-        var tokenPath = Platform.StandardPaths.writableLocation(Platform.StandardPaths.ConfigLocation) + "/forge/hub-token";
+        var tokenPath = Platform.StandardPaths.writableLocation(Platform.StandardPaths.ConfigLocation) + "/24hg/hub-token";
         var xhr = new XMLHttpRequest();
         xhr.open("GET", "file://" + tokenPath, false);
         try {
@@ -158,7 +158,7 @@ PlasmoidItem {
         // Always fetch feed data
         totalSections++;
         pending++;
-        apiFetch("/forge/feed?limit=20", function(err, data) {
+        apiFetch("/24hg/feed?limit=20", function(err, data) {
             if (!err && data) {
                 var list = Array.isArray(data) ? data : (data.feed || data.activities || []);
                 feedData = list.slice(0, 20);
@@ -332,7 +332,7 @@ PlasmoidItem {
 
             PlasmaComponents.Label {
                 Layout.alignment: Qt.AlignHCenter
-                text: "Sign in to 24HG Forge to connect"
+                text: "Sign in to 24HG Hub to connect"
                 color: root.textColor
                 font.pixelSize: 13
             }

@@ -1,0 +1,14 @@
+[Unit]
+Description=24HG Deals Checker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/24hg-deals check
+Environment=HOME=%h
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

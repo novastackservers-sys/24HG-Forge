@@ -2,31 +2,31 @@
 
 ## General
 
-### What is 24HG Forge?
+### What is 24HG?
 
-24HG Forge is a custom Linux gaming distribution built on [Bazzite](https://bazzite.gg/) (Fedora Atomic) by [24 Hour Gaming](https://24hgaming.com). It provides a turnkey gaming experience with 53 purpose-built tools, direct connection to 88+ game servers, and deep community integration.
+24HG is a custom Linux gaming distribution built on [Bazzite](https://bazzite.gg/) (Fedora Atomic) by [24 Hour Gaming](https://24hgaming.com). It provides a turnkey gaming experience with 53 purpose-built tools, direct connection to 88+ game servers, and deep community integration.
 
-### Is 24HG Forge free?
+### Is 24HG free?
 
-Yes. 24HG Forge is completely free and open source under the MIT License (custom code) and inherits Bazzite's Apache 2.0 and Fedora's open-source licenses.
+Yes. 24HG is completely free and open source under the MIT License (custom code) and inherits Bazzite's Apache 2.0 and Fedora's open-source licenses.
 
-### Who makes 24HG Forge?
+### Who makes 24HG?
 
-24HG Forge is made by [24 Hour Gaming](https://24hgaming.com), a gaming community with 88+ game servers across Counter-Strike 2, Team Fortress 2, Counter-Strike 1.6, Rust, FiveM, and more.
+24HG is made by [24 Hour Gaming](https://24hgaming.com), a gaming community with 88+ game servers across Counter-Strike 2, Team Fortress 2, Counter-Strike 1.6, Rust, FiveM, and more.
 
-### What makes 24HG Forge different from other Linux gaming distros?
+### What makes 24HG different from other Linux gaming distros?
 
 Three things:
 
-1. **Community integration** -- 24HG Forge connects directly to 24HG servers, hub, chat, tournaments, and leaderboards. No other distro has this.
-2. **53 gaming tools** -- Every common Linux gaming pain point has a dedicated `forge-*` tool. Proton issues, shader stutter, audio latency, controller setup, anti-cheat tracking -- all one command away.
-3. **VIP perks** -- 24HG Forge users get automatic benefits across all 24HG game servers.
+1. **Community integration** -- 24HG connects directly to 24HG servers, hub, chat, tournaments, and leaderboards. No other distro has this.
+2. **53 gaming tools** -- Every common Linux gaming pain point has a dedicated `24hg-*` tool. Proton issues, shader stutter, audio latency, controller setup, anti-cheat tracking -- all one command away.
+3. **VIP perks** -- 24HG users get automatic benefits across all 24HG game servers.
 
-### How is 24HG Forge different from Bazzite?
+### How is 24HG different from Bazzite?
 
-24HG Forge is built on top of Bazzite. Everything in Bazzite is also in 24HG Forge. On top of that, 24HG Forge adds:
+24HG is built on top of Bazzite. Everything in Bazzite is also in 24HG. On top of that, 24HG adds:
 
-- 53 gaming utility tools (`forge-*`)
+- 53 gaming utility tools (`24hg-*`)
 - 24HG Hub app and community integration
 - Custom branding (GRUB, Plymouth, SDDM, KDE splash, wallpapers, icons, sound theme)
 - First-boot wizard tailored for gaming
@@ -38,13 +38,13 @@ Three things:
 - Game crash diagnosis and auto-fix tools
 - VIP perks system
 
-### Can I use 24HG Forge without being part of 24HG?
+### Can I use 24HG without being part of 24HG?
 
-Yes. 24HG Forge works as a standalone gaming Linux distro. The 24HG integration is optional -- you do not need a 24HG account. All 53 tools work independently.
+Yes. 24HG works as a standalone gaming Linux distro. The 24HG integration is optional -- you do not need a 24HG account. All 53 tools work independently.
 
-### What desktop environment does 24HG Forge use?
+### What desktop environment does 24HG use?
 
-KDE Plasma 6 (via Bazzite). 24HG Forge also includes a "24HG Mode" that boots into a console-like fullscreen Gamescope session.
+KDE Plasma 6 (via Bazzite). 24HG also includes a "24HG Mode" that boots into a console-like fullscreen Gamescope session.
 
 ## Installation
 
@@ -54,34 +54,34 @@ Minimum: 64-bit CPU, 4 GB RAM, 30 GB storage, Vulkan-capable GPU. Recommended: 4
 
 ### Can I dual-boot with Windows?
 
-Yes. The Calamares installer supports installing alongside Windows. Shrink your Windows partition first using Windows Disk Management, then choose "Replace a partition" during 24HG Forge installation. See the [Installation Guide](Installation#dual-boot-setup) for details.
+Yes. The Calamares installer supports installing alongside Windows. Shrink your Windows partition first using Windows Disk Management, then choose "Replace a partition" during 24HG installation. See the [Installation Guide](Installation#dual-boot-setup) for details.
 
-### Does 24HG Forge work on laptops?
+### Does 24HG work on laptops?
 
 Yes. Both AMD and Intel integrated graphics work out of the box. For NVIDIA laptops (Optimus), use the NVIDIA variant -- it includes the proprietary drivers and handles GPU switching.
 
-### Does 24HG Forge work on the Steam Deck?
+### Does 24HG work on the Steam Deck?
 
 Yes. Use the Deck variant. It includes Steam Deck-specific optimizations and handheld support from Bazzite.
 
-### Can I install 24HG Forge on a virtual machine?
+### Can I install 24HG on a virtual machine?
 
 Yes. QEMU/KVM with virt-manager works well for testing. See [Building from Source](Building#testing-in-a-vm) for details. Note that 3D performance in VMs is limited.
 
-### How do I update 24HG Forge?
+### How do I update 24HG?
 
-24HG Forge uses atomic updates. Updates download in the background and apply on the next reboot:
+24HG uses atomic updates. Updates download in the background and apply on the next reboot:
 
 ```bash
 rpm-ostree upgrade
 systemctl reboot
 ```
 
-Or use the 24HG Forge tool:
+Or use the 24HG tool:
 
 ```bash
-forge-update-guard check
-forge-update-guard apply
+24hg-update-guard check
+24hg-update-guard apply
 ```
 
 ### Can I roll back an update?
@@ -93,18 +93,18 @@ rpm-ostree rollback
 systemctl reboot
 ```
 
-### Can I rebase from Bazzite to 24HG Forge without reinstalling?
+### Can I rebase from Bazzite to 24HG without reinstalling?
 
 Yes:
 
 ```bash
-rpm-ostree rebase ostree-unverified-registry:git.raggi.is/24hg/forge:latest
+rpm-ostree rebase ostree-unverified-registry:git.raggi.is/24hg/24hg:latest
 systemctl reboot
 ```
 
 ### Can I install packages with dnf?
 
-Not directly. 24HG Forge uses Fedora Atomic, which means the base system is immutable. You have three options for additional software:
+Not directly. 24HG uses Fedora Atomic, which means the base system is immutable. You have three options for additional software:
 
 1. **Flatpak** (recommended): `flatpak install flathub <app>`
 2. **rpm-ostree**: `rpm-ostree install <package>` (layered on top of the base image, persists across updates)
@@ -114,64 +114,64 @@ Not directly. 24HG Forge uses Fedora Atomic, which means the base system is immu
 
 ### Will my Steam games work?
 
-Most of them. About 85% of Steam games work on Linux via Proton. Use `forge-compat scan` to check your entire library, or `forge-compat check <game>` for a specific game. See [Game Compatibility](Game-Compatibility) for details.
+Most of them. About 85% of Steam games work on Linux via Proton. Use `24hg-compat scan` to check your entire library, or `24hg-compat check <game>` for a specific game. See [Game Compatibility](Game-Compatibility) for details.
 
 ### What about anti-cheat games?
 
-It depends on the anti-cheat and whether the developer has enabled Linux support. Games with EAC or BattlEye may work if the developer opted in (like Rust, Apex Legends, Elden Ring). Games with Vanguard (Valorant) or kernel-level anti-cheat do not work. Use `forge-anticheat-tracker scan` to check your library.
+It depends on the anti-cheat and whether the developer has enabled Linux support. Games with EAC or BattlEye may work if the developer opted in (like Rust, Apex Legends, Elden Ring). Games with Vanguard (Valorant) or kernel-level anti-cheat do not work. Use `24hg-anticheat-tracker scan` to check your library.
 
 ### Do I need to configure Proton manually?
 
-No. Steam automatically uses Proton for Windows games. 24HG Forge also keeps Proton-GE updated automatically via `forge-proton-updater`. For per-game tweaks, use `forge-game-profiles`.
+No. Steam automatically uses Proton for Windows games. 24HG also keeps Proton-GE updated automatically via `24hg-proton-updater`. For per-game tweaks, use `24hg-game-profiles`.
 
 ### How do I fix a game that won't launch?
 
 ```bash
-forge-proton-fix <appid>          # Diagnose Proton issues
-forge-crash-fix diagnose <appid>  # Diagnose crashes
-forge-proton-fix <appid> --fix    # Auto-fix common issues
+24hg-proton-fix <appid>          # Diagnose Proton issues
+24hg-crash-fix diagnose <appid>  # Diagnose crashes
+24hg-proton-fix <appid> --fix    # Auto-fix common issues
 ```
 
 See [Troubleshooting](Troubleshooting) for more.
 
 ### Can I use Lutris and Heroic?
 
-Yes. Both are pre-installed on 24HG Forge. Lutris handles non-Steam games, and Heroic handles Epic Games Store and GOG. The `forge-games` tool shows games from all launchers in one unified library.
+Yes. Both are pre-installed on 24HG. Lutris handles non-Steam games, and Heroic handles Epic Games Store and GOG. The `24hg-games` tool shows games from all launchers in one unified library.
 
 ### How do I install mods?
 
-24HG Forge registers as an NXM protocol handler. Click "Download with Mod Manager" on Nexus Mods, and 24HG Forge handles the rest via `forge-mod-manager`. For manual modding, use `forge-prefix info <appid>` to find the game's Wine prefix.
+24HG registers as an NXM protocol handler. Click "Download with Mod Manager" on Nexus Mods, and 24HG handles the rest via `24hg-mod-manager`. For manual modding, use `24hg-prefix info <appid>` to find the game's Wine prefix.
 
 ### Why is my game stuttering on first launch?
 
 Shader compilation. The GPU compiles shaders the first time you encounter new visuals. This goes away after the first session. To eliminate it, pre-build shaders:
 
 ```bash
-forge-shader-cache prebuild <appid>
+24hg-shader-cache prebuild <appid>
 ```
 
 ### How do I enable HDR?
 
 ```bash
-forge-hdr setup
+24hg-hdr setup
 ```
 
 Requirements: KDE Plasma 6, Wayland session, HDR-capable monitor, AMD GPU (best support) or NVIDIA (improving).
 
 ### How do I record gameplay?
 
-24HG Forge includes instant replay (like NVIDIA ShadowPlay):
+24HG includes instant replay (like NVIDIA ShadowPlay):
 
 ```bash
-forge-replay start   # Start recording in the background
+24hg-replay start   # Start recording in the background
 # Press F9 to save the last 2 minutes as a clip
 ```
 
 For streaming:
 
 ```bash
-forge-stream setup   # Configure Twitch/YouTube/Kick
-forge-stream start   # Start streaming
+24hg-stream setup   # Configure Twitch/YouTube/Kick
+24hg-stream start   # Start streaming
 ```
 
 ### Can I use MangoHud?
@@ -182,7 +182,7 @@ Yes. MangoHud is pre-configured. Press F12 to toggle it. Edit `~/.config/MangoHu
 
 ### Does NVIDIA work?
 
-Yes. Use the NVIDIA variant of 24HG Forge, which includes proprietary NVIDIA drivers. If you experience Wayland issues, run `forge-nvidia-wayland fix`.
+Yes. Use the NVIDIA variant of 24HG, which includes proprietary NVIDIA drivers. If you experience Wayland issues, run `24hg-nvidia-wayland fix`.
 
 ### Does AMD work?
 
@@ -195,8 +195,8 @@ Yes. Intel Arc GPUs use open-source Mesa drivers. Use the Desktop variant.
 ### My controller is not detected. What do I do?
 
 ```bash
-forge-controller list   # See what is detected
-forge-controller fix    # Fix common issues (udev rules, permissions)
+24hg-controller list   # See what is detected
+24hg-controller fix    # Fix common issues (udev rules, permissions)
 ```
 
 Xbox controllers work out of the box. PlayStation and Nintendo controllers usually work but may need the fix command.
@@ -204,9 +204,9 @@ Xbox controllers work out of the box. PlayStation and Nintendo controllers usual
 ### How do I set up multiple monitors?
 
 ```bash
-forge-display status     # Show current display configuration
-forge-display gaming     # Optimize for gaming (disable compositing, etc.)
-forge-display save       # Save current layout as a profile
+24hg-display status     # Show current display configuration
+24hg-display gaming     # Optimize for gaming (disable compositing, etc.)
+24hg-display save       # Save current layout as a profile
 ```
 
 Or use KDE System Settings -> Display and Monitor.
@@ -215,24 +215,24 @@ Or use KDE System Settings -> Display and Monitor.
 
 ### How do I connect to 24HG servers?
 
-Open the Hub app (desktop icon or tray icon) and click any server. 24HG Forge launches the right game automatically. Or from the terminal:
+Open the Hub app (desktop icon or tray icon) and click any server. 24HG launches the right game automatically. Or from the terminal:
 
 ```bash
-forge-server-status   # See all servers and player counts
+24hg-server-status   # See all servers and player counts
 ```
 
 ### How do I claim VIP perks?
 
 ```bash
-forge-perks claim
+24hg-perks claim
 ```
 
-This links your 24HG account to your 24HG Forge installation and activates benefits across all game servers.
+This links your 24HG account to your 24HG installation and activates benefits across all game servers.
 
 ### How do I report a bug?
 
-1. Generate a diagnostic: `forge-diag --paste`
-2. Open an issue on [Gitea](https://git.raggi.is/24hg/forge/issues) with the diagnostic link.
+1. Generate a diagnostic: `24hg-diag --paste`
+2. Open an issue on [Gitea](https://git.raggi.is/24hg/24hg/issues) with the diagnostic link.
 3. Or share it in the [Discord](https://discord.gg/ymfEjH6EJN) support channel.
 
 ### How do I contribute?
@@ -255,38 +255,38 @@ No. The base system is managed by rpm-ostree. For additional software, use Flatp
 
 ### Where are config files stored?
 
-- 24HG Forge tool configs: `~/.config/forge/`
-- 24HG Forge data: `~/.local/share/forge/`
-- 24HG Forge cache: `~/.cache/forge/`
+- 24HG tool configs: `~/.config/24hg/`
+- 24HG data: `~/.local/share/24hg/`
+- 24HG cache: `~/.cache/24hg/`
 - System configs: `/etc/` (managed by rpm-ostree)
 - MangoHud: `~/.config/MangoHud/MangoHud.conf`
 - Steam: `~/.var/app/com.valvesoftware.Steam/` (Flatpak) or `~/.local/share/Steam/` (native)
 
 ### How do automatic backups work?
 
-The `forge-backup` tool runs on a systemd timer. It backs up your game saves, 24HG Forge configs, and important dotfiles. Check status:
+The `24hg-backup` tool runs on a systemd timer. It backs up your game saves, 24HG configs, and important dotfiles. Check status:
 
 ```bash
-forge-backup status
+24hg-backup status
 ```
 
-### What ports does 24HG Forge use?
+### What ports does 24HG use?
 
-24HG Forge does not run any servers by default. Outbound connections:
+24HG does not run any servers by default. Outbound connections:
 
 - Hub app: HTTPS (443) to `hub.24hgaming.com`
 - Game connections: Various ports to game servers
 - Steam: Various ports for Steam networking
 
-The `forge-netguard` tool monitors network connections from games:
+The `24hg-netguard` tool monitors network connections from games:
 
 ```bash
-forge-netguard status
+24hg-netguard status
 ```
 
-### Is 24HG Forge secure?
+### Is 24HG secure?
 
-24HG Forge inherits Fedora's security model:
+24HG inherits Fedora's security model:
 
 - SELinux enabled
 - Immutable base system (harder to compromise)

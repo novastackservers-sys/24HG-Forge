@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=24HG Demo Tour
+Comment=Take a guided tour of 24HG
+Exec=/usr/bin/24hg-demo start
+Icon=24hg-logo
+Terminal=false
+Categories=System;

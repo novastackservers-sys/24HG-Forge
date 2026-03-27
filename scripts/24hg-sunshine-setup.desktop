@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Stream This PC
+Comment=Set up game streaming to phones, tablets, and other devices
+Exec=24hg-sunshine-setup
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Game;

@@ -1,0 +1,1147 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Deals — Game deals tracker with wishlist, alerts & price history
+
+# ── Colors ────────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    BOLD="\033[1m"
+    DIM="\033[2m"
+    RESET="\033[0m"
+    RED="\033[31m"
+    GREEN="\033[32m"
+    YELLOW="\033[33m"
+    BLUE="\033[34m"
+    MAGENTA="\033[35m"
+    CYAN="\033[36m"
+    WHITE="\033[37m"
+    GRAY="\033[38;5;242m"
+    ORANGE="\033[38;5;208m"
+    GOLD="\033[38;5;220m"
+else
+    BOLD="" DIM="" RESET="" RED="" GREEN="" YELLOW="" BLUE=""
+    MAGENTA="" CYAN="" WHITE="" GRAY="" ORANGE="" GOLD=""
+fi
+
+# ── Paths & Configuration ────────────────────────────────────────────────────
+CONFIG_DIR="${HOME}/.config/24hg"
+CACHE_DIR="${HOME}/.cache/24hg/deals"
+COMPAT_CACHE="${HOME}/.cache/24hg-game-compat"
+WISHLIST_FILE="${CONFIG_DIR}/deals-wishlist.json"
+ALERTS_FILE="${CONFIG_DIR}/deals-alerts.json"
+HISTORY_DIR="${CACHE_DIR}/history"
+CACHE_TTL=3600  # 1 hour in seconds
+DAEMON_INTERVAL=21600  # 6 hours in seconds
+PID_FILE="/tmp/24hg-deals-daemon.pid"
+
+# API endpoints
+CHEAPSHARK_API="https://www.cheapshark.com/api/1.0"
+ITAD_API="https://api.isthereanydeal.com"
+STEAM_API="https://store.steampowered.com/api"
+
+# CheapShark store IDs → names
+declare -A STORE_NAMES=(
+    [1]="Steam" [2]="GamersGate" [3]="GreenManGaming" [4]="Amazon"
+    [5]="GameStop" [6]="Direct2Drive" [7]="GOG" [8]="Origin"
+    [10]="Humble Bundle" [11]="Desura" [13]="Uplay" [14]="IndieGameStand"
+    [15]="Fanatical" [21]="WinGameStore" [23]="GameBillet" [24]="Voidu"
+    [25]="Epic Games" [27]="Gamesplanet" [28]="Gamesload" [29]="2Game"
+    [30]="IndieGala" [31]="Blizzard" [33]="DLGamer" [34]="Noctre"
+    [35]="DreamGame"
+)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+log() { logger -t 24hg-deals "$*" 2>/dev/null || true; }
+
+info()  { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+ok()    { echo -e "${GREEN}[ OK ]${RESET}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+err()   { echo -e "${RED}[ERR]${RESET}   $*" >&2; }
+hdr()   { echo -e "\n${BOLD}${MAGENTA}── $* ──${RESET}"; }
+
+die() { err "$*"; log "ERROR: $*"; exit 1; }
+
+check_deps() {
+    local missing=()
+    for cmd in curl jq; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        die "Missing dependencies: ${missing[*]}. Install with: sudo dnf install ${missing[*]}"
+    fi
+}
+
+ensure_dirs() {
+    mkdir -p "$CONFIG_DIR" "$CACHE_DIR" "$HISTORY_DIR"
+    [[ -f "$WISHLIST_FILE" ]] || echo '{"games":[]}' > "$WISHLIST_FILE"
+    [[ -f "$ALERTS_FILE" ]] || echo '{"alerts":[]}' > "$ALERTS_FILE"
+}
+
+# ── Cache Management ─────────────────────────────────────────────────────────
+cache_key() {
+    echo "$1" | md5sum | cut -d' ' -f1
+}
+
+cache_get() {
+    local key
+    key=$(cache_key "$1")
+    local cache_file="${CACHE_DIR}/${key}.json"
+    if [[ -f "$cache_file" ]]; then
+        local age
+        age=$(( $(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0) ))
+        if [[ $age -lt $CACHE_TTL ]]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+cache_set() {
+    local key
+    key=$(cache_key "$1")
+    local cache_file="${CACHE_DIR}/${key}.json"
+    cat > "$cache_file"
+}
+
+cache_clear() {
+    find "$CACHE_DIR" -maxdepth 1 -name '*.json' -mmin +60 -delete 2>/dev/null || true
+    ok "Stale cache entries cleared"
+}
+
+# ── API Functions ─────────────────────────────────────────────────────────────
+api_cheapshark() {
+    local endpoint="$1"
+    shift
+    local url="${CHEAPSHARK_API}/${endpoint}"
+    local params=""
+    while [[ $# -gt 0 ]]; do
+        if [[ -z "$params" ]]; then
+            params="?${1}"
+        else
+            params="${params}&${1}"
+        fi
+        shift
+    done
+    url="${url}${params}"
+
+    local cached
+    if cached=$(cache_get "$url"); then
+        echo "$cached"
+        return 0
+    fi
+
+    local response
+    response=$(curl -sf --max-time 15 "$url" 2>/dev/null) || {
+        log "CheapShark API request failed: $url"
+        return 1
+    }
+
+    echo "$response" | cache_set "$url"
+    echo "$response"
+}
+
+api_steam_search() {
+    local query="$1"
+    local url="${STEAM_API}/storesearch/?term=$(urlencode "$query")&l=english&cc=us"
+
+    local cached
+    if cached=$(cache_get "$url"); then
+        echo "$cached"
+        return 0
+    fi
+
+    local response
+    response=$(curl -sf --max-time 15 "$url" 2>/dev/null) || {
+        log "Steam API search failed: $query"
+        return 1
+    }
+
+    echo "$response" | cache_set "$url"
+    echo "$response"
+}
+
+api_steam_details() {
+    local appid="$1"
+    local url="${STEAM_API}/appdetails?appids=${appid}&cc=us"
+
+    local cached
+    if cached=$(cache_get "$url"); then
+        echo "$cached"
+        return 0
+    fi
+
+    local response
+    response=$(curl -sf --max-time 15 "$url" 2>/dev/null) || {
+        log "Steam API details failed: appid=$appid"
+        return 1
+    }
+
+    echo "$response" | cache_set "$url"
+    echo "$response"
+}
+
+urlencode() {
+    local string="$1"
+    python3 -c "import urllib.parse; print(urllib.parse.quote('$string'))" 2>/dev/null \
+        || echo "$string" | sed 's/ /%20/g; s/!/%21/g; s/"/%22/g; s/#/%23/g; s/&/%26/g; s/'\''/%27/g'
+}
+
+# ── Formatting ────────────────────────────────────────────────────────────────
+discount_color() {
+    local pct="${1:-0}"
+    pct="${pct%\%}"
+    pct="${pct#-}"
+    if [[ "$pct" -ge 50 ]]; then
+        echo -ne "$GREEN"
+    elif [[ "$pct" -ge 20 ]]; then
+        echo -ne "$YELLOW"
+    else
+        echo -ne "$WHITE"
+    fi
+}
+
+format_price() {
+    local price="$1"
+    if [[ "$price" == "0" || "$price" == "0.00" ]]; then
+        echo -e "${GREEN}FREE${RESET}"
+    else
+        printf '$%.2f' "$price"
+    fi
+}
+
+linux_compat_badge() {
+    local game_name="$1"
+    local compat_file="${COMPAT_CACHE}/ratings.json"
+
+    if [[ -f "$compat_file" ]]; then
+        local rating
+        rating=$(jq -r --arg name "$game_name" \
+            '.[$name] // empty' "$compat_file" 2>/dev/null)
+        case "${rating,,}" in
+            platinum) echo -e "${GREEN}[P]${RESET}" ;;
+            gold)     echo -e "${YELLOW}[G]${RESET}" ;;
+            silver)   echo -e "${ORANGE}[S]${RESET}" ;;
+            bronze)   echo -e "${RED}[B]${RESET}" ;;
+            borked)   echo -e "${RED}[X]${RESET}" ;;
+            *)        echo -e "${GRAY}[?]${RESET}" ;;
+        esac
+    else
+        echo -e "${GRAY}[?]${RESET}"
+    fi
+}
+
+sparkline() {
+    local -a values=("$@")
+    local chars=("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█")
+    local count=${#values[@]}
+    if [[ $count -eq 0 ]]; then
+        echo "no data"
+        return
+    fi
+
+    local min=999999 max=0
+    for v in "${values[@]}"; do
+        local iv
+        iv=$(echo "$v" | awk '{printf "%d", $1 * 100}')
+        [[ $iv -lt $min ]] && min=$iv
+        [[ $iv -gt $max ]] && max=$iv
+    done
+
+    local range=$(( max - min ))
+    [[ $range -eq 0 ]] && range=1
+
+    local line=""
+    for v in "${values[@]}"; do
+        local iv
+        iv=$(echo "$v" | awk '{printf "%d", $1 * 100}')
+        local idx=$(( (iv - min) * 7 / range ))
+        [[ $idx -gt 7 ]] && idx=7
+        [[ $idx -lt 0 ]] && idx=0
+        line+="${chars[$idx]}"
+    done
+    echo "$line"
+}
+
+print_table_header() {
+    printf "${BOLD}%-40s %-18s %8s %8s %6s %5s${RESET}\n" \
+        "Game" "Store" "Price" "Regular" "Off" "Linux"
+    printf "${DIM}%-40s %-18s %8s %8s %6s %5s${RESET}\n" \
+        "$(printf '%.0s─' {1..40})" \
+        "$(printf '%.0s─' {1..18})" \
+        "$(printf '%.0s─' {1..8})" \
+        "$(printf '%.0s─' {1..8})" \
+        "$(printf '%.0s─' {1..6})" \
+        "$(printf '%.0s─' {1..5})"
+}
+
+print_deal_row() {
+    local name="$1" store="$2" sale="$3" regular="$4" discount="$5"
+
+    # Truncate long names
+    if [[ ${#name} -gt 38 ]]; then
+        name="${name:0:35}..."
+    fi
+    if [[ ${#store} -gt 16 ]]; then
+        store="${store:0:13}..."
+    fi
+
+    local dc
+    dc=$(discount_color "$discount")
+    local compat
+    compat=$(linux_compat_badge "$name")
+
+    local sale_fmt regular_fmt
+    sale_fmt=$(format_price "$sale")
+    regular_fmt=$(format_price "$regular")
+
+    printf "%-40s %-18s %8s %8s ${dc}%5s%%${RESET} %5s\n" \
+        "$name" "$store" "$sale_fmt" "$regular_fmt" "-${discount}" "$compat"
+}
+
+# ── Wishlist Management ──────────────────────────────────────────────────────
+wishlist_list() {
+    hdr "Wishlist"
+
+    local count
+    count=$(jq '.games | length' "$WISHLIST_FILE" 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        info "Your wishlist is empty."
+        echo "  Add games with: ${BOLD}24hg deals wishlist add <game>${RESET}"
+        return 0
+    fi
+
+    print_table_header
+
+    local games
+    games=$(jq -r '.games[].name' "$WISHLIST_FILE")
+
+    while IFS= read -r game; do
+        [[ -z "$game" ]] && continue
+        local deals
+        deals=$(api_cheapshark "deals" "title=$(urlencode "$game")" "sortBy=Price" "pageSize=1" 2>/dev/null) || continue
+
+        local deal_count
+        deal_count=$(echo "$deals" | jq 'length' 2>/dev/null || echo 0)
+
+        if [[ "$deal_count" -gt 0 ]]; then
+            local sale_price normal_price store_id savings title
+            title=$(echo "$deals" | jq -r '.[0].title // empty')
+            sale_price=$(echo "$deals" | jq -r '.[0].salePrice // "?"')
+            normal_price=$(echo "$deals" | jq -r '.[0].normalPrice // "?"')
+            store_id=$(echo "$deals" | jq -r '.[0].storeID // "1"')
+            savings=$(echo "$deals" | jq -r '.[0].savings // "0"' | awk '{printf "%d", $1}')
+            local store_name="${STORE_NAMES[$store_id]:-Unknown}"
+
+            print_deal_row "${title:-$game}" "$store_name" "$sale_price" "$normal_price" "$savings"
+        else
+            printf "%-40s ${DIM}No deals found${RESET}\n" "$game"
+        fi
+    done <<< "$games"
+
+    echo ""
+    info "${count} game(s) on wishlist"
+}
+
+wishlist_add() {
+    local game_name="$1"
+    [[ -z "$game_name" ]] && die "Usage: 24hg deals wishlist add <game name>"
+
+    # Check if already on wishlist
+    local exists
+    exists=$(jq --arg name "$game_name" \
+        '.games | map(select(.name | ascii_downcase == ($name | ascii_downcase))) | length' \
+        "$WISHLIST_FILE" 2>/dev/null || echo 0)
+
+    if [[ "$exists" -gt 0 ]]; then
+        warn "'${game_name}' is already on your wishlist"
+        return 0
+    fi
+
+    # Verify game exists via CheapShark
+    info "Looking up '${game_name}'..."
+    local results
+    results=$(api_cheapshark "games" "title=$(urlencode "$game_name")" "limit=5") || \
+        die "Failed to search for '${game_name}'"
+
+    local match_count
+    match_count=$(echo "$results" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$match_count" -eq 0 ]]; then
+        warn "No games found matching '${game_name}'"
+        info "Try a more specific name or check spelling"
+        return 1
+    fi
+
+    # Show matches and pick the best one
+    local best_name best_id cheapest
+    best_name=$(echo "$results" | jq -r '.[0].external // empty')
+    best_id=$(echo "$results" | jq -r '.[0].gameID // empty')
+    cheapest=$(echo "$results" | jq -r '.[0].cheapest // "?"')
+
+    if [[ -z "$best_name" ]]; then
+        warn "Could not resolve game name"
+        return 1
+    fi
+
+    # If input doesn't closely match, show options
+    if [[ "${best_name,,}" != "${game_name,,}" ]]; then
+        echo ""
+        info "Did you mean one of these?"
+        echo "$results" | jq -r '.[:5] | .[] | "  - \(.external) (cheapest: $\(.cheapest))"' 2>/dev/null
+        echo ""
+        echo -n "Add '${best_name}'? [Y/n] "
+        read -r confirm
+        if [[ "${confirm,,}" == "n" ]]; then
+            info "Cancelled"
+            return 0
+        fi
+    fi
+
+    # Add to wishlist
+    local now
+    now=$(date -Iseconds)
+    jq --arg name "$best_name" --arg id "$best_id" --arg added "$now" \
+        '.games += [{"name": $name, "gameID": $id, "added": $added}]' \
+        "$WISHLIST_FILE" > "${WISHLIST_FILE}.tmp" && mv "${WISHLIST_FILE}.tmp" "$WISHLIST_FILE"
+
+    ok "Added '${best_name}' to wishlist (cheapest ever: \$${cheapest})"
+    log "Wishlist add: $best_name (id=$best_id)"
+}
+
+wishlist_remove() {
+    local game_name="$1"
+    [[ -z "$game_name" ]] && die "Usage: 24hg deals wishlist remove <game name>"
+
+    local exists
+    exists=$(jq --arg name "$game_name" \
+        '.games | map(select(.name | ascii_downcase == ($name | ascii_downcase))) | length' \
+        "$WISHLIST_FILE" 2>/dev/null || echo 0)
+
+    if [[ "$exists" -eq 0 ]]; then
+        warn "'${game_name}' is not on your wishlist"
+        return 1
+    fi
+
+    jq --arg name "$game_name" \
+        '.games |= map(select(.name | ascii_downcase != ($name | ascii_downcase)))' \
+        "$WISHLIST_FILE" > "${WISHLIST_FILE}.tmp" && mv "${WISHLIST_FILE}.tmp" "$WISHLIST_FILE"
+
+    ok "Removed '${game_name}' from wishlist"
+    log "Wishlist remove: $game_name"
+}
+
+# ── Search ────────────────────────────────────────────────────────────────────
+cmd_search() {
+    local query="$*"
+    [[ -z "$query" ]] && die "Usage: 24hg deals search <game name>"
+
+    hdr "Searching: ${query}"
+    info "Checking multiple sources..."
+
+    # CheapShark search
+    local cs_deals
+    cs_deals=$(api_cheapshark "deals" "title=$(urlencode "$query")" "sortBy=Savings" "pageSize=15") || true
+
+    local cs_count
+    cs_count=$(echo "$cs_deals" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$cs_count" -gt 0 ]]; then
+        echo ""
+        print_table_header
+
+        echo "$cs_deals" | jq -c '.[]' | while IFS= read -r deal; do
+            local title sale_price normal_price store_id savings
+            title=$(echo "$deal" | jq -r '.title // "Unknown"')
+            sale_price=$(echo "$deal" | jq -r '.salePrice // "0"')
+            normal_price=$(echo "$deal" | jq -r '.normalPrice // "0"')
+            store_id=$(echo "$deal" | jq -r '.storeID // "1"')
+            savings=$(echo "$deal" | jq -r '.savings // "0"' | awk '{printf "%d", $1}')
+            local store_name="${STORE_NAMES[$store_id]:-Store#${store_id}}"
+
+            print_deal_row "$title" "$store_name" "$sale_price" "$normal_price" "$savings"
+        done
+
+        echo ""
+        info "Found ${cs_count} deal(s) across multiple stores"
+    else
+        warn "No deals found for '${query}'"
+    fi
+
+    # Steam fallback for additional info
+    local steam_data
+    steam_data=$(api_steam_search "$query" 2>/dev/null) || true
+    local steam_count
+    steam_count=$(echo "$steam_data" | jq '.total // 0' 2>/dev/null || echo 0)
+
+    if [[ "$steam_count" -gt 0 ]]; then
+        local steam_name steam_id steam_price
+        steam_name=$(echo "$steam_data" | jq -r '.items[0].name // empty')
+        steam_id=$(echo "$steam_data" | jq -r '.items[0].id // empty')
+        steam_price=$(echo "$steam_data" | jq -r '.items[0].price.final // 0' 2>/dev/null || echo 0)
+
+        if [[ -n "$steam_id" ]]; then
+            echo ""
+            info "Steam App ID: ${steam_id} — ${steam_name}"
+            local compat
+            compat=$(linux_compat_badge "$steam_name")
+            info "Linux compatibility: ${compat}"
+        fi
+    fi
+}
+
+# ── Top Deals ─────────────────────────────────────────────────────────────────
+cmd_top() {
+    hdr "Top Deals Right Now"
+    info "Fetching best discounts..."
+
+    local deals
+    deals=$(api_cheapshark "deals" "sortBy=Savings" "onSale=1" "pageSize=25") || \
+        die "Failed to fetch top deals"
+
+    local count
+    count=$(echo "$deals" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        warn "No deals available right now"
+        return 0
+    fi
+
+    echo ""
+    print_table_header
+
+    local shown=0
+    echo "$deals" | jq -c '.[]' | while IFS= read -r deal; do
+        local title sale_price normal_price store_id savings rating
+        title=$(echo "$deal" | jq -r '.title // "Unknown"')
+        sale_price=$(echo "$deal" | jq -r '.salePrice // "0"')
+        normal_price=$(echo "$deal" | jq -r '.normalPrice // "0"')
+        store_id=$(echo "$deal" | jq -r '.storeID // "1"')
+        savings=$(echo "$deal" | jq -r '.savings // "0"' | awk '{printf "%d", $1}')
+        rating=$(echo "$deal" | jq -r '.steamRatingPercent // "?"')
+        local store_name="${STORE_NAMES[$store_id]:-Store#${store_id}}"
+
+        # Skip deals with very low ratings
+        if [[ "$rating" != "?" && "$rating" -lt 40 ]] 2>/dev/null; then
+            continue
+        fi
+
+        print_deal_row "$title" "$store_name" "$sale_price" "$normal_price" "$savings"
+        shown=$((shown + 1))
+    done
+
+    echo ""
+    info "Showing top ${count} deals sorted by discount"
+    echo "  ${DIM}Tip: Use '24hg deals search <game>' for specific titles${RESET}"
+}
+
+# ── Price History ─────────────────────────────────────────────────────────────
+cmd_history() {
+    local query="$*"
+    [[ -z "$query" ]] && die "Usage: 24hg deals history <game name>"
+
+    hdr "Price History: ${query}"
+
+    # Look up game ID
+    local games
+    games=$(api_cheapshark "games" "title=$(urlencode "$query")" "limit=1") || \
+        die "Failed to look up '${query}'"
+
+    local game_id game_name cheapest
+    game_id=$(echo "$games" | jq -r '.[0].gameID // empty')
+    game_name=$(echo "$games" | jq -r '.[0].external // empty')
+    cheapest=$(echo "$games" | jq -r '.[0].cheapest // "?"')
+
+    if [[ -z "$game_id" ]]; then
+        warn "Game not found: '${query}'"
+        return 1
+    fi
+
+    info "Game: ${BOLD}${game_name}${RESET}"
+    info "All-time low: ${GREEN}\$${cheapest}${RESET}"
+    echo ""
+
+    # Get deals across all stores for this game
+    local game_deals
+    game_deals=$(api_cheapshark "games" "id=${game_id}") || {
+        warn "Could not fetch deal history"
+        return 1
+    }
+
+    local deals_list
+    deals_list=$(echo "$game_deals" | jq -c '.deals // []' 2>/dev/null)
+    local deal_count
+    deal_count=$(echo "$deals_list" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$deal_count" -gt 0 ]]; then
+        echo -e "${BOLD}Current Prices Across Stores:${RESET}"
+        printf "  %-20s %10s %10s %8s\n" "Store" "Sale" "Regular" "Savings"
+        printf "  %-20s %10s %10s %8s\n" \
+            "$(printf '%.0s─' {1..20})" \
+            "$(printf '%.0s─' {1..10})" \
+            "$(printf '%.0s─' {1..10})" \
+            "$(printf '%.0s─' {1..8})"
+
+        echo "$deals_list" | jq -c '.[]' | while IFS= read -r deal; do
+            local store_id price retail savings
+            store_id=$(echo "$deal" | jq -r '.storeID // "1"')
+            price=$(echo "$deal" | jq -r '.price // "?"')
+            retail=$(echo "$deal" | jq -r '.retailPrice // "?"')
+            savings=$(echo "$deal" | jq -r '.savings // "0"' | awk '{printf "%d", $1}')
+            local store_name="${STORE_NAMES[$store_id]:-Store#${store_id}}"
+            local dc
+            dc=$(discount_color "$savings")
+
+            printf "  %-20s %10s %10s ${dc}%7s%%${RESET}\n" \
+                "$store_name" "\$${price}" "\$${retail}" "-${savings}"
+        done
+    fi
+
+    # Load local price history if available
+    local history_file="${HISTORY_DIR}/${game_id}.json"
+    if [[ -f "$history_file" ]]; then
+        echo ""
+        echo -e "${BOLD}Price Trend (recorded):${RESET}"
+        local prices
+        mapfile -t prices < <(jq -r '.[].price' "$history_file" 2>/dev/null)
+
+        if [[ ${#prices[@]} -gt 0 ]]; then
+            local spark
+            spark=$(sparkline "${prices[@]}")
+            local oldest newest
+            oldest=$(jq -r '.[0].date // "?"' "$history_file")
+            newest=$(jq -r '.[-1].date // "?"' "$history_file")
+            echo "  ${spark}"
+            echo -e "  ${DIM}${oldest} → ${newest}${RESET}"
+            echo -e "  ${DIM}Low: \$$(printf '%s\n' "${prices[@]}" | sort -n | head -1)  High: \$$(printf '%s\n' "${prices[@]}" | sort -n | tail -1)${RESET}"
+        fi
+    else
+        echo ""
+        info "No local price history yet. History builds over time with the daemon."
+    fi
+
+    # Record current price for future history
+    record_price_history "$game_id" "$game_name" "$cheapest"
+}
+
+record_price_history() {
+    local game_id="$1" game_name="$2" price="$3"
+    local history_file="${HISTORY_DIR}/${game_id}.json"
+    local now
+    now=$(date -Iseconds)
+
+    [[ -f "$history_file" ]] || echo '[]' > "$history_file"
+
+    # Don't duplicate if last entry is same price and same day
+    local last_price last_date
+    last_price=$(jq -r '.[-1].price // "none"' "$history_file" 2>/dev/null)
+    last_date=$(jq -r '.[-1].date // "none"' "$history_file" 2>/dev/null)
+    local today
+    today=$(date +%Y-%m-%d)
+
+    if [[ "$last_price" == "$price" && "$last_date" == *"$today"* ]]; then
+        return 0
+    fi
+
+    jq --arg date "$now" --arg price "$price" --arg name "$game_name" \
+        '. += [{"date": $date, "price": ($price | tonumber? // $price), "name": $name}] | .[-100:]' \
+        "$history_file" > "${history_file}.tmp" 2>/dev/null && \
+        mv "${history_file}.tmp" "$history_file"
+}
+
+# ── Price Alerts ──────────────────────────────────────────────────────────────
+cmd_alert() {
+    local game_name="" target_price=""
+
+    # Parse: last arg is price, everything before is game name
+    local args=("$@")
+    local argc=${#args[@]}
+
+    if [[ $argc -lt 2 ]]; then
+        die "Usage: 24hg deals alert <game name> <target price>"
+    fi
+
+    target_price="${args[$((argc-1))]}"
+    target_price="${target_price#\$}"  # Strip leading $ if present
+
+    # Validate price is a number
+    if ! echo "$target_price" | grep -qE '^[0-9]+(\.[0-9]{1,2})?$'; then
+        die "Invalid price: '${target_price}'. Use format: 9.99"
+    fi
+
+    # Everything except the last arg is the game name
+    game_name="${args[*]:0:$((argc-1))}"
+    [[ -z "$game_name" ]] && die "No game name specified"
+
+    # Verify game exists
+    info "Looking up '${game_name}'..."
+    local results
+    results=$(api_cheapshark "games" "title=$(urlencode "$game_name")" "limit=1") || \
+        die "Failed to search for game"
+
+    local resolved_name game_id
+    resolved_name=$(echo "$results" | jq -r '.[0].external // empty')
+    game_id=$(echo "$results" | jq -r '.[0].gameID // empty')
+
+    if [[ -z "$resolved_name" ]]; then
+        warn "Game not found: '${game_name}'"
+        return 1
+    fi
+
+    # Check for duplicate alert
+    local exists
+    exists=$(jq --arg name "$resolved_name" \
+        '.alerts | map(select(.name | ascii_downcase == ($name | ascii_downcase))) | length' \
+        "$ALERTS_FILE" 2>/dev/null || echo 0)
+
+    if [[ "$exists" -gt 0 ]]; then
+        # Update existing alert
+        jq --arg name "$resolved_name" --arg price "$target_price" \
+            '.alerts |= map(if (.name | ascii_downcase) == ($name | ascii_downcase) then .target_price = ($price | tonumber) else . end)' \
+            "$ALERTS_FILE" > "${ALERTS_FILE}.tmp" && mv "${ALERTS_FILE}.tmp" "$ALERTS_FILE"
+        ok "Updated alert for '${resolved_name}' to \$${target_price}"
+    else
+        local now
+        now=$(date -Iseconds)
+        jq --arg name "$resolved_name" --arg id "$game_id" \
+           --arg price "$target_price" --arg created "$now" \
+            '.alerts += [{"name": $name, "gameID": $id, "target_price": ($price | tonumber), "created": $created, "triggered": false}]' \
+            "$ALERTS_FILE" > "${ALERTS_FILE}.tmp" && mv "${ALERTS_FILE}.tmp" "$ALERTS_FILE"
+        ok "Alert set: notify when '${resolved_name}' drops below \$${target_price}"
+    fi
+
+    log "Alert set: $resolved_name < \$$target_price"
+}
+
+cmd_alerts_list() {
+    hdr "Price Alerts"
+
+    local count
+    count=$(jq '.alerts | length' "$ALERTS_FILE" 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        info "No price alerts set."
+        echo "  Set one with: ${BOLD}24hg deals alert <game> <price>${RESET}"
+        return 0
+    fi
+
+    printf "${BOLD}%-40s %10s %10s %8s${RESET}\n" "Game" "Target" "Current" "Status"
+    printf "${DIM}%-40s %10s %10s %8s${RESET}\n" \
+        "$(printf '%.0s─' {1..40})" \
+        "$(printf '%.0s─' {1..10})" \
+        "$(printf '%.0s─' {1..10})" \
+        "$(printf '%.0s─' {1..8})"
+
+    jq -c '.alerts[]' "$ALERTS_FILE" | while IFS= read -r alert; do
+        local name target_price game_id triggered
+        name=$(echo "$alert" | jq -r '.name')
+        target_price=$(echo "$alert" | jq -r '.target_price')
+        game_id=$(echo "$alert" | jq -r '.gameID')
+        triggered=$(echo "$alert" | jq -r '.triggered // false')
+
+        # Get current price
+        local current="?"
+        local games_data
+        games_data=$(api_cheapshark "games" "id=${game_id}" 2>/dev/null) || true
+        if [[ -n "$games_data" ]]; then
+            current=$(echo "$games_data" | jq -r '.cheapestPriceEver.price // "?"' 2>/dev/null || echo "?")
+        fi
+
+        local status_str
+        if [[ "$triggered" == "true" ]]; then
+            status_str="${GREEN}ALERT!${RESET}"
+        elif [[ "$current" != "?" ]]; then
+            local cmp
+            cmp=$(echo "$current $target_price" | awk '{if ($1 <= $2) print "yes"; else print "no"}')
+            if [[ "$cmp" == "yes" ]]; then
+                status_str="${GREEN}BELOW${RESET}"
+            else
+                status_str="${YELLOW}waiting${RESET}"
+            fi
+        else
+            status_str="${DIM}unknown${RESET}"
+        fi
+
+        local display_name="$name"
+        [[ ${#display_name} -gt 38 ]] && display_name="${display_name:0:35}..."
+
+        printf "%-40s %10s %10s %8b\n" \
+            "$display_name" "\$${target_price}" "\$${current}" "$status_str"
+    done
+
+    echo ""
+    info "${count} alert(s) configured"
+}
+
+# ── Check Wishlist Deals ─────────────────────────────────────────────────────
+cmd_check() {
+    hdr "Checking Deals for Wishlisted Games"
+
+    local count
+    count=$(jq '.games | length' "$WISHLIST_FILE" 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        info "Your wishlist is empty."
+        echo ""
+        echo "  Add games:     ${BOLD}24hg deals wishlist add <game>${RESET}"
+        echo "  Search deals:  ${BOLD}24hg deals search <game>${RESET}"
+        echo "  Top deals:     ${BOLD}24hg deals top${RESET}"
+        return 0
+    fi
+
+    info "Checking ${count} wishlisted game(s)..."
+    echo ""
+
+    print_table_header
+
+    local found_deals=0
+    jq -c '.games[]' "$WISHLIST_FILE" | while IFS= read -r game; do
+        local name game_id
+        name=$(echo "$game" | jq -r '.name')
+        game_id=$(echo "$game" | jq -r '.gameID // empty')
+
+        local deals
+        if [[ -n "$game_id" ]]; then
+            deals=$(api_cheapshark "deals" "title=$(urlencode "$name")" "sortBy=Price" "pageSize=3" 2>/dev/null) || continue
+        else
+            deals=$(api_cheapshark "deals" "title=$(urlencode "$name")" "sortBy=Price" "pageSize=3" 2>/dev/null) || continue
+        fi
+
+        local deal_count
+        deal_count=$(echo "$deals" | jq 'length' 2>/dev/null || echo 0)
+
+        if [[ "$deal_count" -gt 0 ]]; then
+            echo "$deals" | jq -c '.[0:3] | .[]' | while IFS= read -r deal; do
+                local title sale_price normal_price store_id savings
+                title=$(echo "$deal" | jq -r '.title // "Unknown"')
+                sale_price=$(echo "$deal" | jq -r '.salePrice // "0"')
+                normal_price=$(echo "$deal" | jq -r '.normalPrice // "0"')
+                store_id=$(echo "$deal" | jq -r '.storeID // "1"')
+                savings=$(echo "$deal" | jq -r '.savings // "0"' | awk '{printf "%d", $1}')
+                local store_name="${STORE_NAMES[$store_id]:-Store#${store_id}}"
+
+                print_deal_row "$title" "$store_name" "$sale_price" "$normal_price" "$savings"
+
+                # Record price history
+                if [[ -n "$game_id" ]]; then
+                    record_price_history "$game_id" "$title" "$sale_price"
+                fi
+            done
+            found_deals=$((found_deals + 1))
+        fi
+    done
+
+    echo ""
+
+    # Check alerts too
+    check_alerts_silent
+}
+
+# ── Alert Checking ────────────────────────────────────────────────────────────
+check_alerts_silent() {
+    local alert_count
+    alert_count=$(jq '.alerts | length' "$ALERTS_FILE" 2>/dev/null || echo 0)
+
+    [[ "$alert_count" -eq 0 ]] && return 0
+
+    local triggered=0
+    local alerts_json
+    alerts_json=$(jq -c '.alerts[]' "$ALERTS_FILE" 2>/dev/null) || return 0
+
+    while IFS= read -r alert; do
+        local name target_price game_id
+        name=$(echo "$alert" | jq -r '.name')
+        target_price=$(echo "$alert" | jq -r '.target_price')
+        game_id=$(echo "$alert" | jq -r '.gameID')
+
+        # Get best current deal
+        local deals
+        deals=$(api_cheapshark "deals" "title=$(urlencode "$name")" "sortBy=Price" "pageSize=1" 2>/dev/null) || continue
+
+        local best_price
+        best_price=$(echo "$deals" | jq -r '.[0].salePrice // "999"' 2>/dev/null || echo "999")
+
+        local is_below
+        is_below=$(echo "$best_price $target_price" | awk '{if ($1 <= $2) print "yes"; else print "no"}')
+
+        if [[ "$is_below" == "yes" ]]; then
+            local store_id store_name
+            store_id=$(echo "$deals" | jq -r '.[0].storeID // "1"')
+            store_name="${STORE_NAMES[$store_id]:-Unknown}"
+
+            echo -e "${GREEN}${BOLD}PRICE ALERT!${RESET} ${name} is \$${best_price} on ${store_name} (target: \$${target_price})"
+
+            # Send desktop notification
+            send_notification "$name" "$best_price" "$store_name" "$target_price"
+
+            # Mark as triggered
+            jq --arg name "$name" \
+                '.alerts |= map(if .name == $name then .triggered = true else . end)' \
+                "$ALERTS_FILE" > "${ALERTS_FILE}.tmp" 2>/dev/null && \
+                mv "${ALERTS_FILE}.tmp" "$ALERTS_FILE"
+
+            triggered=$((triggered + 1))
+        fi
+    done <<< "$alerts_json"
+
+    if [[ $triggered -gt 0 ]]; then
+        ok "${triggered} price alert(s) triggered!"
+    fi
+}
+
+send_notification() {
+    local game="$1" price="$2" store="$3" target="$4"
+
+    # Try 24hg-notify first
+    if command -v 24hg-notify &>/dev/null; then
+        24hg-notify send \
+            --title "Game Deal Alert" \
+            --body "${game} is \$${price} on ${store} (target: \$${target})" \
+            --icon "24hg-deals" \
+            --urgency normal 2>/dev/null || true
+        return
+    fi
+
+    # Fallback to notify-send
+    if command -v notify-send &>/dev/null; then
+        notify-send -a "24HG Deals" \
+            "Game Deal Alert" \
+            "${game} is \$${price} on ${store} (target: \$${target})" \
+            -i "applications-games" 2>/dev/null || true
+    fi
+}
+
+# ── Daemon Mode ───────────────────────────────────────────────────────────────
+cmd_daemon() {
+    # Check for existing daemon
+    if [[ -f "$PID_FILE" ]]; then
+        local old_pid
+        old_pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+            die "Daemon already running (PID ${old_pid}). Stop it first."
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    echo $$ > "$PID_FILE"
+    trap 'rm -f "$PID_FILE"; exit 0' INT TERM EXIT
+
+    log "Daemon started (PID $$, interval ${DAEMON_INTERVAL}s)"
+    info "Deals checker daemon started (PID $$)"
+    info "Checking every $(( DAEMON_INTERVAL / 3600 )) hours"
+    info "Press Ctrl+C to stop"
+
+    while true; do
+        log "Running scheduled deal check"
+
+        # Check wishlist deals
+        local game_count
+        game_count=$(jq '.games | length' "$WISHLIST_FILE" 2>/dev/null || echo 0)
+
+        if [[ "$game_count" -gt 0 ]]; then
+            jq -c '.games[]' "$WISHLIST_FILE" 2>/dev/null | while IFS= read -r game; do
+                local name game_id
+                name=$(echo "$game" | jq -r '.name')
+                game_id=$(echo "$game" | jq -r '.gameID // empty')
+
+                local deals
+                deals=$(api_cheapshark "deals" "title=$(urlencode "$name")" "sortBy=Price" "pageSize=1" 2>/dev/null) || continue
+
+                local sale_price
+                sale_price=$(echo "$deals" | jq -r '.[0].salePrice // "999"' 2>/dev/null || echo "999")
+
+                if [[ -n "$game_id" ]]; then
+                    record_price_history "$game_id" "$name" "$sale_price"
+                fi
+            done
+
+            log "Recorded prices for ${game_count} wishlisted games"
+        fi
+
+        # Check price alerts
+        check_alerts_silent
+
+        # Clean old cache
+        find "$CACHE_DIR" -maxdepth 1 -name '*.json' -mmin +120 -delete 2>/dev/null || true
+
+        log "Deal check complete, sleeping ${DAEMON_INTERVAL}s"
+        sleep "$DAEMON_INTERVAL"
+    done
+}
+
+cmd_daemon_stop() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            rm -f "$PID_FILE"
+            ok "Daemon stopped (PID ${pid})"
+        else
+            rm -f "$PID_FILE"
+            info "No running daemon found (stale PID file cleaned)"
+        fi
+    else
+        info "No daemon PID file found"
+    fi
+}
+
+cmd_daemon_status() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            ok "Daemon is running (PID ${pid})"
+            return 0
+        else
+            warn "Daemon not running (stale PID file)"
+            rm -f "$PID_FILE"
+            return 1
+        fi
+    else
+        info "Daemon is not running"
+        return 1
+    fi
+}
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+usage() {
+    cat << 'USAGE'
+
+  24HG Deals — Game Deals Tracker
+
+  USAGE
+    24hg deals [command] [options]
+
+  COMMANDS
+    check              Check current deals for wishlisted games (default)
+    search <query>     Search for deals on a specific game
+    top                Show top deals right now (biggest discounts)
+    history <game>     Show price history for a game
+    alert <game> <$>   Set a price alert (notify when below target)
+    alerts             List all active price alerts
+
+    wishlist           Show your wishlist with current prices
+    wishlist add <g>   Add a game to your wishlist
+    wishlist remove <g> Remove a game from your wishlist
+
+    daemon             Run as background deal checker (every 6 hours)
+    daemon stop        Stop the background daemon
+    daemon status      Check if daemon is running
+
+    cache clear        Clear cached API responses
+
+  EXAMPLES
+    24hg deals search Hades
+    24hg deals wishlist add "Baldur's Gate 3"
+    24hg deals alert "Elden Ring" 29.99
+    24hg deals top
+    24hg deals history "Cyberpunk 2077"
+
+  CONFIGURATION
+    Wishlist:    ~/.config/24hg/deals-wishlist.json
+    Alerts:      ~/.config/24hg/deals-alerts.json
+    Cache:       ~/.cache/24hg/deals/
+    History:     ~/.cache/24hg/deals/history/
+
+  DATA SOURCES
+    CheapShark   Aggregates 30+ stores (Steam, GOG, Humble, Epic, etc.)
+    Steam        Fallback pricing and app ID resolution
+    ProtonDB     Linux compatibility ratings (via 24hg-game-compat cache)
+
+  NOTES
+    - Prices are in USD
+    - Cache expires after 1 hour
+    - Color coding: green (>50% off), yellow (20-50%), white (<20%)
+    - Linux compat: [P]latinum [G]old [S]ilver [B]ronze [X] borked [?] unknown
+    - Enable the systemd timer for automatic background checks:
+        systemctl --user enable --now 24hg-deals.timer
+
+USAGE
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+main() {
+    check_deps
+    ensure_dirs
+
+    local cmd="${1:-check}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        check)
+            cmd_check
+            ;;
+        search)
+            cmd_search "$@"
+            ;;
+        top)
+            cmd_top
+            ;;
+        history)
+            cmd_history "$@"
+            ;;
+        alert)
+            cmd_alert "$@"
+            ;;
+        alerts)
+            cmd_alerts_list
+            ;;
+        wishlist)
+            local subcmd="${1:-}"
+            shift 2>/dev/null || true
+            case "$subcmd" in
+                add)
+                    wishlist_add "$*"
+                    ;;
+                remove|rm|del)
+                    wishlist_remove "$*"
+                    ;;
+                ""|list|show)
+                    wishlist_list
+                    ;;
+                *)
+                    die "Unknown wishlist command: ${subcmd}. Use: add, remove, or list"
+                    ;;
+            esac
+            ;;
+        daemon)
+            local subcmd="${1:-}"
+            case "$subcmd" in
+                stop)
+                    cmd_daemon_stop
+                    ;;
+                status)
+                    cmd_daemon_status
+                    ;;
+                ""|start|run)
+                    cmd_daemon
+                    ;;
+                *)
+                    die "Unknown daemon command: ${subcmd}. Use: start, stop, or status"
+                    ;;
+            esac
+            ;;
+        cache)
+            local subcmd="${1:-}"
+            case "$subcmd" in
+                clear|clean)
+                    cache_clear
+                    ;;
+                *)
+                    die "Unknown cache command: ${subcmd}. Use: clear"
+                    ;;
+            esac
+            ;;
+        help|-h|--help)
+            usage
+            ;;
+        *)
+            err "Unknown command: ${cmd}"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

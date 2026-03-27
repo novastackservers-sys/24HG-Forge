@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=24HG Desktop Tour
+Comment=Guided tour of 24HG features (runs once after first-boot wizard)
+Exec=/usr/bin/24hg-tour
+Icon=24hg-logo
+Type=Application
+Categories=System;
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Phase=Application
+X-KDE-autostart-after=panel

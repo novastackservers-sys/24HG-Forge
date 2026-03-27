@@ -1,0 +1,1255 @@
+#!/bin/bash
+# 24HG Game Drive Manager
+# Manage external drives as game libraries for Steam, Lutris, Heroic, and GOG.
+# Handles mounting, migration, health monitoring, and auto-mount configuration.
+#
+# Usage: 24hg-gamedrive [command] [options]
+# Commands: list, scan, mount, unmount, add, migrate, balance, benchmark, auto, status
+
+set -euo pipefail
+
+ACTION="${1:-list}"
+shift 2>/dev/null || true
+
+# Paths and config
+CONFIG_DIR="$HOME/.config/24hg"
+DRIVES_DB="$CONFIG_DIR/gamedrives.json"
+UDEV_RULES_DIR="$HOME/.config/24hg/udev"
+STEAM_DIR="$HOME/.steam/steam"
+STEAM_LIB_VDF="$STEAM_DIR/steamapps/libraryfolders.vdf"
+LUTRIS_CFG="$HOME/.config/lutris/system.yml"
+HEROIC_CFG="$HOME/.config/heroic/config.json"
+AUTO_MOUNT_FLAG="$CONFIG_DIR/gamedrive-automount"
+
+mkdir -p "$CONFIG_DIR" "$UDEV_RULES_DIR"
+[[ -f "$DRIVES_DB" ]] || echo '{"drives":[],"version":1}' > "$DRIVES_DB"
+
+# Colors
+BOLD='\033[1m'
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+CYAN='\033[36m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+header()  { echo -e "\n${BOLD}${CYAN}=== $1 ===${RESET}"; }
+info()    { echo -e "${GREEN}[+]${RESET} $1"; }
+warn()    { echo -e "${YELLOW}[!]${RESET} $1"; }
+error()   { echo -e "${RED}[x]${RESET} $1"; }
+dim()     { echo -e "${DIM}$1${RESET}"; }
+
+confirm() {
+    local prompt="$1"
+    echo -en "${YELLOW}$prompt [y/N]:${RESET} "
+    read -r answer
+    [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+require_cmd() {
+    for cmd in "$@"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            error "Required command '$cmd' not found. Install it first."
+            exit 1
+        fi
+    done
+}
+
+human_size() {
+    local bytes=$1
+    if (( bytes >= 1099511627776 )); then
+        echo "$(awk "BEGIN{printf \"%.1f\", $bytes/1099511627776}")T"
+    elif (( bytes >= 1073741824 )); then
+        echo "$(awk "BEGIN{printf \"%.1f\", $bytes/1073741824}")G"
+    elif (( bytes >= 1048576 )); then
+        echo "$(awk "BEGIN{printf \"%.1f\", $bytes/1048576}")M"
+    else
+        echo "${bytes}B"
+    fi
+}
+
+bar_graph() {
+    local pct=$1 width=30
+    local filled=$(( pct * width / 100 ))
+    local empty=$(( width - filled ))
+    local color="$GREEN"
+    (( pct > 70 )) && color="$YELLOW"
+    (( pct > 90 )) && color="$RED"
+    printf "${color}["
+    printf '%0.s█' $(seq 1 $filled 2>/dev/null) || true
+    printf '%0.s░' $(seq 1 $empty 2>/dev/null) || true
+    printf "]${RESET} %3d%%" "$pct"
+}
+
+# Get JSON value using python (available on all 24HG systems)
+json_get() {
+    python3 -c "
+import json, sys
+data = json.load(open('$1'))
+keys = '$2'.split('.')
+for k in keys:
+    if isinstance(data, list):
+        data = data[int(k)]
+    else:
+        data = data[k]
+if isinstance(data, (dict, list)):
+    print(json.dumps(data))
+else:
+    print(data)
+" 2>/dev/null
+}
+
+json_set() {
+    local file="$1" key="$2" value="$3"
+    python3 -c "
+import json
+with open('$file') as f:
+    data = json.load(f)
+keys = '$key'.split('.')
+obj = data
+for k in keys[:-1]:
+    if isinstance(obj, list):
+        obj = obj[int(k)]
+    else:
+        obj = obj[k]
+if isinstance(obj, list):
+    obj[int(keys[-1])] = json.loads('$value')
+else:
+    obj[keys[-1]] = json.loads('$value')
+with open('$file', 'w') as f:
+    json.dump(data, f, indent=2)
+" 2>/dev/null
+}
+
+drives_add() {
+    python3 -c "
+import json
+with open('$DRIVES_DB') as f:
+    data = json.load(f)
+entry = json.loads('''$1''')
+# Replace if same UUID
+data['drives'] = [d for d in data['drives'] if d.get('uuid') != entry.get('uuid')]
+data['drives'].append(entry)
+with open('$DRIVES_DB', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+}
+
+drives_remove() {
+    local uuid="$1"
+    python3 -c "
+import json
+with open('$DRIVES_DB') as f:
+    data = json.load(f)
+data['drives'] = [d for d in data['drives'] if d.get('uuid') != '$uuid']
+with open('$DRIVES_DB', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+}
+
+# ── Drive Discovery ──────────────────────────────────────────────────────────
+
+get_block_devices() {
+    lsblk -J -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,UUID,LABEL,MODEL,HOTPLUG \
+        2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+results = []
+def walk(devs, parent=None):
+    for d in devs:
+        if d.get('type') in ('part', 'disk') and d.get('fstype'):
+            d['parent'] = parent
+            results.append(d)
+        if 'children' in d:
+            walk(d['children'], d.get('name'))
+walk(data.get('blockdevices', []))
+print(json.dumps(results))
+"
+}
+
+resolve_device() {
+    local input="$1"
+    # Accept /dev/sdX, sdX, UUID, or label
+    if [[ "$input" == /dev/* ]]; then
+        echo "$input"
+    elif [[ -b "/dev/$input" ]]; then
+        echo "/dev/$input"
+    else
+        # Try UUID
+        local dev
+        dev=$(blkid -U "$input" 2>/dev/null) && echo "$dev" && return
+        # Try label
+        dev=$(blkid -L "$input" 2>/dev/null) && echo "$dev" && return
+        error "Cannot resolve device: $input"
+        return 1
+    fi
+}
+
+get_mount_point() {
+    local dev="$1"
+    lsblk -no MOUNTPOINT "$dev" 2>/dev/null | head -1
+}
+
+get_uuid() {
+    blkid -s UUID -o value "$1" 2>/dev/null
+}
+
+get_label() {
+    blkid -s LABEL -o value "$1" 2>/dev/null
+}
+
+get_fstype() {
+    blkid -s TYPE -o value "$1" 2>/dev/null
+}
+
+is_game_drive() {
+    local uuid="$1"
+    python3 -c "
+import json
+with open('$DRIVES_DB') as f:
+    data = json.load(f)
+for d in data['drives']:
+    if d.get('uuid') == '$uuid':
+        print('yes')
+        sys.exit(0)
+import sys; sys.exit(1)
+" 2>/dev/null && return 0 || return 1
+}
+
+# ── Game Detection ───────────────────────────────────────────────────────────
+
+count_steam_games() {
+    local path="$1"
+    local steamapps="$path/steamapps"
+    [[ -d "$steamapps" ]] || steamapps="$path/SteamLibrary/steamapps"
+    [[ -d "$steamapps" ]] || return
+    find "$steamapps" -maxdepth 1 -name "appmanifest_*.acf" 2>/dev/null | wc -l
+}
+
+count_lutris_games() {
+    local path="$1"
+    local count=0
+    for dir in "$path/Games" "$path/lutris" "$path/games"; do
+        if [[ -d "$dir" ]]; then
+            count=$(( count + $(find "$dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l) ))
+        fi
+    done
+    echo "$count"
+}
+
+count_heroic_games() {
+    local path="$1"
+    local count=0
+    for dir in "$path/Heroic" "$path/HeroicGamesLauncher" "$path/Games/Heroic"; do
+        if [[ -d "$dir" ]]; then
+            count=$(( count + $(find "$dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l) ))
+        fi
+    done
+    echo "$count"
+}
+
+count_gog_games() {
+    local path="$1"
+    local count=0
+    for dir in "$path/GOG Games" "$path/GOG" "$path/gog"; do
+        if [[ -d "$dir" ]]; then
+            count=$(( count + $(find "$dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l) ))
+        fi
+    done
+    echo "$count"
+}
+
+scan_path_for_games() {
+    local path="$1"
+    local steam lutris heroic gog
+    steam=$(count_steam_games "$path")
+    lutris=$(count_lutris_games "$path")
+    heroic=$(count_heroic_games "$path")
+    gog=$(count_gog_games "$path")
+    echo "${steam:-0}:${lutris:-0}:${heroic:-0}:${gog:-0}"
+}
+
+list_steam_games_at() {
+    local path="$1"
+    local steamapps="$path/steamapps"
+    [[ -d "$steamapps" ]] || steamapps="$path/SteamLibrary/steamapps"
+    [[ -d "$steamapps" ]] || return
+    for acf in "$steamapps"/appmanifest_*.acf; do
+        [[ -f "$acf" ]] || continue
+        local name size
+        name=$(grep -oP '"name"\s+"\K[^"]+' "$acf" 2>/dev/null || echo "Unknown")
+        size=$(grep -oP '"SizeOnDisk"\s+"\K[^"]+' "$acf" 2>/dev/null || echo "0")
+        local appid
+        appid=$(basename "$acf" | grep -oP '\d+')
+        echo "  Steam | $appid | $(human_size "$size") | $name"
+    done
+}
+
+# ── SMART Health ─────────────────────────────────────────────────────────────
+
+check_smart_health() {
+    local dev="$1"
+    # Get the parent disk device (strip partition number)
+    local disk
+    disk=$(echo "$dev" | sed 's/[0-9]*$//')
+    [[ -b "$disk" ]] || disk="$dev"
+
+    if ! command -v smartctl &>/dev/null; then
+        dim "  SMART: smartctl not installed, skipping health check"
+        return 0
+    fi
+
+    local health
+    health=$(sudo smartctl -H "$disk" 2>/dev/null | grep -i "overall" || echo "")
+    if [[ -z "$health" ]]; then
+        dim "  SMART: Unable to read (drive may not support it)"
+        return 0
+    fi
+
+    if echo "$health" | grep -qi "PASSED\|OK"; then
+        info "SMART Health: PASSED"
+        return 0
+    else
+        error "SMART Health: FAILING — back up data immediately!"
+        warn "Drive $disk may be failing. Details: sudo smartctl -a $disk"
+        return 1
+    fi
+}
+
+smart_summary() {
+    local dev="$1"
+    local disk
+    disk=$(echo "$dev" | sed 's/[0-9]*$//')
+    [[ -b "$disk" ]] || disk="$dev"
+
+    if ! command -v smartctl &>/dev/null; then
+        echo "N/A"
+        return
+    fi
+
+    local temp hours health
+    health=$(sudo smartctl -H "$disk" 2>/dev/null | grep -ioP "(PASSED|FAILED|OK)" | head -1 || echo "?")
+    temp=$(sudo smartctl -A "$disk" 2>/dev/null | grep -i "temperature" | head -1 | awk '{print $NF}' || echo "?")
+    hours=$(sudo smartctl -A "$disk" 2>/dev/null | grep -i "power.on.hours\|Power_On_Hours" | awk '{print $NF}' || echo "?")
+    echo "${health}|${temp}C|${hours}h"
+}
+
+# ── Steam Library Registration ───────────────────────────────────────────────
+
+register_steam_library() {
+    local path="$1"
+    local steamapps="$path/steamapps"
+    mkdir -p "$steamapps"
+
+    if [[ ! -f "$STEAM_LIB_VDF" ]]; then
+        warn "Steam libraryfolders.vdf not found at $STEAM_LIB_VDF"
+        warn "Steam may not be installed, or is at a non-standard path."
+        return 1
+    fi
+
+    # Check if already registered
+    if grep -q "$path" "$STEAM_LIB_VDF" 2>/dev/null; then
+        info "Already registered as Steam library."
+        return 0
+    fi
+
+    # Back up the VDF
+    cp "$STEAM_LIB_VDF" "$STEAM_LIB_VDF.bak.$(date +%s)"
+
+    # Find next index and add entry
+    python3 -c "
+import re, shutil
+
+vdf_path = '$STEAM_LIB_VDF'
+new_path = '$path'
+
+with open(vdf_path) as f:
+    content = f.read()
+
+# Find the highest existing index
+indices = [int(m) for m in re.findall(r'\"(\d+)\"', content)]
+next_idx = max(indices) + 1 if indices else 1
+
+# Insert new entry before the final closing brace
+entry = '''	\"{idx}\"
+	{{
+		\"path\"		\"{path}\"
+		\"label\"		\"Game Drive\"
+		\"contentid\"		\"0\"
+		\"totalsize\"		\"0\"
+		\"update_clean_bytes_tally\"		\"0\"
+		\"time_last_update_corruption\"		\"0\"
+		\"apps\"
+		{{
+		}}
+	}}
+'''.format(idx=next_idx, path=new_path)
+
+# Insert before last '}'
+pos = content.rfind('}')
+content = content[:pos] + entry + content[pos:]
+
+with open(vdf_path, 'w') as f:
+    f.write(content)
+print('OK')
+" && info "Registered as Steam library #$(python3 -c "
+import re
+with open('$STEAM_LIB_VDF') as f:
+    indices = [int(m) for m in re.findall(r'\"(\d+)\"', f.read())]
+print(max(indices))
+")" || warn "Failed to register Steam library"
+}
+
+register_lutris_library() {
+    local path="$1"
+    if [[ ! -d "$HOME/.config/lutris" ]]; then
+        dim "  Lutris not installed, skipping library registration"
+        return
+    fi
+
+    # Lutris uses game-specific configs; create a symlink approach
+    local games_dir="$path/Games"
+    mkdir -p "$games_dir"
+
+    local lutris_games="$HOME/Games"
+    if [[ ! -L "$lutris_games/$( basename "$path")-games" ]]; then
+        mkdir -p "$lutris_games"
+        ln -sf "$games_dir" "$lutris_games/$(basename "$path")-games" 2>/dev/null && \
+            info "Linked game drive to ~/Games/ for Lutris" || true
+    fi
+}
+
+# ── Mount / Unmount ──────────────────────────────────────────────────────────
+
+mount_drive() {
+    local dev="$1"
+    local mountpoint
+
+    # Already mounted?
+    mountpoint=$(get_mount_point "$dev")
+    if [[ -n "$mountpoint" ]]; then
+        info "Already mounted at $mountpoint"
+        echo "$mountpoint"
+        return 0
+    fi
+
+    local label uuid fstype
+    label=$(get_label "$dev")
+    uuid=$(get_uuid "$dev")
+    fstype=$(get_fstype "$dev")
+
+    if [[ -z "$fstype" ]]; then
+        error "No filesystem detected on $dev"
+        return 1
+    fi
+
+    # Determine mount point
+    if [[ -n "$label" ]]; then
+        mountpoint="/run/media/$USER/$label"
+    elif [[ -n "$uuid" ]]; then
+        mountpoint="/mnt/gamedrive-$uuid"
+    else
+        mountpoint="/mnt/gamedrive-$(basename "$dev")"
+    fi
+
+    # Try udisksctl first (no root needed)
+    if command -v udisksctl &>/dev/null; then
+        info "Mounting $dev via udisksctl..."
+        if udisksctl mount -b "$dev" 2>/dev/null; then
+            mountpoint=$(get_mount_point "$dev")
+            info "Mounted at $mountpoint"
+            echo "$mountpoint"
+            return 0
+        fi
+    fi
+
+    # Fallback: manual mount
+    warn "udisksctl unavailable or failed, trying sudo mount..."
+    sudo mkdir -p "$mountpoint"
+
+    local mount_opts="defaults"
+    case "$fstype" in
+        ntfs|ntfs3) mount_opts="rw,uid=$(id -u),gid=$(id -g),dmask=022,fmask=133" ;;
+        exfat)      mount_opts="rw,uid=$(id -u),gid=$(id -g)" ;;
+        ext4|btrfs) mount_opts="defaults" ;;
+    esac
+
+    if sudo mount -t "$fstype" -o "$mount_opts" "$dev" "$mountpoint"; then
+        info "Mounted at $mountpoint"
+        echo "$mountpoint"
+        return 0
+    else
+        error "Failed to mount $dev"
+        return 1
+    fi
+}
+
+unmount_drive() {
+    local dev="$1"
+    local mountpoint
+    mountpoint=$(get_mount_point "$dev")
+
+    if [[ -z "$mountpoint" ]]; then
+        warn "$dev is not mounted"
+        return 0
+    fi
+
+    # Check for running games from this drive
+    local running_procs
+    running_procs=$(lsof +D "$mountpoint" 2>/dev/null | grep -v "^COMMAND" | head -10 || true)
+    if [[ -n "$running_procs" ]]; then
+        warn "Active processes using $mountpoint:"
+        echo "$running_procs" | while read -r line; do
+            echo "  $line"
+        done
+        if ! confirm "Games may be running from this drive. Unmount anyway?"; then
+            echo "Aborted."
+            return 1
+        fi
+    fi
+
+    if command -v udisksctl &>/dev/null; then
+        udisksctl unmount -b "$dev" 2>/dev/null && info "Unmounted $dev" && return 0
+    fi
+
+    sudo umount "$mountpoint" && info "Unmounted $dev" && return 0
+    error "Failed to unmount $dev"
+    return 1
+}
+
+# ── Format & Setup ───────────────────────────────────────────────────────────
+
+setup_new_drive() {
+    local dev="$1"
+
+    dev=$(resolve_device "$dev")
+    local size_bytes
+    size_bytes=$(lsblk -bno SIZE "$dev" 2>/dev/null | head -1)
+    local size_human
+    size_human=$(human_size "${size_bytes:-0}")
+    local model
+    model=$(lsblk -no MODEL "$dev" 2>/dev/null | head -1 | xargs)
+
+    header "Game Drive Setup: $dev"
+    echo -e "  Device:  $dev"
+    echo -e "  Model:   ${model:-Unknown}"
+    echo -e "  Size:    $size_human"
+    echo -e "  Current: $(get_fstype "$dev" || echo "unformatted")"
+    echo
+
+    check_smart_health "$dev" || true
+
+    echo -e "\n${BOLD}Options:${RESET}"
+    echo "  1) Use existing filesystem (no format)"
+    echo "  2) Format as ext4 (recommended for Linux)"
+    echo "  3) Format as btrfs (compression, snapshots)"
+    echo "  4) Cancel"
+    echo -en "\nChoice [1-4]: "
+    read -r choice
+
+    case "$choice" in
+        2|3)
+            local fstype="ext4"
+            [[ "$choice" == "3" ]] && fstype="btrfs"
+
+            # Safety: require explicit confirmation with drive size
+            echo
+            error "WARNING: This will DESTROY ALL DATA on $dev ($size_human)"
+            echo -en "${RED}Type 'FORMAT $dev' to confirm: ${RESET}"
+            read -r confirmation
+            if [[ "$confirmation" != "FORMAT $dev" ]]; then
+                echo "Aborted. No changes made."
+                return 1
+            fi
+
+            # Unmount if mounted
+            local mp
+            mp=$(get_mount_point "$dev")
+            [[ -n "$mp" ]] && unmount_drive "$dev"
+
+            info "Formatting $dev as $fstype..."
+            local label="GameDrive"
+            echo -en "Drive label [GameDrive]: "
+            read -r custom_label
+            [[ -n "$custom_label" ]] && label="$custom_label"
+
+            if [[ "$fstype" == "ext4" ]]; then
+                sudo mkfs.ext4 -L "$label" "$dev" || { error "Format failed"; return 1; }
+            else
+                sudo mkfs.btrfs -f -L "$label" "$dev" || { error "Format failed"; return 1; }
+            fi
+            info "Formatted as $fstype with label '$label'"
+            ;;
+        4) echo "Cancelled."; return 1 ;;
+        *) info "Using existing filesystem" ;;
+    esac
+
+    # Mount the drive
+    local mountpoint
+    mountpoint=$(mount_drive "$dev") || return 1
+
+    # Set permissions for ext4/btrfs
+    local fstype_actual
+    fstype_actual=$(get_fstype "$dev")
+    if [[ "$fstype_actual" == "ext4" || "$fstype_actual" == "btrfs" ]]; then
+        sudo chown "$USER:$USER" "$mountpoint" 2>/dev/null || true
+    fi
+
+    # Create game directory structure
+    mkdir -p "$mountpoint/steamapps" 2>/dev/null || true
+    mkdir -p "$mountpoint/Games" 2>/dev/null || true
+    mkdir -p "$mountpoint/GOG Games" 2>/dev/null || true
+    mkdir -p "$mountpoint/Heroic" 2>/dev/null || true
+
+    # Register with game platforms
+    register_steam_library "$mountpoint"
+    register_lutris_library "$mountpoint"
+
+    # Track in our config
+    local uuid
+    uuid=$(get_uuid "$dev")
+    drives_add "{
+        \"uuid\": \"$uuid\",
+        \"device\": \"$dev\",
+        \"label\": \"$(get_label "$dev")\",
+        \"fstype\": \"$fstype_actual\",
+        \"mountpoint\": \"$mountpoint\",
+        \"added\": \"$(date -Iseconds)\",
+        \"auto_mount\": true
+    }"
+
+    echo
+    info "Game drive ready at $mountpoint"
+    info "Steam, Lutris, Heroic, and GOG directories created."
+}
+
+# ── Migration ────────────────────────────────────────────────────────────────
+
+migrate_game() {
+    local game_query="$1"
+    local dest_path="$2"
+
+    if [[ -z "$game_query" || -z "$dest_path" ]]; then
+        error "Usage: 24hg-gamedrive migrate <game-name-or-appid> <destination-path>"
+        return 1
+    fi
+
+    # Resolve destination
+    if [[ ! -d "$dest_path" ]]; then
+        error "Destination '$dest_path' does not exist or is not mounted."
+        return 1
+    fi
+
+    # Find the game (Steam ACF search)
+    local found_acf="" found_dir="" found_name="" found_lib=""
+    local search_dirs=()
+
+    # Gather all Steam library paths
+    if [[ -f "$STEAM_LIB_VDF" ]]; then
+        while IFS= read -r line; do
+            search_dirs+=("$line")
+        done < <(grep -oP '"path"\s+"\K[^"]+' "$STEAM_LIB_VDF" 2>/dev/null)
+    fi
+
+    for lib in "${search_dirs[@]}"; do
+        local steamapps="$lib/steamapps"
+        [[ -d "$steamapps" ]] || continue
+        for acf in "$steamapps"/appmanifest_*.acf; do
+            [[ -f "$acf" ]] || continue
+            local name installdir
+            name=$(grep -oP '"name"\s+"\K[^"]+' "$acf" 2>/dev/null || continue)
+            installdir=$(grep -oP '"installdir"\s+"\K[^"]+' "$acf" 2>/dev/null || continue)
+            if echo "$name" | grep -qi "$game_query" || basename "$acf" | grep -q "$game_query"; then
+                found_acf="$acf"
+                found_dir="$steamapps/common/$installdir"
+                found_name="$name"
+                found_lib="$lib"
+                break 2
+            fi
+        done
+    done
+
+    if [[ -z "$found_acf" ]]; then
+        error "Game matching '$game_query' not found in any Steam library."
+        return 1
+    fi
+
+    local source_size
+    source_size=$(du -sb "$found_dir" 2>/dev/null | awk '{print $1}')
+    local dest_free
+    dest_free=$(df -B1 --output=avail "$dest_path" 2>/dev/null | tail -1 | xargs)
+
+    header "Game Migration"
+    echo -e "  Game:        $found_name"
+    echo -e "  Source:      $found_dir"
+    echo -e "  Destination: $dest_path"
+    echo -e "  Size:        $(human_size "${source_size:-0}")"
+    echo -e "  Free space:  $(human_size "${dest_free:-0}")"
+
+    if (( ${source_size:-0} > ${dest_free:-0} )); then
+        error "Not enough free space on destination!"
+        return 1
+    fi
+
+    if ! confirm "Proceed with migration?"; then
+        echo "Cancelled."
+        return 1
+    fi
+
+    # Create destination steamapps structure
+    local dest_steamapps="$dest_path/steamapps"
+    mkdir -p "$dest_steamapps/common"
+
+    # Copy game files with rsync + progress
+    info "Copying game files..."
+    local dest_game_dir="$dest_steamapps/common/$(basename "$found_dir")"
+    rsync -ah --progress --info=progress2 "$found_dir/" "$dest_game_dir/" || {
+        error "rsync failed!"
+        return 1
+    }
+
+    # Copy ACF manifest
+    cp "$found_acf" "$dest_steamapps/" || {
+        error "Failed to copy manifest"
+        return 1
+    }
+
+    # Verify: compare file count and total size
+    info "Verifying migration..."
+    local src_count dest_count src_size dest_size_actual
+    src_count=$(find "$found_dir" -type f 2>/dev/null | wc -l)
+    dest_count=$(find "$dest_game_dir" -type f 2>/dev/null | wc -l)
+    src_size=$(du -sb "$found_dir" 2>/dev/null | awk '{print $1}')
+    dest_size_actual=$(du -sb "$dest_game_dir" 2>/dev/null | awk '{print $1}')
+
+    if (( src_count != dest_count )); then
+        error "File count mismatch! Source: $src_count, Dest: $dest_count"
+        error "Source files preserved. Please investigate."
+        return 1
+    fi
+
+    # Allow small size variance (filesystem overhead)
+    local size_diff=$(( src_size - dest_size_actual ))
+    (( size_diff < 0 )) && size_diff=$(( -size_diff ))
+    if (( size_diff > 1048576 )); then
+        warn "Size difference detected: $(human_size $size_diff)"
+        if ! confirm "Sizes differ slightly. Remove source anyway?"; then
+            info "Source preserved at $found_dir"
+            return 0
+        fi
+    fi
+
+    info "Verification passed ($dest_count files, $(human_size "$dest_size_actual"))"
+
+    if confirm "Delete source files at $found_dir?"; then
+        rm -rf "$found_dir"
+        rm -f "$found_acf"
+        info "Source files removed."
+    else
+        info "Source files preserved (you can remove them manually later)."
+    fi
+
+    # Ensure destination is a registered Steam library
+    register_steam_library "$dest_path"
+
+    info "Migration complete! Restart Steam to detect the moved game."
+}
+
+# ── Auto-mount ───────────────────────────────────────────────────────────────
+
+setup_automount() {
+    local mode="$1"
+
+    case "$mode" in
+        on)
+            touch "$AUTO_MOUNT_FLAG"
+
+            # Generate udev rule for each tracked drive
+            local rule_file="/etc/udev/rules.d/99-24hg-gamedrive.rules"
+            local rules=""
+
+            python3 -c "
+import json
+with open('$DRIVES_DB') as f:
+    data = json.load(f)
+for d in data['drives']:
+    if d.get('auto_mount'):
+        uuid = d.get('uuid', '')
+        mp = d.get('mountpoint', '')
+        if uuid and mp:
+            print(f'ENV{{ID_FS_UUID}}==\"{uuid}\", ACTION==\"add\", RUN+=\"/usr/bin/systemd-mount --no-block --automount=yes --collect /dev/disk/by-uuid/{uuid} {mp}\"')
+" > /tmp/24hg-gamedrive-rules.tmp
+
+            if [[ -s /tmp/24hg-gamedrive-rules.tmp ]]; then
+                sudo cp /tmp/24hg-gamedrive-rules.tmp "$rule_file"
+                sudo udevadm control --reload-rules 2>/dev/null || true
+                info "Auto-mount enabled. Known game drives will mount on plug-in."
+                dim "  Rule file: $rule_file"
+            else
+                warn "No tracked drives with auto_mount enabled."
+            fi
+            rm -f /tmp/24hg-gamedrive-rules.tmp
+            ;;
+        off)
+            rm -f "$AUTO_MOUNT_FLAG"
+            local rule_file="/etc/udev/rules.d/99-24hg-gamedrive.rules"
+            if [[ -f "$rule_file" ]]; then
+                sudo rm -f "$rule_file"
+                sudo udevadm control --reload-rules 2>/dev/null || true
+            fi
+            info "Auto-mount disabled."
+            ;;
+        *)
+            if [[ -f "$AUTO_MOUNT_FLAG" ]]; then
+                info "Auto-mount is currently: ON"
+            else
+                info "Auto-mount is currently: OFF"
+            fi
+            echo "Usage: 24hg-gamedrive auto on|off"
+            ;;
+    esac
+}
+
+# ── Benchmark ────────────────────────────────────────────────────────────────
+
+benchmark_drive() {
+    local dev="$1"
+    dev=$(resolve_device "$dev")
+    local mountpoint
+    mountpoint=$(get_mount_point "$dev")
+
+    if [[ -z "$mountpoint" ]]; then
+        warn "Drive not mounted, mounting first..."
+        mountpoint=$(mount_drive "$dev") || return 1
+    fi
+
+    header "Drive Benchmark: $dev"
+    echo -e "  Mount: $mountpoint"
+    echo -e "  FS:    $(get_fstype "$dev")"
+    echo
+
+    local test_file="$mountpoint/.24hg-benchmark-$$"
+
+    # Sequential write
+    echo -e "${BOLD}Sequential Write (1GB):${RESET}"
+    local write_speed
+    write_speed=$(dd if=/dev/zero of="$test_file" bs=1M count=1024 conv=fdatasync 2>&1 | \
+        grep -oP '[\d.]+ [MGk]?B/s' | tail -1)
+    echo -e "  Speed: ${GREEN}${write_speed:-N/A}${RESET}"
+
+    # Sequential read (clear cache first)
+    sync
+    echo 3 | sudo tee /proc/sys/vm/drop_caches &>/dev/null 2>&1 || true
+    echo -e "${BOLD}Sequential Read (1GB):${RESET}"
+    local read_speed
+    read_speed=$(dd if="$test_file" of=/dev/null bs=1M count=1024 2>&1 | \
+        grep -oP '[\d.]+ [MGk]?B/s' | tail -1)
+    echo -e "  Speed: ${GREEN}${read_speed:-N/A}${RESET}"
+
+    # Random read (4K blocks)
+    echo -e "${BOLD}Random Read (4K x 1000):${RESET}"
+    local rand_speed
+    if command -v fio &>/dev/null; then
+        rand_speed=$(fio --name=randread --filename="$test_file" --rw=randread \
+            --bs=4k --direct=1 --numjobs=1 --runtime=5 --time_based \
+            --output-format=terse 2>/dev/null | awk -F';' '{print $8}')
+        echo -e "  IOPS: ${GREEN}${rand_speed:-N/A}${RESET}"
+    else
+        dim "  fio not installed, skipping random I/O test"
+    fi
+
+    # Cleanup
+    rm -f "$test_file"
+
+    # SMART info
+    echo
+    check_smart_health "$dev" || true
+}
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    header "Game Drives"
+
+    local drives
+    drives=$(get_block_devices)
+    local found=0
+
+    echo "$drives" | python3 -c "
+import json, sys, os
+
+drives = json.loads(sys.stdin.read())
+db_path = '$DRIVES_DB'
+with open(db_path) as f:
+    db = json.load(f)
+tracked_uuids = {d['uuid'] for d in db['drives']}
+
+for d in drives:
+    mp = d.get('mountpoint') or ''
+    uuid = d.get('uuid') or ''
+    label = d.get('label') or ''
+    fstype = d.get('fstype') or ''
+    size = d.get('size') or '?'
+    model = d.get('model') or ''
+    name = d.get('name') or '?'
+    hotplug = d.get('hotplug')
+
+    tracked = '★' if uuid in tracked_uuids else ' '
+
+    # Check for game folders
+    games = []
+    if mp:
+        for gdir in ['steamapps', 'SteamLibrary/steamapps']:
+            full = os.path.join(mp, gdir)
+            if os.path.isdir(full):
+                count = len([f for f in os.listdir(full) if f.startswith('appmanifest_')])
+                if count > 0:
+                    games.append(f'Steam:{count}')
+        for gdir in ['Games', 'lutris', 'games']:
+            full = os.path.join(mp, gdir)
+            if os.path.isdir(full):
+                count = len([d for d in os.listdir(full) if os.path.isdir(os.path.join(full, d))])
+                if count > 0:
+                    games.append(f'Lutris:{count}')
+        for gdir in ['Heroic', 'HeroicGamesLauncher']:
+            full = os.path.join(mp, gdir)
+            if os.path.isdir(full):
+                count = len([d for d in os.listdir(full) if os.path.isdir(os.path.join(full, d))])
+                if count > 0:
+                    games.append(f'Heroic:{count}')
+        for gdir in ['GOG Games', 'GOG']:
+            full = os.path.join(mp, gdir)
+            if os.path.isdir(full):
+                count = len([d for d in os.listdir(full) if os.path.isdir(os.path.join(full, d))])
+                if count > 0:
+                    games.append(f'GOG:{count}')
+
+    game_str = ', '.join(games) if games else 'No games found'
+    mount_str = mp if mp else 'Not mounted'
+    type_str = 'External' if hotplug else 'Internal'
+
+    print(f'  {tracked} /dev/{name}  {size:>8}  {fstype:<6}  {label or \"(no label)\":<16}  {mount_str}')
+    if model:
+        print(f'            Model: {model}  ({type_str})')
+    if mp:
+        print(f'            Games: {game_str}')
+    print()
+" 2>/dev/null
+
+    dim "  ★ = Tracked as game drive in $DRIVES_DB"
+}
+
+cmd_scan() {
+    header "Scanning All Drives for Games"
+
+    local total_steam=0 total_lutris=0 total_heroic=0 total_gog=0
+
+    # Scan all mount points
+    while IFS= read -r mountpoint; do
+        [[ -z "$mountpoint" ]] && continue
+        [[ "$mountpoint" == "/" ]] && continue
+
+        local result
+        result=$(scan_path_for_games "$mountpoint")
+        IFS=':' read -r steam lutris heroic gog <<< "$result"
+
+        if (( steam + lutris + heroic + gog > 0 )); then
+            echo -e "\n  ${BOLD}$mountpoint${RESET}"
+            (( steam > 0 ))  && echo -e "    Steam:  $steam games"
+            (( lutris > 0 )) && echo -e "    Lutris: $lutris games"
+            (( heroic > 0 )) && echo -e "    Heroic: $heroic games"
+            (( gog > 0 ))    && echo -e "    GOG:    $gog games"
+
+            total_steam=$(( total_steam + steam ))
+            total_lutris=$(( total_lutris + lutris ))
+            total_heroic=$(( total_heroic + heroic ))
+            total_gog=$(( total_gog + gog ))
+        fi
+    done < <(lsblk -nro MOUNTPOINT 2>/dev/null | sort -u)
+
+    # Also scan home directory
+    local home_result
+    home_result=$(scan_path_for_games "$HOME")
+    IFS=':' read -r hs hl hh hg <<< "$home_result"
+    if (( hs + hl + hh + hg > 0 )); then
+        echo -e "\n  ${BOLD}$HOME${RESET} (home directory)"
+        (( hs > 0 )) && echo -e "    Steam:  $hs games"
+        (( hl > 0 )) && echo -e "    Lutris: $hl games"
+        (( hh > 0 )) && echo -e "    Heroic: $hh games"
+        (( hg > 0 )) && echo -e "    GOG:    $hg games"
+        total_steam=$(( total_steam + hs ))
+        total_lutris=$(( total_lutris + hl ))
+        total_heroic=$(( total_heroic + hh ))
+        total_gog=$(( total_gog + hg ))
+    fi
+
+    local total=$(( total_steam + total_lutris + total_heroic + total_gog ))
+    echo -e "\n${BOLD}Total: $total games found${RESET} (Steam:$total_steam Lutris:$total_lutris Heroic:$total_heroic GOG:$total_gog)"
+}
+
+cmd_mount() {
+    local dev="${1:-}"
+    if [[ -z "$dev" ]]; then
+        error "Usage: 24hg-gamedrive mount <device>"
+        echo "  Example: 24hg-gamedrive mount sdb1"
+        return 1
+    fi
+
+    dev=$(resolve_device "$dev")
+    header "Mounting $dev"
+    check_smart_health "$dev" || true
+    local mp
+    mp=$(mount_drive "$dev")
+
+    # Track if not already tracked
+    local uuid
+    uuid=$(get_uuid "$dev")
+    if [[ -n "$uuid" ]] && ! is_game_drive "$uuid" 2>/dev/null; then
+        if confirm "Register as game drive?"; then
+            drives_add "{
+                \"uuid\": \"$uuid\",
+                \"device\": \"$dev\",
+                \"label\": \"$(get_label "$dev")\",
+                \"fstype\": \"$(get_fstype "$dev")\",
+                \"mountpoint\": \"$mp\",
+                \"added\": \"$(date -Iseconds)\",
+                \"auto_mount\": false
+            }"
+            info "Tracked in game drive config."
+        fi
+    fi
+
+    # Show games on this drive
+    local result
+    result=$(scan_path_for_games "$mp")
+    IFS=':' read -r steam lutris heroic gog <<< "$result"
+    local total=$(( steam + lutris + heroic + gog ))
+    if (( total > 0 )); then
+        info "Found $total games on this drive"
+        (( steam > 0 )) && list_steam_games_at "$mp"
+    fi
+}
+
+cmd_unmount() {
+    local dev="${1:-}"
+    if [[ -z "$dev" ]]; then
+        error "Usage: 24hg-gamedrive unmount <device>"
+        return 1
+    fi
+
+    dev=$(resolve_device "$dev")
+    unmount_drive "$dev"
+}
+
+cmd_balance() {
+    header "Storage Balance Across Game Drives"
+
+    local drives_info=()
+    local total_used=0 total_free=0
+
+    # Gather info from all tracked drives + home
+    python3 -c "
+import json, os, subprocess, shutil
+
+with open('$DRIVES_DB') as f:
+    db = json.load(f)
+
+print('DRIVE|MOUNT|TOTAL|USED|FREE|PCT|GAMES')
+
+# Home directory first
+home = os.path.expanduser('~')
+st = shutil.disk_usage(home)
+steam_count = 0
+steam_dir = os.path.join(home, '.steam/steam/steamapps')
+if os.path.isdir(steam_dir):
+    steam_count = len([f for f in os.listdir(steam_dir) if f.startswith('appmanifest_')])
+pct = int(st.used * 100 / st.total) if st.total else 0
+print(f'Home ({home})|{home}|{st.total}|{st.used}|{st.free}|{pct}|{steam_count}')
+
+for d in db['drives']:
+    mp = d.get('mountpoint', '')
+    if not mp or not os.path.ismount(mp):
+        # Try to find current mount
+        uuid = d.get('uuid', '')
+        try:
+            result = subprocess.run(['findmnt', '-rno', 'TARGET', '-S', f'UUID={uuid}'],
+                                   capture_output=True, text=True)
+            mp = result.stdout.strip()
+        except:
+            pass
+    if not mp or not os.path.exists(mp):
+        label = d.get('label', d.get('uuid', '?')[:8])
+        print(f'{label} (not mounted)|—|0|0|0|0|0')
+        continue
+    try:
+        st = shutil.disk_usage(mp)
+    except:
+        continue
+    steam_count = 0
+    for sdir in ['steamapps', 'SteamLibrary/steamapps']:
+        full = os.path.join(mp, sdir)
+        if os.path.isdir(full):
+            steam_count += len([f for f in os.listdir(full) if f.startswith('appmanifest_')])
+    pct = int(st.used * 100 / st.total) if st.total else 0
+    label = d.get('label', d.get('uuid', '?')[:8])
+    print(f'{label}|{mp}|{st.total}|{st.used}|{st.free}|{pct}|{steam_count}')
+" 2>/dev/null | while IFS='|' read -r label mount total used free pct games; do
+        [[ "$label" == "DRIVE|MOUNT|TOTAL|USED|FREE|PCT|GAMES" ]] && continue
+        echo -e "\n  ${BOLD}$label${RESET}"
+        if [[ "$mount" == "—" ]]; then
+            dim "    Not mounted"
+            continue
+        fi
+        echo -n "    "
+        bar_graph "$pct"
+        echo "  $(human_size "$used") / $(human_size "$total")  ($(human_size "$free") free)"
+        echo "    Games: $games"
+    done
+
+    echo -e "\n${DIM}Tip: Use '24hg-gamedrive migrate <game> <dest>' to move games between drives${RESET}"
+}
+
+cmd_status() {
+    header "Game Drive Status"
+
+    local drive_count
+    drive_count=$(python3 -c "
+import json
+with open('$DRIVES_DB') as f:
+    print(len(json.load(f)['drives']))
+" 2>/dev/null)
+
+    echo -e "  Tracked drives: ${BOLD}${drive_count:-0}${RESET}"
+    echo -e "  Auto-mount:     $([ -f "$AUTO_MOUNT_FLAG" ] && echo "${GREEN}ON${RESET}" || echo "${DIM}OFF${RESET}")"
+    echo -e "  Config:         $DRIVES_DB"
+    echo
+
+    python3 -c "
+import json, os, subprocess
+
+with open('$DRIVES_DB') as f:
+    db = json.load(f)
+
+if not db['drives']:
+    print('  No game drives registered. Use \"24hg-gamedrive add <device>\" to set one up.')
+    exit()
+
+for d in db['drives']:
+    uuid = d.get('uuid', '?')
+    label = d.get('label', '(no label)')
+    fstype = d.get('fstype', '?')
+    mp = d.get('mountpoint', '?')
+    added = d.get('added', '?')
+    auto = d.get('auto_mount', False)
+    dev = d.get('device', '?')
+
+    # Check if currently mounted
+    mounted = os.path.ismount(mp) if mp != '?' else False
+    status = '\033[32m● Mounted\033[0m' if mounted else '\033[33m○ Not mounted\033[0m'
+
+    print(f'  {status}  {label} ({dev})')
+    print(f'           UUID: {uuid}')
+    print(f'           FS:   {fstype}   Auto-mount: {\"yes\" if auto else \"no\"}')
+    print(f'           Path: {mp}')
+    if mounted:
+        import shutil
+        st = shutil.disk_usage(mp)
+        pct = int(st.used * 100 / st.total) if st.total else 0
+        total_h = st.total / (1024**3)
+        free_h = st.free / (1024**3)
+        print(f'           Space: {free_h:.1f}G free / {total_h:.1f}G total ({pct}% used)')
+
+        # Count games
+        games = 0
+        for sdir in ['steamapps', 'SteamLibrary/steamapps']:
+            full = os.path.join(mp, sdir)
+            if os.path.isdir(full):
+                games += len([f for f in os.listdir(full) if f.startswith('appmanifest_')])
+        for gdir in ['Games', 'Heroic', 'GOG Games']:
+            full = os.path.join(mp, gdir)
+            if os.path.isdir(full):
+                games += len([dd for dd in os.listdir(full) if os.path.isdir(os.path.join(full, dd))])
+        print(f'           Games: {games}')
+
+    # SMART check
+    try:
+        disk = dev.rstrip('0123456789')
+        result = subprocess.run(['sudo', 'smartctl', '-H', disk],
+                               capture_output=True, text=True, timeout=5)
+        if 'PASSED' in result.stdout or 'OK' in result.stdout:
+            print(f'           Health: \033[32mPASSED\033[0m')
+        elif 'FAILED' in result.stdout:
+            print(f'           Health: \033[31mFAILING\033[0m')
+        else:
+            print(f'           Health: unknown')
+    except:
+        pass
+    print()
+" 2>/dev/null
+}
+
+# ── Usage ────────────────────────────────────────────────────────────────────
+
+usage() {
+    echo -e "${BOLD}24HG Game Drive Manager${RESET}"
+    echo
+    echo "Usage: 24hg-gamedrive <command> [options]"
+    echo
+    echo "Commands:"
+    echo "  list              List connected drives with game libraries (default)"
+    echo "  scan              Scan all drives for game installations"
+    echo "  mount <device>    Mount a drive and register as game library"
+    echo "  unmount <device>  Safely unmount (warns if games running)"
+    echo "  add <device>      Set up a new drive as game drive (format option)"
+    echo "  migrate <game> <dest>  Move a game between drives"
+    echo "  balance           Show storage usage, suggest migrations"
+    echo "  benchmark <dev>   Test drive read/write speed"
+    echo "  auto on|off       Auto-mount known game drives on plug-in"
+    echo "  status            Show all drives, space, health"
+    echo "  help              Show this help"
+    echo
+    echo "Devices can be specified as: /dev/sdb1, sdb1, UUID, or label"
+    echo
+    echo "Examples:"
+    echo "  24hg-gamedrive add sdb1"
+    echo "  24hg-gamedrive migrate \"Counter-Strike 2\" /mnt/gamedrive-fast"
+    echo "  24hg-gamedrive benchmark sdb1"
+    echo "  24hg-gamedrive auto on"
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+case "$ACTION" in
+    list)       cmd_list ;;
+    scan)       cmd_scan ;;
+    mount)      cmd_mount "${1:-}" ;;
+    unmount)    cmd_unmount "${1:-}" ;;
+    add)
+        if [[ -z "${1:-}" ]]; then
+            error "Usage: 24hg-gamedrive add <device>"
+            exit 1
+        fi
+        setup_new_drive "$1"
+        ;;
+    migrate)
+        migrate_game "${1:-}" "${2:-}"
+        ;;
+    balance)    cmd_balance ;;
+    benchmark)
+        if [[ -z "${1:-}" ]]; then
+            error "Usage: 24hg-gamedrive benchmark <device>"
+            exit 1
+        fi
+        benchmark_drive "$1"
+        ;;
+    auto)       setup_automount "${1:-}" ;;
+    status)     cmd_status ;;
+    help|--help|-h) usage ;;
+    *)
+        error "Unknown command: $ACTION"
+        usage
+        exit 1
+        ;;
+esac

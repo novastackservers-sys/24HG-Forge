@@ -1,0 +1,10 @@
+[Unit]
+Description=24HG Proton-GE Auto-Update Timer
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

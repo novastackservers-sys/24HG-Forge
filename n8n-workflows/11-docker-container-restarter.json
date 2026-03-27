@@ -13,7 +13,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// List of critical containers to monitor\nconst criticalContainers = [\n  'docker-frontend-1',\n  'docker-api-1',\n  'forge-control-room',\n  'forge-site',\n  'coolify-proxy',\n  'docker-livekit-1',\n  'yagpdb-jg8k0ckocgow440c4ckgggs4'\n];\n\nreturn criticalContainers.map(name => ({ json: { containerName: name } }));"
+        "jsCode": "// List of critical containers to monitor\nconst criticalContainers = [\n  'docker-frontend-1',\n  'docker-api-1',\n  '24hg-control-room',\n  '24hg-site',\n  'coolify-proxy',\n  'docker-livekit-1',\n  'yagpdb-jg8k0ckocgow440c4ckgggs4'\n];\n\nreturn criticalContainers.map(name => ({ json: { containerName: name } }));"
       },
       "name": "Critical Containers",
       "type": "n8n-nodes-base.code",

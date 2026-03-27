@@ -1,0 +1,13 @@
+[Unit]
+Description=24HG Perks Auto-Claim
+After=24hg-hub-bridge.service
+Wants=24hg-hub-bridge.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 30
+ExecStart=/usr/bin/24hg-perks claim --auto
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

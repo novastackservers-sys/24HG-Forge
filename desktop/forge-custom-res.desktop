@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Custom Resolution
-Comment=Custom display resolutions
-Exec=/usr/bin/forge-custom-res
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=System;HardwareSettings;
-Keywords=resolution;display;custom;xrandr;monitor;

@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Hardware Scout
-Comment=Hardware health monitoring
-Exec=/usr/bin/forge-hw-scout
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=System;Monitor;
-Keywords=hardware;health;monitor;temperature;sensor;

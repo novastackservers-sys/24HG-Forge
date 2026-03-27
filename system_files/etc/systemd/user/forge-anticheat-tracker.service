@@ -1,7 +1,0 @@
-[Unit]
-Description=24HG Forge Anti-Cheat Status Tracker
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/forge-anticheat-tracker watch

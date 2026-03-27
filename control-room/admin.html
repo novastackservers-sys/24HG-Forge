@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>24HG Forge Control Room</title>
+    <title>24HG Control Room</title>
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
     <link rel="stylesheet" href="/admin/admin.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
@@ -17,7 +17,7 @@
     <div class="login-card">
         <div class="brand">24 Hour Gaming</div>
         <h1>Control Room</h1>
-        <p class="subtitle">24HG Forge Admin Dashboard</p>
+        <p class="subtitle">24HG Admin Dashboard</p>
         <form id="login-form">
             <div class="form-group">
                 <label>Username</label>
@@ -42,7 +42,7 @@
     <!-- Sidebar -->
     <aside class="sidebar">
         <div class="sidebar-logo">
-            <h2>24HG Forge</h2>
+            <h2>24HG</h2>
             <span>Control Room</span>
         </div>
         <ul class="sidebar-nav">
@@ -73,7 +73,7 @@
         <div id="page-overview" class="page-section active">
             <div class="page-header">
                 <h1>Overview</h1>
-                <p>24HG Forge distribution dashboard</p>
+                <p>24HG distribution dashboard</p>
             </div>
             <div class="stat-grid" id="overview-stats">
                 <div class="stat-card"><div class="label">Total Downloads</div><div class="value" id="stat-downloads-total">—</div></div>
@@ -132,7 +132,7 @@
         <div id="page-installs" class="page-section">
             <div class="page-header">
                 <h1>Active Installs</h1>
-                <p>24HG Forge installations reporting via heartbeat</p>
+                <p>24HG installations reporting via heartbeat</p>
             </div>
             <div class="chart-grid">
                 <div class="chart-card">
@@ -316,12 +316,12 @@
 
 <script>
 // ═══════════════════════════════════════
-// 24HG Forge Control Room — Dashboard Logic
+// 24HG Control Room — Dashboard Logic
 // ═══════════════════════════════════════
 
 const API = '/api';
 const HUB_API = 'https://api.24hgaming.com';
-let token = localStorage.getItem('forge_token');
+let token = localStorage.getItem('hg24_token');
 let currentUser = null;
 let charts = {};
 
@@ -361,7 +361,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
         }
 
         token = data.token;
-        localStorage.setItem('forge_token', token);
+        localStorage.setItem('hg24_token', token);
         await verifyToken();
     } catch (err) {
         console.error('Login error:', err);
@@ -392,7 +392,7 @@ async function verifyToken() {
 function logout() {
     token = null;
     currentUser = null;
-    localStorage.removeItem('forge_token');
+    localStorage.removeItem('hg24_token');
     showLogin();
 }
 

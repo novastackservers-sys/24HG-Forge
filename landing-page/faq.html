@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>24HG Forge FAQ — Frequently Asked Questions</title>
-    <meta name="description" content="Common questions about 24HG Forge, the custom Linux gaming distribution from 24 Hour Gaming.">
+    <title>24HG FAQ — Frequently Asked Questions</title>
+    <meta name="description" content="Common questions about 24HG, the custom Linux gaming distribution from 24 Hour Gaming.">
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <meta property="og:image" content="https://os.24hgaming.com/og-image.png">
     <link rel="stylesheet" href="style.css">
@@ -13,7 +13,7 @@
 <body>
 
 <nav class="nav">
-    <a href="index.html" class="nav-logo">24HG Forge</a>
+    <a href="index.html" class="nav-logo">24HG</a>
     <div class="nav-links">
         <a href="download.html">Download</a>
         <a href="features.html">Features</a>
@@ -33,28 +33,28 @@
         <h2>General</h2>
 
         <details class="faq-item" open>
-            <summary>What is 24HG Forge?</summary>
-            <p>24HG Forge is a custom Linux distribution built for gamers. It's based on Bazzite (Fedora Atomic) and comes pre-configured with everything you need to game on Linux — GPU drivers, Steam, Proton, performance tools — plus 150+ built-in gaming tools and the 24HG community hub with 89 game servers, voice chat, tournaments, and more.</p>
+            <summary>What is 24HG?</summary>
+            <p>24HG is a custom Linux distribution built for gamers. It's based on Bazzite (Fedora Atomic) and comes pre-configured with everything you need to game on Linux — GPU drivers, Steam, Proton, performance tools — plus 150+ built-in gaming tools and the 24HG community hub with 89 game servers, voice chat, tournaments, and more.</p>
         </details>
 
         <details class="faq-item">
-            <summary>Is 24HG Forge free?</summary>
+            <summary>Is 24HG free?</summary>
             <p>Yes, completely free and open source (MIT license). The 24HG Hub is also free to use. Some premium features on the Hub (like VIP server perks) are optional paid upgrades.</p>
         </details>
 
         <details class="faq-item">
-            <summary>How is 24HG Forge different from Bazzite, Nobara, or SteamOS?</summary>
-            <p>Those are great gaming distros, but they're generic — they give you tools and leave you to figure it out. 24HG Forge integrates the 24HG gaming community directly into the OS. You boot up and you're already connected to 89 servers with 150+ tools, voice chat, tournaments, and a full community platform. No other distro does this.</p>
+            <summary>How is 24HG different from Bazzite, Nobara, or SteamOS?</summary>
+            <p>Those are great gaming distros, but they're generic — they give you tools and leave you to figure it out. 24HG integrates the 24HG gaming community directly into the OS. You boot up and you're already connected to 89 servers with 150+ tools, voice chat, tournaments, and a full community platform. No other distro does this.</p>
         </details>
 
         <details class="faq-item">
             <summary>Can I dual-boot with Windows?</summary>
-            <p>Yes. The installer supports "Install alongside" which shrinks your Windows partition and installs 24HG Forge next to it. You'll get a boot menu to choose which OS to start.</p>
+            <p>Yes. The installer supports "Install alongside" which shrinks your Windows partition and installs 24HG next to it. You'll get a boot menu to choose which OS to start.</p>
         </details>
 
         <details class="faq-item">
-            <summary>Do I need to be part of 24HG to use 24HG Forge?</summary>
-            <p>No. 24HG Forge works as a standalone gaming Linux distro even without a 24HG account. But creating a free account unlocks the full experience — server browser, chat, tournaments, economy, etc.</p>
+            <summary>Do I need to be part of 24HG to use 24HG?</summary>
+            <p>No. 24HG works as a standalone gaming Linux distro even without a 24HG account. But creating a free account unlocks the full experience — server browser, chat, tournaments, economy, etc.</p>
         </details>
     </div>
 
@@ -72,7 +72,7 @@
         </details>
 
         <details class="faq-item">
-            <summary>Can I run 24HG Forge on a Steam Deck?</summary>
+            <summary>Can I run 24HG on a Steam Deck?</summary>
             <p>A Steam Deck variant is in development. The Desktop variant may work but isn't optimized for the Deck's handheld controls.</p>
         </details>
 
@@ -83,7 +83,7 @@
 
         <details class="faq-item">
             <summary>Will my Wi-Fi / Bluetooth / peripherals work?</summary>
-            <p>24HG Forge inherits Fedora's hardware support, which is extensive. Most Wi-Fi chips, Bluetooth adapters, controllers, headsets, and peripherals work out of the box. If you have issues, run <code>forge-diag --paste</code> and share the URL in our Discord #support channel.</p>
+            <p>24HG inherits Fedora's hardware support, which is extensive. Most Wi-Fi chips, Bluetooth adapters, controllers, headsets, and peripherals work out of the box. If you have issues, run <code>24hg-diag --paste</code> and share the URL in our Discord #support channel.</p>
         </details>
     </div>
 
@@ -117,7 +117,7 @@
             <p>Discovery VPN is a WireGuard-based virtual LAN that connects all 24HG members worldwide. It lets you find other gamers, host private matches, and play LAN-only games together — without port forwarding or complex setup.</p>
             <ul>
                 <li><strong>Join from Hub:</strong> Click the VPN widget on your dashboard</li>
-                <li><strong>Join from Forge:</strong> Run <code>forge-vpn</code> or enable auto-connect during first boot</li>
+                <li><strong>Join from 24HG:</strong> Run <code>24hg-vpn</code> or enable auto-connect during first boot</li>
                 <li><strong>Zero extra latency:</strong> Only discovery traffic goes through the server — game traffic is peer-to-peer</li>
                 <li><strong>Free for all members:</strong> Any Hub account can join</li>
             </ul>
@@ -139,7 +139,7 @@
 
         <details class="faq-item">
             <summary>How do updates work?</summary>
-            <p>24HG Forge uses atomic updates (via rpm-ostree). The system checks for updates daily at 4 AM and downloads them in the background. You'll get a desktop notification when an update is ready. Just reboot to apply. If anything goes wrong, you can instantly roll back: <code>rpm-ostree rollback</code>.</p>
+            <p>24HG uses atomic updates (via rpm-ostree). The system checks for updates daily at 4 AM and downloads them in the background. You'll get a desktop notification when an update is ready. Just reboot to apply. If anything goes wrong, you can instantly roll back: <code>rpm-ostree rollback</code>.</p>
         </details>
 
         <details class="faq-item">
@@ -154,7 +154,7 @@
 
         <details class="faq-item">
             <summary>How do I get help?</summary>
-            <p>Join our <a href="https://discord.gg/ymfEjH6EJN">Discord</a> and post in #support. Run <code>forge-diag --paste</code> to generate a diagnostics report and share the URL — it includes your hardware info, driver status, and recent errors.</p>
+            <p>Join our <a href="https://discord.gg/ymfEjH6EJN">Discord</a> and post in #support. Run <code>24hg-diag --paste</code> to generate a diagnostics report and share the URL — it includes your hardware info, driver status, and recent errors.</p>
         </details>
     </div>
 </main>
@@ -162,7 +162,7 @@
 <footer>
     <div class="footer-grid">
         <div class="footer-col">
-            <h4>24HG Forge</h4>
+            <h4>24HG</h4>
             <a href="download.html">Download</a>
             <a href="install.html">Install Guide</a>
             <a href="roadmap.html">Roadmap</a>

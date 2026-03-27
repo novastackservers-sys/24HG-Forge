@@ -1,4 +1,4 @@
-# 24HG Forge GRUB Theme
+# 24HG GRUB Theme
 # 24 Hour Gaming
 
 title-text: ""

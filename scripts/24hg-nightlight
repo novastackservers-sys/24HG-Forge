@@ -1,0 +1,140 @@
+#!/bin/bash
+# 24HG Night Light — Blue light filter for late-night gaming
+# Wraps KDE's built-in Night Color with easy toggle + custom presets.
+#
+# Usage: 24hg-nightlight [on|off|toggle|status|temp <kelvin>]
+
+set -euo pipefail
+
+ACTION="${1:-toggle}"
+
+# KDE Night Color control via D-Bus
+kde_nightcolor() {
+    local METHOD="$1"
+    shift
+    qdbus org.kde.KWin /ColorCorrect org.kde.kwin.ColorCorrect."$METHOD" "$@" 2>/dev/null
+}
+
+# Fallback for X11: use redshift or xrandr
+x11_nightlight() {
+    local TEMP="${1:-4500}"
+    local STATE="${2:-on}"
+
+    if [ "$STATE" = "off" ]; then
+        if command -v redshift &>/dev/null; then
+            redshift -x 2>/dev/null || true
+        fi
+        # Reset gamma via xrandr
+        for output in $(xrandr --listactivemonitors 2>/dev/null | tail -n+2 | awk '{print $NF}'); do
+            xrandr --output "$output" --gamma 1:1:1 2>/dev/null || true
+        done
+        return
+    fi
+
+    if command -v redshift &>/dev/null; then
+        redshift -P -O "$TEMP" 2>/dev/null || true
+    else
+        # Manual gamma calculation for xrandr
+        local R G B
+        if [ "$TEMP" -le 3500 ]; then
+            R="1.0"; G="0.72"; B="0.42"
+        elif [ "$TEMP" -le 4500 ]; then
+            R="1.0"; G="0.82"; B="0.58"
+        elif [ "$TEMP" -le 5500 ]; then
+            R="1.0"; G="0.91"; B="0.76"
+        else
+            R="1.0"; G="1.0"; B="1.0"
+        fi
+        for output in $(xrandr --listactivemonitors 2>/dev/null | tail -n+2 | awk '{print $NF}'); do
+            xrandr --output "$output" --gamma "$R:$G:$B" 2>/dev/null || true
+        done
+    fi
+}
+
+case "$ACTION" in
+    on)
+        TEMP="${2:-4500}"
+        if command -v qdbus &>/dev/null; then
+            # KDE: enable Night Color
+            kwriteconfig6 --file kwinrc --group NightColor --key Active true 2>/dev/null || true
+            kwriteconfig6 --file kwinrc --group NightColor --key Mode "Constant" 2>/dev/null || true
+            kwriteconfig6 --file kwinrc --group NightColor --key NightTemperature "$TEMP" 2>/dev/null || true
+            qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
+            echo "Night light ON (${TEMP}K) via KDE Night Color"
+        else
+            x11_nightlight "$TEMP" "on"
+            echo "Night light ON (${TEMP}K)"
+        fi
+        notify-send -a "24HG" -i "weather-clear-night" "Night Light ON" \
+            "Color temperature: ${TEMP}K" 2>/dev/null || true
+        ;;
+    off)
+        if command -v qdbus &>/dev/null; then
+            kwriteconfig6 --file kwinrc --group NightColor --key Active false 2>/dev/null || true
+            qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
+            echo "Night light OFF"
+        else
+            x11_nightlight 6500 "off"
+            echo "Night light OFF"
+        fi
+        notify-send -a "24HG" -i "weather-clear" "Night Light OFF" 2>/dev/null || true
+        ;;
+    toggle)
+        # Check current state
+        if command -v kreadconfig6 &>/dev/null; then
+            CURRENT=$(kreadconfig6 --file kwinrc --group NightColor --key Active 2>/dev/null || echo "false")
+            if [ "$CURRENT" = "true" ]; then
+                "$0" off
+            else
+                "$0" on "${2:-4500}"
+            fi
+        else
+            # No easy way to check state on X11, just toggle via temp file
+            STATE_FILE="${XDG_RUNTIME_DIR:-/tmp}/24hg-nightlight-state"
+            if [ -f "$STATE_FILE" ]; then
+                rm "$STATE_FILE"
+                "$0" off
+            else
+                touch "$STATE_FILE"
+                "$0" on "${2:-4500}"
+            fi
+        fi
+        ;;
+    temp)
+        # Set specific temperature
+        TEMP="${2:-4500}"
+        "$0" on "$TEMP"
+        ;;
+    status)
+        echo "=== Night Light Status ==="
+        if command -v kreadconfig6 &>/dev/null; then
+            ACTIVE=$(kreadconfig6 --file kwinrc --group NightColor --key Active 2>/dev/null || echo "false")
+            TEMP=$(kreadconfig6 --file kwinrc --group NightColor --key NightTemperature 2>/dev/null || echo "4500")
+            MODE=$(kreadconfig6 --file kwinrc --group NightColor --key Mode 2>/dev/null || echo "Automatic")
+            echo "Active: $ACTIVE"
+            echo "Temperature: ${TEMP}K"
+            echo "Mode: $MODE"
+        else
+            echo "KDE Night Color not available"
+            echo "Using fallback (redshift/xrandr)"
+        fi
+        ;;
+    *)
+        echo "24HG Night Light — Blue light filter"
+        echo "Usage: 24hg-nightlight [on|off|toggle|status|temp <kelvin>]"
+        echo ""
+        echo "  on [temp]   — Enable (default: 4500K warm)"
+        echo "  off         — Disable"
+        echo "  toggle      — Toggle on/off"
+        echo "  temp <K>    — Set temperature (3000=very warm, 6500=daylight)"
+        echo "  status      — Show current state"
+        echo ""
+        echo "Presets:"
+        echo "  3000K — Very warm (late night)"
+        echo "  4000K — Warm (evening)"
+        echo "  4500K — Default (comfortable)"
+        echo "  5500K — Neutral (slightly warm)"
+        echo "  6500K — Daylight (off)"
+        exit 1
+        ;;
+esac

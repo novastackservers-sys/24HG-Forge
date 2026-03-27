@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Game Ready
-Comment=Auto-optimize new game installs
-Exec=/usr/bin/forge-game-ready
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=Game;Utility;
-Keywords=game;optimize;proton;shader;

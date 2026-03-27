@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Smart Updates
-Comment=Gaming-aware update scheduling
-Exec=/usr/bin/forge-smart-updates
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=System;
-Keywords=update;schedule;gaming;automatic;

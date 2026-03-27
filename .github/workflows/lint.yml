@@ -1,8 +1,8 @@
-# 24HG Forge — Lint & Validation
+# 24HG — Lint & Validation
 # Quick checks on every PR to catch errors before a full build.
 #
 # Status badge:
-#   ![Lint](https://github.com/24hgaming/forge/actions/workflows/lint.yml/badge.svg)
+#   ![Lint](https://github.com/24hgaming/24hg/actions/workflows/lint.yml/badge.svg)
 
 name: Lint
 
@@ -249,7 +249,7 @@ jobs:
           mkdir -p system_files/etc/skel/Desktop
           mkdir -p system_files/etc/skel/.bashrc.d
           mkdir -p system_files/etc/{firewalld/services,sddm.conf.d,avahi/services,NetworkManager/conf.d,xdg/discover,default}
-          mkdir -p system_files/usr/share/{plymouth/themes/forge,sddm/themes/forge/icons,plasma/{plasmoids/com.24hg.hubwidget,look-and-feel/com.forge.splash/contents/splash},forge,gnome-background-properties,sounds/forge/stereo,kcm-about,calamares/branding/forge}
+          mkdir -p system_files/usr/share/{plymouth/themes/24hg,sddm/themes/24hg/icons,plasma/{plasmoids/com.24hg.hubwidget,look-and-feel/com.24hg.splash/contents/splash},24hg,gnome-background-properties,sounds/24hg/stereo,kcm-about,calamares/branding/24hg}
           mkdir -p system_files/usr/lib/firefox/distribution
           mkdir -p branding/{grub,wallpapers,icons,overlays}
           mkdir -p hub-app
@@ -257,81 +257,81 @@ jobs:
           mkdir -p scripts
 
           # Create minimal placeholder files that stage-build.sh references
-          touch system_files/etc/forge-gaming-tweaks.conf
+          touch system_files/etc/24hg-gaming-tweaks.conf
           touch system_files/etc/gamemode.ini
           touch system_files/etc/issue
           touch system_files/etc/machine-info
           touch system_files/etc/default-grub-config
-          touch system_files/etc/systemd/system/{forge-gaming-tweaks,forge-first-boot-setup,forge-auto-update,forge-heartbeat}.service
-          touch system_files/etc/systemd/system/{forge-auto-update,forge-heartbeat}.timer
+          touch system_files/etc/systemd/system/{24hg-gaming-tweaks,24hg-first-boot-setup,24hg-auto-update,24hg-heartbeat}.service
+          touch system_files/etc/systemd/system/{24hg-auto-update,24hg-heartbeat}.timer
           touch system_files/etc/skel/.config/{kdeglobals,plasma-org.kde.plasma.desktop-appletsrc,konsolerc,plasmanotifyrc,dolphinrc,kwinrulesrc,kscreenlockerrc,spectaclerc}
           touch system_files/etc/skel/.config/MangoHud/MangoHud.conf
           touch system_files/etc/skel/.config/flatpak-overrides/global
-          touch system_files/etc/skel/.config/kglobalshortcutsrc.d/forge.conf
-          touch system_files/etc/skel/.config/conky/{forge.conf,forge-json.lua}
-          touch system_files/etc/skel/.config/autostart/forge-conky.desktop
-          touch system_files/etc/skel/.config/kwinrc.d/forge.conf
-          touch system_files/etc/skel/.local/share/konsole/forge.profile
+          touch system_files/etc/skel/.config/kglobalshortcutsrc.d/24hg.conf
+          touch system_files/etc/skel/.config/conky/{24hg.conf,24hg-json.lua}
+          touch system_files/etc/skel/.config/autostart/24hg-conky.desktop
+          touch system_files/etc/skel/.config/kwinrc.d/24hg.conf
+          touch system_files/etc/skel/.local/share/konsole/24hg.profile
           touch system_files/etc/skel/.local/share/user-places.xbel
           touch system_files/etc/skel/.local/share/kservices5/dummy
-          touch system_files/etc/skel/Desktop/forge.desktop
-          touch system_files/etc/skel/.bashrc.d/forge.sh
-          touch system_files/etc/firewalld/services/forge-gaming.xml
-          touch system_files/etc/sddm.conf.d/forge.conf
-          touch system_files/etc/avahi/services/forge-lan.service
+          touch system_files/etc/skel/Desktop/24hg.desktop
+          touch system_files/etc/skel/.bashrc.d/24hg.sh
+          touch system_files/etc/firewalld/services/24hg-gaming.xml
+          touch system_files/etc/sddm.conf.d/24hg.conf
+          touch system_files/etc/avahi/services/24hg-lan.service
           touch system_files/etc/NetworkManager/conf.d/24hg-dns.conf
           touch system_files/etc/xdg/kcm-about-distrorc
           touch system_files/etc/xdg/discover/featured.json
-          touch system_files/etc/pipewire/pipewire.conf.d/99-forge-defaults.conf
+          touch system_files/etc/pipewire/pipewire.conf.d/99-24hg-defaults.conf
           touch system_files/etc/libinput/local-overrides.quirks
 
           # Systemd user services
-          for svc in forge-server-status forge-replay forge-discord-fix forge-backup \
-                     forge-hub-bridge forge-game-timer forge-proton-updater \
-                     forge-achievements forge-perks-claim forge-smart-launch \
-                     forge-anticheat-tracker forge-wallpaper forge-live-wallpaper; do
+          for svc in 24hg-server-status 24hg-replay 24hg-discord-fix 24hg-backup \
+                     24hg-hub-bridge 24hg-game-timer 24hg-proton-updater \
+                     24hg-achievements 24hg-perks-claim 24hg-smart-launch \
+                     24hg-anticheat-tracker 24hg-wallpaper 24hg-live-wallpaper; do
             touch "system_files/etc/systemd/user/${svc}.service"
           done
-          for tmr in forge-backup forge-proton-updater forge-achievements \
-                     forge-anticheat-tracker forge-wallpaper; do
+          for tmr in 24hg-backup 24hg-proton-updater 24hg-achievements \
+                     24hg-anticheat-tracker 24hg-wallpaper; do
             touch "system_files/etc/systemd/user/${tmr}.timer"
           done
 
           # USR share files
-          touch system_files/usr/share/plymouth/themes/forge/logo.png
-          touch system_files/usr/share/sddm/themes/forge/theme.conf
+          touch system_files/usr/share/plymouth/themes/24hg/logo.png
+          touch system_files/usr/share/sddm/themes/24hg/theme.conf
           touch system_files/usr/share/plasma/plasmoids/com.24hg.hubwidget/metadata.json
-          touch system_files/usr/share/plasma/look-and-feel/com.forge.splash/metadata.json
-          touch system_files/usr/share/forge/{servers.json,offline.html}
-          touch system_files/usr/share/gnome-background-properties/forge-wallpapers.xml
-          touch system_files/usr/share/sounds/forge/index.theme
-          touch system_files/usr/share/sounds/forge/stereo/login.ogg
-          touch system_files/usr/share/kcm-about/24hg-forge.json
+          touch system_files/usr/share/plasma/look-and-feel/com.24hg.splash/metadata.json
+          touch system_files/usr/share/24hg/{servers.json,offline.html}
+          touch system_files/usr/share/gnome-background-properties/24hg-wallpapers.xml
+          touch system_files/usr/share/sounds/24hg/index.theme
+          touch system_files/usr/share/sounds/24hg/stereo/login.ogg
+          touch system_files/usr/share/kcm-about/24hg-os.json
           touch system_files/usr/lib/firefox/distribution/policies.json
 
           # Branding
           touch branding/grub/theme.txt
           touch branding/wallpapers/default.png
-          touch branding/icons/{forge-logo.svg,forge-logo-256.png}
+          touch branding/icons/{24hg-logo.svg,24hg-logo-256.png}
           touch branding/overlays/tournament.png
 
           # Hub app
-          touch hub-app/{forge-hub,forge-tray,forge-gamescope-session}
-          touch hub-app/{forge-hub.desktop,forge-session.desktop,forge-tray.desktop}
+          touch hub-app/{24hg-hub,24hg-tray,24hg-gamescope-session}
+          touch hub-app/{24hg-hub.desktop,24hg-session.desktop,24hg-tray.desktop}
 
           # Installer
           touch installer/branding/branding.desc
           touch installer/settings.conf
 
-          # Scripts (create dummy forge-* executables and .desktop/.sh files)
-          touch scripts/{forge-first-boot-setup.sh,configure-steam-servers.sh,forge-auto-update.sh}
-          touch scripts/{forge-heartbeat.sh,forge-game-configs.sh,forge-obs-setup.sh}
-          touch scripts/{gamemode-start.sh,gamemode-end.sh,forge-update-guard-hook.sh}
-          touch scripts/{forge-neofetch,forge-diag,forge-first-boot,forge-benchmark}
-          touch scripts/{forge-clip.desktop,forge-overlay.desktop,forge-radio.desktop}
-          touch scripts/{forge-update-prompt.desktop,forge-vpn.desktop,forge-first-boot.desktop}
-          touch scripts/{forge-sunshine-setup.desktop,forge-nxm-handler.desktop,forge-demo.desktop}
-          touch scripts/forge-voice.desktop
+          # Scripts (create dummy 24hg-* executables and .desktop/.sh files)
+          touch scripts/{24hg-first-boot-setup.sh,configure-steam-servers.sh,24hg-auto-update.sh}
+          touch scripts/{24hg-heartbeat.sh,24hg-game-configs.sh,24hg-obs-setup.sh}
+          touch scripts/{gamemode-start.sh,gamemode-end.sh,24hg-update-guard-hook.sh}
+          touch scripts/{24hg-neofetch,24hg-diag,24hg-first-boot,24hg-benchmark}
+          touch scripts/{24hg-clip.desktop,24hg-overlay.desktop,24hg-radio.desktop}
+          touch scripts/{24hg-update-prompt.desktop,24hg-vpn.desktop,24hg-first-boot.desktop}
+          touch scripts/{24hg-sunshine-setup.desktop,24hg-nxm-handler.desktop,24hg-demo.desktop}
+          touch scripts/24hg-voice.desktop
 
           echo "Running stage-build.sh..."
           chmod +x stage-build.sh

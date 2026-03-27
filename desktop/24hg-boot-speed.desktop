@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Boot Speed
+Comment=Boot time optimization
+Exec=/usr/bin/24hg-boot-speed
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=System;
+Keywords=boot;speed;startup;optimize;systemd;

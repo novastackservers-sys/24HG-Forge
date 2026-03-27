@@ -1,0 +1,6 @@
+[Unit]
+Description=24HG Game Save Auto-Backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/24hg-backup auto

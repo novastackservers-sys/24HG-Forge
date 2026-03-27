@@ -1,19 +1,19 @@
 ---
-componentName: forge
+componentName: 24hg
 welcomeStyleCalamares: true
 welcomeExpandingLogo: true
 
 strings:
-    productName: 24HG Forge
-    shortProductName: 24HG Forge
+    productName: 24HG
+    shortProductName: 24HG
     version: "1.0"
     shortVersion: "1.0"
-    versionedName: 24HG Forge 1.0
-    shortVersionedName: 24HG Forge 1.0
-    bootloaderEntryName: 24HG Forge
+    versionedName: 24HG 1.0
+    shortVersionedName: 24HG 1.0
+    bootloaderEntryName: 24HG
     productUrl: https://24hgaming.com/os
     supportUrl: https://discord.gg/ymfEjH6EJN
-    knownIssuesUrl: https://github.com/24hg/forge/issues
+    knownIssuesUrl: https://github.com/24hg/24hg-os/issues
     releaseNotesUrl: https://24hgaming.com/os/release-notes
 
 images:

@@ -1,0 +1,892 @@
+#!/bin/bash
+# 24HG Tournament — Live tournament notifications and OBS streaming integration
+#
+# Usage:
+#   24hg-tournament list              Show upcoming and live 24HG tournaments
+#   24hg-tournament join <id>         Register for a tournament
+#   24hg-tournament watch             Daemon that watches for live tournaments and sends desktop notifications
+#   24hg-tournament stream <id>       Auto-configure OBS to stream to tournament infrastructure
+#   24hg-tournament bracket <id>      Show current bracket
+#   24hg-tournament status            Show your tournament history and stats
+
+set -euo pipefail
+
+# ── Configuration ──
+
+HUB_API="https://hub.24hgaming.com/api/tournaments"
+HUB_TOKEN_FILE="$HOME/.config/24hg/hub-token"
+DATA_DIR="$HOME/.local/share/24hg/tournament"
+WATCH_PID_FILE="$DATA_DIR/watch.pid"
+WATCH_INTERVAL=300  # 5 minutes
+OVERLAY_PATH="/usr/share/24hg/overlays/tournament-overlay.png"
+
+OBS_PROFILES_DIR="$HOME/.config/obs-studio/basic/profiles"
+OBS_SCENES_DIR="$HOME/.config/obs-studio/basic/scenes"
+OBS_FLATPAK_PROFILES_DIR="$HOME/.var/app/com.obsproject.Studio/config/obs-studio/basic/profiles"
+OBS_FLATPAK_SCENES_DIR="$HOME/.var/app/com.obsproject.Studio/config/obs-studio/basic/scenes"
+
+RTMP_SERVER="rtmp://stream.24hgaming.com/tournament"
+
+ACTION="${1:-help}"
+
+# ── Colors & Formatting ──
+
+BOLD="\033[1m"
+DIM="\033[2m"
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+BLUE="\033[34m"
+MAGENTA="\033[35m"
+CYAN="\033[36m"
+WHITE="\033[37m"
+ORANGE="\033[38;5;208m"
+GOLD="\033[38;5;220m"
+RESET="\033[0m"
+
+if [[ ! -t 1 ]]; then
+    BOLD="" DIM="" RED="" GREEN="" YELLOW="" BLUE="" MAGENTA="" CYAN="" WHITE="" ORANGE="" GOLD="" RESET=""
+fi
+
+# ── Helpers ──
+
+log() {
+    logger -t 24hg-tournament "$*"
+}
+
+die() {
+    echo -e "${RED}❌ Error:${RESET} $*" >&2
+    log "ERROR: $*"
+    exit 1
+}
+
+info() {
+    echo -e "${CYAN}ℹ${RESET}  $*"
+}
+
+success() {
+    echo -e "${GREEN}✅${RESET} $*"
+}
+
+warn() {
+    echo -e "${YELLOW}⚠${RESET}  $*"
+}
+
+header() {
+    echo ""
+    echo -e "${BOLD}${MAGENTA}🏆 24HG Tournament${RESET}"
+    echo -e "${DIM}──────────────────────────────────${RESET}"
+}
+
+load_token() {
+    if [[ ! -f "$HUB_TOKEN_FILE" ]]; then
+        die "Not authenticated. Run ${BOLD}24hg-hub login${RESET} first.\n   Token expected at: $HUB_TOKEN_FILE"
+    fi
+    HUB_TOKEN=$(cat "$HUB_TOKEN_FILE")
+    if [[ -z "$HUB_TOKEN" ]]; then
+        die "Hub token is empty. Run ${BOLD}24hg-hub login${RESET} to re-authenticate."
+    fi
+}
+
+api_get() {
+    local endpoint="$1"
+    local response
+    response=$(curl -sf --connect-timeout 10 --max-time 30 \
+        -H "Authorization: Bearer $HUB_TOKEN" \
+        -H "Accept: application/json" \
+        "${HUB_API}${endpoint}" 2>/dev/null) || {
+        die "API request failed: GET ${endpoint}"
+    }
+    echo "$response"
+}
+
+api_post() {
+    local endpoint="$1"
+    local data="${2:-{}}"
+    local response
+    response=$(curl -sf --connect-timeout 10 --max-time 30 \
+        -X POST \
+        -H "Authorization: Bearer $HUB_TOKEN" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -d "$data" \
+        "${HUB_API}${endpoint}" 2>/dev/null) || {
+        die "API request failed: POST ${endpoint}"
+    }
+    echo "$response"
+}
+
+ensure_data_dir() {
+    mkdir -p "$DATA_DIR"
+}
+
+# Format a status string with color and emoji
+format_status() {
+    local status="$1"
+    case "$status" in
+        live)     echo -e "${RED}🔴 LIVE${RESET}" ;;
+        upcoming) echo -e "${GREEN}🟢 Upcoming${RESET}" ;;
+        ended)    echo -e "${DIM}⚫ Ended${RESET}" ;;
+        *)        echo -e "${DIM}$status${RESET}" ;;
+    esac
+}
+
+# Check if a command/program exists
+has_cmd() {
+    command -v "$1" &>/dev/null
+}
+
+# ── Commands ──
+
+cmd_list() {
+    load_token
+    header
+    echo ""
+    info "Fetching tournament list..."
+    echo ""
+
+    local data
+    data=$(api_get "/list")
+
+    local count
+    count=$(echo "$data" | jq -r '.tournaments | length' 2>/dev/null) || die "Failed to parse tournament data."
+
+    if [[ "$count" -eq 0 ]]; then
+        warn "No tournaments found."
+        echo ""
+        echo -e "  Check back soon or visit ${BOLD}https://hub.24hgaming.com/tournaments${RESET}"
+        return 0
+    fi
+
+    # Table header
+    printf "  ${BOLD}%-6s %-28s %-14s %-18s %-10s %s${RESET}\n" \
+        "ID" "Name" "Game" "Date" "Players" "Status"
+    printf "  ${DIM}%-6s %-28s %-14s %-18s %-10s %s${RESET}\n" \
+        "──────" "────────────────────────────" "──────────────" "──────────────────" "──────────" "──────────"
+
+    echo "$data" | jq -r '.tournaments[] | [.id, .name, .game, .date, .players, .max_players, .status] | @tsv' | \
+    while IFS=$'\t' read -r id name game date players max_players status; do
+        local status_fmt
+        status_fmt=$(format_status "$status")
+        local player_str="${players}/${max_players}"
+
+        # Truncate long names
+        if [[ ${#name} -gt 26 ]]; then
+            name="${name:0:24}.."
+        fi
+        if [[ ${#game} -gt 12 ]]; then
+            game="${game:0:11}.."
+        fi
+
+        printf "  ${GOLD}%-6s${RESET} ${WHITE}%-28s${RESET} ${CYAN}%-14s${RESET} ${DIM}%-18s${RESET} ${YELLOW}%-10s${RESET} %b\n" \
+            "$id" "$name" "$game" "$date" "$player_str" "$status_fmt"
+    done
+
+    echo ""
+    echo -e "  ${DIM}Use ${RESET}${BOLD}24hg-tournament join <id>${RESET}${DIM} to register${RESET}"
+    echo -e "  ${DIM}Use ${RESET}${BOLD}24hg-tournament bracket <id>${RESET}${DIM} to view bracket${RESET}"
+    echo ""
+    log "Listed $count tournaments"
+}
+
+cmd_join() {
+    local tournament_id="${2:-}"
+    if [[ -z "$tournament_id" ]]; then
+        die "Usage: 24hg-tournament join <tournament_id>"
+    fi
+
+    load_token
+    header
+    echo ""
+    info "Registering for tournament ${BOLD}#${tournament_id}${RESET}..."
+
+    local response
+    response=$(api_post "/join" "{\"tournament_id\": \"$tournament_id\"}")
+
+    local status
+    status=$(echo "$response" | jq -r '.status // "unknown"' 2>/dev/null)
+    local tournament_name
+    tournament_name=$(echo "$response" | jq -r '.tournament_name // "Unknown"' 2>/dev/null)
+    local game
+    game=$(echo "$response" | jq -r '.game // "Unknown"' 2>/dev/null)
+
+    if [[ "$status" == "registered" ]]; then
+        echo ""
+        success "Registered for ${BOLD}${tournament_name}${RESET}!"
+        echo ""
+        echo -e "  ${CYAN}🎮 Game:${RESET}       $game"
+        echo -e "  ${CYAN}🏷  ID:${RESET}         #$tournament_id"
+        local start_time
+        start_time=$(echo "$response" | jq -r '.start_time // "TBD"' 2>/dev/null)
+        echo -e "  ${CYAN}📅 Starts:${RESET}     $start_time"
+        echo ""
+        echo -e "  ${DIM}You'll get a notification when it goes live.${RESET}"
+        echo -e "  ${DIM}Run ${RESET}${BOLD}24hg-tournament stream $tournament_id${RESET}${DIM} to set up OBS.${RESET}"
+        log "Registered for tournament #$tournament_id ($tournament_name)"
+    elif [[ "$status" == "already_registered" ]]; then
+        warn "You're already registered for ${BOLD}${tournament_name}${RESET}."
+    else
+        local message
+        message=$(echo "$response" | jq -r '.message // "Registration failed"' 2>/dev/null)
+        die "$message"
+    fi
+    echo ""
+}
+
+cmd_watch() {
+    load_token
+    ensure_data_dir
+
+    # Check if already running
+    if [[ -f "$WATCH_PID_FILE" ]]; then
+        local existing_pid
+        existing_pid=$(cat "$WATCH_PID_FILE")
+        if kill -0 "$existing_pid" 2>/dev/null; then
+            info "Watch daemon already running (PID $existing_pid)."
+            info "Kill it with: ${BOLD}kill $existing_pid${RESET}"
+            return 0
+        fi
+        rm -f "$WATCH_PID_FILE"
+    fi
+
+    header
+    echo ""
+    info "Starting tournament watch daemon..."
+    info "Polling every ${WATCH_INTERVAL}s for live tournaments."
+    echo -e "  ${DIM}Notifications via notify-send. Logs to syslog (24hg-tournament).${RESET}"
+    echo ""
+
+    # Daemonize
+    (
+        echo $$ > "$WATCH_PID_FILE"
+        log "Watch daemon started (PID $$)"
+
+        local known_live_file="$DATA_DIR/known_live.json"
+        echo "[]" > "$known_live_file"
+
+        while true; do
+            local data
+            data=$(curl -sf --connect-timeout 10 --max-time 30 \
+                -H "Authorization: Bearer $HUB_TOKEN" \
+                -H "Accept: application/json" \
+                "${HUB_API}/list" 2>/dev/null) || {
+                log "WARN: Failed to fetch tournament list"
+                sleep "$WATCH_INTERVAL"
+                continue
+            }
+
+            # Extract live tournaments
+            local live_tournaments
+            live_tournaments=$(echo "$data" | jq -c '[.tournaments[] | select(.status == "live")]' 2>/dev/null) || {
+                log "WARN: Failed to parse tournament data"
+                sleep "$WATCH_INTERVAL"
+                continue
+            }
+
+            local known_ids
+            known_ids=$(cat "$known_live_file" 2>/dev/null || echo "[]")
+
+            # Check each live tournament
+            echo "$live_tournaments" | jq -c '.[]' 2>/dev/null | while read -r tournament; do
+                local tid tname tgame
+                tid=$(echo "$tournament" | jq -r '.id')
+                tname=$(echo "$tournament" | jq -r '.name')
+                tgame=$(echo "$tournament" | jq -r '.game')
+
+                # Skip if already notified
+                if echo "$known_ids" | jq -e "index(\"$tid\")" &>/dev/null; then
+                    continue
+                fi
+
+                # Send notification
+                log "Tournament LIVE: #$tid $tname ($tgame)"
+
+                if has_cmd notify-send; then
+                    local action_result
+                    action_result=$(notify-send \
+                        --app-name="24HG Tournament" \
+                        --icon="applications-games" \
+                        --urgency="critical" \
+                        --action="join=Click to join" \
+                        "🏆 Tournament LIVE!" \
+                        "$tname ($tgame) is now live!\nRun: 24hg-tournament bracket $tid" 2>/dev/null) || true
+
+                    # Handle notification action via gdbus if available
+                    if [[ "$action_result" == "join" ]] && has_cmd gdbus; then
+                        gdbus call --session \
+                            --dest=org.freedesktop.Notifications \
+                            --object-path=/org/freedesktop/Notifications \
+                            --method=org.freedesktop.Notifications.GetServerInformation \
+                            &>/dev/null || true
+                        # Open bracket in browser if action clicked
+                        if has_cmd xdg-open; then
+                            xdg-open "https://hub.24hgaming.com/tournaments/$tid" &>/dev/null &
+                        fi
+                    fi
+                fi
+
+                # Add to known list
+                known_ids=$(echo "$known_ids" | jq ". + [\"$tid\"]")
+                echo "$known_ids" > "$known_live_file"
+            done
+
+            # Clean up ended tournaments from known list
+            local active_ids
+            active_ids=$(echo "$data" | jq '[.tournaments[] | select(.status == "live" or .status == "upcoming") | .id]' 2>/dev/null || echo "[]")
+            known_ids=$(cat "$known_live_file" 2>/dev/null || echo "[]")
+            local cleaned
+            cleaned=$(jq -n --argjson known "$known_ids" --argjson active "$active_ids" \
+                '[$known[] | select(. as $k | $active | index($k))]' 2>/dev/null || echo "[]")
+            echo "$cleaned" > "$known_live_file"
+
+            sleep "$WATCH_INTERVAL"
+        done
+    ) &
+    disown
+
+    local daemon_pid=$!
+    echo -e "  ${GREEN}✅ Daemon started${RESET} (PID ${BOLD}$daemon_pid${RESET})"
+    echo ""
+    echo -e "  ${DIM}To install as systemd user service:${RESET}"
+    echo -e "  ${BOLD}24hg-tournament install-service${RESET}"
+    echo ""
+    log "Watch daemon launched (PID $daemon_pid)"
+}
+
+cmd_stream() {
+    local tournament_id="${2:-}"
+    if [[ -z "$tournament_id" ]]; then
+        die "Usage: 24hg-tournament stream <tournament_id>"
+    fi
+
+    load_token
+    header
+    echo ""
+    info "Configuring OBS for tournament ${BOLD}#${tournament_id}${RESET}..."
+
+    # Check OBS installation
+    local obs_type=""
+    local profiles_dir=""
+    local scenes_dir=""
+
+    if has_cmd obs || [[ -d "$OBS_PROFILES_DIR" ]]; then
+        obs_type="system"
+        profiles_dir="$OBS_PROFILES_DIR"
+        scenes_dir="$OBS_SCENES_DIR"
+    elif flatpak list 2>/dev/null | grep -q "com.obsproject.Studio"; then
+        obs_type="flatpak"
+        profiles_dir="$OBS_FLATPAK_PROFILES_DIR"
+        scenes_dir="$OBS_FLATPAK_SCENES_DIR"
+    else
+        die "OBS Studio not found. Install it via:\n   ${BOLD}flatpak install com.obsproject.Studio${RESET}\n   or your package manager."
+    fi
+
+    info "Detected OBS: ${BOLD}$obs_type${RESET}"
+
+    # Fetch stream key
+    info "Fetching stream key..."
+    local stream_data
+    stream_data=$(api_get "/stream-key/$tournament_id")
+
+    local stream_key
+    stream_key=$(echo "$stream_data" | jq -r '.stream_key // empty' 2>/dev/null)
+    if [[ -z "$stream_key" ]]; then
+        die "Could not retrieve stream key. Are you registered for this tournament?"
+    fi
+
+    local game_name
+    game_name=$(echo "$stream_data" | jq -r '.game // "Game"' 2>/dev/null)
+    local tournament_name
+    tournament_name=$(echo "$stream_data" | jq -r '.tournament_name // "Tournament"' 2>/dev/null)
+
+    success "Stream key obtained."
+
+    # Create OBS profile directory
+    local profile_dir="${profiles_dir}/24HG Tournament"
+    mkdir -p "$profile_dir"
+
+    # Write OBS profile (basic.ini)
+    cat > "$profile_dir/basic.ini" << PROFILE_EOF
+[General]
+Name=24HG Tournament
+
+[Stream]
+Mode=Advanced
+StreamType=rtmp_custom
+CustomServer=${RTMP_SERVER}
+key=${stream_key}
+use_auth=false
+
+[Output]
+Mode=Advanced
+RecType=Standard
+
+[AdvOut]
+Encoder=obs_x264
+RateControl=CBR
+Bitrate=6000
+KeyframeIntervalSec=2
+Preset=veryfast
+Profile=high
+AudioBitrate=160
+
+[Video]
+BaseCX=1920
+BaseCY=1080
+OutputCX=1920
+OutputCY=1080
+FPSType=0
+FPSCommon=60
+PROFILE_EOF
+
+    # Write OBS service.json
+    cat > "$profile_dir/service.json" << SERVICE_EOF
+{
+    "type": "rtmp_custom",
+    "settings": {
+        "server": "${RTMP_SERVER}",
+        "key": "${stream_key}",
+        "use_auth": false
+    }
+}
+SERVICE_EOF
+
+    info "Profile written to: ${DIM}$profile_dir${RESET}"
+
+    # Detect webcam
+    local has_webcam=false
+    local webcam_device=""
+    if [[ -d /dev/v4l/by-id ]]; then
+        webcam_device=$(ls /dev/v4l/by-id/ 2>/dev/null | head -1 || true)
+        if [[ -n "$webcam_device" ]]; then
+            has_webcam=true
+            info "Webcam detected: ${BOLD}$webcam_device${RESET}"
+        fi
+    fi
+
+    # Create scene collection JSON
+    mkdir -p "$scenes_dir"
+
+    local webcam_source=""
+    if $has_webcam; then
+        webcam_source=',
+                {
+                    "name": "Webcam (PiP)",
+                    "id": "v4l2_input",
+                    "versioned_id": "v4l2_input",
+                    "settings": {
+                        "device_id": "/dev/v4l/by-id/'"$webcam_device"'"
+                    },
+                    "pos": { "x": 1560.0, "y": 840.0 },
+                    "bounds": { "x": 320.0, "y": 240.0 },
+                    "bounds_type": 2
+                }'
+    fi
+
+    cat > "$scenes_dir/24HG Tournament.json" << SCENE_EOF
+{
+    "name": "24HG Tournament",
+    "current_scene": "Tournament Stream",
+    "current_program_scene": "Tournament Stream",
+    "sources": [
+        {
+            "name": "Game Capture",
+            "id": "xcomposite_input",
+            "versioned_id": "xcomposite_input",
+            "settings": {
+                "capture_window": "",
+                "capture_any_fullscreen": true
+            }
+        },
+        {
+            "name": "24HG Overlay",
+            "id": "image_source",
+            "versioned_id": "image_source",
+            "settings": {
+                "file": "${OVERLAY_PATH}"
+            }
+        },
+        {
+            "name": "Now Playing",
+            "id": "text_ft2_source_v2",
+            "versioned_id": "text_ft2_source_v2",
+            "settings": {
+                "text": "Now Playing: ${game_name}",
+                "font": {
+                    "face": "Sans Serif",
+                    "size": 28,
+                    "style": "Bold"
+                },
+                "color1": 4294967295,
+                "color2": 4294967295,
+                "outline": true,
+                "outline_size": 2,
+                "outline_color": 4278190080
+            }
+        },
+        {
+            "name": "BRB Text",
+            "id": "text_ft2_source_v2",
+            "versioned_id": "text_ft2_source_v2",
+            "settings": {
+                "text": "Be Right Back\n\n24 Hour Gaming",
+                "font": {
+                    "face": "Sans Serif",
+                    "size": 72,
+                    "style": "Bold"
+                },
+                "color1": 4294967295,
+                "color2": 4294967295
+            }
+        },
+        {
+            "name": "Starting Soon Text",
+            "id": "text_ft2_source_v2",
+            "versioned_id": "text_ft2_source_v2",
+            "settings": {
+                "text": "Starting Soon...\n\n${tournament_name}\n${game_name}",
+                "font": {
+                    "face": "Sans Serif",
+                    "size": 64,
+                    "style": "Bold"
+                },
+                "color1": 4294967295,
+                "color2": 4294967295
+            }
+        },
+        {
+            "name": "BRB Background",
+            "id": "color_source_v3",
+            "versioned_id": "color_source_v3",
+            "settings": {
+                "color": 4281545523,
+                "width": 1920,
+                "height": 1080
+            }
+        },
+        {
+            "name": "Starting Background",
+            "id": "color_source_v3",
+            "versioned_id": "color_source_v3",
+            "settings": {
+                "color": 4279505940,
+                "width": 1920,
+                "height": 1080
+            }
+        }
+    ],
+    "scenes": [
+        {
+            "name": "Tournament Stream",
+            "items": [
+                {
+                    "name": "Game Capture",
+                    "pos": { "x": 0.0, "y": 0.0 },
+                    "bounds": { "x": 1920.0, "y": 1080.0 },
+                    "bounds_type": 2
+                },
+                {
+                    "name": "24HG Overlay",
+                    "pos": { "x": 16.0, "y": 16.0 },
+                    "bounds": { "x": 120.0, "y": 40.0 },
+                    "bounds_type": 2
+                },
+                {
+                    "name": "Now Playing",
+                    "pos": { "x": 16.0, "y": 1040.0 },
+                    "bounds": { "x": 600.0, "y": 30.0 },
+                    "bounds_type": 0
+                }${webcam_source}
+            ]
+        },
+        {
+            "name": "BRB",
+            "items": [
+                {
+                    "name": "BRB Background",
+                    "pos": { "x": 0.0, "y": 0.0 },
+                    "bounds": { "x": 1920.0, "y": 1080.0 },
+                    "bounds_type": 2
+                },
+                {
+                    "name": "24HG Overlay",
+                    "pos": { "x": 860.0, "y": 200.0 },
+                    "bounds": { "x": 200.0, "y": 67.0 },
+                    "bounds_type": 2
+                },
+                {
+                    "name": "BRB Text",
+                    "pos": { "x": 960.0, "y": 400.0 },
+                    "bounds": { "x": 800.0, "y": 300.0 },
+                    "bounds_type": 0,
+                    "align": 5
+                }
+            ]
+        },
+        {
+            "name": "Starting Soon",
+            "items": [
+                {
+                    "name": "Starting Background",
+                    "pos": { "x": 0.0, "y": 0.0 },
+                    "bounds": { "x": 1920.0, "y": 1080.0 },
+                    "bounds_type": 2
+                },
+                {
+                    "name": "24HG Overlay",
+                    "pos": { "x": 860.0, "y": 180.0 },
+                    "bounds": { "x": 200.0, "y": 67.0 },
+                    "bounds_type": 2
+                },
+                {
+                    "name": "Starting Soon Text",
+                    "pos": { "x": 960.0, "y": 350.0 },
+                    "bounds": { "x": 800.0, "y": 400.0 },
+                    "bounds_type": 0,
+                    "align": 5
+                }
+            ]
+        }
+    ]
+}
+SCENE_EOF
+
+    info "Scene collection written to: ${DIM}$scenes_dir/24HG Tournament.json${RESET}"
+
+    echo ""
+    success "OBS configured for tournament ${BOLD}${tournament_name}${RESET}!"
+    echo ""
+    echo -e "  ${CYAN}📡 RTMP Server:${RESET}  ${RTMP_SERVER}"
+    echo -e "  ${CYAN}🔑 Stream Key:${RESET}   ${DIM}${stream_key:0:8}...${RESET} (hidden)"
+    echo -e "  ${CYAN}🎮 Game:${RESET}         $game_name"
+    echo -e "  ${CYAN}📹 Webcam:${RESET}       $(if $has_webcam; then echo "Detected (PiP enabled)"; else echo "Not found (skipped)"; fi)"
+    echo ""
+    echo -e "  ${BOLD}Scenes created:${RESET}"
+    echo -e "    ${GREEN}▸${RESET} Tournament Stream — Game + overlay + webcam"
+    echo -e "    ${YELLOW}▸${RESET} BRB — Be Right Back screen"
+    echo -e "    ${BLUE}▸${RESET} Starting Soon — Pre-tournament countdown"
+    echo ""
+    echo -e "  ${DIM}Open OBS and select profile ${RESET}${BOLD}24HG Tournament${RESET}${DIM} to get started.${RESET}"
+    echo ""
+    log "OBS configured for tournament #$tournament_id ($tournament_name), stream key set"
+}
+
+cmd_bracket() {
+    local tournament_id="${2:-}"
+    if [[ -z "$tournament_id" ]]; then
+        die "Usage: 24hg-tournament bracket <tournament_id>"
+    fi
+
+    load_token
+    header
+    echo ""
+    info "Fetching bracket for tournament ${BOLD}#${tournament_id}${RESET}..."
+    echo ""
+
+    local data
+    data=$(api_get "/$tournament_id/bracket")
+
+    local tournament_name
+    tournament_name=$(echo "$data" | jq -r '.tournament_name // "Unknown"' 2>/dev/null)
+    local game
+    game=$(echo "$data" | jq -r '.game // "Unknown"' 2>/dev/null)
+    local status
+    status=$(echo "$data" | jq -r '.status // "unknown"' 2>/dev/null)
+    local status_fmt
+    status_fmt=$(format_status "$status")
+
+    echo -e "  ${BOLD}${WHITE}$tournament_name${RESET}  ${CYAN}$game${RESET}  $status_fmt"
+    echo ""
+
+    local round_count
+    round_count=$(echo "$data" | jq '.rounds | length' 2>/dev/null) || die "Failed to parse bracket data."
+
+    if [[ "$round_count" -eq 0 ]]; then
+        warn "Bracket not yet generated."
+        return 0
+    fi
+
+    local r=0
+    while [[ $r -lt $round_count ]]; do
+        local round_name
+        round_name=$(echo "$data" | jq -r ".rounds[$r].name // \"Round $((r+1))\"" 2>/dev/null)
+        echo -e "  ${BOLD}${ORANGE}── $round_name ──${RESET}"
+
+        echo "$data" | jq -r ".rounds[$r].matches[] | [.player1, .score1, .player2, .score2, .winner] | @tsv" 2>/dev/null | \
+        while IFS=$'\t' read -r p1 s1 p2 s2 winner; do
+            local p1_fmt p2_fmt
+            if [[ "$winner" == "$p1" ]]; then
+                p1_fmt="${GREEN}${BOLD}$p1${RESET}"
+                p2_fmt="${DIM}$p2${RESET}"
+            elif [[ "$winner" == "$p2" ]]; then
+                p1_fmt="${DIM}$p1${RESET}"
+                p2_fmt="${GREEN}${BOLD}$p2${RESET}"
+            else
+                p1_fmt="${WHITE}$p1${RESET}"
+                p2_fmt="${WHITE}$p2${RESET}"
+            fi
+
+            printf "    %b ${DIM}(%s)${RESET}  vs  %b ${DIM}(%s)${RESET}\n" \
+                "$p1_fmt" "${s1:--}" "$p2_fmt" "${s2:--}"
+        done
+
+        echo ""
+        r=$((r + 1))
+    done
+
+    echo -e "  ${DIM}Live bracket: https://hub.24hgaming.com/tournaments/$tournament_id${RESET}"
+    echo ""
+    log "Displayed bracket for tournament #$tournament_id"
+}
+
+cmd_status() {
+    load_token
+    header
+    echo ""
+    info "Fetching your tournament stats..."
+    echo ""
+
+    local data
+    data=$(api_get "/status" 2>/dev/null) || {
+        # Graceful fallback if no status endpoint
+        data=$(api_get "/list")
+    }
+
+    # Try to display user stats if available
+    local username
+    username=$(echo "$data" | jq -r '.username // "Player"' 2>/dev/null)
+    local total_played
+    total_played=$(echo "$data" | jq -r '.total_played // 0' 2>/dev/null)
+    local wins
+    wins=$(echo "$data" | jq -r '.wins // 0' 2>/dev/null)
+    local losses
+    losses=$(echo "$data" | jq -r '.losses // 0' 2>/dev/null)
+    local ranking
+    ranking=$(echo "$data" | jq -r '.ranking // "Unranked"' 2>/dev/null)
+    local registered
+    registered=$(echo "$data" | jq -r '.registered // []' 2>/dev/null)
+
+    echo -e "  ${BOLD}${WHITE}$username${RESET}"
+    echo ""
+    echo -e "  ${CYAN}🏆 Tournaments Played:${RESET}  $total_played"
+    echo -e "  ${GREEN}✅ Wins:${RESET}                $wins"
+    echo -e "  ${RED}❌ Losses:${RESET}              $losses"
+
+    if [[ "$total_played" -gt 0 ]]; then
+        local winrate
+        winrate=$(awk "BEGIN { printf \"%.0f\", ($wins / $total_played) * 100 }")
+        echo -e "  ${YELLOW}📊 Win Rate:${RESET}            ${winrate}%"
+    fi
+
+    echo -e "  ${MAGENTA}🎖  Ranking:${RESET}            $ranking"
+    echo ""
+
+    # Show registered upcoming tournaments
+    local reg_count
+    reg_count=$(echo "$data" | jq '.registered | length' 2>/dev/null || echo "0")
+    if [[ "$reg_count" -gt 0 ]]; then
+        echo -e "  ${BOLD}Registered Tournaments:${RESET}"
+        echo "$data" | jq -r '.registered[] | [.id, .name, .game, .date, .status] | @tsv' 2>/dev/null | \
+        while IFS=$'\t' read -r id name game date tstatus; do
+            local sfmt
+            sfmt=$(format_status "$tstatus")
+            echo -e "    ${GOLD}#$id${RESET}  ${WHITE}$name${RESET}  ${CYAN}$game${RESET}  ${DIM}$date${RESET}  $sfmt"
+        done
+        echo ""
+    fi
+
+    # Show recent results
+    local history_count
+    history_count=$(echo "$data" | jq '.history | length' 2>/dev/null || echo "0")
+    if [[ "$history_count" -gt 0 ]]; then
+        echo -e "  ${BOLD}Recent Results:${RESET}"
+        echo "$data" | jq -r '.history[] | [.name, .game, .placement, .date] | @tsv' 2>/dev/null | head -5 | \
+        while IFS=$'\t' read -r name game placement date; do
+            local place_fmt
+            case "$placement" in
+                1) place_fmt="${GOLD}🥇 1st${RESET}" ;;
+                2) place_fmt="${WHITE}🥈 2nd${RESET}" ;;
+                3) place_fmt="${ORANGE}🥉 3rd${RESET}" ;;
+                *) place_fmt="${DIM}#${placement}${RESET}" ;;
+            esac
+            echo -e "    $place_fmt  ${WHITE}$name${RESET}  ${CYAN}$game${RESET}  ${DIM}$date${RESET}"
+        done
+        echo ""
+    fi
+
+    log "Displayed tournament status for $username"
+}
+
+cmd_install_service() {
+    local service_dir="$HOME/.config/systemd/user"
+    mkdir -p "$service_dir"
+
+    cat > "$service_dir/24hg-tournament-watch.service" << UNIT_EOF
+[Unit]
+Description=24HG Tournament Watch Daemon
+Documentation=https://hub.24hgaming.com/docs/24hg-tournament
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/24hg-tournament watch
+Restart=on-failure
+RestartSec=60
+Environment=HOME=%h
+
+[Install]
+WantedBy=default.target
+UNIT_EOF
+
+    systemctl --user daemon-reload
+    systemctl --user enable 24hg-tournament-watch.service
+    systemctl --user start 24hg-tournament-watch.service
+
+    success "Systemd user service installed and started."
+    info "Manage with: ${BOLD}systemctl --user [start|stop|status] 24hg-tournament-watch${RESET}"
+    log "Installed systemd user service"
+}
+
+cmd_help() {
+    header
+    echo ""
+    echo -e "  ${BOLD}Usage:${RESET} 24hg-tournament <command> [args]"
+    echo ""
+    echo -e "  ${BOLD}Commands:${RESET}"
+    echo -e "    ${GREEN}list${RESET}              Show upcoming and live 24HG tournaments"
+    echo -e "    ${GREEN}join${RESET} ${DIM}<id>${RESET}         Register for a tournament"
+    echo -e "    ${GREEN}watch${RESET}             Daemon: notify when tournaments go live"
+    echo -e "    ${GREEN}stream${RESET} ${DIM}<id>${RESET}       Auto-configure OBS for tournament streaming"
+    echo -e "    ${GREEN}bracket${RESET} ${DIM}<id>${RESET}      Show current bracket"
+    echo -e "    ${GREEN}status${RESET}            Your tournament history and stats"
+    echo -e "    ${DIM}install-service${RESET}   Install watch as systemd user service"
+    echo -e "    ${DIM}help${RESET}              Show this help"
+    echo ""
+    echo -e "  ${BOLD}Examples:${RESET}"
+    echo -e "    ${DIM}\$${RESET} 24hg-tournament list"
+    echo -e "    ${DIM}\$${RESET} 24hg-tournament join 42"
+    echo -e "    ${DIM}\$${RESET} 24hg-tournament stream 42"
+    echo -e "    ${DIM}\$${RESET} 24hg-tournament watch"
+    echo ""
+    echo -e "  ${DIM}Auth: Requires hub-token at ~/.config/24hg/hub-token${RESET}"
+    echo -e "  ${DIM}API:  ${HUB_API}${RESET}"
+    echo ""
+}
+
+# ── Dispatch ──
+
+case "$ACTION" in
+    list)            cmd_list "$@" ;;
+    join)            cmd_join "$@" ;;
+    watch)           cmd_watch "$@" ;;
+    stream)          cmd_stream "$@" ;;
+    bracket)         cmd_bracket "$@" ;;
+    status)          cmd_status "$@" ;;
+    install-service) cmd_install_service "$@" ;;
+    help|--help|-h)  cmd_help ;;
+    *)
+        echo -e "${RED}Unknown command:${RESET} $ACTION" >&2
+        cmd_help
+        exit 1
+        ;;
+esac

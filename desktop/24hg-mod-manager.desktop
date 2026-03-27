@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Mod Manager
+Comment=Game mod management
+Exec=/usr/bin/24hg-mod-manager
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Game;
+Keywords=mod;workshop;nexus;manage;game;

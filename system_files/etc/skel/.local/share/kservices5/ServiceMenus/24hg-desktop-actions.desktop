@@ -1,0 +1,30 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=application/octet-stream;inode/directory;
+Actions=openHub;quickConnect;performance;serverStatus;screenshot;
+
+[Desktop Action openHub]
+Name=Open 24HG Hub
+Icon=24hg-logo
+Exec=/usr/bin/24hg-hub
+
+[Desktop Action quickConnect]
+Name=Quick Connect to Server
+Icon=network-connect
+Exec=konsole -e 24hg-server-status --once
+
+[Desktop Action performance]
+Name=Toggle Gaming Mode
+Icon=speedometer
+Exec=/usr/bin/24hg-performance gaming
+
+[Desktop Action serverStatus]
+Name=Server Status
+Icon=network-server
+Exec=konsole -e 24hg-server-status --once
+
+[Desktop Action screenshot]
+Name=Take Screenshot
+Icon=camera-photo
+Exec=/usr/bin/24hg-screenshot full

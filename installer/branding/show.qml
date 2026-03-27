@@ -1,4 +1,4 @@
-/* 24HG Forge Calamares Installer Slideshow */
+/* 24HG Calamares Installer Slideshow */
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
@@ -33,7 +33,7 @@ Presentation {
                 }
 
                 Text {
-                    text: "Welcome to 24HG Forge"
+                    text: "Welcome to 24HG"
                     font.pointSize: 32
                     font.bold: true
                     color: "#00e5ff"
@@ -76,7 +76,7 @@ Presentation {
                 }
 
                 Text {
-                    text: "Install a game → Forge auto-optimizes it\n\n✓  Optimal Proton version selected\n✓  Launch arguments configured\n✓  Shader cache pre-built\n✓  Performance profile applied\n✓  Controller mappings set\n\nYou just click Play."
+                    text: "Install a game → 24HG auto-optimizes it\n\n✓  Optimal Proton version selected\n✓  Launch arguments configured\n✓  Shader cache pre-built\n✓  Performance profile applied\n✓  Controller mappings set\n\nYou just click Play."
                     font.pointSize: 13
                     color: "#8899aa"
                     horizontalAlignment: Text.AlignHCenter
@@ -136,7 +136,7 @@ Presentation {
                 }
 
                 Text {
-                    text: "Updates wait until you're done gaming\nPer-game performance profiles apply automatically\nHardware Scout monitors your system health\nQuick Resume saves your session across reboots\nSmart power management for laptops\n\nForge thinks so you don't have to."
+                    text: "Updates wait until you're done gaming\nPer-game performance profiles apply automatically\nHardware Scout monitors your system health\nQuick Resume saves your session across reboots\nSmart power management for laptops\n\n24HG thinks so you don't have to."
                     font.pointSize: 13
                     color: "#8899aa"
                     horizontalAlignment: Text.AlignHCenter
@@ -166,7 +166,7 @@ Presentation {
                 }
 
                 Text {
-                    text: "Mouse DPI & RGB lighting → built in\nPer-app audio routing → built in\nInput lag optimization → built in\nDual GPU switching → built in\nMod manager → built in\nCustom resolutions → built in\n\nForge replaces Razer Synapse, Voicemeeter,\nMSI Afterburner, and Vortex."
+                    text: "Mouse DPI & RGB lighting → built in\nPer-app audio routing → built in\nInput lag optimization → built in\nDual GPU switching → built in\nMod manager → built in\nCustom resolutions → built in\n\n24HG replaces Razer Synapse, Voicemeeter,\nMSI Afterburner, and Vortex."
                     font.pointSize: 13
                     color: "#8899aa"
                     horizontalAlignment: Text.AlignHCenter
@@ -256,7 +256,7 @@ Presentation {
                 }
 
                 Text {
-                    text: "Desktop Mode\nFull KDE Plasma desktop with all 150+ Forge tools\n\nGame Mode\nGamescope + Steam Big Picture — console experience\n\nSwitch anytime: forge-boot-select toggle"
+                    text: "Desktop Mode\nFull KDE Plasma desktop with all 150+ 24HG tools\n\nGame Mode\nGamescope + Steam Big Picture — console experience\n\nSwitch anytime: 24hg-boot-select toggle"
                     font.pointSize: 13
                     color: "#8899aa"
                     horizontalAlignment: Text.AlignHCenter
@@ -316,7 +316,7 @@ Presentation {
                 }
 
                 Text {
-                    text: "One command: lan-mode\n\nAuto-discover other Forge gamers on your network\nShare files and maps instantly\nVote on which game to play\nBuilt-in chat between party members\nCommunity radio for background beats\n\nBring your friends. We handle the rest."
+                    text: "One command: lan-mode\n\nAuto-discover other 24HG gamers on your network\nShare files and maps instantly\nVote on which game to play\nBuilt-in chat between party members\nCommunity radio for background beats\n\nBring your friends. We handle the rest."
                     font.pointSize: 13
                     color: "#8899aa"
                     horizontalAlignment: Text.AlignHCenter
@@ -354,7 +354,7 @@ Presentation {
                 }
 
                 Text {
-                    text: "After install, type  help  in the terminal\nto see everything Forge can do.\n\nJoin us at hub.24hgaming.com\nDiscord: discord.gg/ymfEjH6EJN\n\nWelcome to the 24HG family. 🎮"
+                    text: "After install, type  help  in the terminal\nto see everything 24HG can do.\n\nJoin us at hub.24hgaming.com\nDiscord: discord.gg/ymfEjH6EJN\n\nWelcome to the 24HG family. 🎮"
                     font.pointSize: 14
                     color: "#8899aa"
                     horizontalAlignment: Text.AlignHCenter

@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""
+24HG Proton Troubleshooter — Diagnose and fix Proton/Wine game issues
+Checks Vulkan, Proton versions, game logs, and common failure modes.
+Usage: 24hg-proton-fix [appid|game-name] [--fix]
+"""
+
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+STEAM_PATHS = [
+    os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam"),
+    os.path.expanduser("~/.local/share/Steam"),
+    os.path.expanduser("~/.steam/steam"),
+]
+
+COMMON_FIXES = {
+    "vcredist": "Install Visual C++ Redistributable into the Wine prefix",
+    "dotnet": "Install .NET Framework into the Wine prefix",
+    "d3dcompiler": "Install DirectX shader compiler",
+    "xact": "Install XAudio/XACT audio libraries",
+    "vulkan": "Vulkan driver issue — check GPU drivers",
+    "dxvk": "DXVK (DirectX→Vulkan) issue",
+    "eac": "Easy Anti-Cheat — may need native Linux EAC support enabled",
+    "battleye": "BattlEye — may need native Linux BattlEye support enabled",
+}
+
+# Known problematic games and their fixes
+KNOWN_FIXES = {
+    "730": {"name": "CS2", "launch": "-vulkan -high"},
+    "440": {"name": "TF2", "launch": "-novid -nojoy -particles 1"},
+    "252490": {"name": "Rust", "launch": "-window-mode exclusive -force-vulkan"},
+}
+
+
+def find_steam():
+    """Find the Steam installation directory."""
+    for path in STEAM_PATHS:
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def find_library_folders(steam_dir):
+    """Parse libraryfolders.vdf to find all Steam library paths."""
+    vdf_path = os.path.join(steam_dir, "steamapps", "libraryfolders.vdf")
+    folders = [os.path.join(steam_dir, "steamapps")]
+    if os.path.exists(vdf_path):
+        with open(vdf_path) as f:
+            for line in f:
+                m = re.search(r'"path"\s+"(.+)"', line)
+                if m:
+                    p = os.path.join(m.group(1), "steamapps")
+                    if os.path.isdir(p):
+                        folders.append(p)
+    return folders
+
+
+def find_appid(steam_dir, search):
+    """Find an AppID by name or number."""
+    if search.isdigit():
+        return search
+
+    # Search appmanifest files
+    for folder in find_library_folders(steam_dir):
+        for manifest in glob.glob(os.path.join(folder, "appmanifest_*.acf")):
+            with open(manifest) as f:
+                content = f.read()
+                name_match = re.search(r'"name"\s+"(.+)"', content)
+                appid_match = re.search(r'"appid"\s+"(\d+)"', content)
+                if name_match and appid_match:
+                    if search.lower() in name_match.group(1).lower():
+                        return appid_match.group(1)
+    return None
+
+
+def check_vulkan():
+    """Check Vulkan availability."""
+    issues = []
+    try:
+        result = subprocess.run(["vulkaninfo", "--summary"],
+                                capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            issues.append("CRITICAL: vulkaninfo failed — no Vulkan driver detected")
+        else:
+            if "deviceName" in result.stdout:
+                gpu_match = re.search(r'deviceName\s*=\s*(.+)', result.stdout)
+                if gpu_match:
+                    print(f"  GPU: {gpu_match.group(1).strip()}")
+            # Check for multiple GPUs (iGPU/dGPU confusion)
+            gpu_count = result.stdout.count("deviceName")
+            if gpu_count > 1:
+                issues.append("WARNING: Multiple GPUs detected — games may use wrong GPU. "
+                              "Set DRI_PRIME=1 or DXVK_FILTER_DEVICE_NAME")
+    except FileNotFoundError:
+        issues.append("CRITICAL: vulkaninfo not installed (vulkan-tools package)")
+    except subprocess.TimeoutExpired:
+        issues.append("WARNING: vulkaninfo timed out — driver may be stuck")
+    return issues
+
+
+def check_proton_versions(steam_dir):
+    """List installed Proton versions."""
+    protons = []
+    for folder in find_library_folders(steam_dir):
+        common = os.path.join(folder, "common")
+        if os.path.isdir(common):
+            for d in os.listdir(common):
+                if d.lower().startswith("proton"):
+                    protons.append(d)
+
+    # Check for Proton-GE
+    ge_dir = os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d")
+    if not os.path.isdir(ge_dir):
+        ge_dir = os.path.expanduser("~/.local/share/Steam/compatibilitytools.d")
+    if os.path.isdir(ge_dir):
+        for d in os.listdir(ge_dir):
+            if "proton" in d.lower() or "ge" in d.lower():
+                protons.append(f"{d} (GE)")
+
+    return sorted(protons)
+
+
+def check_game_logs(steam_dir, appid):
+    """Check game-specific logs for errors."""
+    issues = []
+
+    # Check compatdata
+    for folder in find_library_folders(steam_dir):
+        compat = os.path.join(folder, "compatdata", appid)
+        if os.path.isdir(compat):
+            # Check if prefix exists
+            pfx = os.path.join(compat, "pfx")
+            if not os.path.isdir(pfx):
+                issues.append("Wine prefix doesn't exist yet — game hasn't launched")
+                continue
+
+            # Check crash logs
+            for logfile in ["crash.dmp", "steam_autocloud.vdf"]:
+                path = os.path.join(compat, logfile)
+                if os.path.exists(path):
+                    mtime = os.path.getmtime(path)
+                    import time
+                    age = time.time() - mtime
+                    if age < 3600:
+                        issues.append(f"Recent crash detected: {logfile}")
+
+            # Check DXVK log
+            dxvk_log = os.path.join(pfx, "drive_c", "dxvk.log")
+            if os.path.exists(dxvk_log):
+                with open(dxvk_log) as f:
+                    content = f.read()[-2000:]  # Last 2KB
+                    if "err:" in content.lower():
+                        issues.append("DXVK errors detected in Wine prefix")
+
+            # Check wine prefix size (sometimes corrupted = very small)
+            try:
+                result = subprocess.run(["du", "-sm", pfx], capture_output=True, text=True, timeout=10)
+                size = int(result.stdout.split()[0])
+                if size < 5:
+                    issues.append(f"Wine prefix is tiny ({size}MB) — may be corrupted. Try deleting compatdata/{appid}")
+            except Exception:
+                pass
+
+    return issues
+
+
+def check_anticheat(steam_dir, appid):
+    """Check for anti-cheat that may not work with Proton."""
+    issues = []
+    for folder in find_library_folders(steam_dir):
+        game_dir = os.path.join(folder, "common")
+        # Search for EAC
+        eac_paths = glob.glob(os.path.join(game_dir, "*", "EasyAntiCheat*"))
+        eac_paths += glob.glob(os.path.join(game_dir, "*", "eac_*"))
+        if eac_paths:
+            issues.append("Easy Anti-Cheat detected — developer must enable Linux/Proton EAC support")
+
+        # Search for BattlEye
+        be_paths = glob.glob(os.path.join(game_dir, "*", "BattlEye*"))
+        be_paths += glob.glob(os.path.join(game_dir, "*", "BEService*"))
+        if be_paths:
+            issues.append("BattlEye detected — developer must enable Linux/Proton BattlEye support")
+
+    return issues
+
+
+def fix_prefix(steam_dir, appid):
+    """Apply common fixes to a Wine prefix."""
+    print("\nAttempting automatic fixes...")
+
+    for folder in find_library_folders(steam_dir):
+        compat = os.path.join(folder, "compatdata", appid, "pfx")
+        if os.path.isdir(compat):
+            print(f"  Wine prefix: {compat}")
+
+            # Fix 1: Install vcredist via protontricks if available
+            if shutil.which("protontricks") or shutil.which("flatpak"):
+                print("  Installing Visual C++ Redistributables...")
+                try:
+                    subprocess.run(
+                        ["flatpak", "run", "com.github.Matoking.protontricks",
+                         appid, "vcrun2019"],
+                        timeout=120, capture_output=True
+                    )
+                    print("  -> vcrun2019 installed")
+                except Exception:
+                    print("  -> protontricks not available, skipping vcredist")
+
+            # Fix 2: Delete shader cache to force recompile
+            shader_cache = os.path.join(folder, "shadercache", appid)
+            if os.path.isdir(shader_cache):
+                print(f"  Clearing shader cache ({appid})...")
+                shutil.rmtree(shader_cache, ignore_errors=True)
+                print("  -> Shader cache cleared (will recompile on next launch)")
+
+            print("\nDone. Try launching the game again.")
+            return
+
+    print("  Could not find Wine prefix for this game.")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("24HG Proton Troubleshooter")
+        print("Usage: 24hg-proton-fix <appid or game name> [--fix]")
+        print("")
+        print("Examples:")
+        print("  24hg-proton-fix 252490        # Diagnose Rust by AppID")
+        print("  24hg-proton-fix rust           # Diagnose by name")
+        print("  24hg-proton-fix rust --fix     # Attempt automatic fixes")
+        print("  24hg-proton-fix --check        # General system check")
+        sys.exit(0)
+
+    # General system check
+    if sys.argv[1] == "--check":
+        print("=== 24HG Proton System Check ===\n")
+
+        steam_dir = find_steam()
+        if not steam_dir:
+            print("CRITICAL: Steam not found!")
+            sys.exit(1)
+        print(f"Steam: {steam_dir}")
+
+        print("\n--- Vulkan ---")
+        vulkan_issues = check_vulkan()
+        if vulkan_issues:
+            for issue in vulkan_issues:
+                print(f"  {issue}")
+        else:
+            print("  Vulkan OK")
+
+        print("\n--- Proton Versions ---")
+        protons = check_proton_versions(steam_dir)
+        for p in protons:
+            print(f"  {p}")
+        if not protons:
+            print("  No Proton versions found!")
+
+        has_ge = any("ge" in p.lower() for p in protons)
+        if not has_ge:
+            print("\n  TIP: Install Proton-GE via ProtonUp-Qt for better game compatibility")
+
+        print("\n--- System ---")
+        # Check 32-bit libs
+        lib32 = os.path.exists("/usr/lib/libGL.so.1") or os.path.exists("/usr/lib32/libGL.so.1")
+        print(f"  32-bit libraries: {'OK' if lib32 else 'MISSING — some games need lib32'}")
+
+        # Check vm.max_map_count
+        try:
+            with open("/proc/sys/vm/max_map_count") as f:
+                mmc = int(f.read().strip())
+                ok = mmc >= 1048576
+                print(f"  vm.max_map_count: {mmc} {'OK' if ok else 'TOO LOW — some games need >= 1048576'}")
+        except Exception:
+            pass
+
+        sys.exit(0)
+
+    # Game-specific diagnosis
+    search = sys.argv[1]
+    do_fix = "--fix" in sys.argv
+
+    steam_dir = find_steam()
+    if not steam_dir:
+        print("CRITICAL: Steam not found! Install Steam first.")
+        sys.exit(1)
+
+    appid = find_appid(steam_dir, search)
+    if not appid:
+        print(f"Could not find game matching '{search}'")
+        print("Try using the Steam AppID (number) directly")
+        sys.exit(1)
+
+    print(f"=== Diagnosing AppID {appid} ===\n")
+
+    # Known game info
+    if appid in KNOWN_FIXES:
+        info = KNOWN_FIXES[appid]
+        print(f"Game: {info['name']}")
+        if "launch" in info:
+            print(f"Recommended launch options: {info['launch']}")
+        print()
+
+    all_issues = []
+
+    # Check Vulkan
+    print("--- Vulkan ---")
+    vulkan_issues = check_vulkan()
+    all_issues.extend(vulkan_issues)
+    if vulkan_issues:
+        for issue in vulkan_issues:
+            print(f"  {issue}")
+    else:
+        print("  OK")
+
+    # Check Proton
+    print("\n--- Proton ---")
+    protons = check_proton_versions(steam_dir)
+    if protons:
+        print(f"  Installed: {', '.join(protons[:5])}")
+    else:
+        all_issues.append("No Proton versions installed!")
+        print("  NONE FOUND — install Proton from Steam")
+
+    # Check game logs
+    print("\n--- Game Status ---")
+    log_issues = check_game_logs(steam_dir, appid)
+    all_issues.extend(log_issues)
+    if log_issues:
+        for issue in log_issues:
+            print(f"  {issue}")
+    else:
+        print("  No issues detected in game data")
+
+    # Check anti-cheat
+    print("\n--- Anti-Cheat ---")
+    ac_issues = check_anticheat(steam_dir, appid)
+    all_issues.extend(ac_issues)
+    if ac_issues:
+        for issue in ac_issues:
+            print(f"  {issue}")
+    else:
+        print("  No anti-cheat detected")
+
+    # Summary
+    print(f"\n--- Summary ---")
+    if not all_issues:
+        print("No obvious issues found. Try these steps:")
+        print("  1. Verify game files in Steam (Properties → Local Files → Verify)")
+        print("  2. Try Proton-GE instead of default Proton")
+        print("  3. Set launch options: gamemoderun %command%")
+        print("  4. Delete compatdata and retry: rm -rf ~/.steam/steam/steamapps/compatdata/" + appid)
+    else:
+        print(f"Found {len(all_issues)} issue(s):")
+        for i, issue in enumerate(all_issues, 1):
+            print(f"  {i}. {issue}")
+
+        if do_fix:
+            fix_prefix(steam_dir, appid)
+        else:
+            print(f"\nRun '24hg-proton-fix {appid} --fix' to attempt automatic fixes")
+
+
+if __name__ == "__main__":
+    main()

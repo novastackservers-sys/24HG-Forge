@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Overlay
+Comment=In-game friend activity and notifications
+Exec=24hg-overlay start
+Icon=24hg-logo
+Terminal=false
+Type=Application
+Categories=Game;
+StartupNotify=false

@@ -1,0 +1,1293 @@
+#!/usr/bin/env python3
+"""
+24HG Anti-Cheat Status Tracker — Know what works, get notified when games add Linux support
+
+Tracks anti-cheat compatibility for your Steam library and notifies you when
+games enable Linux support. A 24HG exclusive — no other distro does this.
+
+Commands:
+    scan            Scan Steam library and check anti-cheat status
+    watch           Background check for status changes (for systemd timer)
+    status          Show current tracking status
+    check <game>    Check a specific game by name or AppID
+    updates         Show recent anti-cheat status changes
+    database        Show/manage the anti-cheat database
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+
+DATA_DIR = Path(os.environ.get("HG24_AC_DATA", Path.home() / ".local/share/24hg/anticheat"))
+CACHE_DIR = Path(os.environ.get("HG24_AC_CACHE", Path.home() / ".cache/24hg/anticheat"))
+LAST_SCAN_FILE = DATA_DIR / "last-scan.json"
+HISTORY_FILE = DATA_DIR / "history.json"
+TRACKING_FILE = DATA_DIR / "tracking.json"
+AWACY_CACHE = CACHE_DIR / "areweanticheatyet.json"
+PROTONDB_CACHE = CACHE_DIR / "protondb-cache.json"
+CACHE_TTL = 86400  # 24 hours
+
+# ── Colors ─────────────────────────────────────────────────────────────────────
+
+class C:
+    """Terminal color codes."""
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN = "\033[96m"
+    WHITE = "\033[97m"
+    GRAY = "\033[90m"
+    BG_RED = "\033[41m"
+    BG_GREEN = "\033[42m"
+    BG_YELLOW = "\033[43m"
+
+    @staticmethod
+    def strip(text: str) -> str:
+        return re.sub(r'\033\[[0-9;]*m', '', text)
+
+def use_color() -> bool:
+    return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+NO_COLOR = not use_color()
+
+def c(code: str, text: str) -> str:
+    if NO_COLOR:
+        return text
+    return f"{code}{text}{C.RESET}"
+
+def status_color(status: str) -> str:
+    colors = {
+        "supported": C.GREEN,
+        "denied": C.YELLOW,
+        "broken": C.RED,
+        "unknown": C.GRAY,
+    }
+    return colors.get(status, C.WHITE)
+
+def status_label(status: str) -> str:
+    labels = {
+        "supported": "SUPPORTED",
+        "denied": "DENIED",
+        "broken": "BROKEN",
+        "unknown": "UNKNOWN",
+    }
+    return c(status_color(status), f" {labels.get(status, status.upper()):^11s} ")
+
+def status_badge(status: str) -> str:
+    bg = {
+        "supported": C.BG_GREEN,
+        "denied": C.BG_YELLOW,
+        "broken": C.BG_RED,
+    }
+    label = {"supported": " WORKS ", "denied": " DENIED ", "broken": " BROKEN ", "unknown": " ??? "}
+    code = bg.get(status, "")
+    if NO_COLOR:
+        return label.get(status, f" {status.upper()} ")
+    return f"{code}{C.BOLD}{label.get(status, f' {status.upper()} ')}{C.RESET}"
+
+# ── Anti-Cheat Type Info ───────────────────────────────────────────────────────
+
+AC_INFO = {
+    "VAC": {
+        "name": "Valve Anti-Cheat",
+        "linux": "native",
+        "desc": "Always works on Linux. Valve's own anti-cheat runs natively via Proton.",
+    },
+    "EAC": {
+        "name": "Easy Anti-Cheat",
+        "linux": "per_game",
+        "desc": "Works on Linux IF the developer enables it. Epic provides a Proton runtime, "
+                "but each developer must opt in.",
+    },
+    "BattlEye": {
+        "name": "BattlEye",
+        "linux": "per_game",
+        "desc": "Works on Linux IF the developer enables it. BattlEye provides Proton support, "
+                "but each developer must opt in.",
+    },
+    "Vanguard": {
+        "name": "Riot Vanguard",
+        "linux": "broken",
+        "desc": "Does NOT work on Linux. Requires a Windows kernel-level driver (ring 0). "
+                "Fundamentally incompatible with Proton/Wine.",
+    },
+    "FACEIT": {
+        "name": "FACEIT Anti-Cheat",
+        "linux": "broken",
+        "desc": "Does NOT work on Linux. Requires a Windows kernel driver.",
+    },
+    "Ricochet": {
+        "name": "Ricochet (Activision)",
+        "linux": "broken",
+        "desc": "Does NOT work on Linux. Kernel-level driver, no Proton support.",
+    },
+    "GameGuard": {
+        "name": "nProtect GameGuard",
+        "linux": "broken",
+        "desc": "Does NOT work on Linux. Deep Windows kernel integration.",
+    },
+    "Hyperion": {
+        "name": "Hyperion (Roblox)",
+        "linux": "broken",
+        "desc": "Does NOT work on Linux. Byfron/Hyperion requires Windows kernel access.",
+    },
+    "PunkBuster": {
+        "name": "PunkBuster",
+        "linux": "mostly_broken",
+        "desc": "Mostly doesn't work on Linux. Legacy anti-cheat with no Proton support.",
+    },
+    "XIGNCODE3": {
+        "name": "XIGNCODE3",
+        "linux": "broken",
+        "desc": "Does NOT work on Linux. Kernel-level driver.",
+    },
+    "Nexon": {
+        "name": "Nexon Game Security",
+        "linux": "broken",
+        "desc": "Does NOT work on Linux.",
+    },
+    "none": {
+        "name": "No Anti-Cheat",
+        "linux": "native",
+        "desc": "Game has no anti-cheat system. Compatibility depends only on Proton.",
+    },
+    "custom": {
+        "name": "Custom/Proprietary",
+        "linux": "varies",
+        "desc": "Game uses a custom anti-cheat. Compatibility varies.",
+    },
+}
+
+# ── Built-in Anti-Cheat Database (200+ games) ─────────────────────────────────
+
+ANTICHEAT_DB = {
+    # ── EAC — SUPPORTED (developer enabled Linux) ──
+    252490: {"name": "Rust", "ac": "EAC", "status": "supported"},
+    1172470: {"name": "Apex Legends", "ac": "EAC", "status": "supported"},
+    892970: {"name": "Valheim", "ac": "EAC", "status": "supported"},
+    1966720: {"name": "Lethal Company", "ac": "EAC", "status": "supported"},
+    548430: {"name": "Deep Rock Galactic", "ac": "EAC", "status": "supported"},
+    1097150: {"name": "Fall Guys", "ac": "EAC", "status": "supported"},
+    1623730: {"name": "Palworld", "ac": "EAC", "status": "supported"},
+    1245620: {"name": "Elden Ring", "ac": "EAC", "status": "supported"},
+    236850: {"name": "Europa Universalis IV", "ac": "EAC", "status": "supported"},
+    945360: {"name": "Among Us", "ac": "EAC", "status": "supported"},
+    1290220: {"name": "Naraka: Bladepoint", "ac": "EAC", "status": "supported"},
+    632360: {"name": "Risk of Rain 2", "ac": "EAC", "status": "supported"},
+    394360: {"name": "Hearts of Iron IV", "ac": "EAC", "status": "supported"},
+    1174180: {"name": "Red Dead Redemption 2", "ac": "EAC", "status": "supported"},
+    397540: {"name": "Borderlands 3", "ac": "EAC", "status": "supported"},
+    677620: {"name": "Paladins", "ac": "EAC", "status": "supported"},
+    813780: {"name": "Age of Empires II: DE", "ac": "EAC", "status": "supported"},
+    1426210: {"name": "It Takes Two", "ac": "EAC", "status": "supported"},
+    1361210: {"name": "Titanfall 2", "ac": "EAC", "status": "supported"},
+    2073850: {"name": "THE FINALS", "ac": "EAC", "status": "supported"},
+    1517290: {"name": "Fortnite", "ac": "EAC", "status": "denied"},
+
+    # ── EAC — DENIED (developer has NOT enabled Linux) ──
+    578080: {"name": "PUBG: BATTLEGROUNDS", "ac": "EAC", "status": "denied"},
+    381210: {"name": "Dead by Daylight", "ac": "EAC", "status": "denied"},
+    236390: {"name": "War Thunder", "ac": "EAC", "status": "denied"},
+    1604030: {"name": "V Rising", "ac": "EAC", "status": "denied"},
+    271590: {"name": "Grand Theft Auto V", "ac": "EAC", "status": "denied"},
+    1222670: {"name": "The Sims 4", "ac": "EAC", "status": "denied"},
+    1811260: {"name": "EA SPORTS FC 25", "ac": "EAC", "status": "denied"},
+    2138330: {"name": "Dragon Ball Sparking! ZERO", "ac": "EAC", "status": "denied"},
+    2344520: {"name": "Warhammer 40K: Space Marine 2", "ac": "EAC", "status": "denied"},
+    2379780: {"name": "Party Animals", "ac": "EAC", "status": "denied"},
+    1599340: {"name": "Lost Ark", "ac": "EAC", "status": "denied"},
+
+    # ── BattlEye — SUPPORTED ──
+    221100: {"name": "DayZ", "ac": "BattlEye", "status": "supported"},
+    346110: {"name": "ARK: Survival Evolved", "ac": "BattlEye", "status": "supported"},
+    107410: {"name": "Arma 3", "ac": "BattlEye", "status": "supported"},
+    2215430: {"name": "Sons of the Forest", "ac": "BattlEye", "status": "supported"},
+    393380: {"name": "Squad", "ac": "BattlEye", "status": "supported"},
+    686810: {"name": "Hell Let Loose", "ac": "BattlEye", "status": "supported"},
+    1874880: {"name": "Superpeople", "ac": "BattlEye", "status": "supported"},
+    251570: {"name": "7 Days to Die", "ac": "BattlEye", "status": "supported"},
+    304930: {"name": "Unturned", "ac": "BattlEye", "status": "supported"},
+
+    # ── BattlEye — DENIED ──
+    359550: {"name": "Rainbow Six Siege", "ac": "BattlEye", "status": "denied"},
+    1085660: {"name": "Destiny 2", "ac": "BattlEye", "status": "denied"},
+    611500: {"name": "Quake Champions", "ac": "BattlEye", "status": "denied"},
+    218620: {"name": "PAYDAY 2", "ac": "BattlEye", "status": "denied"},
+    1938090: {"name": "Call of Duty: HQ", "ac": "Ricochet", "status": "broken"},
+    2406770: {"name": "Escape from Tarkov", "ac": "BattlEye", "status": "denied"},
+    2074920: {"name": "Arena Breakout: Infinite", "ac": "BattlEye", "status": "denied"},
+
+    # ── Vanguard — BROKEN ──
+    "valorant": {"name": "Valorant", "ac": "Vanguard", "status": "broken"},
+    "league": {"name": "League of Legends", "ac": "Vanguard", "status": "broken"},
+
+    # ── FACEIT — BROKEN ──
+    "faceit_cs2": {"name": "FACEIT CS2", "ac": "FACEIT", "status": "broken"},
+    "faceit_generic": {"name": "FACEIT Client", "ac": "FACEIT", "status": "broken"},
+
+    # ── Ricochet — BROKEN ──
+    1962663: {"name": "Call of Duty: MW III", "ac": "Ricochet", "status": "broken"},
+    2933620: {"name": "Call of Duty: Black Ops 6", "ac": "Ricochet", "status": "broken"},
+    1938090: {"name": "Call of Duty: Warzone", "ac": "Ricochet", "status": "broken"},
+
+    # ── GameGuard / XIGNCODE3 — BROKEN ──
+    2357570: {"name": "Overwatch 2", "ac": "custom", "status": "denied"},
+    109600: {"name": "Neverwinter", "ac": "GameGuard", "status": "broken"},
+    746930: {"name": "Closers", "ac": "XIGNCODE3", "status": "broken"},
+    "maplestory": {"name": "MapleStory", "ac": "Nexon", "status": "broken"},
+    "maplestory2": {"name": "MapleStory 2", "ac": "Nexon", "status": "broken"},
+    "lost_saga": {"name": "Lost Saga", "ac": "GameGuard", "status": "broken"},
+
+    # ── Hyperion — BROKEN ──
+    "roblox": {"name": "Roblox", "ac": "Hyperion", "status": "broken"},
+
+    # ── PunkBuster — MOSTLY BROKEN ──
+    24960: {"name": "Battlefield: Bad Company 2", "ac": "PunkBuster", "status": "broken"},
+    1238810: {"name": "Battlefield 2042", "ac": "EAC", "status": "denied"},
+
+    # ── VAC — ALWAYS WORKS ──
+    730: {"name": "Counter-Strike 2", "ac": "VAC", "status": "supported"},
+    440: {"name": "Team Fortress 2", "ac": "VAC", "status": "supported"},
+    570: {"name": "Dota 2", "ac": "VAC", "status": "supported"},
+    4000: {"name": "Garry's Mod", "ac": "VAC", "status": "supported"},
+    550: {"name": "Left 4 Dead 2", "ac": "VAC", "status": "supported"},
+    252950: {"name": "Rocket League", "ac": "VAC", "status": "supported"},
+    740: {"name": "Counter-Strike: Source", "ac": "VAC", "status": "supported"},
+    10: {"name": "Counter-Strike", "ac": "VAC", "status": "supported"},
+    240: {"name": "Counter-Strike: Source", "ac": "VAC", "status": "supported"},
+    320: {"name": "Half-Life 2: Deathmatch", "ac": "VAC", "status": "supported"},
+    500: {"name": "Left 4 Dead", "ac": "VAC", "status": "supported"},
+    620: {"name": "Portal 2", "ac": "VAC", "status": "supported"},
+    1046930: {"name": "Dota Underlords", "ac": "VAC", "status": "supported"},
+    222880: {"name": "Insurgency", "ac": "VAC", "status": "supported"},
+    581320: {"name": "Insurgency: Sandstorm", "ac": "EAC", "status": "supported"},
+    70: {"name": "Half-Life", "ac": "VAC", "status": "supported"},
+    80: {"name": "Counter-Strike: Condition Zero", "ac": "VAC", "status": "supported"},
+
+    # ── No Anti-Cheat — SUPPORTED ──
+    1091500: {"name": "Cyberpunk 2077", "ac": "none", "status": "supported"},
+    1086940: {"name": "Baldur's Gate 3", "ac": "none", "status": "supported"},
+    292030: {"name": "The Witcher 3: Wild Hunt", "ac": "none", "status": "supported"},
+    1174480: {"name": "Red Dead Redemption 2 (SP)", "ac": "none", "status": "supported"},
+    413150: {"name": "Stardew Valley", "ac": "none", "status": "supported"},
+    105600: {"name": "Terraria", "ac": "none", "status": "supported"},
+    367520: {"name": "Hollow Knight", "ac": "none", "status": "supported"},
+    1145360: {"name": "Hades", "ac": "none", "status": "supported"},
+    1426210: {"name": "It Takes Two", "ac": "none", "status": "supported"},
+    814380: {"name": "Sekiro: Shadows Die Twice", "ac": "none", "status": "supported"},
+    1237970: {"name": "Titanfall 2 (SP)", "ac": "none", "status": "supported"},
+    374320: {"name": "Dark Souls III", "ac": "none", "status": "supported"},
+    1888160: {"name": "FINAL FANTASY VII REBIRTH", "ac": "none", "status": "supported"},
+    1985810: {"name": "Palworld (SP)", "ac": "none", "status": "supported"},
+    892970: {"name": "Valheim", "ac": "none", "status": "supported"},
+    427520: {"name": "Factorio", "ac": "none", "status": "supported"},
+    526870: {"name": "Satisfactory", "ac": "none", "status": "supported"},
+    1326470: {"name": "Sons of the Forest (SP)", "ac": "none", "status": "supported"},
+    257850: {"name": "Hyper Light Drifter", "ac": "none", "status": "supported"},
+    311210: {"name": "Call of Duty: Black Ops III", "ac": "none", "status": "supported"},
+    377160: {"name": "Fallout 4", "ac": "none", "status": "supported"},
+    489830: {"name": "The Elder Scrolls V: Skyrim SE", "ac": "none", "status": "supported"},
+    1716740: {"name": "Starfield", "ac": "none", "status": "supported"},
+    814380: {"name": "Sekiro", "ac": "none", "status": "supported"},
+    1145350: {"name": "Hades", "ac": "none", "status": "supported"},
+    990080: {"name": "Hogwarts Legacy", "ac": "none", "status": "supported"},
+    1551360: {"name": "Forza Horizon 5", "ac": "none", "status": "supported"},
+    1238060: {"name": "PowerWash Simulator", "ac": "none", "status": "supported"},
+    1794680: {"name": "Vampire Survivors", "ac": "none", "status": "supported"},
+    668580: {"name": "Disco Elysium", "ac": "none", "status": "supported"},
+    1063730: {"name": "New World", "ac": "EAC", "status": "denied"},
+    230410: {"name": "Warframe", "ac": "custom", "status": "supported"},
+    275850: {"name": "No Man's Sky", "ac": "none", "status": "supported"},
+    582010: {"name": "Monster Hunter: World", "ac": "none", "status": "supported"},
+    1446780: {"name": "Monster Hunter Rise", "ac": "none", "status": "supported"},
+    1817070: {"name": "Marvel's Spider-Man Remastered", "ac": "none", "status": "supported"},
+    1817190: {"name": "Marvel's Spider-Man: Miles Morales", "ac": "none", "status": "supported"},
+    1593500: {"name": "God of War", "ac": "none", "status": "supported"},
+    2322010: {"name": "God of War Ragnarok", "ac": "none", "status": "supported"},
+    1240440: {"name": "Halo Infinite", "ac": "EAC", "status": "denied"},
+    976730: {"name": "Halo: MCC", "ac": "EAC", "status": "supported"},
+    1888930: {"name": "The Last of Us Part I", "ac": "none", "status": "supported"},
+    2358720: {"name": "Black Myth: Wukong", "ac": "none", "status": "supported"},
+    1282100: {"name": "Remnant II", "ac": "EAC", "status": "supported"},
+    236390: {"name": "War Thunder", "ac": "EAC", "status": "denied"},
+    255710: {"name": "Cities: Skylines", "ac": "none", "status": "supported"},
+    949230: {"name": "Cities: Skylines II", "ac": "none", "status": "supported"},
+    1062090: {"name": "Grounded", "ac": "none", "status": "supported"},
+    1263950: {"name": "Midnight Fight Express", "ac": "none", "status": "supported"},
+    1449850: {"name": "Sifu", "ac": "none", "status": "supported"},
+    1245620: {"name": "Elden Ring", "ac": "EAC", "status": "supported"},
+    1313140: {"name": "Weird West", "ac": "none", "status": "supported"},
+    1368930: {"name": "Lies of P", "ac": "none", "status": "supported"},
+    1172620: {"name": "Sea of Thieves", "ac": "custom", "status": "supported"},
+    2054970: {"name": "Wuthering Waves", "ac": "custom", "status": "denied"},
+    570940: {"name": "Dark Souls: REMASTERED", "ac": "none", "status": "supported"},
+    1817230: {"name": "Horizon Forbidden West", "ac": "none", "status": "supported"},
+    374900: {"name": "Prey (2017)", "ac": "none", "status": "supported"},
+    1144200: {"name": "Ready or Not", "ac": "EAC", "status": "supported"},
+    548430: {"name": "Deep Rock Galactic", "ac": "EAC", "status": "supported"},
+    250900: {"name": "The Binding of Isaac: Rebirth", "ac": "none", "status": "supported"},
+    291550: {"name": "Brawlhalla", "ac": "EAC", "status": "supported"},
+    755790: {"name": "Ring of Elysium", "ac": "EAC", "status": "denied"},
+    227300: {"name": "Euro Truck Simulator 2", "ac": "none", "status": "supported"},
+    270880: {"name": "American Truck Simulator", "ac": "none", "status": "supported"},
+    431960: {"name": "Wallpaper Engine", "ac": "none", "status": "supported"},
+    1229380: {"name": "Everhood", "ac": "none", "status": "supported"},
+    570: {"name": "Dota 2", "ac": "VAC", "status": "supported"},
+    1468810: {"name": "Dave the Diver", "ac": "none", "status": "supported"},
+    594650: {"name": "Hunt: Showdown", "ac": "EAC", "status": "supported"},
+    444090: {"name": "Payday 3", "ac": "EAC", "status": "denied"},
+    1222680: {"name": "Need for Speed Heat", "ac": "none", "status": "supported"},
+    1293830: {"name": "Forza Horizon 4", "ac": "none", "status": "supported"},
+    552520: {"name": "Far Cry 5", "ac": "none", "status": "supported"},
+    2369390: {"name": "Marvel Rivals", "ac": "EAC", "status": "supported"},
+    1985690: {"name": "Bodycam", "ac": "EAC", "status": "denied"},
+    899770: {"name": "Last Oasis", "ac": "EAC", "status": "denied"},
+    1240440: {"name": "Halo Infinite (MP)", "ac": "EAC", "status": "denied"},
+    782330: {"name": "DOOM Eternal", "ac": "custom", "status": "supported"},
+    2420110: {"name": "Warhammer 40K: Darktide", "ac": "EAC", "status": "supported"},
+    1623730: {"name": "Palworld", "ac": "EAC", "status": "supported"},
+    553850: {"name": "HELLDIVERS 2", "ac": "GameGuard", "status": "broken"},
+    105600: {"name": "Terraria", "ac": "none", "status": "supported"},
+    632360: {"name": "Risk of Rain 2", "ac": "EAC", "status": "supported"},
+    233860: {"name": "Kenshi", "ac": "none", "status": "supported"},
+    322170: {"name": "Geometry Dash", "ac": "none", "status": "supported"},
+    1794680: {"name": "Vampire Survivors", "ac": "none", "status": "supported"},
+    1422450: {"name": "Dead Island 2", "ac": "EAC", "status": "denied"},
+    1811260: {"name": "EA SPORTS FC 25", "ac": "EAC", "status": "denied"},
+    1203220: {"name": "Naraka: Bladepoint", "ac": "EAC", "status": "supported"},
+    730: {"name": "Counter-Strike 2", "ac": "VAC", "status": "supported"},
+    386360: {"name": "SMITE", "ac": "EAC", "status": "supported"},
+    1599660: {"name": "Enlisted", "ac": "EAC", "status": "denied"},
+    1677740: {"name": "Stumble Guys", "ac": "none", "status": "supported"},
+    602960: {"name": "The Long Dark", "ac": "none", "status": "supported"},
+    1326470: {"name": "Sons of the Forest", "ac": "none", "status": "supported"},
+    620980: {"name": "Beat Saber", "ac": "none", "status": "supported"},
+    1654120: {"name": "Delta Force", "ac": "EAC", "status": "denied"},
+    1272010: {"name": "CRSED: F.O.A.D.", "ac": "EAC", "status": "supported"},
+    1778820: {"name": "Marauders", "ac": "EAC", "status": "denied"},
+    1517290: {"name": "Fortnite", "ac": "EAC", "status": "denied"},
+    105450: {"name": "Age of Empires III: DE", "ac": "none", "status": "supported"},
+    1017900: {"name": "Age of Empires IV", "ac": "none", "status": "supported"},
+    261550: {"name": "Mount & Blade II: Bannerlord", "ac": "none", "status": "supported"},
+    48700: {"name": "Mount & Blade: Warband", "ac": "none", "status": "supported"},
+    1343240: {"name": "Crusader Kings III", "ac": "none", "status": "supported"},
+    281990: {"name": "Stellaris", "ac": "none", "status": "supported"},
+    394360: {"name": "Hearts of Iron IV", "ac": "none", "status": "supported"},
+    236090: {"name": "Desperados III", "ac": "none", "status": "supported"},
+    2198150: {"name": "Content Warning", "ac": "none", "status": "supported"},
+    1948280: {"name": "Schedule I", "ac": "none", "status": "supported"},
+    1091500: {"name": "Cyberpunk 2077", "ac": "none", "status": "supported"},
+    736260: {"name": "Brawlhalla", "ac": "EAC", "status": "supported"},
+    2399830: {"name": "Deadlock", "ac": "VAC", "status": "supported"},
+    2358720: {"name": "Black Myth: Wukong", "ac": "none", "status": "supported"},
+    1332010: {"name": "Stray", "ac": "none", "status": "supported"},
+    440900: {"name": "Conan Exiles", "ac": "BattlEye", "status": "supported"},
+    418240: {"name": "Shadow of Mordor", "ac": "none", "status": "supported"},
+    356190: {"name": "Middle-earth: Shadow of War", "ac": "none", "status": "supported"},
+    1328670: {"name": "Mass Effect Legendary Edition", "ac": "none", "status": "supported"},
+    1237950: {"name": "FINAL FANTASY VII REMAKE", "ac": "none", "status": "supported"},
+    2050650: {"name": "Resident Evil 4 Remake", "ac": "none", "status": "supported"},
+    418370: {"name": "Resident Evil 7", "ac": "none", "status": "supported"},
+    883710: {"name": "Resident Evil 2 Remake", "ac": "none", "status": "supported"},
+    952060: {"name": "Resident Evil 3 Remake", "ac": "none", "status": "supported"},
+}
+
+# ── Steam Library Parsing ──────────────────────────────────────────────────────
+
+def find_steam_roots() -> list[Path]:
+    """Find all Steam installation roots (native + Flatpak)."""
+    candidates = [
+        Path.home() / ".steam/steam",
+        Path.home() / ".local/share/Steam",
+        Path.home() / ".var/app/com.valvesoftware.Steam/.steam/steam",
+        Path.home() / ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+        Path("/usr/share/steam"),
+    ]
+    roots = []
+    for p in candidates:
+        if p.exists():
+            roots.append(p.resolve())
+    # Deduplicate (symlinks)
+    seen = set()
+    unique = []
+    for r in roots:
+        real = r.resolve()
+        if real not in seen:
+            seen.add(real)
+            unique.append(real)
+    return unique
+
+
+def parse_vdf_simple(text: str) -> dict:
+    """Minimal VDF/ACF parser — extracts key-value pairs from Valve's text format."""
+    result = {}
+    for match in re.finditer(r'"([^"]+)"\s+"([^"]*)"', text):
+        result[match.group(1)] = match.group(2)
+    return result
+
+
+def find_library_folders(steam_root: Path) -> list[Path]:
+    """Parse libraryfolders.vdf to find all Steam library paths."""
+    vdf_path = steam_root / "steamapps" / "libraryfolders.vdf"
+    if not vdf_path.exists():
+        vdf_path = steam_root / "config" / "libraryfolders.vdf"
+    if not vdf_path.exists():
+        return [steam_root]
+
+    folders = []
+    try:
+        text = vdf_path.read_text(errors="replace")
+        for match in re.finditer(r'"path"\s+"([^"]+)"', text):
+            p = Path(match.group(1))
+            if p.exists():
+                folders.append(p)
+    except Exception:
+        pass
+
+    if not folders:
+        folders.append(steam_root)
+    return folders
+
+
+def scan_steam_library() -> dict[int, str]:
+    """Scan all Steam library folders and return {appid: name} for installed games."""
+    games = {}
+    steam_roots = find_steam_roots()
+
+    for root in steam_roots:
+        for lib_folder in find_library_folders(root):
+            steamapps = lib_folder / "steamapps"
+            if not steamapps.exists():
+                continue
+            for acf in steamapps.glob("appmanifest_*.acf"):
+                try:
+                    text = acf.read_text(errors="replace")
+                    data = parse_vdf_simple(text)
+                    appid = int(data.get("appid", 0))
+                    name = data.get("name", "Unknown")
+                    if appid > 0:
+                        games[appid] = name
+                except (ValueError, OSError):
+                    continue
+
+    return games
+
+
+# ── areweanticheatyet.com Integration ──────────────────────────────────────────
+
+def fetch_awacy_data(force: bool = False) -> Optional[list]:
+    """Fetch data from areweanticheatyet.com with caching."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not force and AWACY_CACHE.exists():
+        try:
+            stat = AWACY_CACHE.stat()
+            age = time.time() - stat.st_mtime
+            if age < CACHE_TTL:
+                return json.loads(AWACY_CACHE.read_text())
+        except Exception:
+            pass
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://areweanticheatyet.com/games.json",
+            headers={"User-Agent": "24HG-AntiCheat-Tracker/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            AWACY_CACHE.write_text(json.dumps(data, indent=2))
+            return data
+    except Exception as e:
+        print(c(C.YELLOW, f"  Warning: Could not fetch areweanticheatyet.com: {e}"))
+        # Fall back to cache even if expired
+        if AWACY_CACHE.exists():
+            try:
+                return json.loads(AWACY_CACHE.read_text())
+            except Exception:
+                pass
+        return None
+
+
+def normalize_awacy_status(status_str: str) -> str:
+    """Convert areweanticheatyet.com status strings to our status format."""
+    s = status_str.lower().strip()
+    if s in ("supported", "native", "running"):
+        return "supported"
+    if s in ("denied", "planned", ""):
+        return "denied"
+    if s in ("broken", "unsupported"):
+        return "broken"
+    return "unknown"
+
+
+def merge_awacy_data(awacy: list) -> dict:
+    """Merge AWACY data into our database format. Returns extra entries."""
+    extra = {}
+    for game in awacy:
+        name = game.get("name", "")
+        status = normalize_awacy_status(game.get("status", ""))
+        ac_list = game.get("anticheats", [])
+        ac_type = ac_list[0] if ac_list else "unknown"
+        # Normalize AC type
+        ac_map = {
+            "Easy Anti-Cheat": "EAC",
+            "BattlEye": "BattlEye",
+            "Valve Anti-Cheat": "VAC",
+            "Vanguard": "Vanguard",
+            "FACEIT": "FACEIT",
+            "Ricochet": "Ricochet",
+            "nProtect GameGuard": "GameGuard",
+            "PunkBuster": "PunkBuster",
+        }
+        ac_normalized = ac_map.get(ac_type, ac_type)
+
+        # Try to match by name to existing DB (don't override with worse data)
+        found = False
+        for appid, entry in ANTICHEAT_DB.items():
+            if isinstance(appid, int) and entry["name"].lower() == name.lower():
+                found = True
+                break
+        if not found:
+            extra[name] = {"name": name, "ac": ac_normalized, "status": status}
+    return extra
+
+
+# ── ProtonDB Integration ──────────────────────────────────────────────────────
+
+def fetch_protondb_rating(appid: int) -> Optional[str]:
+    """Fetch ProtonDB rating for a game. Uses cache."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    cache = {}
+    if PROTONDB_CACHE.exists():
+        try:
+            cache = json.loads(PROTONDB_CACHE.read_text())
+        except Exception:
+            cache = {}
+
+    key = str(appid)
+    if key in cache:
+        entry = cache[key]
+        if time.time() - entry.get("fetched", 0) < CACHE_TTL:
+            return entry.get("rating")
+
+    try:
+        import urllib.request
+        url = f"https://www.protondb.com/api/v1/reports/summaries/{appid}.json"
+        req = urllib.request.Request(url, headers={"User-Agent": "24HG-AntiCheat-Tracker/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            rating = data.get("tier", "unknown")
+            cache[key] = {"rating": rating, "fetched": time.time()}
+            PROTONDB_CACHE.write_text(json.dumps(cache, indent=2))
+            return rating
+    except Exception:
+        return None
+
+
+def protondb_color(rating: str) -> str:
+    """Color a ProtonDB rating."""
+    colors = {
+        "platinum": C.WHITE,
+        "gold": C.YELLOW,
+        "silver": C.GRAY,
+        "bronze": C.RED,
+        "borked": C.RED,
+        "native": C.GREEN,
+    }
+    return c(colors.get(rating, C.WHITE), rating.upper() if rating else "N/A")
+
+
+# ── Data Persistence ──────────────────────────────────────────────────────────
+
+def ensure_dirs():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_json(path: Path) -> dict:
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_json(path: Path, data: dict):
+    ensure_dirs()
+    path.write_text(json.dumps(data, indent=2, default=str))
+
+
+def send_notification(title: str, body: str, icon: str = "dialog-information"):
+    """Send a desktop notification via notify-send."""
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "24HG Anti-Cheat Tracker", "-i", icon, title, body],
+            timeout=5, capture_output=True,
+        )
+    except Exception:
+        pass
+
+
+# ── Game Lookup ────────────────────────────────────────────────────────────────
+
+def lookup_game(query: str) -> list[tuple]:
+    """Look up a game by name or AppID. Returns list of (key, entry) tuples."""
+    results = []
+
+    # Try as AppID first
+    try:
+        appid = int(query)
+        if appid in ANTICHEAT_DB:
+            results.append((appid, ANTICHEAT_DB[appid]))
+            return results
+    except ValueError:
+        pass
+
+    # Search by name (case-insensitive, substring match)
+    q = query.lower()
+    for key, entry in ANTICHEAT_DB.items():
+        if q in entry["name"].lower():
+            results.append((key, entry))
+
+    # Sort: exact matches first, then alphabetical
+    results.sort(key=lambda x: (0 if x[1]["name"].lower() == q else 1, x[1]["name"]))
+    return results
+
+
+# ── Commands ───────────────────────────────────────────────────────────────────
+
+def cmd_scan(args):
+    """Scan Steam library and check anti-cheat status."""
+    print(c(C.BOLD + C.CYAN, "\n  24HG Anti-Cheat Status Tracker"))
+    print(c(C.DIM, "  Scanning your Steam library...\n"))
+
+    installed = scan_steam_library()
+
+    if not installed:
+        print(c(C.YELLOW, "  No Steam games found."))
+        print(c(C.DIM, "  Make sure Steam is installed (native or Flatpak).\n"))
+        return
+
+    print(c(C.DIM, f"  Found {len(installed)} installed games. Checking anti-cheat status...\n"))
+
+    # Fetch AWACY data
+    awacy_data = fetch_awacy_data()
+    awacy_extra = {}
+    if awacy_data:
+        awacy_extra = merge_awacy_data(awacy_data)
+        print(c(C.DIM, f"  Loaded {len(awacy_data)} games from areweanticheatyet.com\n"))
+
+    # Categorize
+    categories = {"supported": [], "denied": [], "broken": [], "unknown": []}
+
+    for appid, name in sorted(installed.items(), key=lambda x: x[1].lower()):
+        if appid in ANTICHEAT_DB:
+            entry = ANTICHEAT_DB[appid]
+            cat = entry["status"]
+            categories[cat].append({
+                "appid": appid, "name": name,
+                "ac": entry["ac"], "status": cat, "source": "builtin",
+            })
+        else:
+            # Try AWACY extra by name match
+            matched = False
+            for ename, edata in awacy_extra.items():
+                if ename.lower() == name.lower():
+                    cat = edata["status"]
+                    categories[cat].append({
+                        "appid": appid, "name": name,
+                        "ac": edata["ac"], "status": cat, "source": "awacy",
+                    })
+                    matched = True
+                    break
+            if not matched:
+                categories["unknown"].append({
+                    "appid": appid, "name": name,
+                    "ac": "unknown", "status": "unknown", "source": "none",
+                })
+
+    # Print results
+    total = len(installed)
+    counts = {k: len(v) for k, v in categories.items()}
+
+    # Summary bar
+    print(c(C.BOLD, f"  {total} games scanned: "), end="")
+    parts = []
+    if counts["supported"]:
+        parts.append(c(C.GREEN, f"{counts['supported']} work"))
+    if counts["denied"]:
+        parts.append(c(C.YELLOW, f"{counts['denied']} blocked by developer"))
+    if counts["broken"]:
+        parts.append(c(C.RED, f"{counts['broken']} fundamentally blocked"))
+    if counts["unknown"]:
+        parts.append(c(C.GRAY, f"{counts['unknown']} unknown"))
+    print(", ".join(parts))
+    print()
+
+    # Table
+    header = f"  {'Game':<42} {'Anti-Cheat':<18} {'Status':<15}"
+    print(c(C.BOLD, header))
+    print(c(C.DIM, "  " + "─" * 75))
+
+    for cat_name, label, color in [
+        ("supported", "SUPPORTED — These games work on Linux", C.GREEN),
+        ("denied", "DENIED — Developer hasn't enabled Linux support", C.YELLOW),
+        ("broken", "BROKEN — Anti-cheat fundamentally incompatible", C.RED),
+        ("unknown", "UNKNOWN — Not in database", C.GRAY),
+    ]:
+        games = categories[cat_name]
+        if not games:
+            continue
+        print(c(C.BOLD + color, f"\n  ▸ {label} ({len(games)})"))
+        for g in games:
+            ac_display = g["ac"] if g["ac"] != "unknown" else "—"
+            name_display = g["name"][:40]
+            print(f"    {name_display:<42} {ac_display:<18} {status_label(g['status'])}")
+
+    print()
+
+    # Save scan results
+    scan_data = {
+        "timestamp": datetime.now().isoformat(),
+        "total": total,
+        "counts": counts,
+        "games": {},
+    }
+    for cat, games in categories.items():
+        for g in games:
+            scan_data["games"][str(g["appid"])] = g
+
+    save_json(LAST_SCAN_FILE, scan_data)
+
+    # Update tracking
+    tracking = load_json(TRACKING_FILE)
+    tracking["installed_appids"] = list(installed.keys())
+    tracking["last_scan"] = datetime.now().isoformat()
+    save_json(TRACKING_FILE, tracking)
+
+    if args.json:
+        print(json.dumps(scan_data, indent=2))
+
+
+def cmd_watch(args):
+    """Check for status changes and send notifications."""
+    print(c(C.DIM, "  24HG Anti-Cheat Tracker — Checking for updates..."))
+
+    # Load previous scan
+    prev_scan = load_json(LAST_SCAN_FILE)
+    prev_games = prev_scan.get("games", {})
+
+    if not prev_games:
+        print(c(C.YELLOW, "  No previous scan found. Run 'scan' first."))
+        return
+
+    # Fetch fresh AWACY data
+    awacy_data = fetch_awacy_data(force=True)
+    if not awacy_data:
+        print(c(C.YELLOW, "  Could not fetch updated data. Will retry next run."))
+        return
+
+    awacy_extra = merge_awacy_data(awacy_data)
+    changes = []
+    history = load_json(HISTORY_FILE)
+    if "changes" not in history:
+        history["changes"] = []
+
+    # Check each tracked game for status changes
+    for appid_str, prev_info in prev_games.items():
+        try:
+            appid = int(appid_str)
+        except ValueError:
+            continue
+
+        old_status = prev_info.get("status", "unknown")
+        new_status = old_status
+
+        # Check built-in DB first (may have been updated)
+        if appid in ANTICHEAT_DB:
+            new_status = ANTICHEAT_DB[appid]["status"]
+        else:
+            # Check AWACY
+            name = prev_info.get("name", "")
+            for ename, edata in awacy_extra.items():
+                if ename.lower() == name.lower():
+                    new_status = edata["status"]
+                    break
+
+        if old_status != new_status:
+            change = {
+                "appid": appid,
+                "name": prev_info.get("name", "Unknown"),
+                "old_status": old_status,
+                "new_status": new_status,
+                "ac": prev_info.get("ac", "unknown"),
+                "date": datetime.now().isoformat(),
+            }
+            changes.append(change)
+            history["changes"].append(change)
+
+            # Send desktop notification for good news
+            if new_status == "supported" and old_status in ("denied", "broken", "unknown"):
+                name = prev_info.get("name", "Unknown")
+                send_notification(
+                    "Great news! Linux support enabled!",
+                    f"{name} just enabled Linux anti-cheat support! You can play it now.",
+                    "24hg-gamepad",
+                )
+                print(c(C.GREEN + C.BOLD,
+                         f"  ★ {name}: {old_status.upper()} → SUPPORTED!"))
+            elif new_status == "denied" and old_status == "supported":
+                name = prev_info.get("name", "Unknown")
+                send_notification(
+                    "Linux support removed",
+                    f"{name} has disabled Linux anti-cheat support.",
+                    "dialog-warning",
+                )
+                print(c(C.RED + C.BOLD,
+                         f"  ✘ {name}: SUPPORTED → DENIED"))
+            else:
+                print(c(C.YELLOW,
+                         f"  ~ {prev_info.get('name', 'Unknown')}: "
+                         f"{old_status.upper()} → {new_status.upper()}"))
+
+    if not changes:
+        print(c(C.DIM, "  No status changes detected."))
+    else:
+        print(c(C.BOLD, f"\n  {len(changes)} status change(s) detected."))
+
+    history["last_check"] = datetime.now().isoformat()
+    save_json(HISTORY_FILE, history)
+
+    # Re-run scan silently to update last-scan.json
+    # We just update timestamps
+    prev_scan["last_watch"] = datetime.now().isoformat()
+    save_json(LAST_SCAN_FILE, prev_scan)
+
+    if args.json:
+        print(json.dumps({"changes": changes}, indent=2))
+
+
+def cmd_status(args):
+    """Show current tracking status."""
+    print(c(C.BOLD + C.CYAN, "\n  24HG Anti-Cheat Tracker — Status\n"))
+
+    tracking = load_json(TRACKING_FILE)
+    scan = load_json(LAST_SCAN_FILE)
+    history = load_json(HISTORY_FILE)
+
+    # Last scan
+    last_scan = scan.get("timestamp", "Never")
+    if last_scan != "Never":
+        try:
+            dt = datetime.fromisoformat(last_scan)
+            age = datetime.now() - dt
+            last_scan = f"{dt.strftime('%Y-%m-%d %H:%M')} ({age.days}d ago)"
+        except Exception:
+            pass
+
+    installed = tracking.get("installed_appids", [])
+    counts = scan.get("counts", {})
+
+    print(f"  {c(C.BOLD, 'Last scan:')}     {last_scan}")
+    print(f"  {c(C.BOLD, 'Games tracked:')} {len(installed)}")
+    if counts:
+        print(f"  {c(C.BOLD, 'Breakdown:')}    "
+              f"{c(C.GREEN, str(counts.get('supported', 0)))} working, "
+              f"{c(C.YELLOW, str(counts.get('denied', 0)))} denied, "
+              f"{c(C.RED, str(counts.get('broken', 0)))} broken, "
+              f"{c(C.GRAY, str(counts.get('unknown', 0)))} unknown")
+    print()
+
+    # Recent changes
+    changes = history.get("changes", [])
+    if changes:
+        print(c(C.BOLD, "  Recent status changes:"))
+        for ch in changes[-10:]:
+            date = ch.get("date", "")[:10]
+            name = ch.get("name", "Unknown")
+            old = ch.get("old_status", "?")
+            new = ch.get("new_status", "?")
+            arrow = c(C.GREEN, "→") if new == "supported" else c(C.RED, "→")
+            print(f"    {c(C.DIM, date)}  {name:<35} {old.upper()} {arrow} {new.upper()}")
+    else:
+        print(c(C.DIM, "  No status changes recorded yet."))
+
+    # Cache info
+    print()
+    if AWACY_CACHE.exists():
+        age = time.time() - AWACY_CACHE.stat().st_mtime
+        hours = int(age // 3600)
+        print(f"  {c(C.BOLD, 'AWACY cache:')}  {hours}h old " +
+              (c(C.GREEN, "(fresh)") if age < CACHE_TTL else c(C.YELLOW, "(stale)")))
+    else:
+        print(f"  {c(C.BOLD, 'AWACY cache:')}  Not cached")
+
+    print()
+
+    if args.json:
+        print(json.dumps({
+            "last_scan": scan.get("timestamp"),
+            "tracked": len(installed),
+            "counts": counts,
+            "changes": changes[-10:],
+        }, indent=2))
+
+
+def cmd_check(args):
+    """Check a specific game's anti-cheat status."""
+    query = " ".join(args.game) if args.game else ""
+    if not query:
+        print(c(C.RED, "  Usage: 24hg-anticheat-tracker check <game name or AppID>"))
+        return
+
+    results = lookup_game(query)
+
+    if not results:
+        print(c(C.YELLOW, f"\n  No game found matching '{query}'"))
+        print(c(C.DIM, "  Try a different name or check by Steam AppID.\n"))
+        return
+
+    for key, entry in results[:5]:
+        name = entry["name"]
+        ac = entry["ac"]
+        status = entry["status"]
+        ac_info = AC_INFO.get(ac, AC_INFO.get("custom", {}))
+
+        print(c(C.BOLD + C.CYAN, f"\n  {name}"))
+        if isinstance(key, int):
+            print(c(C.DIM, f"  Steam AppID: {key}"))
+        print()
+
+        print(f"  {c(C.BOLD, 'Anti-Cheat:')}    {ac_info.get('name', ac)} ({ac})")
+        print(f"  {c(C.BOLD, 'Linux Status:')}  {status_badge(status)}")
+        print()
+
+        # Explanation
+        print(f"  {c(C.BOLD, 'Details:')}")
+        print(f"  {ac_info.get('desc', 'No information available.')}")
+        print()
+
+        if status == "denied":
+            print(c(C.YELLOW + C.BOLD, "  ⚠ Why is this blocked?"))
+            print(c(C.YELLOW,
+                     f"  The {ac} anti-cheat system DOES support Linux/Proton."))
+            print(c(C.YELLOW,
+                     f"  However, the developer of {name} has NOT enabled it."))
+            print(c(C.YELLOW,
+                     "  This is a DEVELOPER CHOICE, not a technical limitation."))
+            print()
+            print(c(C.DIM, "  You can request Linux support:"))
+            print(c(C.DIM, f"  • Steam Community: https://steamcommunity.com/app/{key}/discussions/"))
+            if ac == "EAC":
+                print(c(C.DIM, "  • EAC developer docs: https://dev.epicgames.com/docs/game-services/anti-cheat"))
+            elif ac == "BattlEye":
+                print(c(C.DIM, "  • BattlEye supports Proton since Dec 2021"))
+            print()
+
+        elif status == "broken":
+            print(c(C.RED + C.BOLD, "  ✘ Why doesn't this work?"))
+            if ac == "Vanguard":
+                print(c(C.RED,
+                         "  Riot Vanguard requires a Windows kernel-level driver (ring 0)."))
+                print(c(C.RED,
+                         "  This fundamentally cannot work under Proton/Wine."))
+                print(c(C.RED,
+                         "  Riot would need to rewrite Vanguard for Linux — unlikely."))
+            elif ac == "Ricochet":
+                print(c(C.RED,
+                         "  Ricochet uses a Windows kernel driver for anti-cheat."))
+                print(c(C.RED,
+                         "  Activision has shown no interest in Linux support."))
+            elif ac == "FACEIT":
+                print(c(C.RED,
+                         "  FACEIT Anti-Cheat requires a Windows kernel driver."))
+                print(c(C.RED,
+                         "  There is no Proton/Linux support available."))
+            elif ac in ("GameGuard", "XIGNCODE3", "Nexon"):
+                print(c(C.RED,
+                         f"  {ac_info.get('name', ac)} is deeply tied to Windows internals."))
+                print(c(C.RED,
+                         "  No Linux support exists or is planned."))
+            elif ac == "Hyperion":
+                print(c(C.RED,
+                         "  Hyperion (Byfron) requires Windows kernel access."))
+                print(c(C.RED,
+                         "  Roblox has not provided Linux support."))
+            else:
+                print(c(C.RED, f"  {ac} does not support Linux."))
+            print()
+
+        elif status == "supported":
+            print(c(C.GREEN + C.BOLD, "  ✓ This game works on Linux!"))
+            if ac == "VAC":
+                print(c(C.GREEN, "  VAC always works on Linux — no developer opt-in needed."))
+            elif ac in ("EAC", "BattlEye"):
+                print(c(C.GREEN, f"  The developer has enabled {ac} Proton support."))
+            elif ac == "none":
+                print(c(C.GREEN, "  No anti-cheat — compatibility depends on Proton."))
+            print()
+
+        # ProtonDB rating
+        if isinstance(key, int):
+            rating = fetch_protondb_rating(key)
+            if rating:
+                print(f"  {c(C.BOLD, 'ProtonDB:')}     {protondb_color(rating)}")
+                print(c(C.DIM, f"  https://www.protondb.com/app/{key}"))
+                print()
+
+    if len(results) > 5:
+        print(c(C.DIM, f"  ... and {len(results) - 5} more results. Be more specific.\n"))
+
+    if args.json:
+        out = []
+        for key, entry in results[:5]:
+            out.append({"appid": key, **entry})
+        print(json.dumps(out, indent=2))
+
+
+def cmd_updates(args):
+    """Show recent anti-cheat status changes."""
+    print(c(C.BOLD + C.CYAN, "\n  24HG Anti-Cheat Tracker — Recent Updates\n"))
+
+    history = load_json(HISTORY_FILE)
+    changes = history.get("changes", [])
+
+    if not changes:
+        print(c(C.DIM, "  No status changes recorded yet."))
+        print(c(C.DIM, "  Run 'scan' first, then 'watch' periodically to track changes.\n"))
+        return
+
+    # Filter
+    if args.good:
+        changes = [ch for ch in changes if ch.get("new_status") == "supported"]
+        print(c(C.GREEN + C.BOLD, "  Showing only newly SUPPORTED games:\n"))
+    elif args.bad:
+        changes = [ch for ch in changes
+                   if ch.get("new_status") in ("denied", "broken")]
+        print(c(C.RED + C.BOLD, "  Showing only newly blocked games:\n"))
+
+    if not changes:
+        print(c(C.DIM, "  No matching changes found.\n"))
+        return
+
+    # Group by month
+    by_month = {}
+    for ch in changes:
+        date_str = ch.get("date", "")[:7]  # YYYY-MM
+        if date_str not in by_month:
+            by_month[date_str] = []
+        by_month[date_str].append(ch)
+
+    for month in sorted(by_month.keys(), reverse=True):
+        try:
+            label = datetime.strptime(month, "%Y-%m").strftime("%B %Y")
+        except Exception:
+            label = month
+        print(c(C.BOLD, f"  {label}:"))
+
+        for ch in by_month[month]:
+            name = ch.get("name", "Unknown")
+            old = ch.get("old_status", "?")
+            new = ch.get("new_status", "?")
+            ac = ch.get("ac", "?")
+            sc = status_color(new)
+            print(f"    {c(sc, '●')} {name:<35} {old.upper():>10} → {c(sc, new.upper()):<10}  ({ac})")
+        print()
+
+    if args.json:
+        print(json.dumps({"changes": changes}, indent=2))
+
+
+def cmd_database(args):
+    """Show/manage the anti-cheat database."""
+    subcmd = args.db_command if args.db_command else "stats"
+
+    if subcmd == "show":
+        cmd_database_show(args)
+    elif subcmd == "update":
+        cmd_database_update(args)
+    elif subcmd == "stats":
+        cmd_database_stats(args)
+    else:
+        print(c(C.RED, f"  Unknown subcommand: {subcmd}"))
+        print(c(C.DIM, "  Available: show, update, stats"))
+
+
+def cmd_database_show(args):
+    """Show full database listing."""
+    print(c(C.BOLD + C.CYAN, "\n  24HG Anti-Cheat Database\n"))
+
+    # Collect all integer-keyed entries and sort by name
+    entries = [(k, v) for k, v in ANTICHEAT_DB.items() if isinstance(k, int)]
+    entries.sort(key=lambda x: x[1]["name"].lower())
+
+    header = f"  {'AppID':<10} {'Game':<42} {'Anti-Cheat':<15} {'Status':<12}"
+    print(c(C.BOLD, header))
+    print(c(C.DIM, "  " + "─" * 79))
+
+    for appid, entry in entries:
+        sc = status_color(entry["status"])
+        print(f"  {appid:<10} {entry['name']:<42} {entry['ac']:<15} "
+              f"{c(sc, entry['status'].upper())}")
+
+    # Non-integer keys
+    str_entries = [(k, v) for k, v in ANTICHEAT_DB.items() if not isinstance(k, int)]
+    if str_entries:
+        print(c(C.DIM, "\n  Non-Steam entries:"))
+        for key, entry in str_entries:
+            sc = status_color(entry["status"])
+            print(f"  {str(key):<10} {entry['name']:<42} {entry['ac']:<15} "
+                  f"{c(sc, entry['status'].upper())}")
+
+    total = len(ANTICHEAT_DB)
+    print(c(C.DIM, f"\n  {total} games in database\n"))
+
+    if args.json:
+        out = {}
+        for k, v in ANTICHEAT_DB.items():
+            out[str(k)] = v
+        print(json.dumps(out, indent=2))
+
+
+def cmd_database_update(args):
+    """Fetch latest data from areweanticheatyet.com."""
+    print(c(C.BOLD + C.CYAN, "\n  Updating anti-cheat database...\n"))
+
+    awacy = fetch_awacy_data(force=True)
+    if awacy:
+        extra = merge_awacy_data(awacy)
+        print(c(C.GREEN, f"  ✓ Fetched {len(awacy)} games from areweanticheatyet.com"))
+        print(c(C.DIM, f"  {len(extra)} additional games not in built-in database"))
+        print(c(C.DIM, f"  Cache saved to {AWACY_CACHE}\n"))
+    else:
+        print(c(C.RED, "  ✘ Failed to fetch data.\n"))
+
+
+def cmd_database_stats(args):
+    """Show database statistics."""
+    print(c(C.BOLD + C.CYAN, "\n  24HG Anti-Cheat Database — Statistics\n"))
+
+    # By anti-cheat type
+    by_ac = {}
+    by_status = {}
+    for entry in ANTICHEAT_DB.values():
+        ac = entry["ac"]
+        status = entry["status"]
+        by_ac[ac] = by_ac.get(ac, 0) + 1
+        by_status[status] = by_status.get(status, 0) + 1
+
+    print(c(C.BOLD, "  By Anti-Cheat Type:"))
+    for ac, count in sorted(by_ac.items(), key=lambda x: -x[1]):
+        info = AC_INFO.get(ac, {})
+        linux = info.get("linux", "?")
+        linux_label = {
+            "native": c(C.GREEN, "Always works"),
+            "per_game": c(C.YELLOW, "Per-game (dev opt-in)"),
+            "broken": c(C.RED, "Does not work"),
+            "mostly_broken": c(C.RED, "Mostly broken"),
+            "varies": c(C.GRAY, "Varies"),
+        }.get(linux, c(C.GRAY, linux))
+        print(f"    {ac:<18} {count:>4} games   {linux_label}")
+    print()
+
+    print(c(C.BOLD, "  By Linux Status:"))
+    for status, count in sorted(by_status.items(), key=lambda x: -x[1]):
+        sc = status_color(status)
+        bar = c(sc, "█" * min(count, 50))
+        print(f"    {c(sc, status.upper()):<22} {count:>4}  {bar}")
+    print()
+
+    total = len(ANTICHEAT_DB)
+    working = by_status.get("supported", 0)
+    pct = (working / total * 100) if total else 0
+    print(c(C.BOLD, f"  Total: {total} games, {working} work on Linux ({pct:.0f}%)\n"))
+
+    if args.json:
+        print(json.dumps({"by_ac": by_ac, "by_status": by_status, "total": total}, indent=2))
+
+
+# ── CLI Entry Point ────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="24hg-anticheat-tracker",
+        description="24HG Anti-Cheat Status Tracker — Know what works, "
+                    "get notified when games add Linux support",
+    )
+    parser.add_argument("--json", action="store_true",
+                        help="Output in JSON format")
+
+    sub = parser.add_subparsers(dest="command")
+
+    # scan
+    p_scan = sub.add_parser("scan", help="Scan Steam library and check anti-cheat status")
+    p_scan.set_defaults(func=cmd_scan)
+
+    # watch
+    p_watch = sub.add_parser("watch", help="Check for status changes (for systemd timer)")
+    p_watch.set_defaults(func=cmd_watch)
+
+    # status
+    p_status = sub.add_parser("status", help="Show current tracking status")
+    p_status.set_defaults(func=cmd_status)
+
+    # check
+    p_check = sub.add_parser("check", help="Check a specific game by name or AppID")
+    p_check.add_argument("game", nargs="*", help="Game name or Steam AppID")
+    p_check.set_defaults(func=cmd_check)
+
+    # updates
+    p_updates = sub.add_parser("updates", help="Show recent anti-cheat status changes")
+    p_updates.add_argument("--good", action="store_true",
+                           help="Show only newly supported games")
+    p_updates.add_argument("--bad", action="store_true",
+                           help="Show only newly blocked games")
+    p_updates.set_defaults(func=cmd_updates)
+
+    # database
+    p_db = sub.add_parser("database", help="Show/manage the anti-cheat database")
+    p_db.add_argument("db_command", nargs="?", default="stats",
+                      choices=["show", "update", "stats"],
+                      help="Subcommand: show, update, stats")
+    p_db.set_defaults(func=cmd_database)
+
+    return parser
+
+
+def main():
+    ensure_dirs()
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return
+
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        print(c(C.DIM, "\n  Interrupted.\n"))
+        sys.exit(130)
+    except BrokenPipeError:
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

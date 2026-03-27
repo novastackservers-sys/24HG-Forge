@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Custom Resolution
+Comment=Custom display resolutions
+Exec=/usr/bin/24hg-custom-res
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=System;HardwareSettings;
+Keywords=resolution;display;custom;xrandr;monitor;

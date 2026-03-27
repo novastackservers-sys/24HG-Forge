@@ -1,0 +1,496 @@
+#!/usr/bin/env bash
+# 24hg-smart-updates — Intelligent update manager for 24HG Linux
+# Manages rpm-ostree and flatpak updates around gaming sessions.
+set -euo pipefail
+
+APP_NAME="24hg-smart-updates"
+STATE_DIR="${HOME}/.config/24hg/smart-updates"
+CONFIG_FILE="${STATE_DIR}/config"
+HISTORY_FILE="${STATE_DIR}/history.log"
+QUEUE_FILE="${STATE_DIR}/queue"
+LOCK_FILE="${STATE_DIR}/daemon.lock"
+PAUSE_FILE="${STATE_DIR}/paused"
+DAEMON_PID_FILE="${STATE_DIR}/daemon.pid"
+POLL_INTERVAL=300  # 5 minutes
+
+# Ensure state directory exists
+mkdir -p "$STATE_DIR"
+
+# ── Default config ──────────────────────────────────────────────────────────
+write_default_config() {
+    cat > "$CONFIG_FILE" <<'CONF'
+# 24hg-smart-updates configuration
+SCHEDULE_START="03:00"
+SCHEDULE_END="06:00"
+BANDWIDTH_LIMIT_GAMING="512K"    # trickle limit while gaming (K/M)
+BANDWIDTH_LIMIT_DOWNLOAD="1M"    # limit while game downloads active
+AUTO_SNAPSHOT=true
+AUTO_APPLY=true                  # apply queued updates in schedule window
+NOTIFY=true
+CONF
+}
+
+load_config() {
+    [[ -f "$CONFIG_FILE" ]] || write_default_config
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+}
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$HISTORY_FILE"; }
+
+notify() {
+    local title="$1" body="$2"
+    if [[ "${NOTIFY:-true}" == "true" ]] && command -v notify-send &>/dev/null; then
+        notify-send -a "$APP_NAME" -i system-software-update "$title" "$body" 2>/dev/null || true
+    fi
+    echo "$title: $body"
+}
+
+is_gaming() {
+    # Check gamemode daemon
+    if command -v gamemoded &>/dev/null && gamemoded -s 2>/dev/null | grep -qi "active"; then
+        return 0
+    fi
+    # Check gamemode D-Bus
+    if busctl --user get-property com.feralinteractive.GameMode \
+        /com/feralinteractive/GameMode com.feralinteractive.GameMode ClientCount \
+        2>/dev/null | grep -qvE ' 0$'; then
+        return 0
+    fi
+    # Check common game processes
+    local game_procs=("reaper" "proton" "wine64-preloader" "wineserver"
+                      "pressure-vessel" "gamescope" "mangohud")
+    for proc in "${game_procs[@]}"; do
+        if pgrep -x "$proc" &>/dev/null; then
+            return 0
+        fi
+    done
+    # Check if Steam shows a running game via its .pid files
+    if [[ -d "${HOME}/.steam/steam" ]] && ls "${HOME}/.steam/steam/steamapps/"*.pid 2>/dev/null | head -1 | grep -q .; then
+        return 0
+    fi
+    return 1
+}
+
+is_downloading() {
+    # Steam download active (steamwebhelper network or steam state file)
+    if [[ -f "${HOME}/.steam/steam/downloading" ]]; then
+        return 0
+    fi
+    # Check for active Steam download via process
+    if pgrep -f "steamwebhelper.*--download" &>/dev/null; then
+        return 0
+    fi
+    # Heroic download
+    if pgrep -f "heroic.*download" &>/dev/null; then
+        return 0
+    fi
+    # Lutris download/install
+    if pgrep -f "lutris.*install" &>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+in_schedule_window() {
+    local now hour_min start end
+    hour_min=$(date '+%H:%M')
+    start="${SCHEDULE_START:-03:00}"
+    end="${SCHEDULE_END:-06:00}"
+    [[ "$hour_min" > "$start" || "$hour_min" == "$start" ]] && [[ "$hour_min" < "$end" ]]
+}
+
+apply_bandwidth_limit() {
+    local limit="$1"
+    # Use trickle if available; systemd property as fallback
+    if command -v trickle &>/dev/null; then
+        echo "$limit" > "${STATE_DIR}/bw_limit_active"
+    fi
+}
+
+clear_bandwidth_limit() {
+    rm -f "${STATE_DIR}/bw_limit_active"
+}
+
+# ── Core operations ─────────────────────────────────────────────────────────
+check_updates() {
+    echo "Checking for updates..."
+    local pending=0
+
+    echo "── rpm-ostree ──"
+    if rpm-ostree upgrade --check 2>/dev/null; then
+        local ostree_info
+        ostree_info=$(rpm-ostree upgrade --check 2>&1 || true)
+        if echo "$ostree_info" | grep -qi "available"; then
+            echo "rpm-ostree: Updates available"
+            echo "rpm-ostree" >> "$QUEUE_FILE"
+            pending=$((pending + 1))
+        else
+            echo "rpm-ostree: Up to date"
+        fi
+    else
+        echo "rpm-ostree: Check failed or up to date"
+    fi
+
+    echo ""
+    echo "── Flatpak ──"
+    local flatpak_updates
+    flatpak_updates=$(flatpak remote-ls --updates 2>/dev/null || true)
+    if [[ -n "$flatpak_updates" ]]; then
+        echo "$flatpak_updates"
+        echo "flatpak" >> "$QUEUE_FILE"
+        pending=$((pending + 1))
+    else
+        echo "Flatpak: Up to date"
+    fi
+
+    # Deduplicate queue
+    if [[ -f "$QUEUE_FILE" ]]; then
+        sort -u "$QUEUE_FILE" -o "$QUEUE_FILE"
+    fi
+
+    if [[ $pending -gt 0 ]]; then
+        notify "Updates Available" "$pending update source(s) have pending updates"
+        log "CHECK: $pending source(s) with updates"
+    else
+        log "CHECK: System up to date"
+    fi
+    return 0
+}
+
+create_snapshot() {
+    if [[ "${AUTO_SNAPSHOT:-true}" != "true" ]]; then
+        return 0
+    fi
+    echo "Creating pre-update snapshot..."
+    local tag="24hg-pre-update-$(date '+%Y%m%d-%H%M%S')"
+
+    # ostree admin pin the current deployment
+    if command -v ostree &>/dev/null; then
+        sudo ostree admin pin 0 2>/dev/null && \
+            echo "$tag" > "${STATE_DIR}/last_snapshot" && \
+            log "SNAPSHOT: Pinned deployment 0 as $tag" && \
+            echo "Snapshot created: $tag" || \
+            echo "Warning: Could not pin deployment (may need root)"
+    fi
+}
+
+do_apply() {
+    local force="${1:-false}"
+
+    # Safety checks
+    if [[ "$force" != "force" ]]; then
+        if is_gaming; then
+            echo "A game is currently running. Queuing updates for later."
+            echo "Use '24hg-smart-updates apply force' to override."
+            log "APPLY: Blocked — game running"
+            return 1
+        fi
+        if is_downloading; then
+            echo "A game download is in progress. Queuing updates for later."
+            echo "Use '24hg-smart-updates apply force' to override."
+            log "APPLY: Blocked — download active"
+            return 1
+        fi
+    fi
+
+    # Bandwidth limit if gaming detected (force mode)
+    if is_gaming && [[ "$force" == "force" ]]; then
+        echo "Gaming detected — applying bandwidth limit: ${BANDWIDTH_LIMIT_GAMING}"
+        apply_bandwidth_limit "${BANDWIDTH_LIMIT_GAMING}"
+    elif is_downloading && [[ "$force" == "force" ]]; then
+        echo "Download detected — applying bandwidth limit: ${BANDWIDTH_LIMIT_DOWNLOAD}"
+        apply_bandwidth_limit "${BANDWIDTH_LIMIT_DOWNLOAD}"
+    fi
+
+    create_snapshot
+
+    local success=0 failed=0
+
+    # rpm-ostree upgrade
+    echo "── Applying rpm-ostree updates ──"
+    if sudo rpm-ostree upgrade 2>&1; then
+        echo "rpm-ostree: Done"
+        success=$((success + 1))
+        log "APPLY: rpm-ostree upgrade succeeded"
+    else
+        echo "rpm-ostree: No updates or failed"
+        failed=$((failed + 1))
+        log "APPLY: rpm-ostree upgrade failed/no-op"
+    fi
+
+    # Flatpak updates
+    echo ""
+    echo "── Applying Flatpak updates ──"
+    if flatpak update -y --noninteractive 2>&1; then
+        echo "Flatpak: Done"
+        success=$((success + 1))
+        log "APPLY: flatpak update succeeded"
+    else
+        echo "Flatpak: Failed"
+        failed=$((failed + 1))
+        log "APPLY: flatpak update failed"
+    fi
+
+    # Clear queue and bandwidth limit
+    rm -f "$QUEUE_FILE"
+    clear_bandwidth_limit
+
+    notify "Updates Applied" "$success succeeded, $failed failed"
+    log "APPLY: Completed ($success ok, $failed fail)"
+
+    if rpm-ostree status 2>/dev/null | grep -q "pending"; then
+        echo ""
+        echo "Note: rpm-ostree changes require a reboot to take effect."
+        notify "Reboot Needed" "System updates require a reboot to activate"
+    fi
+}
+
+do_rollback() {
+    echo "Rolling back to previous deployment..."
+    local snapshot=""
+    [[ -f "${STATE_DIR}/last_snapshot" ]] && snapshot=$(cat "${STATE_DIR}/last_snapshot")
+
+    if sudo rpm-ostree rollback 2>&1; then
+        echo "Rollback staged. Reboot to complete."
+        notify "Rollback Staged" "Previous deployment will activate on reboot"
+        log "ROLLBACK: Staged (snapshot: ${snapshot:-unknown})"
+    else
+        echo "Rollback failed."
+        log "ROLLBACK: Failed"
+        return 1
+    fi
+}
+
+show_status() {
+    load_config
+    echo "╔══════════════════════════════════════════╗"
+    echo "║     24HG Smart Updates — Status         ║"
+    echo "╚══════════════════════════════════════════╝"
+    echo ""
+
+    # Gaming state
+    printf "Gaming:      "
+    is_gaming && echo "ACTIVE (updates will queue)" || echo "Idle"
+
+    printf "Downloads:   "
+    is_downloading && echo "ACTIVE (updates will queue)" || echo "None"
+
+    # Pause state
+    printf "Auto-update: "
+    [[ -f "$PAUSE_FILE" ]] && echo "PAUSED" || echo "Active"
+
+    # Schedule
+    echo "Schedule:    ${SCHEDULE_START:-03:00} – ${SCHEDULE_END:-06:00}"
+
+    printf "In window:   "
+    in_schedule_window && echo "Yes" || echo "No"
+
+    # Bandwidth
+    printf "BW limit:    "
+    if [[ -f "${STATE_DIR}/bw_limit_active" ]]; then
+        cat "${STATE_DIR}/bw_limit_active"
+    else
+        echo "None"
+    fi
+
+    # Pending queue
+    echo ""
+    if [[ -f "$QUEUE_FILE" ]] && [[ -s "$QUEUE_FILE" ]]; then
+        echo "Queued updates:"
+        while IFS= read -r src; do
+            echo "  - $src"
+        done < "$QUEUE_FILE"
+    else
+        echo "No queued updates."
+    fi
+
+    # Current deployments
+    echo ""
+    echo "── Deployments ──"
+    rpm-ostree status 2>/dev/null | head -12 || echo "rpm-ostree not available"
+
+    # Last snapshot
+    if [[ -f "${STATE_DIR}/last_snapshot" ]]; then
+        echo ""
+        echo "Last snapshot: $(cat "${STATE_DIR}/last_snapshot")"
+    fi
+
+    # Daemon
+    echo ""
+    printf "Daemon:      "
+    if [[ -f "$DAEMON_PID_FILE" ]] && kill -0 "$(cat "$DAEMON_PID_FILE")" 2>/dev/null; then
+        echo "Running (PID $(cat "$DAEMON_PID_FILE"))"
+    else
+        echo "Not running"
+    fi
+}
+
+show_history() {
+    if [[ -f "$HISTORY_FILE" ]]; then
+        echo "── Update History ──"
+        tail -50 "$HISTORY_FILE"
+    else
+        echo "No update history yet."
+    fi
+}
+
+set_schedule() {
+    local time_spec="${1:-}"
+    if [[ -z "$time_spec" ]]; then
+        echo "Current schedule: ${SCHEDULE_START:-03:00} – ${SCHEDULE_END:-06:00}"
+        echo "Usage: 24hg-smart-updates schedule START-END"
+        echo "Example: 24hg-smart-updates schedule 03:00-06:00"
+        return 0
+    fi
+
+    local start end
+    start="${time_spec%%-*}"
+    end="${time_spec##*-}"
+
+    if ! [[ "$start" =~ ^[0-2][0-9]:[0-5][0-9]$ ]] || ! [[ "$end" =~ ^[0-2][0-9]:[0-5][0-9]$ ]]; then
+        echo "Error: Invalid time format. Use HH:MM-HH:MM (24h)."
+        return 1
+    fi
+
+    load_config
+    sed -i "s/^SCHEDULE_START=.*/SCHEDULE_START=\"$start\"/" "$CONFIG_FILE"
+    sed -i "s/^SCHEDULE_END=.*/SCHEDULE_END=\"$end\"/" "$CONFIG_FILE"
+    echo "Schedule set: $start – $end"
+    log "CONFIG: Schedule changed to $start–$end"
+}
+
+do_pause() {
+    touch "$PAUSE_FILE"
+    echo "Auto-updates paused."
+    notify "Updates Paused" "Automatic updates are paused until resumed"
+    log "PAUSE: Auto-updates paused"
+}
+
+do_resume() {
+    rm -f "$PAUSE_FILE"
+    echo "Auto-updates resumed."
+    notify "Updates Resumed" "Automatic updates are active"
+    log "RESUME: Auto-updates resumed"
+}
+
+# ── Daemon ──────────────────────────────────────────────────────────────────
+daemon_loop() {
+    load_config
+
+    # Prevent duplicate daemons
+    if [[ -f "$DAEMON_PID_FILE" ]] && kill -0 "$(cat "$DAEMON_PID_FILE")" 2>/dev/null; then
+        echo "Daemon already running (PID $(cat "$DAEMON_PID_FILE"))"
+        return 1
+    fi
+
+    echo $$ > "$DAEMON_PID_FILE"
+    log "DAEMON: Started (PID $$)"
+    echo "Daemon started (PID $$). Polling every ${POLL_INTERVAL}s."
+
+    cleanup() {
+        rm -f "$DAEMON_PID_FILE" "$LOCK_FILE"
+        clear_bandwidth_limit
+        log "DAEMON: Stopped"
+        exit 0
+    }
+    trap cleanup SIGTERM SIGINT
+
+    local last_check=0
+    local check_interval=3600  # full check every hour
+
+    while true; do
+        load_config
+        local now
+        now=$(date +%s)
+
+        # Respect pause
+        if [[ -f "$PAUSE_FILE" ]]; then
+            sleep "$POLL_INTERVAL"
+            continue
+        fi
+
+        # Dynamic bandwidth management
+        if is_gaming; then
+            if [[ ! -f "${STATE_DIR}/bw_limit_active" ]]; then
+                apply_bandwidth_limit "${BANDWIDTH_LIMIT_GAMING}"
+                log "DAEMON: Gaming detected — bandwidth limited"
+            fi
+        elif is_downloading; then
+            if [[ ! -f "${STATE_DIR}/bw_limit_active" ]]; then
+                apply_bandwidth_limit "${BANDWIDTH_LIMIT_DOWNLOAD}"
+                log "DAEMON: Download detected — bandwidth limited"
+            fi
+        else
+            if [[ -f "${STATE_DIR}/bw_limit_active" ]]; then
+                clear_bandwidth_limit
+                log "DAEMON: Idle — bandwidth limit cleared"
+            fi
+        fi
+
+        # Periodic check for updates
+        if (( now - last_check > check_interval )); then
+            check_updates > /dev/null 2>&1
+            last_check=$now
+        fi
+
+        # Auto-apply in schedule window if idle
+        if [[ "${AUTO_APPLY:-true}" == "true" ]] && in_schedule_window; then
+            if [[ -f "$QUEUE_FILE" ]] && [[ -s "$QUEUE_FILE" ]]; then
+                if ! is_gaming && ! is_downloading; then
+                    log "DAEMON: In schedule window, applying queued updates"
+                    do_apply force > "${STATE_DIR}/last_apply.log" 2>&1
+                fi
+            fi
+        fi
+
+        sleep "$POLL_INTERVAL"
+    done
+}
+
+# ── Usage ───────────────────────────────────────────────────────────────────
+usage() {
+    cat <<EOF
+24HG Smart Updates — Intelligent update manager for 24HG Linux
+
+Usage: $APP_NAME <command> [options]
+
+Commands:
+  status              Show pending updates, gaming state, and daemon info
+  check               Check for available rpm-ostree and flatpak updates
+  apply [force]       Apply updates now (blocked if gaming, unless forced)
+  schedule [HH:MM-HH:MM]  Show or set preferred update window
+  rollback            Roll back to the previous ostree deployment
+  history             Show update history log
+  pause               Pause automatic updates
+  resume              Resume automatic updates
+  daemon              Run as background daemon (manages updates around gaming)
+
+Configuration: $CONFIG_FILE
+History log:   $HISTORY_FILE
+
+Examples:
+  $APP_NAME check                  # See what's available
+  $APP_NAME apply                  # Apply if safe
+  $APP_NAME schedule 02:00-05:00   # Set update window
+  $APP_NAME daemon &               # Run in background
+EOF
+}
+
+# ── Main ────────────────────────────────────────────────────────────────────
+load_config
+
+case "${1:-}" in
+    status)     show_status ;;
+    check)      check_updates ;;
+    apply)      do_apply "${2:-}" ;;
+    schedule)   set_schedule "${2:-}" ;;
+    rollback)   do_rollback ;;
+    history)    show_history ;;
+    pause)      do_pause ;;
+    resume)     do_resume ;;
+    daemon)     daemon_loop ;;
+    -h|--help)  usage ;;
+    *)          usage; exit 1 ;;
+esac

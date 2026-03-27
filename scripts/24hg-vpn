@@ -1,0 +1,739 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG VPN — Virtual LAN for discovering other 24HG gamers worldwide
+#
+# Connect to the 24HG WireGuard network to discover other gamers via mDNS/Avahi
+# (same as 24hg-lan-party), but game traffic goes direct peer-to-peer — the VPN
+# only carries tiny discovery packets.
+
+# ── Constants ────────────────────────────────────────────────────────────────
+readonly VERSION="1.0.0"
+readonly APP_NAME="24hg-vpn"
+readonly API_BASE="https://vpn.24hgaming.com/api/vpn"
+readonly CONFIG_DIR="${HOME}/.config/24hg"
+readonly HUB_TOKEN_FILE="${CONFIG_DIR}/hub-token"
+readonly WG_CONF="${CONFIG_DIR}/wg-24hg.conf"
+readonly VPN_STATE="${CONFIG_DIR}/vpn-state.json"
+readonly WG_IFACE="wg-24hg"
+readonly VPN_SUBNET="10.24.0.0/16"
+readonly VPN_DNS="10.24.0.1"
+readonly VPN_ENDPOINT="vpn.24hgaming.com:51820"
+readonly KEEPALIVE=25
+readonly SYSTEMD_SERVICE_DIR="${HOME}/.config/systemd/user"
+readonly SYSTEMD_UNIT="24hg-vpn-autoconnect.service"
+readonly INVITE_PORT=24242
+
+# ── Colors & formatting ─────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    MAGENTA='\033[0;35m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' MAGENTA='' BOLD='' DIM='' RESET=''
+fi
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+log() { logger -t "$APP_NAME" "$*"; }
+
+info()  { echo -e "${CYAN}[INFO]${RESET} $*";  log "INFO: $*"; }
+ok()    { echo -e "${GREEN}[  OK]${RESET} $*";  log "OK: $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${RESET} $*"; log "WARN: $*"; }
+err()   { echo -e "${RED}[FAIL]${RESET} $*" >&2; log "ERROR: $*"; }
+die()   { err "$@"; exit 1; }
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+ensure_config_dir() {
+    mkdir -p "$CONFIG_DIR"
+}
+
+hub_token() {
+    if [[ ! -f "$HUB_TOKEN_FILE" ]]; then
+        die "Hub token not found at $HUB_TOKEN_FILE — run '24hg-hub-bridge login' first."
+    fi
+    cat "$HUB_TOKEN_FILE"
+}
+
+api_get() {
+    local endpoint="$1"
+    curl -sf --max-time 15 \
+        -H "Authorization: Bearer $(hub_token)" \
+        -H "Accept: application/json" \
+        "${API_BASE}${endpoint}"
+}
+
+api_post() {
+    local endpoint="$1"
+    shift
+    curl -sf --max-time 15 \
+        -H "Authorization: Bearer $(hub_token)" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -X POST "${API_BASE}${endpoint}" "$@"
+}
+
+check_deps() {
+    local missing=()
+    for cmd in wg wg-quick curl jq avahi-browse ping; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        die "Missing dependencies: ${missing[*]}. Install wireguard-tools, curl, jq, avahi-utils."
+    fi
+}
+
+is_connected() {
+    ip link show "$WG_IFACE" &>/dev/null 2>&1
+}
+
+get_vpn_ip() {
+    if [[ -f "$VPN_STATE" ]]; then
+        jq -r '.vpn_ip // empty' "$VPN_STATE" 2>/dev/null
+    fi
+}
+
+save_state() {
+    local vpn_ip="$1" connected="$2"
+    ensure_config_dir
+    jq -n \
+        --arg ip "$vpn_ip" \
+        --arg conn "$connected" \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{vpn_ip: $ip, connected: ($conn == "true"), connected_at: $ts, interface: "'"$WG_IFACE"'"}' \
+        > "$VPN_STATE"
+}
+
+clear_state() {
+    if [[ -f "$VPN_STATE" ]]; then
+        jq '.connected = false | .disconnected_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+            "$VPN_STATE" > "${VPN_STATE}.tmp" && mv "${VPN_STATE}.tmp" "$VPN_STATE"
+    fi
+}
+
+notify() {
+    if command -v notify-send &>/dev/null; then
+        notify-send -i 24hg-logo "$@" 2>/dev/null || true
+    fi
+}
+
+# ── Connection animation ────────────────────────────────────────────────────
+spinner() {
+    local msg="$1"
+    local pid="$2"
+    local frames=("⣾" "⣽" "⣻" "⢿" "⡿" "⣟" "⣯" "⣷")
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r${CYAN}%s${RESET} %s" "${frames[$((i % ${#frames[@]}))]}" "$msg"
+        i=$((i + 1))
+        sleep 0.1
+    done
+    printf "\r"
+}
+
+connect_animation() {
+    local steps=("Authenticating with 24HG Hub..."
+                 "Receiving WireGuard configuration..."
+                 "Establishing encrypted tunnel..."
+                 "Configuring virtual LAN interface..."
+                 "Verifying connection...")
+    for step in "${steps[@]}"; do
+        printf "  ${BLUE}●${RESET} %s" "$step"
+        sleep 0.3
+        printf "\r  ${GREEN}✓${RESET} %s\n" "$step"
+    done
+}
+
+# ── Banner ───────────────────────────────────────────────────────────────────
+banner() {
+    echo -e "${BOLD}${CYAN}"
+    echo "  ╔═══════════════════════════════════════╗"
+    echo "  ║     24HG VPN — Virtual LAN      ║"
+    echo "  ║  Discover gamers. Play peer-to-peer.   ║"
+    echo "  ╚═══════════════════════════════════════╝"
+    echo -e "${RESET}"
+}
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_join() {
+    banner
+    check_deps
+
+    if is_connected; then
+        local current_ip
+        current_ip="$(get_vpn_ip)"
+        ok "Already connected to 24HG Virtual LAN (IP: ${GREEN}${current_ip}${RESET})"
+        return 0
+    fi
+
+    ensure_config_dir
+    info "Connecting to 24HG Virtual LAN..."
+    echo
+
+    # Step 1: Authenticate and get WireGuard config from Hub API
+    connect_animation &
+    local anim_pid=$!
+
+    local response
+    response="$(api_post "/join")" || {
+        kill "$anim_pid" 2>/dev/null; wait "$anim_pid" 2>/dev/null
+        die "Failed to join VPN — check your Hub token and network connection."
+    }
+    kill "$anim_pid" 2>/dev/null; wait "$anim_pid" 2>/dev/null
+
+    # Step 2: Parse the response
+    local private_key server_pubkey assigned_ip
+    private_key="$(echo "$response" | jq -r '.private_key // empty')"
+    server_pubkey="$(echo "$response" | jq -r '.server_public_key // empty')"
+    assigned_ip="$(echo "$response" | jq -r '.assigned_ip // empty')"
+
+    if [[ -z "$private_key" || -z "$server_pubkey" || -z "$assigned_ip" ]]; then
+        die "Invalid response from VPN server — missing configuration fields."
+    fi
+
+    # Step 3: Write WireGuard config
+    cat > "$WG_CONF" <<EOF
+[Interface]
+PrivateKey = ${private_key}
+Address = ${assigned_ip}/16
+
+[Peer]
+PublicKey = ${server_pubkey}
+Endpoint = ${VPN_ENDPOINT}
+AllowedIPs = ${VPN_SUBNET}
+PersistentKeepalive = ${KEEPALIVE}
+EOF
+    chmod 600 "$WG_CONF"
+
+    # Step 4: Bring up the WireGuard interface
+    info "Bringing up WireGuard interface ${BOLD}${WG_IFACE}${RESET}..."
+    if ! sudo wg-quick up "$WG_CONF" 2>&1; then
+        die "Failed to bring up WireGuard interface. Check sudo permissions."
+    fi
+
+    # Step 5: Verify connection
+    sleep 1
+    if ! is_connected; then
+        die "WireGuard interface did not come up. Check logs: journalctl -t wireguard"
+    fi
+
+    local handshake
+    handshake="$(sudo wg show "$WG_IFACE" latest-handshakes 2>/dev/null | awk '{print $2}')"
+    if [[ -z "$handshake" || "$handshake" == "0" ]]; then
+        warn "Interface is up but no handshake yet — server may need a moment."
+    fi
+
+    # Step 6: Save state
+    save_state "$assigned_ip" "true"
+
+    echo
+    echo -e "  ${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "  ${GREEN}${BOLD}  Connected to 24HG Virtual LAN!${RESET}"
+    echo -e "  ${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo
+    echo -e "  ${BOLD}VPN IP:${RESET}     ${CYAN}${assigned_ip}${RESET}"
+    echo -e "  ${BOLD}Interface:${RESET}  ${CYAN}${WG_IFACE}${RESET}"
+    echo -e "  ${BOLD}Subnet:${RESET}     ${DIM}${VPN_SUBNET}${RESET}"
+    echo -e "  ${BOLD}Routing:${RESET}    ${DIM}Only discovery traffic through VPN${RESET}"
+    echo -e "  ${BOLD}Gaming:${RESET}     ${DIM}Direct peer-to-peer (low latency)${RESET}"
+    echo
+
+    notify "24HG Virtual LAN" "Connected as ${assigned_ip}\nDiscover gamers with: 24hg-vpn peers"
+
+    # Step 7: Auto-start lan-party announce daemon
+    if command -v 24hg-lan-party &>/dev/null; then
+        info "Starting LAN party discovery daemon..."
+        24hg-lan-party announce --daemon &>/dev/null &
+        ok "LAN party announce daemon started — you are now discoverable."
+    else
+        warn "24hg-lan-party not found — other users won't see you via mDNS."
+    fi
+
+    ok "Run ${BOLD}24hg-vpn peers${RESET} to see who's online."
+}
+
+cmd_leave() {
+    check_deps
+
+    if ! is_connected; then
+        warn "Not currently connected to 24HG Virtual LAN."
+        return 0
+    fi
+
+    info "Disconnecting from 24HG Virtual LAN..."
+
+    # Step 1: Stop 24hg-lan-party daemon
+    if pgrep -f "24hg-lan-party announce --daemon" &>/dev/null; then
+        info "Stopping LAN party discovery daemon..."
+        pkill -f "24hg-lan-party announce --daemon" 2>/dev/null || true
+        ok "LAN party daemon stopped."
+    fi
+
+    # Step 2: Bring down WireGuard interface
+    info "Bringing down WireGuard interface ${BOLD}${WG_IFACE}${RESET}..."
+    if sudo wg-quick down "$WG_IFACE" 2>&1; then
+        ok "WireGuard interface down."
+    else
+        warn "Failed to bring down interface cleanly — may already be down."
+    fi
+
+    # Step 3: Notify server
+    api_post "/leave" 2>/dev/null || warn "Could not notify server of disconnect."
+
+    # Step 4: Update state
+    clear_state
+
+    echo
+    echo -e "  ${YELLOW}${BOLD}Disconnected from 24HG Virtual LAN.${RESET}"
+    echo
+    notify "24HG Virtual LAN" "Disconnected from the network."
+    ok "Done."
+}
+
+cmd_status() {
+    check_deps
+    banner
+
+    if ! is_connected; then
+        echo -e "  ${BOLD}Status:${RESET}  ${RED}● Disconnected${RESET}"
+        echo
+        echo -e "  Run ${BOLD}24hg-vpn join${RESET} to connect."
+        return 0
+    fi
+
+    local vpn_ip
+    vpn_ip="$(get_vpn_ip)"
+
+    echo -e "  ${BOLD}Status:${RESET}      ${GREEN}● Connected${RESET}"
+    echo -e "  ${BOLD}VPN IP:${RESET}      ${CYAN}${vpn_ip:-unknown}${RESET}"
+    echo -e "  ${BOLD}Interface:${RESET}   ${CYAN}${WG_IFACE}${RESET}"
+    echo -e "  ${BOLD}Subnet:${RESET}      ${DIM}${VPN_SUBNET}${RESET}"
+    echo
+
+    # WireGuard stats
+    echo -e "  ${BOLD}${MAGENTA}WireGuard Details:${RESET}"
+    local wg_output
+    wg_output="$(sudo wg show "$WG_IFACE" 2>/dev/null)" || true
+    if [[ -n "$wg_output" ]]; then
+        local endpoint latest_hs transfer_rx transfer_tx
+        endpoint="$(echo "$wg_output" | grep -oP 'endpoint: \K.*' || echo "unknown")"
+        latest_hs="$(echo "$wg_output" | grep -oP 'latest handshake: \K.*' || echo "never")"
+        transfer_rx="$(echo "$wg_output" | grep -oP 'transfer: \K[^ ]+' || echo "0")"
+        transfer_tx="$(echo "$wg_output" | grep -oP 'transfer: [^ ]+ [^ ]+ \K.*' || echo "0")"
+
+        echo -e "  ${BOLD}Endpoint:${RESET}    ${DIM}${endpoint}${RESET}"
+        echo -e "  ${BOLD}Handshake:${RESET}   ${DIM}${latest_hs}${RESET}"
+        echo -e "  ${BOLD}Transfer:${RESET}    ${DIM}↓ ${transfer_rx}  ↑ ${transfer_tx}${RESET}"
+    fi
+    echo
+
+    # Connection state
+    if [[ -f "$VPN_STATE" ]]; then
+        local connected_at
+        connected_at="$(jq -r '.connected_at // "unknown"' "$VPN_STATE" 2>/dev/null)"
+        echo -e "  ${BOLD}Connected since:${RESET} ${DIM}${connected_at}${RESET}"
+    fi
+
+    # LAN party daemon
+    if pgrep -f "24hg-lan-party announce --daemon" &>/dev/null; then
+        echo -e "  ${BOLD}Discovery:${RESET}   ${GREEN}● Broadcasting via mDNS${RESET}"
+    else
+        echo -e "  ${BOLD}Discovery:${RESET}   ${YELLOW}● Not broadcasting${RESET} (run 24hg-lan-party announce --daemon)"
+    fi
+
+    # Peer count
+    local peer_count
+    peer_count="$(sudo wg show "$WG_IFACE" peers 2>/dev/null | wc -l)" || peer_count=0
+    echo -e "  ${BOLD}WG Peers:${RESET}    ${CYAN}${peer_count}${RESET}"
+    echo
+}
+
+cmd_peers() {
+    check_deps
+
+    if ! is_connected; then
+        die "Not connected to 24HG Virtual LAN. Run ${BOLD}24hg-vpn join${RESET} first."
+    fi
+
+    info "Scanning for online 24HG gamers..."
+    echo
+
+    # Fetch peer list from API
+    local peers_json
+    peers_json="$(api_get "/peers" 2>/dev/null)" || {
+        warn "Could not reach VPN API — showing local Avahi results only."
+        peers_json='{"peers":[]}'
+    }
+
+    # Also scan Avahi on VPN interface for active mDNS peers
+    local avahi_results=""
+    if command -v avahi-browse &>/dev/null; then
+        avahi_results="$(timeout 3 avahi-browse -rpt -k _24hg-gamer._tcp 2>/dev/null || true)"
+    fi
+
+    # Parse and display
+    local peer_count
+    peer_count="$(echo "$peers_json" | jq '.peers | length' 2>/dev/null || echo 0)"
+
+    if [[ "$peer_count" -eq 0 && -z "$avahi_results" ]]; then
+        echo -e "  ${DIM}No gamers found on the virtual LAN right now.${RESET}"
+        echo -e "  ${DIM}Invite friends with: 24hg-vpn invite <user> <game>${RESET}"
+        return 0
+    fi
+
+    # Table header
+    printf "  ${BOLD}%-18s %-15s %-20s %-17s %-10s %-10s${RESET}\n" \
+        "Username" "VPN IP" "Game" "Direct IP" "VPN Ping" "Direct"
+    printf "  ${DIM}%-18s %-15s %-20s %-17s %-10s %-10s${RESET}\n" \
+        "──────────────────" "───────────────" "────────────────────" "─────────────────" "──────────" "──────────"
+
+    # Render each peer from API
+    echo "$peers_json" | jq -r '.peers[]? | "\(.username)\t\(.vpn_ip)\t\(.game // "-")\t\(.direct_ip // "-")"' 2>/dev/null | \
+    while IFS=$'\t' read -r username vpn_ip game direct_ip; do
+        # Quick ping to VPN IP (1 packet, 1s timeout)
+        local vpn_ping="-"
+        local vpn_ms
+        vpn_ms="$(ping -c1 -W1 "$vpn_ip" 2>/dev/null | grep -oP 'time=\K[0-9.]+')" && vpn_ping="${vpn_ms}ms"
+
+        # Quick ping to direct IP if available
+        local direct_ping="-"
+        if [[ "$direct_ip" != "-" && -n "$direct_ip" ]]; then
+            local direct_ms
+            direct_ms="$(ping -c1 -W1 "$direct_ip" 2>/dev/null | grep -oP 'time=\K[0-9.]+')" && direct_ping="${direct_ms}ms"
+        fi
+
+        printf "  ${CYAN}%-18s${RESET} %-15s ${MAGENTA}%-20s${RESET} ${DIM}%-17s${RESET} %-10s %-10s\n" \
+            "$username" "$vpn_ip" "$game" "$direct_ip" "$vpn_ping" "$direct_ping"
+    done
+
+    # Also show Avahi-discovered peers not in API list
+    if [[ -n "$avahi_results" ]]; then
+        echo "$avahi_results" | grep "^=" | while IFS=';' read -r _ iface _ name _ _ _ addr port txt; do
+            if [[ "$iface" == "$WG_IFACE" || "$iface" == *"wg"* ]]; then
+                local avahi_user avahi_game avahi_direct
+                avahi_user="$(echo "$txt" | grep -oP 'user=\K[^"]+' || echo "$name")"
+                avahi_game="$(echo "$txt" | grep -oP 'game=\K[^"]+' || echo "-")"
+                avahi_direct="$(echo "$txt" | grep -oP 'direct_ip=\K[^"]+' || echo "-")"
+
+                # Only show if not already in API results
+                if ! echo "$peers_json" | jq -e ".peers[]? | select(.vpn_ip == \"$addr\")" &>/dev/null; then
+                    printf "  ${CYAN}%-18s${RESET} %-15s ${MAGENTA}%-20s${RESET} ${DIM}%-17s${RESET} %-10s %-10s\n" \
+                        "$avahi_user" "$addr" "$avahi_game" "$avahi_direct" "-" "-"
+                fi
+            fi
+        done
+    fi
+
+    echo
+    echo -e "  ${DIM}Tip: Use ${RESET}${BOLD}24hg-vpn ping <user>${RESET}${DIM} for detailed latency info${RESET}"
+}
+
+cmd_ping() {
+    local target_user="${1:-}"
+    if [[ -z "$target_user" ]]; then
+        die "Usage: 24hg-vpn ping <username>"
+    fi
+
+    check_deps
+
+    if ! is_connected; then
+        die "Not connected to 24HG Virtual LAN. Run ${BOLD}24hg-vpn join${RESET} first."
+    fi
+
+    info "Resolving ${BOLD}${target_user}${RESET}..."
+
+    # Look up user from API
+    local peers_json
+    peers_json="$(api_get "/peers" 2>/dev/null)" || die "Could not reach VPN API."
+
+    local vpn_ip direct_ip
+    vpn_ip="$(echo "$peers_json" | jq -r ".peers[]? | select(.username == \"$target_user\") | .vpn_ip // empty")"
+    direct_ip="$(echo "$peers_json" | jq -r ".peers[]? | select(.username == \"$target_user\") | .direct_ip // empty")"
+
+    if [[ -z "$vpn_ip" ]]; then
+        die "User ${BOLD}${target_user}${RESET} not found on the virtual LAN."
+    fi
+
+    echo
+    echo -e "  ${BOLD}Pinging ${CYAN}${target_user}${RESET}${BOLD}...${RESET}"
+    echo
+
+    # VPN ping (3 packets)
+    echo -e "  ${BLUE}VPN Path${RESET} (${vpn_ip}):"
+    local vpn_result
+    vpn_result="$(ping -c3 -W2 "$vpn_ip" 2>/dev/null)" || true
+    local vpn_avg
+    vpn_avg="$(echo "$vpn_result" | grep -oP 'rtt min/avg/max/mdev = [^/]+/\K[^/]+' || echo "timeout")"
+    if [[ "$vpn_avg" != "timeout" ]]; then
+        echo -e "    ${GREEN}●${RESET} ${vpn_avg}ms average (3 packets)"
+    else
+        echo -e "    ${RED}●${RESET} Timed out"
+    fi
+
+    # Direct ping (if available)
+    if [[ -n "$direct_ip" ]]; then
+        echo
+        echo -e "  ${MAGENTA}Direct Path${RESET} (${direct_ip}):"
+        local direct_result
+        direct_result="$(ping -c3 -W2 "$direct_ip" 2>/dev/null)" || true
+        local direct_avg
+        direct_avg="$(echo "$direct_result" | grep -oP 'rtt min/avg/max/mdev = [^/]+/\K[^/]+' || echo "timeout")"
+        if [[ "$direct_avg" != "timeout" ]]; then
+            echo -e "    ${GREEN}●${RESET} ${direct_avg}ms average (3 packets)"
+        else
+            echo -e "    ${RED}●${RESET} Timed out"
+        fi
+
+        # Comparison
+        echo
+        if [[ "$vpn_avg" != "timeout" && "$direct_avg" != "timeout" ]]; then
+            echo -e "  ${BOLD}Comparison:${RESET} VPN: ${vpn_avg}ms | Direct: ${direct_avg}ms"
+            local vpn_int direct_int
+            vpn_int="${vpn_avg%%.*}"
+            direct_int="${direct_avg%%.*}"
+            if [[ "$direct_int" -lt "$vpn_int" ]]; then
+                echo -e "  ${GREEN}→ Use direct connection for gaming (lower latency)${RESET}"
+            else
+                echo -e "  ${YELLOW}→ VPN path is comparable — both routes are fine${RESET}"
+            fi
+        fi
+    else
+        echo
+        echo -e "  ${DIM}Direct IP not available for this user.${RESET}"
+    fi
+    echo
+}
+
+cmd_invite() {
+    local target_user="${1:-}"
+    local game="${2:-}"
+    if [[ -z "$target_user" || -z "$game" ]]; then
+        die "Usage: 24hg-vpn invite <username> <game>"
+    fi
+
+    check_deps
+
+    if ! is_connected; then
+        die "Not connected to 24HG Virtual LAN. Run ${BOLD}24hg-vpn join${RESET} first."
+    fi
+
+    info "Sending game invite to ${BOLD}${target_user}${RESET} for ${MAGENTA}${game}${RESET}..."
+
+    # Resolve target VPN IP
+    local peers_json
+    peers_json="$(api_get "/peers" 2>/dev/null)" || die "Could not reach VPN API."
+
+    local vpn_ip
+    vpn_ip="$(echo "$peers_json" | jq -r ".peers[]? | select(.username == \"$target_user\") | .vpn_ip // empty")"
+
+    if [[ -z "$vpn_ip" ]]; then
+        die "User ${BOLD}${target_user}${RESET} not found on the virtual LAN."
+    fi
+
+    # Send invite via 24hg-lan-party UDP mechanism over VPN interface
+    local my_username my_vpn_ip
+    my_username="$(jq -r '.username // "unknown"' "$HUB_TOKEN_FILE" 2>/dev/null || whoami)"
+    my_vpn_ip="$(get_vpn_ip)"
+
+    local invite_payload
+    invite_payload="$(jq -cn \
+        --arg from "$my_username" \
+        --arg from_ip "$my_vpn_ip" \
+        --arg to "$target_user" \
+        --arg game "$game" \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{type: "game_invite", from: $from, from_ip: $from_ip, to: $to, game: $game, timestamp: $ts}')"
+
+    # Send via UDP to the target's invite port on VPN interface
+    if command -v 24hg-lan-party &>/dev/null; then
+        echo "$invite_payload" | 24hg-lan-party send-invite --interface "$WG_IFACE" --target "$vpn_ip" 2>/dev/null && {
+            ok "Invite sent via 24hg-lan-party."
+        } || {
+            # Fallback: raw UDP
+            echo "$invite_payload" | socat - "UDP4:${vpn_ip}:${INVITE_PORT}" 2>/dev/null && {
+                ok "Invite sent via UDP."
+            } || {
+                # Second fallback: API relay
+                api_post "/invite" -d "$invite_payload" 2>/dev/null && {
+                    ok "Invite sent via API relay."
+                } || die "Failed to deliver invite."
+            }
+        }
+    else
+        # Direct UDP send
+        echo "$invite_payload" | socat - "UDP4:${vpn_ip}:${INVITE_PORT}" 2>/dev/null && {
+            ok "Invite sent via UDP."
+        } || {
+            api_post "/invite" -d "$invite_payload" 2>/dev/null && {
+                ok "Invite sent via API relay."
+            } || die "Failed to deliver invite."
+        }
+    fi
+
+    echo
+    echo -e "  ${GREEN}${BOLD}Game invite sent!${RESET}"
+    echo -e "  ${DIM}To: ${target_user} | Game: ${game}${RESET}"
+    echo
+}
+
+cmd_refresh() {
+    check_deps
+    ensure_config_dir
+
+    info "Refreshing VPN credentials..."
+
+    local was_connected=false
+    if is_connected; then
+        was_connected=true
+        info "Disconnecting to refresh..."
+        sudo wg-quick down "$WG_IFACE" 2>/dev/null || true
+    fi
+
+    # Request fresh credentials
+    local response
+    response="$(api_post "/refresh")" || die "Failed to refresh credentials."
+
+    local private_key server_pubkey assigned_ip
+    private_key="$(echo "$response" | jq -r '.private_key // empty')"
+    server_pubkey="$(echo "$response" | jq -r '.server_public_key // empty')"
+    assigned_ip="$(echo "$response" | jq -r '.assigned_ip // empty')"
+
+    if [[ -z "$private_key" || -z "$server_pubkey" || -z "$assigned_ip" ]]; then
+        die "Invalid response from VPN server."
+    fi
+
+    # Write fresh config
+    cat > "$WG_CONF" <<EOF
+[Interface]
+PrivateKey = ${private_key}
+Address = ${assigned_ip}/16
+
+[Peer]
+PublicKey = ${server_pubkey}
+Endpoint = ${VPN_ENDPOINT}
+AllowedIPs = ${VPN_SUBNET}
+PersistentKeepalive = ${KEEPALIVE}
+EOF
+    chmod 600 "$WG_CONF"
+
+    ok "Credentials refreshed."
+
+    if $was_connected; then
+        info "Reconnecting..."
+        sudo wg-quick up "$WG_CONF" 2>/dev/null || die "Failed to reconnect."
+        save_state "$assigned_ip" "true"
+        ok "Reconnected with fresh credentials (IP: ${CYAN}${assigned_ip}${RESET})."
+    else
+        save_state "$assigned_ip" "false"
+        ok "New credentials saved. Run ${BOLD}24hg-vpn join${RESET} to connect."
+    fi
+}
+
+cmd_auto_connect() {
+    ensure_config_dir
+    mkdir -p "$SYSTEMD_SERVICE_DIR"
+
+    local service_file="${SYSTEMD_SERVICE_DIR}/${SYSTEMD_UNIT}"
+
+    if [[ -f "$service_file" ]]; then
+        # Toggle off
+        info "Disabling auto-connect on login..."
+        systemctl --user disable --now "$SYSTEMD_UNIT" 2>/dev/null || true
+        rm -f "$service_file"
+        systemctl --user daemon-reload 2>/dev/null || true
+        ok "Auto-connect ${RED}disabled${RESET}."
+    else
+        # Toggle on — create systemd user service
+        info "Enabling auto-connect on login..."
+
+        local script_path
+        script_path="$(command -v 24hg-vpn 2>/dev/null || echo "/usr/bin/24hg-vpn")"
+
+        cat > "$service_file" <<EOF
+[Unit]
+Description=24HG VPN Auto-Connect
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${script_path} join
+ExecStop=${script_path} leave
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+EOF
+
+        systemctl --user daemon-reload 2>/dev/null || true
+        systemctl --user enable "$SYSTEMD_UNIT" 2>/dev/null || true
+
+        ok "Auto-connect ${GREEN}enabled${RESET}."
+        echo -e "  ${DIM}The VPN will connect automatically when you log in.${RESET}"
+        echo -e "  ${DIM}Run again to disable.${RESET}"
+    fi
+}
+
+# ── Usage ────────────────────────────────────────────────────────────────────
+usage() {
+    banner
+    echo -e "  ${BOLD}USAGE:${RESET}"
+    echo -e "    24hg-vpn <command> [args]"
+    echo
+    echo -e "  ${BOLD}COMMANDS:${RESET}"
+    echo -e "    ${CYAN}join${RESET}                   Connect to the 24HG virtual LAN"
+    echo -e "    ${CYAN}leave${RESET}                  Disconnect from the virtual LAN"
+    echo -e "    ${CYAN}status${RESET}                 Show connection status, VPN IP, peers"
+    echo -e "    ${CYAN}peers${RESET}                  List online 24HG gamers on the VPN"
+    echo -e "    ${CYAN}ping${RESET} <user>            Ping another user (VPN + direct)"
+    echo -e "    ${CYAN}invite${RESET} <user> <game>   Send game invite to a VPN peer"
+    echo -e "    ${CYAN}refresh${RESET}                Refresh VPN credentials/keys"
+    echo -e "    ${CYAN}auto-connect${RESET}           Toggle auto-connect on login"
+    echo
+    echo -e "  ${BOLD}HOW IT WORKS:${RESET}"
+    echo -e "    ${DIM}The VPN creates a lightweight tunnel for discovering other gamers${RESET}"
+    echo -e "    ${DIM}via mDNS/Avahi. Actual game traffic goes direct peer-to-peer —${RESET}"
+    echo -e "    ${DIM}the VPN only carries tiny discovery packets (AllowedIPs = 10.24.0.0/16).${RESET}"
+    echo
+    echo -e "  ${BOLD}EXAMPLES:${RESET}"
+    echo -e "    ${DIM}24hg-vpn join${RESET}                       # Connect to the network"
+    echo -e "    ${DIM}24hg-vpn peers${RESET}                      # See who's online"
+    echo -e "    ${DIM}24hg-vpn ping ShadowFox${RESET}             # Check latency to a user"
+    echo -e "    ${DIM}24hg-vpn invite ShadowFox \"Rust\"${RESET}    # Invite to play Rust"
+    echo
+    echo -e "  ${DIM}v${VERSION}${RESET}"
+}
+
+# ── Main dispatch ────────────────────────────────────────────────────────────
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        join)          cmd_join "$@" ;;
+        leave)         cmd_leave "$@" ;;
+        status)        cmd_status "$@" ;;
+        peers)         cmd_peers "$@" ;;
+        ping)          cmd_ping "$@" ;;
+        invite)        cmd_invite "$@" ;;
+        refresh)       cmd_refresh "$@" ;;
+        auto-connect)  cmd_auto_connect "$@" ;;
+        -h|--help|help|"")
+            usage ;;
+        *)
+            err "Unknown command: $cmd"
+            echo
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

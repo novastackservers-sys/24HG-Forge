@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# 24HG Forge — Upload ISO builds to Cloudflare R2 CDN
+# 24HG — Upload ISO builds to Cloudflare R2 CDN
 
 ###############################################################################
 # Configuration
 ###############################################################################
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly RCLONE_CONF="${SCRIPT_DIR}/rclone.conf"
-readonly R2_REMOTE="r2forge"
-readonly R2_BUCKET="forge-iso"
+readonly R2_REMOTE="r224hg"
+readonly R2_BUCKET="24hg-iso"
 readonly CDN_BASE_URL="https://cdn.24hgaming.com"
 readonly API_BASE="https://os.24hgaming.com/api"
 readonly ISO_DIR="${1:-$(dirname "$SCRIPT_DIR")/iso-output}"
@@ -171,9 +171,9 @@ generate_urls() {
 ###############################################################################
 
 update_mirror_api() {
-    local api_key="${FORGE_API_KEY:-}"
+    local api_key="${HG24_API_KEY:-}"
     if [[ -z "$api_key" ]]; then
-        log_warn "FORGE_API_KEY not set, skipping mirror API update"
+        log_warn "HG24_API_KEY not set, skipping mirror API update"
         return 0
     fi
 
@@ -253,7 +253,7 @@ purge_cdn_cache() {
 ###############################################################################
 
 main() {
-    echo -e "${BOLD}24HG Forge — R2 Upload${RESET}"
+    echo -e "${BOLD}24HG — R2 Upload${RESET}"
     echo ""
 
     preflight

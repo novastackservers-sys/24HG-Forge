@@ -1,0 +1,12 @@
+[Unit]
+Description=24HG Live Wallpaper Daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/24hg-live-wallpaper start --foreground
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

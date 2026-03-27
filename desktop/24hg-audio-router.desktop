@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Audio Router
+Comment=Per-app audio routing
+Exec=/usr/bin/24hg-audio-router
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Audio;Game;
+Keywords=audio;sound;route;pipewire;game;

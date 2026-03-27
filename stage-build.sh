@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stage all 24HG Forge files into a single directory for a single COPY in the Containerfile
+# Stage all 24HG files into a single directory for a single COPY in the Containerfile
 # This avoids the Docker 127-layer limit
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -19,12 +19,12 @@ cp -r system_files/usr/* "${STAGE}/usr/" 2>/dev/null || true
 cp -r branding/* "${STAGE}/branding/"
 
 # Hub app
-cp hub-app/forge-hub "${STAGE}/bin/"
-cp hub-app/forge-hub.desktop "${STAGE}/desktop/"
-cp hub-app/forge-session.desktop "${STAGE}/desktop/"
-cp hub-app/forge-tray "${STAGE}/bin/"
-cp hub-app/forge-tray.desktop "${STAGE}/desktop/"
-cp hub-app/forge-gamescope-session "${STAGE}/bin/"
+cp hub-app/24hg-hub "${STAGE}/bin/"
+cp hub-app/24hg-hub.desktop "${STAGE}/desktop/"
+cp hub-app/24hg-session.desktop "${STAGE}/desktop/"
+cp hub-app/24hg-tray "${STAGE}/bin/"
+cp hub-app/24hg-tray.desktop "${STAGE}/desktop/"
+cp hub-app/24hg-gamescope-session "${STAGE}/bin/"
 
 # Desktop files from scripts/ and desktop/ directories
 for f in scripts/*.desktop; do
@@ -35,16 +35,16 @@ for f in desktop/*.desktop; do
 done
 
 # Lib scripts
-for f in scripts/forge-first-boot-setup.sh scripts/configure-steam-servers.sh \
-         scripts/forge-auto-update.sh scripts/forge-heartbeat.sh \
-         scripts/forge-game-configs.sh \
-         scripts/forge-obs-setup.sh scripts/gamemode-start.sh scripts/gamemode-end.sh \
-         scripts/forge-update-guard-hook.sh scripts/forge-i18n.sh; do
+for f in scripts/24hg-first-boot-setup.sh scripts/configure-steam-servers.sh \
+         scripts/24hg-auto-update.sh scripts/24hg-heartbeat.sh \
+         scripts/24hg-game-configs.sh \
+         scripts/24hg-obs-setup.sh scripts/gamemode-start.sh scripts/gamemode-end.sh \
+         scripts/24hg-update-guard-hook.sh scripts/24hg-i18n.sh; do
     [ -f "$f" ] && cp "$f" "${STAGE}/lib/$(basename "$f")"
 done
 
 # All bin scripts (everything in scripts/ that's not a .sh, .desktop, or helper)
-for f in scripts/forge-*; do
+for f in scripts/24hg-*; do
     [ -f "$f" ] || continue
     base=$(basename "$f")
     # Skip files already handled as lib or desktop
@@ -65,11 +65,11 @@ cp -r system_files/etc/pipewire/* "${STAGE}/pipewire/" 2>/dev/null || true
 cp -r system_files/etc/libinput/* "${STAGE}/libinput/" 2>/dev/null || true
 
 # Data files
-cp system_files/usr/share/forge/servers.json "${STAGE}/data/" 2>/dev/null || true
-cp system_files/usr/share/forge/offline.html "${STAGE}/data/" 2>/dev/null || true
+cp system_files/usr/share/24hg/servers.json "${STAGE}/data/" 2>/dev/null || true
+cp system_files/usr/share/24hg/offline.html "${STAGE}/data/" 2>/dev/null || true
 
 # Plasma splash
-cp -r system_files/usr/share/plasma/look-and-feel/com.forge.splash/* "${STAGE}/plasma-splash/" 2>/dev/null || true
+cp -r system_files/usr/share/plasma/look-and-feel/com.24hg.splash/* "${STAGE}/plasma-splash/" 2>/dev/null || true
 
 # Conky
 cp -r system_files/etc/skel/.config/conky/* "${STAGE}/conky/" 2>/dev/null || true

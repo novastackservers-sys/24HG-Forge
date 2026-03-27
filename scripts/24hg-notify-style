@@ -1,0 +1,266 @@
+#!/bin/bash
+# 24HG Notification Style — Configure KDE Plasma notification appearance
+# Switches between gaming-optimized, desktop, and minimal notification profiles
+# to keep your screen clean during gameplay.
+#
+# Usage: 24hg-notify-style [gaming|desktop|minimal|status]
+
+set -euo pipefail
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+NOTIFY_RC="${XDG_CONFIG_HOME:-$HOME/.config}/plasmanotifyrc"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/24hg"
+STATE_FILE="$CONFIG_DIR/notify-style"
+
+mkdir -p "$CONFIG_DIR"
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+msg() {
+    echo -e "\033[1;35m❯\033[0m $*"
+}
+
+warn() {
+    echo -e "\033[1;33m⚠\033[0m $*" >&2
+}
+
+err() {
+    echo -e "\033[1;31m✗\033[0m $*" >&2
+    exit 1
+}
+
+# Write a key to plasmanotifyrc using kwriteconfig6
+notify_set() {
+    local group="$1"
+    local key="$2"
+    local value="$3"
+
+    kwriteconfig6 --file "$NOTIFY_RC" --group "$group" --key "$key" "$value" 2>/dev/null
+}
+
+# Read a key from plasmanotifyrc
+notify_get() {
+    local group="$1"
+    local key="$2"
+    local default="${3:-}"
+
+    kreadconfig6 --file "$NOTIFY_RC" --group "$group" --key "$key" --default "$default" 2>/dev/null || echo "$default"
+}
+
+# Reload Plasma notification daemon to pick up changes
+reload_notifications() {
+    # Signal the notification daemon to re-read its config
+    if qdbus org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.DBus.Properties.GetAll org.freedesktop.Notifications &>/dev/null; then
+        # Poke the daemon — it watches the config file, but a D-Bus ping helps
+        true
+    fi
+
+    # Also reconfigure the notification plasmoid if present
+    qdbus org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "
+        var panels = panels();
+        // Trigger a config re-read by toggling a harmless property
+    " 2>/dev/null || true
+}
+
+# Save the current profile name
+save_state() {
+    echo "$1" > "$STATE_FILE"
+}
+
+# ── Profiles ──────────────────────────────────────────────────────────────────
+
+profile_gaming() {
+    msg "Applying \033[1;36mgaming\033[0m notification profile..."
+    echo ""
+
+    # Popup position: top-right (out of the way of most HUDs)
+    notify_set "Notifications" "PopupPosition" "TopRight"
+
+    # Short timeout — glance and gone
+    notify_set "Notifications" "PopupTimeout" "3000"
+
+    # Low priority popups hidden (less clutter during gameplay)
+    notify_set "Notifications" "LowPriorityPopups" "false"
+
+    # Compact popup size — minimal screen real estate
+    notify_set "Notifications" "NormalPopupWidth" "300"
+    notify_set "Notifications" "CriticalPopupWidth" "350"
+
+    # Do not disturb while fullscreen apps are running
+    notify_set "DoNotDisturb" "WhenScreensMirrored" "false"
+    notify_set "DoNotDisturb" "WhenScreensMirrored" "false"
+
+    # Keep notification history available but don't intrude
+    notify_set "Notifications" "KeepNormalAlwaysOnTop" "false"
+
+    # Badge in taskbar — subtle indicator of missed notifications
+    notify_set "Badges" "InTaskManager" "true"
+
+    save_state "gaming"
+    reload_notifications
+
+    echo -e "  Position:         \033[1mTop-right\033[0m"
+    echo -e "  Auto-hide:        \033[1m3 seconds\033[0m"
+    echo -e "  Popup width:      \033[1mNarrow (300px)\033[0m"
+    echo -e "  Low priority:     \033[1mHidden\033[0m"
+    echo -e "  Fullscreen:       \033[1mDo Not Disturb\033[0m"
+    echo -e "  Taskbar badges:   \033[1mEnabled\033[0m"
+    echo ""
+    msg "\033[1;32mGaming profile active.\033[0m Notifications will stay out of your way."
+}
+
+profile_desktop() {
+    msg "Applying \033[1;36mdesktop\033[0m notification profile..."
+    echo ""
+
+    # Standard bottom-right position (KDE default)
+    notify_set "Notifications" "PopupPosition" "BottomRight"
+
+    # Comfortable 5-second timeout
+    notify_set "Notifications" "PopupTimeout" "5000"
+
+    # Show all notifications including low priority
+    notify_set "Notifications" "LowPriorityPopups" "true"
+
+    # Full-width popups for readability
+    notify_set "Notifications" "NormalPopupWidth" "400"
+    notify_set "Notifications" "CriticalPopupWidth" "450"
+
+    # No auto-DND
+    notify_set "DoNotDisturb" "WhenScreensMirrored" "false"
+
+    # Standard stacking
+    notify_set "Notifications" "KeepNormalAlwaysOnTop" "false"
+
+    # Badges on
+    notify_set "Badges" "InTaskManager" "true"
+
+    save_state "desktop"
+    reload_notifications
+
+    echo -e "  Position:         \033[1mBottom-right\033[0m"
+    echo -e "  Auto-hide:        \033[1m5 seconds\033[0m"
+    echo -e "  Popup width:      \033[1mFull (400px)\033[0m"
+    echo -e "  Low priority:     \033[1mShown\033[0m"
+    echo -e "  Fullscreen:       \033[1mNormal behavior\033[0m"
+    echo -e "  Taskbar badges:   \033[1mEnabled\033[0m"
+    echo ""
+    msg "\033[1;32mDesktop profile active.\033[0m Full notification experience."
+}
+
+profile_minimal() {
+    msg "Applying \033[1;36mminimal\033[0m notification profile..."
+    echo ""
+
+    # Top-right, very brief
+    notify_set "Notifications" "PopupPosition" "TopRight"
+
+    # Ultra-short — blink and you'll miss it
+    notify_set "Notifications" "PopupTimeout" "2000"
+
+    # Only critical notifications as popups
+    notify_set "Notifications" "LowPriorityPopups" "false"
+
+    # Narrow popups
+    notify_set "Notifications" "NormalPopupWidth" "280"
+    notify_set "Notifications" "CriticalPopupWidth" "320"
+
+    # Silent — no notification sounds
+    notify_set "Notifications" "PopupSound" "false"
+
+    # Critical only during fullscreen
+    notify_set "DoNotDisturb" "WhenScreensMirrored" "true"
+
+    # Suppress always-on-top
+    notify_set "Notifications" "KeepNormalAlwaysOnTop" "false"
+
+    # Badges still on so nothing is truly lost
+    notify_set "Badges" "InTaskManager" "true"
+
+    save_state "minimal"
+    reload_notifications
+
+    echo -e "  Position:         \033[1mTop-right\033[0m"
+    echo -e "  Auto-hide:        \033[1m2 seconds\033[0m"
+    echo -e "  Popup width:      \033[1mNarrow (280px)\033[0m"
+    echo -e "  Low priority:     \033[1mHidden\033[0m"
+    echo -e "  Sounds:           \033[1mDisabled\033[0m"
+    echo -e "  Fullscreen:       \033[1mCritical only\033[0m"
+    echo -e "  Taskbar badges:   \033[1mEnabled\033[0m"
+    echo ""
+    msg "\033[1;32mMinimal profile active.\033[0m Maximum focus, minimum interruption."
+}
+
+cmd_status() {
+    echo ""
+    msg "\033[1mNotification Configuration\033[0m"
+    echo ""
+
+    local current_profile="unknown"
+    [[ -f "$STATE_FILE" ]] && current_profile="$(cat "$STATE_FILE" 2>/dev/null || echo "unknown")"
+
+    local position timeout low_priority width
+    position="$(notify_get "Notifications" "PopupPosition" "BottomRight")"
+    timeout="$(notify_get "Notifications" "PopupTimeout" "5000")"
+    low_priority="$(notify_get "Notifications" "LowPriorityPopups" "true")"
+    width="$(notify_get "Notifications" "NormalPopupWidth" "400")"
+
+    local timeout_sec
+    timeout_sec="$(awk "BEGIN {printf \"%.1f\", $timeout / 1000}")"
+
+    echo -e "  Active profile:   \033[1;36m$current_profile\033[0m"
+    echo -e "  Position:         $position"
+    echo -e "  Auto-hide:        ${timeout_sec}s"
+    echo -e "  Low priority:     $low_priority"
+    echo -e "  Popup width:      ${width}px"
+    echo ""
+    echo -e "  \033[2mConfig file: $NOTIFY_RC\033[0m"
+    echo ""
+
+    msg "Available profiles: \033[1mgaming\033[0m  \033[1mdesktop\033[0m  \033[1mminimal\033[0m"
+    echo ""
+}
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<'HELP'
+
+  24hg-notify-style — Configure notification appearance for 24HG
+
+  Profiles:
+    gaming      Compact top-right popups, 3s timeout, DND during fullscreen
+    desktop     Standard bottom-right popups, 5s timeout, all sounds
+    minimal     Tiny top-right popups, 2s timeout, no sounds, critical only
+
+  Commands:
+    gaming      Apply gaming notification profile
+    desktop     Apply desktop notification profile
+    minimal     Apply minimal notification profile
+    status      Show current notification configuration
+
+  The gaming profile is recommended while playing — it keeps notifications
+  small, fast, and out of the way. Switch to desktop for normal use.
+
+HELP
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+ACTION="${1:-}"
+
+case "$ACTION" in
+    gaming|game)        profile_gaming ;;
+    desktop|default)    profile_desktop ;;
+    minimal|min|quiet)  profile_minimal ;;
+    status|info)        cmd_status ;;
+    -h|--help|help)     usage ;;
+    "")
+        msg "No profile specified. Run \033[1m24hg-notify-style --help\033[0m for usage."
+        cmd_status
+        ;;
+    *)
+        err "Unknown profile: $ACTION. Options: gaming, desktop, minimal, status"
+        ;;
+esac

@@ -1,0 +1,954 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Smart Launcher — Unified game launcher with auto-optimization
+
+# ─── Colors & Formatting ──────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'
+PURPLE='\033[0;35m'; CYAN='\033[0;36m'; WHITE='\033[1;37m'; ORANGE='\033[0;33m'
+BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
+
+# Source colors
+CLR_STEAM="$BLUE"
+CLR_LUTRIS="$ORANGE"
+CLR_HEROIC="$PURPLE"
+CLR_FLATPAK="$GREEN"
+CLR_NATIVE="$WHITE"
+
+# ─── Paths & Config ───────────────────────────────────────────────────────────
+HG24_DIR="${HOME}/.config/24hg"
+CONF_FILE="${HG24_DIR}/launcher.conf"
+HISTORY_FILE="${HG24_DIR}/play-history.json"
+GAME_CACHE="${HG24_DIR}/game-cache.json"
+PID_DIR="${HG24_DIR}/running"
+
+STEAM_ROOT="${HOME}/.local/share/Steam"
+LUTRIS_DB="${HOME}/.local/share/lutris/pga.db"
+HEROIC_CACHE="${HOME}/.config/heroic/store_cache"
+PROTON_TOOLS="${STEAM_ROOT}/compatibilitytools.d"
+
+VERSION="1.0.0"
+
+# ─── Default config ───────────────────────────────────────────────────────────
+MANGOHUD=yes
+GAMEMODE=yes
+AUTO_OPTIMIZE=yes
+TRACK_PLAYTIME=yes
+
+# ─── Init ──────────────────────────────────────────────────────────────────────
+init_24hg() {
+    mkdir -p "$HG24_DIR" "$PID_DIR"
+    [[ -f "$HISTORY_FILE" ]] || echo '[]' > "$HISTORY_FILE"
+    if [[ ! -f "$CONF_FILE" ]]; then
+        cat > "$CONF_FILE" <<'CONF'
+MANGOHUD=yes
+GAMEMODE=yes
+AUTO_OPTIMIZE=yes
+TRACK_PLAYTIME=yes
+CONF
+        logger -t 24hg-launch "Created default config at $CONF_FILE"
+    fi
+    # shellcheck source=/dev/null
+    source "$CONF_FILE"
+}
+
+log() { logger -t 24hg-launch "$*"; }
+
+header() {
+    echo -e "\n${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${CYAN}║${RESET}  ${BOLD}🎮 24HG Smart Launcher${RESET}  ${DIM}v${VERSION}${RESET}                        ${BOLD}${CYAN}║${RESET}"
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════╝${RESET}\n"
+}
+
+# ─── Known Game Optimizations ─────────────────────────────────────────────────
+declare -A GAME_FLAGS=(
+    ["Elden Ring"]="PROTON_NO_ESYNC=0 PROTON_NO_FSYNC=0 mangohud %command%"
+    ["ELDEN RING"]="PROTON_NO_ESYNC=0 PROTON_NO_FSYNC=0 mangohud %command%"
+    ["Cyberpunk 2077"]="WINEDLLOVERRIDES=\"winmm=n,b\" mangohud %command%"
+    ["Grand Theft Auto V"]="PROTON_USE_WINED3D=0 %command%"
+    ["GTA V"]="PROTON_USE_WINED3D=0 %command%"
+    ["Minecraft"]="java -Xmx4G -Xms2G"
+    ["Counter-Strike 2"]="LAUNCH_FLAGS=\"-novid -nojoy +fps_max 0\""
+    ["CS2"]="LAUNCH_FLAGS=\"-novid -nojoy +fps_max 0\""
+    ["Baldur's Gate 3"]="PROTON_NO_ESYNC=0 PROTON_NO_FSYNC=0 %command% --skip-launcher"
+    ["The Witcher 3"]="PROTON_NO_ESYNC=0 mangohud %command%"
+    ["Red Dead Redemption 2"]="STAGING_SHARED_MEMORY=1 PROTON_NO_ESYNC=0 mangohud %command%"
+    ["Hogwarts Legacy"]="PROTON_NO_ESYNC=0 PROTON_NO_FSYNC=0 DXVK_ASYNC=1 mangohud %command%"
+    ["Starfield"]="PROTON_NO_ESYNC=0 PROTON_NO_FSYNC=0 mangohud %command%"
+    ["Horizon Zero Dawn"]="PROTON_NO_ESYNC=1 mangohud %command%"
+    ["Hades"]="mangohud %command%"
+    ["Hades II"]="mangohud %command%"
+    ["Deep Rock Galactic"]="mangohud %command%"
+    ["Valheim"]="PROTON_NO_ESYNC=0 mangohud %command%"
+    ["Terraria"]="mangohud %command%"
+    ["Stardew Valley"]="mangohud %command%"
+    ["No Man's Sky"]="PROTON_NO_ESYNC=0 PROTON_NO_FSYNC=0 mangohud %command%"
+    ["Monster Hunter Rise"]="PROTON_NO_ESYNC=0 DXVK_ASYNC=1 mangohud %command%"
+    ["God of War"]="PROTON_NO_ESYNC=0 PROTON_NO_FSYNC=0 mangohud %command%"
+    ["Death Stranding"]="mangohud %command%"
+    ["Sekiro"]="PROTON_NO_ESYNC=0 mangohud %command%"
+    ["Dark Souls III"]="PROTON_NO_ESYNC=0 mangohud %command%"
+    ["Resident Evil Village"]="PROTON_NO_ESYNC=0 DXVK_ASYNC=1 mangohud %command%"
+    ["It Takes Two"]="PROTON_NO_ESYNC=0 mangohud %command%"
+    ["Apex Legends"]="PROTON_NO_ESYNC=0 PROTON_NO_FSYNC=0 %command% -novid"
+    ["Dota 2"]="mangohud %command% -novid -nojoy"
+    ["Team Fortress 2"]="mangohud %command% -novid -nojoy -noipx"
+)
+
+# ─── Steam Detection ──────────────────────────────────────────────────────────
+detect_steam_games() {
+    local library_file="${STEAM_ROOT}/steamapps/libraryfolders.vdf"
+    [[ -f "$library_file" ]] || return 0
+
+    local -a lib_paths=()
+    # Parse libraryfolders.vdf for paths
+    while IFS= read -r line; do
+        if [[ "$line" =~ \"path\"[[:space:]]+\"(.+)\" ]]; then
+            lib_paths+=("${BASH_REMATCH[1]}/steamapps")
+        fi
+    done < "$library_file"
+    # Always include default
+    [[ " ${lib_paths[*]} " == *" ${STEAM_ROOT}/steamapps "* ]] || lib_paths+=("${STEAM_ROOT}/steamapps")
+
+    for lib in "${lib_paths[@]}"; do
+        [[ -d "$lib" ]] || continue
+        for manifest in "$lib"/appmanifest_*.acf; do
+            [[ -f "$manifest" ]] || continue
+            local appid="" name="" installdir="" size=""
+            while IFS= read -r mline; do
+                if [[ "$mline" =~ \"appid\"[[:space:]]+\"([^\"]+)\" ]]; then
+                    appid="${BASH_REMATCH[1]}"
+                elif [[ "$mline" =~ \"name\"[[:space:]]+\"([^\"]+)\" ]]; then
+                    name="${BASH_REMATCH[1]}"
+                elif [[ "$mline" =~ \"installdir\"[[:space:]]+\"([^\"]+)\" ]]; then
+                    installdir="${BASH_REMATCH[1]}"
+                elif [[ "$mline" =~ \"SizeOnDisk\"[[:space:]]+\"([^\"]+)\" ]]; then
+                    size="${BASH_REMATCH[1]}"
+                fi
+            done < "$manifest"
+            [[ -n "$name" && -n "$appid" ]] || continue
+            # Skip tools/redistributables
+            [[ "$name" == *"Redistributable"* || "$name" == *"Proton"* || "$name" == *"Steam Linux Runtime"* ]] && continue
+            local size_human="?"
+            if [[ -n "$size" && "$size" -gt 0 ]] 2>/dev/null; then
+                size_human=$(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "${size}B")
+            fi
+            echo "STEAM|${appid}|${name}|${installdir}|${size_human}|${lib}/${installdir}"
+        done
+    done
+}
+
+# ─── Lutris Detection ─────────────────────────────────────────────────────────
+detect_lutris_games() {
+    [[ -f "$LUTRIS_DB" ]] || return 0
+    command -v sqlite3 &>/dev/null || return 0
+
+    sqlite3 -separator '|' "$LUTRIS_DB" \
+        "SELECT name, slug, runner, directory FROM games WHERE installed = 1;" 2>/dev/null | \
+    while IFS='|' read -r name slug runner directory; do
+        echo "LUTRIS|${slug}|${name}|${runner}||${directory}"
+    done
+}
+
+# ─── Heroic Detection ─────────────────────────────────────────────────────────
+detect_heroic_games() {
+    [[ -d "$HEROIC_CACHE" ]] || return 0
+    command -v jq &>/dev/null || return 0
+
+    # Epic Games (Legendary)
+    local epic_cache="${HEROIC_CACHE}/legendary_library.json"
+    if [[ -f "$epic_cache" ]]; then
+        jq -r '.library[]? | select(.is_installed == true) |
+            "HEROIC-EPIC|\(.app_name)|\(.title)|epic||\(.install.install_path // "")"' \
+            "$epic_cache" 2>/dev/null || true
+    fi
+
+    # GOG
+    local gog_cache="${HEROIC_CACHE}/gog_library.json"
+    if [[ -f "$gog_cache" ]]; then
+        jq -r '.games[]? | select(.is_installed == true) |
+            "HEROIC-GOG|\(.app_name)|\(.title)|gog||\(.install.install_path // "")"' \
+            "$gog_cache" 2>/dev/null || true
+    fi
+}
+
+# ─── Flatpak Detection ────────────────────────────────────────────────────────
+detect_flatpak_games() {
+    command -v flatpak &>/dev/null || return 0
+
+    # Known game-related Flatpak prefixes/apps
+    local -a game_prefixes=(
+        "com.valvesoftware" "net.lutris" "com.heroicgameslauncher"
+        "org.libretro" "io.github.antimicrox" "net.pcsx2"
+        "org.DolphinEmu" "org.ppsspp" "com.retroarch"
+        "org.yuzu_emu" "org.citra_emu" "io.mgba" "net.rpcs3"
+        "com.mojang" "io.itch" "com.obsproject" "net.minetest"
+        "org.supertuxkart" "org.wesnoth" "com.play0ad"
+    )
+
+    flatpak list --app --columns=application,name 2>/dev/null | while IFS=$'\t' read -r appid name; do
+        local is_game=false
+        for prefix in "${game_prefixes[@]}"; do
+            if [[ "$appid" == "${prefix}"* ]]; then
+                is_game=true
+                break
+            fi
+        done
+        $is_game && echo "FLATPAK|${appid}|${name}|flatpak||"
+    done
+}
+
+# ─── Native Game Detection ────────────────────────────────────────────────────
+detect_native_games() {
+    local -a desktop_dirs=(
+        "/usr/share/applications"
+        "${HOME}/.local/share/applications"
+    )
+
+    for dir in "${desktop_dirs[@]}"; do
+        [[ -d "$dir" ]] || continue
+        for desktop_file in "$dir"/*.desktop; do
+            [[ -f "$desktop_file" ]] || continue
+            local name="" exec_cmd="" categories="" is_game=false
+            while IFS='=' read -r key val; do
+                case "$key" in
+                    Name) [[ -z "$name" ]] && name="$val" ;;
+                    Exec) exec_cmd="$val" ;;
+                    Categories) categories="$val" ;;
+                esac
+            done < "$desktop_file"
+            [[ "$categories" == *"Game"* ]] && is_game=true
+            if $is_game && [[ -n "$name" ]]; then
+                local slug
+                slug=$(basename "$desktop_file" .desktop)
+                echo "NATIVE|${slug}|${name}|native||${exec_cmd}"
+            fi
+        done
+    done
+}
+
+# ─── Collect All Games ────────────────────────────────────────────────────────
+collect_all_games() {
+    {
+        detect_steam_games
+        detect_lutris_games
+        detect_heroic_games
+        detect_flatpak_games
+        detect_native_games
+    } | sort -t'|' -k3
+}
+
+# ─── Source color helper ───────────────────────────────────────────────────────
+source_color() {
+    case "$1" in
+        STEAM)      echo -e "${CLR_STEAM}Steam${RESET}" ;;
+        LUTRIS)     echo -e "${CLR_LUTRIS}Lutris${RESET}" ;;
+        HEROIC-EPIC) echo -e "${CLR_HEROIC}Heroic/Epic${RESET}" ;;
+        HEROIC-GOG) echo -e "${CLR_HEROIC}Heroic/GOG${RESET}" ;;
+        FLATPAK)    echo -e "${CLR_FLATPAK}Flatpak${RESET}" ;;
+        NATIVE)     echo -e "${CLR_NATIVE}Native${RESET}" ;;
+        *)          echo -e "${DIM}$1${RESET}" ;;
+    esac
+}
+
+source_name_color() {
+    local source="$1" name="$2"
+    case "$source" in
+        STEAM)      echo -e "${CLR_STEAM}${name}${RESET}" ;;
+        LUTRIS)     echo -e "${CLR_LUTRIS}${name}${RESET}" ;;
+        HEROIC-*)   echo -e "${CLR_HEROIC}${name}${RESET}" ;;
+        FLATPAK)    echo -e "${CLR_FLATPAK}${name}${RESET}" ;;
+        NATIVE)     echo -e "${CLR_NATIVE}${name}${RESET}" ;;
+        *)          echo "$name" ;;
+    esac
+}
+
+# ─── Playtime helpers ─────────────────────────────────────────────────────────
+get_playtime() {
+    local game_name="$1"
+    [[ -f "$HISTORY_FILE" ]] || { echo "0"; return; }
+    command -v jq &>/dev/null || { echo "?"; return; }
+    local total
+    total=$(jq -r --arg name "$game_name" \
+        '[.[] | select(.game == $name) | .duration // 0] | add // 0' "$HISTORY_FILE" 2>/dev/null)
+    echo "$total"
+}
+
+format_duration() {
+    local seconds="${1:-0}"
+    [[ "$seconds" =~ ^[0-9]+$ ]] || { echo "—"; return; }
+    if (( seconds < 60 )); then
+        echo "${seconds}s"
+    elif (( seconds < 3600 )); then
+        echo "$(( seconds / 60 ))m"
+    else
+        local h=$(( seconds / 3600 ))
+        local m=$(( (seconds % 3600) / 60 ))
+        echo "${h}h ${m}m"
+    fi
+}
+
+get_last_played() {
+    local game_name="$1"
+    [[ -f "$HISTORY_FILE" ]] || { echo "—"; return; }
+    command -v jq &>/dev/null || { echo "?"; return; }
+    local ts
+    ts=$(jq -r --arg name "$game_name" \
+        '[.[] | select(.game == $name) | .timestamp] | sort | last // empty' "$HISTORY_FILE" 2>/dev/null)
+    if [[ -n "$ts" && "$ts" != "null" ]]; then
+        date -d "$ts" "+%Y-%m-%d" 2>/dev/null || echo "$ts"
+    else
+        echo "—"
+    fi
+}
+
+# ─── Compat rating ────────────────────────────────────────────────────────────
+get_compat_rating() {
+    local source="$1" name="$2"
+    case "$source" in
+        NATIVE)     echo -e "${GREEN}Native${RESET}" ;;
+        FLATPAK)    echo -e "${GREEN}Native${RESET}" ;;
+        STEAM)      echo -e "${GREEN}Verified${RESET}" ;;
+        LUTRIS)     echo -e "${YELLOW}Good${RESET}" ;;
+        HEROIC-*)   echo -e "${YELLOW}Good${RESET}" ;;
+        *)          echo -e "${DIM}Unknown${RESET}" ;;
+    esac
+}
+
+# ─── Proton selection ─────────────────────────────────────────────────────────
+find_best_proton() {
+    local best=""
+    local best_ver=0
+
+    # Check custom Proton tools
+    if [[ -d "$PROTON_TOOLS" ]]; then
+        for d in "$PROTON_TOOLS"/*/; do
+            [[ -d "$d" ]] || continue
+            local name
+            name=$(basename "$d")
+            # Prefer GE-Proton, then Proton
+            if [[ "$name" == GE-Proton* ]]; then
+                local ver
+                ver=$(echo "$name" | grep -oP '\d+' | head -1)
+                if (( ver > best_ver )); then
+                    best_ver=$ver
+                    best="$d"
+                fi
+            fi
+        done
+    fi
+
+    # Check system Proton in Steam
+    if [[ -z "$best" && -d "${STEAM_ROOT}/steamapps/common" ]]; then
+        for d in "${STEAM_ROOT}/steamapps/common"/Proton*/; do
+            [[ -d "$d" ]] || continue
+            local name
+            name=$(basename "$d")
+            local ver
+            ver=$(echo "$name" | grep -oP '[\d.]+' | head -1 | tr -d '.')
+            if (( ver > best_ver )); then
+                best_ver=$ver
+                best="$d"
+            fi
+        done
+    fi
+
+    if [[ -n "$best" ]]; then
+        echo "$best"
+    else
+        echo "system"
+    fi
+}
+
+# ─── Build launch environment ─────────────────────────────────────────────────
+build_launch_env() {
+    local game_name="$1"
+    local env_vars=""
+
+    # MangoHud
+    if [[ "$MANGOHUD" == "yes" ]] && command -v mangohud &>/dev/null; then
+        env_vars+="MANGOHUD=1 "
+    fi
+
+    # GameMode
+    if [[ "$GAMEMODE" == "yes" ]] && command -v gamemoderun &>/dev/null; then
+        env_vars+="ENABLE_GAMESCOPE=0 "
+    fi
+
+    # GPU-specific env from 24hg-hw-optimizer
+    local hw_env="${HG24_DIR}/hw-env.sh"
+    if [[ -f "$hw_env" ]]; then
+        # shellcheck source=/dev/null
+        source "$hw_env" 2>/dev/null || true
+    fi
+
+    # Game-specific flags
+    if [[ -n "${GAME_FLAGS[$game_name]+x}" ]]; then
+        local flags="${GAME_FLAGS[$game_name]}"
+        # Extract env vars (KEY=VALUE pairs before %command%)
+        local env_part
+        env_part=$(echo "$flags" | sed 's/%command%.*//' | xargs)
+        [[ -n "$env_part" ]] && env_vars+="$env_part "
+    fi
+
+    echo "$env_vars"
+}
+
+get_launch_flags() {
+    local game_name="$1"
+    if [[ -n "${GAME_FLAGS[$game_name]+x}" ]]; then
+        local flags="${GAME_FLAGS[$game_name]}"
+        # Extract part after %command%
+        if [[ "$flags" == *"%command%"* ]]; then
+            echo "${flags#*%command%}" | xargs
+        elif [[ "$flags" == LAUNCH_FLAGS=* ]]; then
+            echo "$flags" | sed 's/LAUNCH_FLAGS="//' | sed 's/"//'
+        else
+            echo "$flags"
+        fi
+    fi
+}
+
+# ─── Record play session ──────────────────────────────────────────────────────
+record_play_start() {
+    local game_name="$1" pid="$2"
+    local start_time
+    start_time=$(date -Iseconds)
+    echo "${start_time}|${game_name}" > "${PID_DIR}/${pid}.session"
+    log "Started playing: $game_name (PID: $pid)"
+}
+
+record_play_end() {
+    local pid="$1"
+    local session_file="${PID_DIR}/${pid}.session"
+    [[ -f "$session_file" ]] || return 0
+
+    local data
+    data=$(<"$session_file")
+    local start_time="${data%%|*}"
+    local game_name="${data#*|}"
+    local end_time
+    end_time=$(date -Iseconds)
+
+    local start_epoch end_epoch duration
+    start_epoch=$(date -d "$start_time" +%s 2>/dev/null || echo 0)
+    end_epoch=$(date -d "$end_time" +%s 2>/dev/null || echo 0)
+    duration=$(( end_epoch - start_epoch ))
+    (( duration < 0 )) && duration=0
+
+    if [[ "$TRACK_PLAYTIME" == "yes" ]] && command -v jq &>/dev/null; then
+        local entry
+        entry=$(jq -n --arg game "$game_name" --arg ts "$start_time" \
+            --arg end "$end_time" --argjson dur "$duration" \
+            '{game: $game, timestamp: $ts, end_time: $end, duration: $dur}')
+        local tmp
+        tmp=$(mktemp)
+        jq ". + [$entry]" "$HISTORY_FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$HISTORY_FILE"
+    fi
+
+    rm -f "$session_file"
+    log "Finished playing: $game_name (duration: $(format_duration $duration))"
+}
+
+# ─── Background watcher ───────────────────────────────────────────────────────
+watch_game_exit() {
+    local pid="$1"
+    (
+        while kill -0 "$pid" 2>/dev/null; do
+            sleep 10
+        done
+        record_play_end "$pid"
+    ) &
+    disown
+}
+
+# ─── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    header
+    echo -e "${BOLD}  Scanning installed games...${RESET}\n"
+
+    local games
+    games=$(collect_all_games)
+
+    if [[ -z "$games" ]]; then
+        echo -e "  ${DIM}No installed games found.${RESET}"
+        echo -e "  ${DIM}Install games via Steam, Lutris, Heroic, or Flatpak.${RESET}"
+        return 0
+    fi
+
+    local count=0
+    printf "  ${BOLD}%-4s  %-40s  %-14s  %-10s  %-12s  %s${RESET}\n" \
+        "#" "Game" "Source" "Compat" "Last Played" "Playtime"
+    echo -e "  ${DIM}$(printf '─%.0s' {1..100})${RESET}"
+
+    while IFS='|' read -r source id name runner size path; do
+        (( count++ ))
+        local colored_src colored_name compat last_played playtime
+        colored_src=$(source_color "$source")
+        colored_name=$(source_name_color "$source" "$name")
+        compat=$(get_compat_rating "$source" "$name")
+        last_played=$(get_last_played "$name")
+        playtime=$(format_duration "$(get_playtime "$name")")
+
+        printf "  %-4s  %-40b  %-25b  %-21b  %-12s  %s\n" \
+            "$count" "$colored_name" "$colored_src" "$compat" "$last_played" "$playtime"
+    done <<< "$games"
+
+    echo -e "\n  ${DIM}Found ${count} games across all sources.${RESET}"
+    echo -e "  ${DIM}Use '${BOLD}24hg-launch play <name>${RESET}${DIM}' to launch a game.${RESET}\n"
+}
+
+cmd_search() {
+    local query="${1:-}"
+    if [[ -z "$query" ]]; then
+        echo -e "${RED}Error: Please provide a search query.${RESET}"
+        echo "Usage: 24hg-launch search <query>"
+        return 1
+    fi
+
+    header
+    echo -e "  ${BOLD}Searching for:${RESET} ${CYAN}${query}${RESET}\n"
+
+    local games matched=0
+    games=$(collect_all_games)
+
+    printf "  ${BOLD}%-4s  %-40s  %-14s  %-10s${RESET}\n" "#" "Game" "Source" "Compat"
+    echo -e "  ${DIM}$(printf '─%.0s' {1..75})${RESET}"
+
+    while IFS='|' read -r source id name runner size path; do
+        if echo "$name" | grep -qi "$query"; then
+            (( matched++ ))
+            local colored_src colored_name compat
+            colored_src=$(source_color "$source")
+            colored_name=$(source_name_color "$source" "$name")
+            compat=$(get_compat_rating "$source" "$name")
+            printf "  %-4s  %-40b  %-25b  %-21b\n" "$matched" "$colored_name" "$colored_src" "$compat"
+        fi
+    done <<< "$games"
+
+    if (( matched == 0 )); then
+        echo -e "  ${DIM}No games found matching '${query}'.${RESET}"
+    else
+        echo -e "\n  ${DIM}Found ${matched} matching game(s).${RESET}"
+    fi
+    echo
+}
+
+cmd_info() {
+    local query="${1:-}"
+    if [[ -z "$query" ]]; then
+        echo -e "${RED}Error: Please provide a game name.${RESET}"
+        echo "Usage: 24hg-launch info <game>"
+        return 1
+    fi
+
+    header
+    local games match_source="" match_id="" match_name="" match_runner="" match_size="" match_path=""
+    games=$(collect_all_games)
+
+    while IFS='|' read -r source id name runner size path; do
+        if echo "$name" | grep -qi "$query"; then
+            match_source="$source"
+            match_id="$id"
+            match_name="$name"
+            match_runner="$runner"
+            match_size="$size"
+            match_path="$path"
+            break
+        fi
+    done <<< "$games"
+
+    if [[ -z "$match_name" ]]; then
+        echo -e "  ${RED}Game not found: ${query}${RESET}"
+        return 1
+    fi
+
+    local colored_name colored_src compat playtime_raw playtime last_played
+    colored_name=$(source_name_color "$match_source" "$match_name")
+    colored_src=$(source_color "$match_source")
+    compat=$(get_compat_rating "$match_source" "$match_name")
+    playtime_raw=$(get_playtime "$match_name")
+    playtime=$(format_duration "$playtime_raw")
+    last_played=$(get_last_played "$match_name")
+
+    echo -e "  ${BOLD}Game Information${RESET}"
+    echo -e "  ${DIM}$(printf '─%.0s' {1..50})${RESET}"
+    echo -e "  ${BOLD}Name:${RESET}         $colored_name"
+    echo -e "  ${BOLD}Source:${RESET}       $colored_src"
+    echo -e "  ${BOLD}ID:${RESET}           ${match_id}"
+    echo -e "  ${BOLD}Runner:${RESET}       ${match_runner:-—}"
+    echo -e "  ${BOLD}Size:${RESET}         ${match_size:-—}"
+    echo -e "  ${BOLD}Path:${RESET}         ${match_path:-—}"
+    echo -e "  ${BOLD}Compat:${RESET}       $compat"
+    echo -e "  ${BOLD}Last Played:${RESET}  ${last_played}"
+    echo -e "  ${BOLD}Playtime:${RESET}     ${playtime}"
+
+    # Optimal settings
+    echo -e "\n  ${BOLD}Optimal Launch Settings${RESET}"
+    echo -e "  ${DIM}$(printf '─%.0s' {1..50})${RESET}"
+    if [[ -n "${GAME_FLAGS[$match_name]+x}" ]]; then
+        echo -e "  ${GREEN}Known optimizations:${RESET}"
+        echo -e "  ${CYAN}${GAME_FLAGS[$match_name]}${RESET}"
+    else
+        echo -e "  ${DIM}No specific optimizations — default settings will be used.${RESET}"
+    fi
+
+    local proton
+    proton=$(find_best_proton)
+    echo -e "  ${BOLD}Best Proton:${RESET}  ${proton}"
+
+    # Session history
+    if command -v jq &>/dev/null && [[ -f "$HISTORY_FILE" ]]; then
+        local sessions
+        sessions=$(jq -r --arg name "$match_name" \
+            '.[] | select(.game == $name) | "\(.timestamp) — \(.duration)s"' \
+            "$HISTORY_FILE" 2>/dev/null | tail -5)
+        if [[ -n "$sessions" ]]; then
+            echo -e "\n  ${BOLD}Recent Sessions${RESET}"
+            echo -e "  ${DIM}$(printf '─%.0s' {1..50})${RESET}"
+            while IFS= read -r session; do
+                local ts dur
+                ts="${session%% — *}"
+                dur="${session##* — }"
+                dur="${dur%s}"
+                echo -e "  $(date -d "$ts" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "$ts")  —  $(format_duration "$dur")"
+            done <<< "$sessions"
+        fi
+    fi
+    echo
+}
+
+cmd_optimize() {
+    local query="${1:-}"
+    if [[ -z "$query" ]]; then
+        echo -e "${RED}Error: Please provide a game name.${RESET}"
+        echo "Usage: 24hg-launch optimize <game>"
+        return 1
+    fi
+
+    header
+    local games match_source="" match_name=""
+    games=$(collect_all_games)
+
+    while IFS='|' read -r source id name runner size path; do
+        if echo "$name" | grep -qi "$query"; then
+            match_source="$source"
+            match_name="$name"
+            break
+        fi
+    done <<< "$games"
+
+    if [[ -z "$match_name" ]]; then
+        echo -e "  ${RED}Game not found: ${query}${RESET}"
+        return 1
+    fi
+
+    echo -e "  ${BOLD}Optimization Settings for:${RESET} $(source_name_color "$match_source" "$match_name")\n"
+
+    # Environment
+    local env_vars
+    env_vars=$(build_launch_env "$match_name")
+    echo -e "  ${BOLD}Environment Variables:${RESET}"
+    if [[ -n "$env_vars" ]]; then
+        for var in $env_vars; do
+            echo -e "    ${GREEN}+${RESET} ${var}"
+        done
+    else
+        echo -e "    ${DIM}None${RESET}"
+    fi
+
+    # Launch flags
+    echo -e "\n  ${BOLD}Launch Flags:${RESET}"
+    local flags
+    flags=$(get_launch_flags "$match_name")
+    if [[ -n "$flags" ]]; then
+        echo -e "    ${CYAN}${flags}${RESET}"
+    else
+        echo -e "    ${DIM}None${RESET}"
+    fi
+
+    # Game-specific
+    echo -e "\n  ${BOLD}Known Optimizations:${RESET}"
+    if [[ -n "${GAME_FLAGS[$match_name]+x}" ]]; then
+        echo -e "    ${CYAN}${GAME_FLAGS[$match_name]}${RESET}"
+    else
+        echo -e "    ${DIM}No game-specific optimizations in database.${RESET}"
+        echo -e "    ${DIM}Default MangoHud + GameMode will be applied.${RESET}"
+    fi
+
+    # Proton
+    local proton
+    proton=$(find_best_proton)
+    echo -e "\n  ${BOLD}Proton:${RESET}"
+    echo -e "    Best available: ${CYAN}${proton}${RESET}"
+
+    # System features
+    echo -e "\n  ${BOLD}System Features:${RESET}"
+    if command -v mangohud &>/dev/null; then
+        echo -e "    ${GREEN}[OK]${RESET} MangoHud: ${MANGOHUD}"
+    else
+        echo -e "    ${RED}[--]${RESET} MangoHud: not installed"
+    fi
+    if command -v gamemoderun &>/dev/null; then
+        echo -e "    ${GREEN}[OK]${RESET} GameMode: ${GAMEMODE}"
+    else
+        echo -e "    ${RED}[--]${RESET} GameMode: not installed"
+    fi
+    echo
+}
+
+cmd_play() {
+    local query="${1:-}"
+    if [[ -z "$query" ]]; then
+        echo -e "${RED}Error: Please provide a game name.${RESET}"
+        echo "Usage: 24hg-launch play <game>"
+        return 1
+    fi
+
+    header
+    local games match_source="" match_id="" match_name="" match_runner="" match_size="" match_path=""
+    games=$(collect_all_games)
+
+    while IFS='|' read -r source id name runner size path; do
+        if echo "$name" | grep -qi "$query"; then
+            match_source="$source"
+            match_id="$id"
+            match_name="$name"
+            match_runner="$runner"
+            match_size="$size"
+            match_path="$path"
+            break
+        fi
+    done <<< "$games"
+
+    if [[ -z "$match_name" ]]; then
+        echo -e "  ${RED}Game not found: ${query}${RESET}"
+        echo -e "  ${DIM}Try '24hg-launch search ${query}' to find matching games.${RESET}"
+        return 1
+    fi
+
+    echo -e "  ${BOLD}Launching:${RESET} $(source_name_color "$match_source" "$match_name")"
+    echo -e "  ${BOLD}Source:${RESET}    $(source_color "$match_source")"
+
+    # Build environment
+    local env_vars=""
+    if [[ "$AUTO_OPTIMIZE" == "yes" ]]; then
+        env_vars=$(build_launch_env "$match_name")
+        if [[ -n "$env_vars" ]]; then
+            echo -e "  ${BOLD}Env:${RESET}      ${DIM}${env_vars}${RESET}"
+        fi
+    fi
+
+    local launch_flags
+    launch_flags=$(get_launch_flags "$match_name")
+    [[ -n "$launch_flags" ]] && echo -e "  ${BOLD}Flags:${RESET}    ${DIM}${launch_flags}${RESET}"
+
+    echo -e ""
+    log "Launching $match_name (source: $match_source, id: $match_id)"
+
+    local game_pid=""
+    local gamemode_prefix=""
+    if [[ "$GAMEMODE" == "yes" ]] && command -v gamemoderun &>/dev/null; then
+        gamemode_prefix="gamemoderun"
+    fi
+
+    case "$match_source" in
+        STEAM)
+            echo -e "  ${DIM}Starting via Steam...${RESET}"
+            local steam_cmd="steam steam://rungameid/${match_id}"
+            if [[ -n "$launch_flags" ]]; then
+                steam_cmd="steam -applaunch ${match_id} ${launch_flags}"
+            fi
+            env $env_vars $gamemode_prefix $steam_cmd &>/dev/null &
+            game_pid=$!
+            ;;
+        LUTRIS)
+            echo -e "  ${DIM}Starting via Lutris...${RESET}"
+            env $env_vars $gamemode_prefix lutris "lutris:rungame/${match_id}" &>/dev/null &
+            game_pid=$!
+            ;;
+        HEROIC-EPIC|HEROIC-GOG)
+            echo -e "  ${DIM}Starting via Heroic...${RESET}"
+            env $env_vars $gamemode_prefix xdg-open "heroic://launch/${match_id}" &>/dev/null &
+            game_pid=$!
+            ;;
+        FLATPAK)
+            echo -e "  ${DIM}Starting Flatpak app...${RESET}"
+            $gamemode_prefix flatpak run "$match_id" &>/dev/null &
+            game_pid=$!
+            ;;
+        NATIVE)
+            echo -e "  ${DIM}Starting native game...${RESET}"
+            local exec_cmd="$match_path"
+            # Strip desktop-file Exec field codes
+            exec_cmd="${exec_cmd%% %*}"
+            env $env_vars $gamemode_prefix $exec_cmd &>/dev/null &
+            game_pid=$!
+            ;;
+    esac
+
+    if [[ -n "$game_pid" ]]; then
+        record_play_start "$match_name" "$game_pid"
+        watch_game_exit "$game_pid"
+        echo -e "  ${GREEN}Game launched!${RESET} (PID: ${game_pid})"
+        echo -e "  ${DIM}Session tracking active. Playtime will be recorded on exit.${RESET}"
+    else
+        echo -e "  ${RED}Failed to launch game.${RESET}"
+        return 1
+    fi
+    echo
+}
+
+cmd_recent() {
+    header
+    echo -e "  ${BOLD}Recently Played Games${RESET}\n"
+
+    if ! command -v jq &>/dev/null; then
+        echo -e "  ${RED}jq is required for play history. Install with: sudo dnf install jq${RESET}"
+        return 1
+    fi
+    if [[ ! -f "$HISTORY_FILE" ]] || [[ "$(jq length "$HISTORY_FILE" 2>/dev/null)" == "0" ]]; then
+        echo -e "  ${DIM}No play history yet. Launch a game with '24hg-launch play <game>'.${RESET}\n"
+        return 0
+    fi
+
+    printf "  ${BOLD}%-4s  %-35s  %-20s  %s${RESET}\n" "#" "Game" "Date" "Session"
+    echo -e "  ${DIM}$(printf '─%.0s' {1..75})${RESET}"
+
+    local count=0
+    jq -r 'sort_by(.timestamp) | reverse | .[0:10][] |
+        "\(.game)|\(.timestamp)|\(.duration // 0)"' "$HISTORY_FILE" 2>/dev/null | \
+    while IFS='|' read -r game ts dur; do
+        (( count++ )) || true
+        local date_fmt
+        date_fmt=$(date -d "$ts" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "$ts")
+        local dur_fmt
+        dur_fmt=$(format_duration "$dur")
+        printf "  %-4s  %-35s  %-20s  %s\n" "$((count))" "$game" "$date_fmt" "$dur_fmt"
+        count=$((count))
+    done
+    echo
+}
+
+cmd_stats() {
+    header
+    echo -e "  ${BOLD}Gaming Statistics${RESET}\n"
+
+    if ! command -v jq &>/dev/null; then
+        echo -e "  ${RED}jq is required for stats. Install with: sudo dnf install jq${RESET}"
+        return 1
+    fi
+    if [[ ! -f "$HISTORY_FILE" ]] || [[ "$(jq length "$HISTORY_FILE" 2>/dev/null)" == "0" ]]; then
+        echo -e "  ${DIM}No play history yet.${RESET}\n"
+        return 0
+    fi
+
+    # Total playtime
+    local total_seconds
+    total_seconds=$(jq '[.[].duration // 0] | add // 0' "$HISTORY_FILE" 2>/dev/null)
+    echo -e "  ${BOLD}Total Playtime:${RESET}      $(format_duration "$total_seconds")"
+
+    # Total sessions
+    local total_sessions
+    total_sessions=$(jq 'length' "$HISTORY_FILE" 2>/dev/null)
+    echo -e "  ${BOLD}Total Sessions:${RESET}      ${total_sessions}"
+
+    # Unique games
+    local unique_games
+    unique_games=$(jq '[.[].game] | unique | length' "$HISTORY_FILE" 2>/dev/null)
+    echo -e "  ${BOLD}Unique Games:${RESET}        ${unique_games}"
+
+    # Average session
+    if (( total_sessions > 0 )); then
+        local avg=$(( total_seconds / total_sessions ))
+        echo -e "  ${BOLD}Avg Session:${RESET}         $(format_duration "$avg")"
+    fi
+
+    # Daily average
+    local first_date last_date
+    first_date=$(jq -r '[.[].timestamp] | sort | first // empty' "$HISTORY_FILE" 2>/dev/null)
+    last_date=$(jq -r '[.[].timestamp] | sort | last // empty' "$HISTORY_FILE" 2>/dev/null)
+    if [[ -n "$first_date" && -n "$last_date" ]]; then
+        local first_epoch last_epoch days
+        first_epoch=$(date -d "$first_date" +%s 2>/dev/null || echo 0)
+        last_epoch=$(date -d "$last_date" +%s 2>/dev/null || echo 0)
+        days=$(( (last_epoch - first_epoch) / 86400 + 1 ))
+        (( days < 1 )) && days=1
+        local daily_avg=$(( total_seconds / days ))
+        echo -e "  ${BOLD}Daily Average:${RESET}       $(format_duration "$daily_avg") (over ${days} days)"
+    fi
+
+    # Most played
+    echo -e "\n  ${BOLD}Most Played${RESET}"
+    echo -e "  ${DIM}$(printf '─%.0s' {1..50})${RESET}"
+    jq -r '
+        group_by(.game) |
+        map({game: .[0].game, total: ([.[].duration // 0] | add), count: length}) |
+        sort_by(-.total) | .[0:5][] |
+        "\(.game)|\(.total)|\(.count)"
+    ' "$HISTORY_FILE" 2>/dev/null | while IFS='|' read -r game total count; do
+        printf "  %-35s  %10s  (%s sessions)\n" "$game" "$(format_duration "$total")" "$count"
+    done
+
+    # Games per source
+    echo -e "\n  ${BOLD}Games by Source${RESET}"
+    echo -e "  ${DIM}$(printf '─%.0s' {1..50})${RESET}"
+    local games
+    games=$(collect_all_games)
+    local -A source_counts=()
+    while IFS='|' read -r source _rest; do
+        source_counts["$source"]=$(( ${source_counts["$source"]:-0} + 1 ))
+    done <<< "$games"
+    for src in "${!source_counts[@]}"; do
+        printf "  %-20b  %s games\n" "$(source_color "$src")" "${source_counts[$src]}"
+    done
+    echo
+}
+
+# ─── Usage ─────────────────────────────────────────────────────────────────────
+usage() {
+    header
+    echo -e "  ${BOLD}Usage:${RESET} 24hg-launch <command> [args]\n"
+    echo -e "  ${BOLD}Commands:${RESET}"
+    echo -e "    ${CYAN}list${RESET}              Show all installed games from every source"
+    echo -e "    ${CYAN}play${RESET} <game>       Launch a game with optimal settings"
+    echo -e "    ${CYAN}search${RESET} <query>    Search across all game sources"
+    echo -e "    ${CYAN}info${RESET} <game>       Show game details, compat, settings, playtime"
+    echo -e "    ${CYAN}optimize${RESET} <game>   Show/apply optimal launch settings"
+    echo -e "    ${CYAN}recent${RESET}            Show recently played games"
+    echo -e "    ${CYAN}stats${RESET}             Show gaming statistics"
+    echo -e ""
+    echo -e "  ${BOLD}Sources:${RESET}"
+    echo -e "    ${CLR_STEAM}Steam${RESET}  ${CLR_LUTRIS}Lutris${RESET}  ${CLR_HEROIC}Heroic${RESET}  ${CLR_FLATPAK}Flatpak${RESET}  ${CLR_NATIVE}Native${RESET}"
+    echo -e ""
+    echo -e "  ${BOLD}Config:${RESET} ${DIM}${CONF_FILE}${RESET}"
+    echo -e "  ${BOLD}History:${RESET} ${DIM}${HISTORY_FILE}${RESET}"
+    echo -e ""
+}
+
+# ─── Main ──────────────────────────────────────────────────────────────────────
+main() {
+    init_24hg
+
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        list)       cmd_list ;;
+        play)       cmd_play "$*" ;;
+        search)     cmd_search "$*" ;;
+        info)       cmd_info "$*" ;;
+        optimize)   cmd_optimize "$*" ;;
+        recent)     cmd_recent ;;
+        stats)      cmd_stats ;;
+        help|--help|-h)  usage ;;
+        "")         usage ;;
+        *)
+            echo -e "${RED}Unknown command: ${cmd}${RESET}"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

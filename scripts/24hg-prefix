@@ -1,0 +1,1540 @@
+#!/usr/bin/env bash
+# 24HG Wine/Proton Prefix Manager
+# Manages Wine/Proton prefixes for Steam games on 24HG (Bazzite/Fedora Atomic).
+# Supports both Flatpak and native Steam installations.
+#
+# Usage: 24hg-prefix <command> [options]
+#   list                          List all prefixes (sorted by size)
+#   info <appid>                  Detailed prefix information
+#   health <appid>                Health-check a prefix
+#   install-deps <appid> [deps]   Install dependencies via protontricks
+#   backup <appid> [--saves-only] Backup a prefix (tar+zstd)
+#   restore <appid> [backup]      Restore from backup
+#   cleanup                       Find and remove orphaned prefixes
+#   reset <appid>                 Nuclear reset (backs up saves first)
+#
+# Global flags:
+#   --gui                         Use zenity dialogs instead of terminal
+
+set -euo pipefail
+
+# ─── Constants ──────────────────────────────────────────────────────────────
+
+VERSION="1.0.0"
+PROGRAM_NAME="24hg-prefix"
+
+STEAM_FLATPAK_DIR="$HOME/.var/app/com.valvesoftware.Steam/data/Steam"
+STEAM_NATIVE_DIR="$HOME/.local/share/Steam"
+BACKUP_DIR="$HOME/.local/share/24hg/prefix-backups"
+
+# Critical prefix structure
+CRITICAL_FILES=("pfx/system.reg" "pfx/user.reg")
+CRITICAL_DIRS=("pfx" "pfx/drive_c" "pfx/drive_c/windows" "pfx/drive_c/windows/system32" "pfx/drive_c/users")
+
+# Dependency presets
+declare -A DEP_PRESETS=(
+    [vcredist]="vcrun2005 vcrun2008 vcrun2010 vcrun2012 vcrun2013 vcrun2015 vcrun2017 vcrun2019 vcrun2022"
+    [dotnet35]="dotnet35"
+    [dotnet40]="dotnet40"
+    [dotnet45]="dotnet45"
+    [dotnet48]="dotnet48"
+    [d3dx9]="d3dx9"
+    [d3dcompiler_47]="d3dcompiler_47"
+    [xact]="xact"
+    [physx]="physx"
+)
+
+# Known game dependency mappings
+declare -A GAME_DEPS=(
+    [730]="vcrun2019 dxvk"
+    [440]="vcrun2019"
+    [570]="vcrun2019 dotnet48"
+    [252490]="vcrun2019 dxvk"
+    [892970]="vcrun2022 dotnet48"
+    [1245620]="vcrun2022 dxvk d3dcompiler_47"
+    [1174180]="vcrun2019"
+    [1091500]="vcrun2022 dotnet48 dxvk"
+    [489830]="vcrun2019 d3dcompiler_47"
+    [377160]="vcrun2019 dotnet48"
+    [413150]="vcrun2015 d3dx9"
+)
+
+# ─── Colors ─────────────────────────────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    MAGENTA='\033[0;35m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' MAGENTA='' BOLD='' DIM='' NC=''
+fi
+
+# ─── Global Flags ───────────────────────────────────────────────────────────
+
+GUI_MODE=false
+
+# ─── Output Helpers ─────────────────────────────────────────────────────────
+
+msg()     { echo -e "${BOLD}${BLUE}::${NC} $*"; }
+msg_ok()  { echo -e "${BOLD}${GREEN} ✓${NC} $*"; }
+msg_warn(){ echo -e "${BOLD}${YELLOW} ⚠${NC} $*"; }
+msg_err() { echo -e "${BOLD}${RED} ✗${NC} $*"; }
+msg_dim() { echo -e "${DIM}   $*${NC}"; }
+
+die() { msg_err "$@"; exit 1; }
+
+header() {
+    echo -e "\n${BOLD}${CYAN}━━━ $* ━━━${NC}\n"
+}
+
+# Format bytes to human-readable
+human_size() {
+    local bytes="${1:-0}"
+    if (( bytes >= 1073741824 )); then
+        printf "%.1f GB" "$(echo "scale=1; $bytes / 1073741824" | bc 2>/dev/null || echo 0)"
+    elif (( bytes >= 1048576 )); then
+        printf "%.1f MB" "$(echo "scale=1; $bytes / 1048576" | bc 2>/dev/null || echo 0)"
+    elif (( bytes >= 1024 )); then
+        printf "%.1f KB" "$(echo "scale=1; $bytes / 1024" | bc 2>/dev/null || echo 0)"
+    else
+        printf "%d B" "$bytes"
+    fi
+}
+
+# Zenity wrapper
+gui_info() {
+    if $GUI_MODE && command -v zenity &>/dev/null; then
+        zenity --info --title="24HG Prefix Manager" --text="$1" --width=500 2>/dev/null
+    fi
+}
+
+gui_question() {
+    if $GUI_MODE && command -v zenity &>/dev/null; then
+        zenity --question --title="24HG Prefix Manager" --text="$1" --width=400 2>/dev/null
+        return $?
+    else
+        read -rp "$1 [y/N] " ans
+        [[ "$ans" =~ ^[Yy] ]]
+    fi
+}
+
+gui_list() {
+    if $GUI_MODE && command -v zenity &>/dev/null; then
+        zenity --list --title="$1" --column="$2" --width=600 --height=400 2>/dev/null
+    else
+        cat
+    fi
+}
+
+# ─── Steam Discovery ───────────────────────────────────────────────────────
+
+# Find the active Steam root directory
+find_steam_root() {
+    if [[ -d "$STEAM_FLATPAK_DIR/steamapps" ]]; then
+        echo "$STEAM_FLATPAK_DIR"
+    elif [[ -d "$STEAM_NATIVE_DIR/steamapps" ]]; then
+        echo "$STEAM_NATIVE_DIR"
+    else
+        return 1
+    fi
+}
+
+# Parse libraryfolders.vdf for all Steam library paths
+get_library_paths() {
+    local -a paths=()
+    local steam_root
+
+    # Check both possible Steam roots
+    for candidate in "$STEAM_FLATPAK_DIR" "$STEAM_NATIVE_DIR"; do
+        local vdf="$candidate/steamapps/libraryfolders.vdf"
+        [[ -f "$vdf" ]] || continue
+
+        while IFS= read -r line; do
+            local path
+            path=$(echo "$line" | sed -n 's/.*"path"[[:space:]]*"\([^"]*\)".*/\1/p')
+            if [[ -n "$path" && -d "$path/steamapps" ]]; then
+                paths+=("$path")
+            fi
+        done < "$vdf"
+
+        # Also include the Steam root itself
+        if [[ -d "$candidate/steamapps" ]]; then
+            local already=false
+            for p in "${paths[@]:-}"; do
+                [[ "$p" == "$candidate" ]] && already=true
+            done
+            $already || paths+=("$candidate")
+        fi
+    done
+
+    if [[ ${#paths[@]} -eq 0 ]]; then
+        steam_root=$(find_steam_root) || die "No Steam installation found"
+        echo "$steam_root"
+        return
+    fi
+
+    printf '%s\n' "${paths[@]}"
+}
+
+# Get steamapps directory for a library path
+steamapps_dir() {
+    echo "$1/steamapps"
+}
+
+# ─── App Manifest Parsing ──────────────────────────────────────────────────
+
+# Parse a field from an ACF/VDF file
+parse_acf_field() {
+    local file="$1" field="$2"
+    sed -n "s/.*\"${field}\"[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" 2>/dev/null | head -1
+}
+
+# Get game name from appmanifest
+get_game_name() {
+    local appid="$1"
+    local lib_path
+    while IFS= read -r lib_path; do
+        local manifest
+        manifest="$(steamapps_dir "$lib_path")/appmanifest_${appid}.acf"
+        if [[ -f "$manifest" ]]; then
+            parse_acf_field "$manifest" "name"
+            return 0
+        fi
+    done < <(get_library_paths)
+    echo "Unknown (AppID $appid)"
+}
+
+# Get all installed AppIDs
+get_installed_appids() {
+    local lib_path
+    while IFS= read -r lib_path; do
+        local sa
+        sa="$(steamapps_dir "$lib_path")"
+        for manifest in "$sa"/appmanifest_*.acf; do
+            [[ -f "$manifest" ]] || continue
+            local appid
+            appid=$(parse_acf_field "$manifest" "appid")
+            [[ -n "$appid" ]] && echo "$appid"
+        done
+    done < <(get_library_paths)
+}
+
+# Get the last update timestamp for an app
+get_last_updated() {
+    local appid="$1"
+    local lib_path
+    while IFS= read -r lib_path; do
+        local manifest
+        manifest="$(steamapps_dir "$lib_path")/appmanifest_${appid}.acf"
+        if [[ -f "$manifest" ]]; then
+            local ts
+            ts=$(parse_acf_field "$manifest" "LastUpdated")
+            if [[ -n "$ts" && "$ts" != "0" ]]; then
+                date -d "@$ts" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown"
+            else
+                echo "never"
+            fi
+            return 0
+        fi
+    done < <(get_library_paths)
+    echo "unknown"
+}
+
+# Check if a game is currently installed
+is_game_installed() {
+    local appid="$1"
+    local lib_path
+    while IFS= read -r lib_path; do
+        [[ -f "$(steamapps_dir "$lib_path")/appmanifest_${appid}.acf" ]] && return 0
+    done < <(get_library_paths)
+    return 1
+}
+
+# ─── Prefix Discovery ──────────────────────────────────────────────────────
+
+# Find all compatdata (prefix) directories
+find_all_prefixes() {
+    local lib_path
+    while IFS= read -r lib_path; do
+        local compat_dir
+        compat_dir="$(steamapps_dir "$lib_path")/compatdata"
+        [[ -d "$compat_dir" ]] || continue
+        for prefix_dir in "$compat_dir"/*/; do
+            [[ -d "$prefix_dir" ]] || continue
+            local appid
+            appid=$(basename "$prefix_dir")
+            # Only numeric directory names are real prefixes
+            [[ "$appid" =~ ^[0-9]+$ ]] || continue
+            echo "$appid|$prefix_dir"
+        done
+    done < <(get_library_paths)
+}
+
+# Find the prefix directory for a specific AppID
+find_prefix_path() {
+    local appid="$1"
+    local lib_path
+    while IFS= read -r lib_path; do
+        local candidate
+        candidate="$(steamapps_dir "$lib_path")/compatdata/$appid"
+        if [[ -d "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done < <(get_library_paths)
+    return 1
+}
+
+# Get the Proton version used by a prefix
+get_proton_version() {
+    local prefix_dir="$1"
+    local version_file="$prefix_dir/version"
+    if [[ -f "$version_file" ]]; then
+        head -1 "$version_file" 2>/dev/null | sed 's/[[:space:]]*$//'
+        return 0
+    fi
+    # Try to detect from tracked_files or config_info
+    local config_info="$prefix_dir/config_info"
+    if [[ -f "$config_info" ]]; then
+        head -1 "$config_info" 2>/dev/null | grep -oP 'Proton[^/]*' | head -1
+        return 0
+    fi
+    echo "unknown"
+}
+
+# Get directory size in bytes
+get_dir_size_bytes() {
+    du -sb "$1" 2>/dev/null | cut -f1
+}
+
+# ─── Proton Version Checks ─────────────────────────────────────────────────
+
+# Check if the Proton version used by a prefix is still installed
+is_proton_installed() {
+    local version_str="$1"
+    [[ "$version_str" == "unknown" ]] && return 1
+
+    local lib_path
+    while IFS= read -r lib_path; do
+        local common_dir
+        common_dir="$(steamapps_dir "$lib_path")/common"
+        [[ -d "$common_dir" ]] || continue
+        for proton_dir in "$common_dir"/Proton*/ "$common_dir"/GE-Proton*/; do
+            [[ -d "$proton_dir" ]] || continue
+            local dirname
+            dirname=$(basename "$proton_dir")
+            if [[ "$version_str" == *"$dirname"* || "$dirname" == *"$version_str"* ]]; then
+                return 0
+            fi
+        done
+    done < <(get_library_paths)
+    return 1
+}
+
+# ─── Registry Parsing ──────────────────────────────────────────────────────
+
+# Count registry entries in a .reg file
+count_registry_entries() {
+    local reg_file="$1"
+    [[ -f "$reg_file" ]] || { echo 0; return; }
+    grep -c '^\[' "$reg_file" 2>/dev/null || echo 0
+}
+
+# Get Windows version from registry
+get_windows_version() {
+    local prefix_dir="$1"
+    local system_reg="$prefix_dir/pfx/system.reg"
+    [[ -f "$system_reg" ]] || { echo "unknown"; return; }
+
+    local version
+    version=$(grep -A2 '\[Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\]' "$system_reg" 2>/dev/null \
+        | grep '"CurrentVersion"' | sed 's/.*"\([^"]*\)".*/\1/' | head -1)
+
+    local build
+    build=$(grep -A5 '\[Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\]' "$system_reg" 2>/dev/null \
+        | grep '"CurrentBuildNumber"' | sed 's/.*"\([^"]*\)".*/\1/' | head -1)
+
+    if [[ -n "$version" ]]; then
+        if [[ "$build" == "19041" || "$build" == "19042" || "$build" == "19043" ]]; then
+            echo "Windows 10 ($version, build $build)"
+        elif [[ "$build" == "22000" || "$build" == "22621" ]]; then
+            echo "Windows 11 ($version, build $build)"
+        elif [[ -n "$build" ]]; then
+            echo "Windows ($version, build $build)"
+        else
+            echo "Windows ($version)"
+        fi
+    else
+        echo "unknown"
+    fi
+}
+
+# Get DLL overrides from user.reg
+get_dll_overrides() {
+    local prefix_dir="$1"
+    local user_reg="$prefix_dir/pfx/user.reg"
+    [[ -f "$user_reg" ]] || return
+
+    local in_section=false
+    while IFS= read -r line; do
+        if [[ "$line" == *'[Software\\Wine\\DllOverrides]'* ]]; then
+            in_section=true
+            continue
+        fi
+        if $in_section; then
+            [[ "$line" =~ ^\[ ]] && break
+            if [[ "$line" =~ ^\" ]]; then
+                local dll val
+                dll=$(echo "$line" | sed 's/^"\([^"]*\)".*/\1/')
+                val=$(echo "$line" | sed 's/.*="\([^"]*\)".*/\1/')
+                [[ -n "$dll" ]] && echo "  $dll = $val"
+            fi
+        fi
+    done < "$user_reg"
+}
+
+# ─── DXVK / VKD3D Detection ────────────────────────────────────────────────
+
+detect_dxvk_version() {
+    local prefix_dir="$1"
+    local sys32="$prefix_dir/pfx/drive_c/windows/system32"
+
+    # Check for DXVK DLLs
+    for dll in d3d11.dll d3d10core.dll d3d9.dll dxgi.dll; do
+        local path="$sys32/$dll"
+        if [[ -f "$path" ]]; then
+            # Try to extract version info from the DLL
+            local ver
+            ver=$(strings "$path" 2>/dev/null | grep -oP 'dxvk-[0-9.]+' | head -1)
+            if [[ -n "$ver" ]]; then
+                echo "$ver"
+                return 0
+            fi
+        fi
+    done
+    echo "not detected"
+}
+
+detect_vkd3d_version() {
+    local prefix_dir="$1"
+    local sys32="$prefix_dir/pfx/drive_c/windows/system32"
+
+    for dll in d3d12.dll d3d12core.dll; do
+        local path="$sys32/$dll"
+        if [[ -f "$path" ]]; then
+            local ver
+            ver=$(strings "$path" 2>/dev/null | grep -oP 'vkd3d-proton-[0-9.]+' | head -1)
+            if [[ -n "$ver" ]]; then
+                echo "$ver"
+                return 0
+            fi
+        fi
+    done
+    echo "not detected"
+}
+
+# Get drive mappings from dosdevices
+get_drive_mappings() {
+    local prefix_dir="$1"
+    local dosdevices="$prefix_dir/pfx/dosdevices"
+    [[ -d "$dosdevices" ]] || return
+
+    for link in "$dosdevices"/*; do
+        [[ -L "$link" || -d "$link" ]] || continue
+        local name target
+        name=$(basename "$link")
+        target=$(readlink -f "$link" 2>/dev/null || echo "?")
+        echo "  $name -> $target"
+    done
+}
+
+# ─── Health Check Logic ────────────────────────────────────────────────────
+
+# Return status: 0=healthy, 1=warning, 2=corrupt
+check_prefix_health() {
+    local prefix_dir="$1"
+    local issues=()
+    local warnings=()
+
+    # Check critical directories
+    for dir in "${CRITICAL_DIRS[@]}"; do
+        if [[ ! -d "$prefix_dir/$dir" ]]; then
+            issues+=("Missing directory: $dir")
+        fi
+    done
+
+    # Check critical files
+    for file in "${CRITICAL_FILES[@]}"; do
+        if [[ ! -f "$prefix_dir/$file" ]]; then
+            issues+=("Missing file: $file")
+        elif [[ ! -s "$prefix_dir/$file" ]]; then
+            issues+=("Zero-byte file: $file")
+        fi
+    done
+
+    # Check for zero-byte DLLs in system32
+    local sys32="$prefix_dir/pfx/drive_c/windows/system32"
+    if [[ -d "$sys32" ]]; then
+        local zero_count=0
+        while IFS= read -r -d '' f; do
+            (( zero_count++ ))
+        done < <(find "$sys32" -maxdepth 1 -name "*.dll" -empty -print0 2>/dev/null)
+        if (( zero_count > 0 )); then
+            issues+=("$zero_count zero-byte DLL(s) in system32")
+        fi
+    fi
+
+    # Check for broken symlinks
+    local broken_links=0
+    while IFS= read -r -d '' link; do
+        (( broken_links++ ))
+    done < <(find "$prefix_dir" -maxdepth 4 -xtype l -print0 2>/dev/null)
+    if (( broken_links > 5 )); then
+        warnings+=("$broken_links broken symlinks detected")
+    fi
+
+    # Check Proton version still installed
+    local proton_ver
+    proton_ver=$(get_proton_version "$prefix_dir")
+    if [[ "$proton_ver" != "unknown" ]] && ! is_proton_installed "$proton_ver"; then
+        warnings+=("Proton version '$proton_ver' no longer installed")
+    fi
+
+    # Check disk space
+    local avail_kb
+    avail_kb=$(df --output=avail "$prefix_dir" 2>/dev/null | tail -1 | tr -d ' ')
+    if [[ -n "$avail_kb" ]] && (( avail_kb < 1048576 )); then
+        warnings+=("Low disk space: $(human_size $(( avail_kb * 1024 ))) available")
+    fi
+
+    # Check for orphan (game not installed)
+    local appid
+    appid=$(basename "$(dirname "$(dirname "$prefix_dir")")" 2>/dev/null)
+    # Actually get from the path pattern .../compatdata/APPID/
+    appid=$(echo "$prefix_dir" | grep -oP 'compatdata/\K[0-9]+')
+    if [[ -n "$appid" ]] && ! is_game_installed "$appid"; then
+        warnings+=("Orphaned prefix — game $appid not installed")
+    fi
+
+    # Output results
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        for i in "${issues[@]}"; do echo "ERROR|$i"; done
+        for w in "${warnings[@]}"; do echo "WARN|$w"; done
+        return 2
+    elif [[ ${#warnings[@]} -gt 0 ]]; then
+        for w in "${warnings[@]}"; do echo "WARN|$w"; done
+        return 1
+    else
+        echo "OK|Prefix is healthy"
+        return 0
+    fi
+}
+
+# Quick health status (for list coloring)
+quick_health_status() {
+    local prefix_dir="$1"
+    # Fast checks only
+    [[ -f "$prefix_dir/pfx/system.reg" ]] || { echo "corrupt"; return; }
+    [[ -f "$prefix_dir/pfx/user.reg" ]] || { echo "corrupt"; return; }
+    [[ -d "$prefix_dir/pfx/drive_c" ]] || { echo "corrupt"; return; }
+    [[ -s "$prefix_dir/pfx/system.reg" ]] || { echo "corrupt"; return; }
+
+    local appid
+    appid=$(echo "$prefix_dir" | grep -oP 'compatdata/\K[0-9]+')
+    if [[ -n "$appid" ]] && ! is_game_installed "$appid"; then
+        echo "warning"
+        return
+    fi
+    echo "healthy"
+}
+
+# ─── Save File Detection ───────────────────────────────────────────────────
+
+# Common save locations within a prefix
+find_save_dirs() {
+    local prefix_dir="$1"
+    local drive_c="$prefix_dir/pfx/drive_c"
+    local -a save_paths=()
+
+    # Common save directories
+    local candidates=(
+        "$drive_c/users/steamuser/AppData/Local"
+        "$drive_c/users/steamuser/AppData/LocalLow"
+        "$drive_c/users/steamuser/AppData/Roaming"
+        "$drive_c/users/steamuser/Documents/My Games"
+        "$drive_c/users/steamuser/Documents/my games"
+        "$drive_c/users/steamuser/Saved Games"
+    )
+
+    for cand in "${candidates[@]}"; do
+        if [[ -d "$cand" ]] && [[ -n "$(ls -A "$cand" 2>/dev/null)" ]]; then
+            save_paths+=("$cand")
+        fi
+    done
+
+    printf '%s\n' "${save_paths[@]}"
+}
+
+# ─── Protontricks Integration ──────────────────────────────────────────────
+
+find_protontricks() {
+    if command -v protontricks &>/dev/null; then
+        echo "protontricks"
+    elif command -v flatpak &>/dev/null && flatpak list --app 2>/dev/null | grep -q protontricks; then
+        echo "flatpak run com.github.Matoking.protontricks"
+    else
+        return 1
+    fi
+}
+
+# Expand dependency presets to protontricks verbs
+expand_deps() {
+    local -a result=()
+    for dep in "$@"; do
+        if [[ -n "${DEP_PRESETS[$dep]:-}" ]]; then
+            read -ra expanded <<< "${DEP_PRESETS[$dep]}"
+            result+=("${expanded[@]}")
+        else
+            result+=("$dep")
+        fi
+    done
+    printf '%s\n' "${result[@]}"
+}
+
+# Detect missing deps from crash logs
+detect_missing_deps() {
+    local appid="$1"
+    local prefix_dir="$2"
+    local -a suggestions=()
+
+    # Check Steam error logs
+    local steam_root
+    steam_root=$(find_steam_root 2>/dev/null) || return
+
+    local crash_log="$steam_root/logs/stderr.txt"
+    if [[ -f "$crash_log" ]]; then
+        # Check for common missing DLL patterns
+        if grep -qi "d3d11\|dxgi\|d3d9" "$crash_log" 2>/dev/null; then
+            suggestions+=("dxvk")
+        fi
+        if grep -qi "d3dx9" "$crash_log" 2>/dev/null; then
+            suggestions+=("d3dx9")
+        fi
+        if grep -qi "d3dcompiler_47" "$crash_log" 2>/dev/null; then
+            suggestions+=("d3dcompiler_47")
+        fi
+        if grep -qi "vcruntime\|msvcp\|msvcr" "$crash_log" 2>/dev/null; then
+            suggestions+=("vcredist")
+        fi
+        if grep -qi "dotnet\|\.net\|clr\.dll" "$crash_log" 2>/dev/null; then
+            suggestions+=("dotnet48")
+        fi
+        if grep -qi "xaudio\|xact" "$crash_log" 2>/dev/null; then
+            suggestions+=("xact")
+        fi
+    fi
+
+    # Check known game deps
+    if [[ -n "${GAME_DEPS[$appid]:-}" ]]; then
+        read -ra known <<< "${GAME_DEPS[$appid]}"
+        suggestions+=("${known[@]}")
+    fi
+
+    # Deduplicate
+    printf '%s\n' "${suggestions[@]}" | sort -u
+}
+
+# ─── Command: list ──────────────────────────────────────────────────────────
+
+cmd_list() {
+    header "Proton Prefixes"
+
+    local -a entries=()
+    local total_size=0
+
+    while IFS='|' read -r appid prefix_dir; do
+        [[ -n "$appid" ]] || continue
+        local name size_bytes proton_ver last_played status
+        name=$(get_game_name "$appid")
+        size_bytes=$(get_dir_size_bytes "$prefix_dir")
+        proton_ver=$(get_proton_version "$prefix_dir")
+        last_played=$(get_last_updated "$appid")
+        status=$(quick_health_status "$prefix_dir")
+        total_size=$(( total_size + size_bytes ))
+        entries+=("${size_bytes}|${appid}|${name}|${proton_ver}|${last_played}|${status}|${prefix_dir}")
+    done < <(find_all_prefixes)
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        msg_warn "No Proton prefixes found"
+        return 0
+    fi
+
+    # Sort by size descending
+    IFS=$'\n' sorted=($(printf '%s\n' "${entries[@]}" | sort -t'|' -k1 -rn))
+    unset IFS
+
+    # Column header
+    printf "${BOLD}%-6s  %-40s  %-10s  %-22s  %-12s  %s${NC}\n" \
+        "AppID" "Game Name" "Size" "Proton Version" "Last Played" "Status"
+    printf "${DIM}%s${NC}\n" "$(printf '─%.0s' {1..120})"
+
+    for entry in "${sorted[@]}"; do
+        IFS='|' read -r size_bytes appid name proton_ver last_played status _dir <<< "$entry"
+        local size_str color
+        size_str=$(human_size "$size_bytes")
+
+        case "$status" in
+            healthy) color="$GREEN" ;;
+            warning) color="$YELLOW" ;;
+            corrupt) color="$RED" ;;
+            *)       color="$NC" ;;
+        esac
+
+        # Truncate game name
+        local display_name="${name:0:38}"
+        [[ "${#name}" -gt 38 ]] && display_name="${display_name}.."
+
+        printf "${color}%-6s${NC}  %-40s  %-10s  %-22s  %-12s  ${color}%s${NC}\n" \
+            "$appid" "$display_name" "$size_str" "${proton_ver:0:20}" "${last_played:0:12}" "$status"
+    done
+
+    echo ""
+    msg "Total: ${#entries[@]} prefixes using $(human_size $total_size)"
+}
+
+# ─── Command: info ──────────────────────────────────────────────────────────
+
+cmd_info() {
+    local appid="${1:-}"
+    [[ -n "$appid" ]] || die "Usage: $PROGRAM_NAME info <appid>"
+
+    local prefix_dir
+    prefix_dir=$(find_prefix_path "$appid") || die "No prefix found for AppID $appid"
+
+    local name size_bytes proton_ver win_ver
+    name=$(get_game_name "$appid")
+    size_bytes=$(get_dir_size_bytes "$prefix_dir")
+    proton_ver=$(get_proton_version "$prefix_dir")
+    win_ver=$(get_windows_version "$prefix_dir")
+
+    header "Prefix Info: $name ($appid)"
+
+    echo -e "${BOLD}Path:${NC}            $prefix_dir"
+    echo -e "${BOLD}Total Size:${NC}      $(human_size "$size_bytes")"
+    echo -e "${BOLD}Proton Version:${NC}  $proton_ver"
+    echo -e "${BOLD}Windows Version:${NC} $win_ver"
+    echo -e "${BOLD}Last Played:${NC}     $(get_last_updated "$appid")"
+    echo -e "${BOLD}Game Installed:${NC}  $(is_game_installed "$appid" && echo "yes" || echo "${RED}no${NC}")"
+
+    # DXVK / VKD3D
+    echo ""
+    echo -e "${BOLD}Graphics Layers:${NC}"
+    echo -e "  DXVK:   $(detect_dxvk_version "$prefix_dir")"
+    echo -e "  VKD3D:  $(detect_vkd3d_version "$prefix_dir")"
+
+    # DLL overrides
+    echo ""
+    echo -e "${BOLD}DLL Overrides:${NC}"
+    local overrides
+    overrides=$(get_dll_overrides "$prefix_dir")
+    if [[ -n "$overrides" ]]; then
+        echo "$overrides"
+    else
+        echo "  (none)"
+    fi
+
+    # Registry stats
+    echo ""
+    echo -e "${BOLD}Registry:${NC}"
+    local sys_count=0 usr_count=0
+    [[ -f "$prefix_dir/pfx/system.reg" ]] && sys_count=$(count_registry_entries "$prefix_dir/pfx/system.reg")
+    [[ -f "$prefix_dir/pfx/user.reg" ]] && usr_count=$(count_registry_entries "$prefix_dir/pfx/user.reg")
+    echo "  system.reg: $sys_count keys"
+    echo "  user.reg:   $usr_count keys"
+
+    # Drive mappings
+    echo ""
+    echo -e "${BOLD}Drive Mappings:${NC}"
+    local mappings
+    mappings=$(get_drive_mappings "$prefix_dir")
+    if [[ -n "$mappings" ]]; then
+        echo "$mappings"
+    else
+        echo "  (none)"
+    fi
+
+    # Save directories
+    echo ""
+    echo -e "${BOLD}Save Directories:${NC}"
+    local saves
+    saves=$(find_save_dirs "$prefix_dir")
+    if [[ -n "$saves" ]]; then
+        while IFS= read -r save_dir; do
+            local save_size
+            save_size=$(human_size "$(get_dir_size_bytes "$save_dir")")
+            echo "  $save_dir ($save_size)"
+        done <<< "$saves"
+    else
+        echo "  (none detected)"
+    fi
+
+    # Known issues
+    echo ""
+    echo -e "${BOLD}Known Issues:${NC}"
+    local found_issues=false
+    if [[ "$proton_ver" != "unknown" ]] && ! is_proton_installed "$proton_ver"; then
+        msg_warn "Proton version '$proton_ver' is not installed"
+        found_issues=true
+    fi
+    if ! is_game_installed "$appid"; then
+        msg_warn "Game is not installed (orphaned prefix)"
+        found_issues=true
+    fi
+    $found_issues || msg_ok "No known issues"
+
+    if $GUI_MODE; then
+        gui_info "Prefix: $name ($appid)\nPath: $prefix_dir\nSize: $(human_size "$size_bytes")\nProton: $proton_ver"
+    fi
+}
+
+# ─── Command: health ───────────────────────────────────────────────────────
+
+cmd_health() {
+    local appid="${1:-}"
+    [[ -n "$appid" ]] || die "Usage: $PROGRAM_NAME health <appid>"
+
+    local prefix_dir
+    prefix_dir=$(find_prefix_path "$appid") || die "No prefix found for AppID $appid"
+
+    local name
+    name=$(get_game_name "$appid")
+
+    header "Health Check: $name ($appid)"
+
+    local results status_code
+    results=$(check_prefix_health "$prefix_dir") && status_code=0 || status_code=$?
+
+    while IFS='|' read -r level message; do
+        case "$level" in
+            ERROR) msg_err "$message" ;;
+            WARN)  msg_warn "$message" ;;
+            OK)    msg_ok "$message" ;;
+        esac
+    done <<< "$results"
+
+    # Additional detailed checks
+    echo ""
+    msg "Detailed checks:"
+
+    # File count
+    local file_count
+    file_count=$(find "$prefix_dir" -type f 2>/dev/null | wc -l)
+    msg_dim "Total files: $file_count"
+
+    # Disk space on volume
+    local avail_human
+    avail_human=$(df -h --output=avail "$prefix_dir" 2>/dev/null | tail -1 | tr -d ' ')
+    msg_dim "Available disk space: $avail_human"
+
+    # Size breakdown
+    echo ""
+    msg "Size breakdown:"
+    if [[ -d "$prefix_dir/pfx/drive_c/windows" ]]; then
+        msg_dim "Windows dir:   $(human_size "$(get_dir_size_bytes "$prefix_dir/pfx/drive_c/windows")")"
+    fi
+    if [[ -d "$prefix_dir/pfx/drive_c/users" ]]; then
+        msg_dim "Users dir:     $(human_size "$(get_dir_size_bytes "$prefix_dir/pfx/drive_c/users")")"
+    fi
+    if [[ -d "$prefix_dir/pfx/drive_c/Program Files" ]]; then
+        msg_dim "Program Files: $(human_size "$(get_dir_size_bytes "$prefix_dir/pfx/drive_c/Program Files")")"
+    fi
+
+    echo ""
+    case $status_code in
+        0) msg_ok "Overall status: ${GREEN}HEALTHY${NC}" ;;
+        1) msg_warn "Overall status: ${YELLOW}WARNINGS${NC}" ;;
+        2) msg_err "Overall status: ${RED}CORRUPT${NC}" ;;
+    esac
+
+    if $GUI_MODE; then
+        local gui_status
+        case $status_code in
+            0) gui_status="HEALTHY" ;;
+            1) gui_status="WARNINGS DETECTED" ;;
+            2) gui_status="CORRUPT" ;;
+        esac
+        gui_info "Health check for $name: $gui_status\n\n$(echo "$results" | sed 's/|/: /g')"
+    fi
+
+    return $status_code
+}
+
+# ─── Command: install-deps ──────────────────────────────────────────────────
+
+cmd_install_deps() {
+    local appid="${1:-}"
+    [[ -n "$appid" ]] || die "Usage: $PROGRAM_NAME install-deps <appid> [deps...]"
+    shift
+
+    local prefix_dir
+    prefix_dir=$(find_prefix_path "$appid") || die "No prefix found for AppID $appid"
+
+    local name
+    name=$(get_game_name "$appid")
+
+    local pt_cmd
+    pt_cmd=$(find_protontricks) || die "protontricks not found. Install with: flatpak install com.github.Matoking.protontricks"
+
+    header "Install Dependencies: $name ($appid)"
+
+    local -a deps_to_install=()
+
+    if [[ $# -gt 0 ]]; then
+        # User-specified deps
+        while IFS= read -r verb; do
+            deps_to_install+=("$verb")
+        done < <(expand_deps "$@")
+    else
+        # Auto-detect from crash logs and known mappings
+        msg "Auto-detecting required dependencies..."
+        while IFS= read -r dep; do
+            [[ -n "$dep" ]] && deps_to_install+=("$dep")
+        done < <(detect_missing_deps "$appid" "$prefix_dir")
+
+        if [[ ${#deps_to_install[@]} -eq 0 ]]; then
+            msg_ok "No dependencies detected as needed"
+            echo ""
+            msg "Available presets: ${!DEP_PRESETS[*]}"
+            msg "Usage: $PROGRAM_NAME install-deps $appid vcredist d3dx9 ..."
+            return 0
+        fi
+
+        msg "Detected dependencies: ${deps_to_install[*]}"
+        echo ""
+        if ! gui_question "Install these dependencies?"; then
+            msg "Cancelled"
+            return 0
+        fi
+    fi
+
+    echo ""
+    msg "Installing ${#deps_to_install[@]} component(s) via protontricks..."
+    echo ""
+
+    local failed=0 succeeded=0
+    for verb in "${deps_to_install[@]}"; do
+        echo -ne "  Installing ${BOLD}$verb${NC}... "
+        if $pt_cmd "$appid" "$verb" &>/dev/null; then
+            echo -e "${GREEN}OK${NC}"
+            (( succeeded++ ))
+        else
+            echo -e "${RED}FAILED${NC}"
+            (( failed++ ))
+        fi
+    done
+
+    echo ""
+    msg_ok "Installed: $succeeded"
+    [[ $failed -gt 0 ]] && msg_err "Failed: $failed"
+
+    # Verify by checking DLL overrides changed
+    echo ""
+    msg "Current DLL overrides after install:"
+    get_dll_overrides "$prefix_dir" || echo "  (none)"
+
+    return $failed
+}
+
+# ─── Command: backup ────────────────────────────────────────────────────────
+
+cmd_backup() {
+    local appid="${1:-}"
+    [[ -n "$appid" ]] || die "Usage: $PROGRAM_NAME backup <appid> [--saves-only]"
+    shift || true
+
+    local saves_only=false
+    [[ "${1:-}" == "--saves-only" ]] && saves_only=true
+
+    local prefix_dir
+    prefix_dir=$(find_prefix_path "$appid") || die "No prefix found for AppID $appid"
+
+    local name proton_ver size_bytes
+    name=$(get_game_name "$appid")
+    proton_ver=$(get_proton_version "$prefix_dir")
+    size_bytes=$(get_dir_size_bytes "$prefix_dir")
+
+    header "Backup: $name ($appid)"
+
+    mkdir -p "$BACKUP_DIR"
+
+    local timestamp
+    timestamp=$(date +%Y%m%d-%H%M%S)
+    local safe_name
+    safe_name=$(echo "$name" | tr -dc 'a-zA-Z0-9_-' | head -c 40)
+
+    local backup_name backup_path
+    if $saves_only; then
+        backup_name="${appid}_${safe_name}_saves_${timestamp}"
+        msg "Backing up save files only..."
+
+        local -a save_dirs=()
+        while IFS= read -r sd; do
+            [[ -n "$sd" ]] && save_dirs+=("$sd")
+        done < <(find_save_dirs "$prefix_dir")
+
+        if [[ ${#save_dirs[@]} -eq 0 ]]; then
+            msg_warn "No save directories detected"
+            msg "Falling back to full backup"
+            saves_only=false
+        fi
+    fi
+
+    if $saves_only; then
+        backup_path="$BACKUP_DIR/${backup_name}.tar.zst"
+
+        # Build relative paths for tar
+        local -a tar_paths=()
+        for sd in "${save_dirs[@]}"; do
+            local rel_path="${sd#$prefix_dir/}"
+            tar_paths+=("$rel_path")
+        done
+
+        msg "Compressing save files..."
+        tar -C "$prefix_dir" -cf - "${tar_paths[@]}" 2>/dev/null \
+            | zstd -T0 -3 -o "$backup_path" 2>/dev/null
+
+    else
+        backup_name="${appid}_${safe_name}_full_${timestamp}"
+        backup_path="$BACKUP_DIR/${backup_name}.tar.zst"
+
+        msg "Compressing full prefix ($(human_size "$size_bytes"))..."
+        msg_dim "This may take a while for large prefixes"
+        tar -C "$(dirname "$prefix_dir")" -cf - "$(basename "$prefix_dir")" 2>/dev/null \
+            | zstd -T0 -3 -o "$backup_path" 2>/dev/null
+    fi
+
+    # Write metadata sidecar
+    local meta_path="$BACKUP_DIR/${backup_name}.meta"
+    cat > "$meta_path" <<EOF
+appid=$appid
+name=$name
+proton_version=$proton_ver
+backup_date=$(date -Iseconds)
+backup_type=$($saves_only && echo "saves" || echo "full")
+original_size=$size_bytes
+prefix_path=$prefix_dir
+EOF
+
+    local backup_size
+    backup_size=$(stat -c%s "$backup_path" 2>/dev/null || echo 0)
+
+    echo ""
+    msg_ok "Backup complete"
+    msg_dim "File: $backup_path"
+    msg_dim "Size: $(human_size "$backup_size") (from $(human_size "$size_bytes"))"
+    msg_dim "Type: $($saves_only && echo "saves only" || echo "full prefix")"
+
+    if $GUI_MODE; then
+        gui_info "Backup created:\n$backup_path\nSize: $(human_size "$backup_size")"
+    fi
+}
+
+# ─── Command: restore ──────────────────────────────────────────────────────
+
+cmd_restore() {
+    local appid="${1:-}"
+    [[ -n "$appid" ]] || die "Usage: $PROGRAM_NAME restore <appid> [backup-file]"
+    shift || true
+
+    local backup_file="${1:-}"
+    local name
+    name=$(get_game_name "$appid")
+
+    header "Restore: $name ($appid)"
+
+    # List available backups if none specified
+    if [[ -z "$backup_file" ]]; then
+        msg "Available backups for AppID $appid:"
+        echo ""
+
+        local found=false
+        local -a available=()
+        for meta in "$BACKUP_DIR"/${appid}_*.meta; do
+            [[ -f "$meta" ]] || continue
+            found=true
+            local archive="${meta%.meta}.tar.zst"
+            [[ -f "$archive" ]] || continue
+
+            local b_date b_type b_size b_name
+            b_name=$(grep '^name=' "$meta" | cut -d= -f2-)
+            b_date=$(grep '^backup_date=' "$meta" | cut -d= -f2-)
+            b_type=$(grep '^backup_type=' "$meta" | cut -d= -f2-)
+            b_size=$(stat -c%s "$archive" 2>/dev/null || echo 0)
+
+            printf "  ${BOLD}%s${NC}\n" "$(basename "$archive")"
+            printf "    Date: %s  Type: %s  Size: %s\n\n" "$b_date" "$b_type" "$(human_size "$b_size")"
+            available+=("$archive")
+        done
+
+        if ! $found; then
+            die "No backups found for AppID $appid in $BACKUP_DIR"
+        fi
+
+        if $GUI_MODE && [[ ${#available[@]} -gt 0 ]]; then
+            backup_file=$(printf '%s\n' "${available[@]}" | gui_list "Select Backup" "Backup File")
+            [[ -n "$backup_file" ]] || { msg "Cancelled"; return 0; }
+        else
+            msg "Specify a backup file:"
+            msg "  $PROGRAM_NAME restore $appid <filename>"
+            return 0
+        fi
+    fi
+
+    # Resolve backup path
+    if [[ ! -f "$backup_file" ]]; then
+        # Try in backup dir
+        if [[ -f "$BACKUP_DIR/$backup_file" ]]; then
+            backup_file="$BACKUP_DIR/$backup_file"
+        else
+            die "Backup file not found: $backup_file"
+        fi
+    fi
+
+    # Verify integrity
+    msg "Verifying backup integrity..."
+    if ! zstd -t "$backup_file" &>/dev/null; then
+        die "Backup file is corrupt or not a valid zstd archive"
+    fi
+    msg_ok "Backup integrity verified"
+
+    # Determine backup type from metadata
+    local meta_file="${backup_file%.tar.zst}.meta"
+    local backup_type="full"
+    if [[ -f "$meta_file" ]]; then
+        backup_type=$(grep '^backup_type=' "$meta_file" | cut -d= -f2- || echo "full")
+    fi
+
+    local prefix_dir
+    prefix_dir=$(find_prefix_path "$appid" 2>/dev/null) || true
+
+    if [[ "$backup_type" == "saves" ]]; then
+        msg "Restore type: saves only (merge into existing prefix)"
+        if [[ -z "$prefix_dir" ]]; then
+            die "No existing prefix to merge saves into. Use a full backup."
+        fi
+
+        if ! gui_question "Restore save files into $prefix_dir?"; then
+            msg "Cancelled"
+            return 0
+        fi
+
+        zstd -d "$backup_file" --stdout 2>/dev/null | tar -xf - -C "$prefix_dir" 2>/dev/null
+        msg_ok "Save files restored"
+    else
+        msg "Restore type: full prefix replacement"
+
+        if [[ -n "$prefix_dir" && -d "$prefix_dir" ]]; then
+            msg_warn "Existing prefix will be replaced"
+            if ! gui_question "Replace existing prefix at $prefix_dir?"; then
+                msg "Cancelled"
+                return 0
+            fi
+
+            # Backup saves before replacing
+            msg "Backing up current saves first..."
+            local temp_saves
+            temp_saves=$(mktemp -d)
+            while IFS= read -r sd; do
+                [[ -n "$sd" && -d "$sd" ]] && cp -a "$sd" "$temp_saves/" 2>/dev/null || true
+            done < <(find_save_dirs "$prefix_dir")
+
+            msg "Removing old prefix..."
+            rm -rf "$prefix_dir"
+        fi
+
+        # Determine target directory
+        local target_parent
+        if [[ -n "$prefix_dir" ]]; then
+            target_parent=$(dirname "$prefix_dir")
+        else
+            # Find a suitable compatdata directory
+            local lib_path
+            lib_path=$(get_library_paths | head -1)
+            target_parent="$(steamapps_dir "$lib_path")/compatdata"
+            mkdir -p "$target_parent"
+        fi
+
+        msg "Extracting backup..."
+        zstd -d "$backup_file" --stdout 2>/dev/null | tar -xf - -C "$target_parent" 2>/dev/null
+
+        # Ensure directory is named correctly
+        local extracted
+        extracted="$target_parent/$appid"
+        if [[ ! -d "$extracted" ]]; then
+            # Find what was extracted and rename
+            local newest
+            newest=$(ls -td "$target_parent"/*/ 2>/dev/null | head -1)
+            if [[ -n "$newest" && "$newest" != "$extracted/" ]]; then
+                mv "$newest" "$extracted"
+            fi
+        fi
+
+        msg_ok "Full prefix restored to $extracted"
+    fi
+
+    if $GUI_MODE; then
+        gui_info "Restore complete for $name ($appid)"
+    fi
+}
+
+# ─── Command: cleanup ──────────────────────────────────────────────────────
+
+cmd_cleanup() {
+    header "Prefix Cleanup"
+
+    local -a orphans=()
+    local -a duplicates=()
+    local total_reclaimable=0
+
+    msg "Scanning for orphaned prefixes..."
+    echo ""
+
+    while IFS='|' read -r appid prefix_dir; do
+        [[ -n "$appid" ]] || continue
+
+        if ! is_game_installed "$appid"; then
+            local size_bytes name
+            size_bytes=$(get_dir_size_bytes "$prefix_dir")
+            name=$(get_game_name "$appid")
+            orphans+=("$appid|$name|$size_bytes|$prefix_dir")
+            total_reclaimable=$(( total_reclaimable + size_bytes ))
+        fi
+    done < <(find_all_prefixes)
+
+    # Check for duplicate prefixes (same appid in multiple libraries)
+    msg "Checking for duplicate prefixes..."
+    local -A seen_appids=()
+    while IFS='|' read -r appid prefix_dir; do
+        [[ -n "$appid" ]] || continue
+        if [[ -n "${seen_appids[$appid]:-}" ]]; then
+            local size_bytes
+            size_bytes=$(get_dir_size_bytes "$prefix_dir")
+            duplicates+=("$appid|$prefix_dir|$size_bytes")
+            total_reclaimable=$(( total_reclaimable + size_bytes ))
+        fi
+        seen_appids[$appid]="$prefix_dir"
+    done < <(find_all_prefixes)
+
+    echo ""
+
+    if [[ ${#orphans[@]} -eq 0 && ${#duplicates[@]} -eq 0 ]]; then
+        msg_ok "No orphaned or duplicate prefixes found"
+        return 0
+    fi
+
+    # Display orphans
+    if [[ ${#orphans[@]} -gt 0 ]]; then
+        echo -e "${BOLD}Orphaned prefixes (game uninstalled):${NC}"
+        echo ""
+        printf "  ${BOLD}%-8s  %-40s  %s${NC}\n" "AppID" "Game Name" "Size"
+        printf "  ${DIM}%s${NC}\n" "$(printf '─%.0s' {1..70})"
+
+        for entry in "${orphans[@]}"; do
+            IFS='|' read -r appid name size_bytes prefix_dir <<< "$entry"
+            local display_name="${name:0:38}"
+            printf "  ${RED}%-8s${NC}  %-40s  %s\n" "$appid" "$display_name" "$(human_size "$size_bytes")"
+        done
+        echo ""
+    fi
+
+    # Display duplicates
+    if [[ ${#duplicates[@]} -gt 0 ]]; then
+        echo -e "${BOLD}Duplicate prefixes:${NC}"
+        echo ""
+        for entry in "${duplicates[@]}"; do
+            IFS='|' read -r appid prefix_dir size_bytes <<< "$entry"
+            msg_warn "AppID $appid: $prefix_dir ($(human_size "$size_bytes"))"
+        done
+        echo ""
+    fi
+
+    msg "Total reclaimable space: ${BOLD}$(human_size $total_reclaimable)${NC}"
+    echo ""
+
+    if ! gui_question "Remove ${#orphans[@]} orphaned and ${#duplicates[@]} duplicate prefix(es)?"; then
+        msg "Cancelled"
+        return 0
+    fi
+
+    echo ""
+
+    # Remove orphans
+    for entry in "${orphans[@]}"; do
+        IFS='|' read -r appid name size_bytes prefix_dir <<< "$entry"
+        echo -ne "  Removing $name ($appid)... "
+        if rm -rf "$prefix_dir" 2>/dev/null; then
+            echo -e "${GREEN}done${NC}"
+        else
+            echo -e "${RED}failed${NC}"
+        fi
+    done
+
+    # Remove duplicates
+    for entry in "${duplicates[@]}"; do
+        IFS='|' read -r appid prefix_dir size_bytes <<< "$entry"
+        echo -ne "  Removing duplicate $appid at $prefix_dir... "
+        if rm -rf "$prefix_dir" 2>/dev/null; then
+            echo -e "${GREEN}done${NC}"
+        else
+            echo -e "${RED}failed${NC}"
+        fi
+    done
+
+    echo ""
+    msg_ok "Cleanup complete — freed $(human_size $total_reclaimable)"
+
+    if $GUI_MODE; then
+        gui_info "Cleanup complete.\nFreed $(human_size $total_reclaimable)"
+    fi
+}
+
+# ─── Command: reset ─────────────────────────────────────────────────────────
+
+cmd_reset() {
+    local appid="${1:-}"
+    [[ -n "$appid" ]] || die "Usage: $PROGRAM_NAME reset <appid>"
+
+    local prefix_dir
+    prefix_dir=$(find_prefix_path "$appid") || die "No prefix found for AppID $appid"
+
+    local name
+    name=$(get_game_name "$appid")
+
+    header "Reset Prefix: $name ($appid)"
+
+    msg_warn "This will ${BOLD}completely delete${NC} the prefix for $name"
+    msg_warn "Steam will recreate it on next launch"
+    echo ""
+
+    # Show what will be lost
+    local size_bytes
+    size_bytes=$(get_dir_size_bytes "$prefix_dir")
+    msg "Prefix size: $(human_size "$size_bytes")"
+    msg "Path: $prefix_dir"
+
+    # Show save directories
+    local saves
+    saves=$(find_save_dirs "$prefix_dir")
+    if [[ -n "$saves" ]]; then
+        echo ""
+        msg "Detected save directories:"
+        while IFS= read -r sd; do
+            msg_dim "$sd"
+        done <<< "$saves"
+    fi
+
+    echo ""
+    if ! gui_question "Proceed with reset? (saves will be backed up first)"; then
+        msg "Cancelled"
+        return 0
+    fi
+
+    # Step 1: Backup saves
+    echo ""
+    msg "Step 1/3: Backing up save files..."
+    mkdir -p "$BACKUP_DIR"
+
+    local timestamp safe_name saves_backup
+    timestamp=$(date +%Y%m%d-%H%M%S)
+    safe_name=$(echo "$name" | tr -dc 'a-zA-Z0-9_-' | head -c 40)
+    saves_backup="$BACKUP_DIR/${appid}_${safe_name}_pre-reset_${timestamp}.tar.zst"
+
+    local -a save_dirs=()
+    while IFS= read -r sd; do
+        [[ -n "$sd" && -d "$sd" ]] && save_dirs+=("$sd")
+    done < <(find_save_dirs "$prefix_dir")
+
+    if [[ ${#save_dirs[@]} -gt 0 ]]; then
+        local -a tar_paths=()
+        for sd in "${save_dirs[@]}"; do
+            tar_paths+=("${sd#$prefix_dir/}")
+        done
+        tar -C "$prefix_dir" -cf - "${tar_paths[@]}" 2>/dev/null \
+            | zstd -T0 -3 -o "$saves_backup" 2>/dev/null
+
+        # Write metadata
+        cat > "${saves_backup%.tar.zst}.meta" <<EOF
+appid=$appid
+name=$name
+proton_version=$(get_proton_version "$prefix_dir")
+backup_date=$(date -Iseconds)
+backup_type=saves
+original_size=$size_bytes
+prefix_path=$prefix_dir
+reason=pre-reset
+EOF
+        msg_ok "Saves backed up to $saves_backup"
+    else
+        msg_dim "No save directories detected — skipping backup"
+    fi
+
+    # Step 2: Delete prefix
+    msg "Step 2/3: Deleting prefix..."
+    if rm -rf "$prefix_dir"; then
+        msg_ok "Prefix deleted"
+    else
+        die "Failed to delete prefix"
+    fi
+
+    # Step 3: Notify
+    msg "Step 3/3: Done"
+    echo ""
+    msg_ok "Prefix reset complete for $name ($appid)"
+    msg "Launch the game through Steam to recreate the prefix"
+
+    if [[ ${#save_dirs[@]} -gt 0 ]]; then
+        echo ""
+        msg "To restore saves after first launch:"
+        msg "  $PROGRAM_NAME restore $appid $(basename "$saves_backup")"
+    fi
+
+    if $GUI_MODE; then
+        gui_info "Prefix reset complete for $name.\nLaunch the game to recreate.\n\nSaves backed up to:\n$saves_backup"
+    fi
+}
+
+# ─── Usage ──────────────────────────────────────────────────────────────────
+
+show_usage() {
+    cat <<EOF
+${BOLD}24HG Wine/Proton Prefix Manager${NC} v${VERSION}
+
+${BOLD}USAGE:${NC}
+    $PROGRAM_NAME <command> [options]
+
+${BOLD}COMMANDS:${NC}
+    ${GREEN}list${NC}                            List all prefixes (sorted by size)
+    ${GREEN}info${NC} <appid>                     Detailed prefix information
+    ${GREEN}health${NC} <appid>                   Health-check a prefix
+    ${GREEN}install-deps${NC} <appid> [deps...]   Install dependencies via protontricks
+    ${GREEN}backup${NC} <appid> [--saves-only]    Backup a prefix (tar+zstd)
+    ${GREEN}restore${NC} <appid> [backup-file]    Restore from backup
+    ${GREEN}cleanup${NC}                          Find and remove orphaned prefixes
+    ${GREEN}reset${NC} <appid>                    Nuclear reset (backs up saves first)
+
+${BOLD}DEPENDENCY PRESETS:${NC}
+    vcredist         All Visual C++ runtimes (2005-2022)
+    dotnet35/40/45/48  .NET Framework versions
+    d3dx9            DirectX 9 extensions
+    d3dcompiler_47   DirectX shader compiler
+    xact             Xbox Audio Cross-platform Toolkit
+    physx            NVIDIA PhysX
+
+${BOLD}OPTIONS:${NC}
+    --gui            Use zenity dialogs for interaction
+    --help, -h       Show this help message
+    --version        Show version
+
+${BOLD}EXAMPLES:${NC}
+    $PROGRAM_NAME list
+    $PROGRAM_NAME info 892970
+    $PROGRAM_NAME health 1245620
+    $PROGRAM_NAME install-deps 489830 vcredist d3dx9
+    $PROGRAM_NAME backup 252490
+    $PROGRAM_NAME backup 252490 --saves-only
+    $PROGRAM_NAME restore 252490
+    $PROGRAM_NAME cleanup
+    $PROGRAM_NAME reset 1091500
+
+${BOLD}PATHS:${NC}
+    Backups:  $BACKUP_DIR
+    Flatpak:  $STEAM_FLATPAK_DIR
+    Native:   $STEAM_NATIVE_DIR
+
+${DIM}Part of 24HG — https://24hgaming.com${NC}
+EOF
+}
+
+# ─── Tab Completion Helper ──────────────────────────────────────────────────
+
+# Output completion-friendly data when invoked with --completions
+generate_completions() {
+    local cur="${1:-}"
+    local prev="${2:-}"
+
+    case "$prev" in
+        24hg-prefix|"$PROGRAM_NAME")
+            echo "list info health install-deps backup restore cleanup reset --gui --help --version"
+            ;;
+        info|health|backup|restore|reset|install-deps)
+            # Output appids for completion
+            find_all_prefixes 2>/dev/null | cut -d'|' -f1
+            ;;
+        --*)
+            echo "--gui --help --version"
+            ;;
+    esac
+}
+
+# ─── Main ───────────────────────────────────────────────────────────────────
+
+main() {
+    local -a args=()
+    local command=""
+
+    # Parse global flags and command
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gui)
+                GUI_MODE=true
+                shift
+                ;;
+            --help|-h)
+                show_usage
+                return 0
+                ;;
+            --version)
+                echo "$PROGRAM_NAME v$VERSION"
+                return 0
+                ;;
+            --completions)
+                shift
+                generate_completions "$@"
+                return 0
+                ;;
+            -*)
+                die "Unknown option: $1 (see --help)"
+                ;;
+            *)
+                if [[ -z "$command" ]]; then
+                    command="$1"
+                else
+                    args+=("$1")
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    [[ -n "$command" ]] || { show_usage; return 0; }
+
+    case "$command" in
+        list)         cmd_list "${args[@]:-}" ;;
+        info)         cmd_info "${args[@]:-}" ;;
+        health)       cmd_health "${args[@]:-}" ;;
+        install-deps) cmd_install_deps "${args[@]:-}" ;;
+        backup)       cmd_backup "${args[@]:-}" ;;
+        restore)      cmd_restore "${args[@]:-}" ;;
+        cleanup)      cmd_cleanup ;;
+        reset)        cmd_reset "${args[@]:-}" ;;
+        *)            die "Unknown command: $command (see --help)" ;;
+    esac
+}
+
+main "$@"

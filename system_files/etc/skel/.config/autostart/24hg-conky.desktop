@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=24HG Desktop Widget
+Exec=conky -c ~/.config/conky/24hg.conf -d
+Hidden=true
+NoDisplay=true
+X-KDE-autostart-after=panel
+X-KDE-autostart-phase=2
+StartupNotify=false

@@ -1,0 +1,1256 @@
+#!/bin/bash
+# 24HG Accessibility Configuration Tool
+# Configures KDE Plasma accessibility features including color blind filters,
+# high contrast mode, text scaling, screen reader, input aids, and MangoHud
+# accessibility presets.
+#
+# Usage: 24hg-a11y <command> [options]
+# Run '24hg-a11y help' for full command reference.
+
+set -euo pipefail
+
+ACTION="${1:-help}"
+PROFILE_DIR="${HOME}/.config/24hg/a11y-profiles"
+MANGOHUD_CONF="${HOME}/.config/MangoHud/MangoHud.conf"
+CONKY_CONF="${HOME}/.config/conky/conky.conf"
+KONSOLE_PROFILE_DIR="${HOME}/.local/share/konsole"
+A11Y_STATE="${HOME}/.config/24hg/a11y-state.conf"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+ensure_dirs() {
+    mkdir -p "${PROFILE_DIR}" "$(dirname "$A11Y_STATE")"
+    [ -f "$A11Y_STATE" ] || touch "$A11Y_STATE"
+}
+
+log_info() {
+    echo "[a11y] $*"
+}
+
+log_ok() {
+    echo "[a11y] OK: $*"
+}
+
+log_err() {
+    echo "[a11y] ERROR: $*" >&2
+}
+
+notify() {
+    notify-send -a "24HG" -i "preferences-desktop-accessibility" \
+        "Accessibility" "$*" 2>/dev/null || true
+}
+
+# Detect kwriteconfig version (5 vs 6)
+kwrite() {
+    if command -v kwriteconfig6 &>/dev/null; then
+        kwriteconfig6 "$@"
+    elif command -v kwriteconfig5 &>/dev/null; then
+        kwriteconfig5 "$@"
+    else
+        log_err "Neither kwriteconfig5 nor kwriteconfig6 found"
+        return 1
+    fi
+}
+
+kread() {
+    if command -v kreadconfig6 &>/dev/null; then
+        kreadconfig6 "$@"
+    elif command -v kreadconfig5 &>/dev/null; then
+        kreadconfig5 "$@"
+    else
+        echo ""
+    fi
+}
+
+reload_kwin() {
+    if command -v qdbus6 &>/dev/null; then
+        qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || true
+    elif command -v qdbus &>/dev/null; then
+        qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
+    fi
+}
+
+reload_plasma() {
+    if command -v qdbus6 &>/dev/null; then
+        qdbus6 org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.refreshCurrentShell 2>/dev/null || true
+    elif command -v qdbus &>/dev/null; then
+        qdbus org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.refreshCurrentShell 2>/dev/null || true
+    fi
+}
+
+state_set() {
+    local key="$1" value="$2"
+    ensure_dirs
+    if grep -q "^${key}=" "$A11Y_STATE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$A11Y_STATE"
+    else
+        echo "${key}=${value}" >> "$A11Y_STATE"
+    fi
+}
+
+state_get() {
+    local key="$1" default="${2:-}"
+    if [ -f "$A11Y_STATE" ]; then
+        grep "^${key}=" "$A11Y_STATE" 2>/dev/null | cut -d= -f2- || echo "$default"
+    else
+        echo "$default"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Color Blind Filters
+# ---------------------------------------------------------------------------
+
+colorblind_types() {
+    echo "  deuteranopia   — Red-green (most common, ~6% of males)"
+    echo "  protanopia     — Red-green (reduced red sensitivity)"
+    echo "  tritanopia     — Blue-yellow (rare)"
+    echo "  achromatopsia  — Total color blindness (monochromacy)"
+    echo "  off            — Remove color blind filter"
+}
+
+apply_colorblind() {
+    local mode="${1:-}"
+
+    if [ -z "$mode" ]; then
+        log_err "Specify a color blind type or 'off'."
+        colorblind_types
+        return 1
+    fi
+
+    case "$mode" in
+        deuteranopia|protanopia|tritanopia|achromatopsia)
+            # Map to KWin color correction mode names
+            local kwin_mode
+            case "$mode" in
+                deuteranopia)  kwin_mode="Deuteranopia" ;;
+                protanopia)    kwin_mode="Protanopia" ;;
+                tritanopia)    kwin_mode="Tritanopia" ;;
+                achromatopsia) kwin_mode="Achromatopsia" ;;
+            esac
+
+            # Enable the KWin color blindness correction effect
+            kwrite --file kwinrc --group Plugins --key colorblaboratorEnabled true
+            kwrite --file kwinrc --group Effect-ColorBlindnessCorrection --key Mode "$kwin_mode"
+            kwrite --file kwinrc --group Effect-ColorBlindnessCorrection --key Intensity 1.0
+
+            reload_kwin
+
+            # Adjust MangoHud colors for distinguishability
+            apply_mangohud_colorblind "$mode"
+
+            # Adjust Conky colors
+            apply_conky_colorblind "$mode"
+
+            state_set "colorblind" "$mode"
+            log_ok "Color blind filter applied: $mode ($kwin_mode)"
+            notify "Color blind filter: $mode"
+            ;;
+        off)
+            kwrite --file kwinrc --group Plugins --key colorblaboratorEnabled false
+            reload_kwin
+
+            restore_mangohud_colors
+            restore_conky_colors
+
+            state_set "colorblind" "off"
+            log_ok "Color blind filter removed."
+            notify "Color blind filter removed"
+            ;;
+        *)
+            log_err "Unknown color blind type: $mode"
+            colorblind_types
+            return 1
+            ;;
+    esac
+}
+
+apply_mangohud_colorblind() {
+    local mode="$1"
+    [ -f "$MANGOHUD_CONF" ] || return 0
+
+    # Safe colors per type — avoid red/green confusion
+    local gpu_color cpu_color fps_color text_color
+    case "$mode" in
+        deuteranopia|protanopia)
+            gpu_color="5B9BD5"   # blue
+            cpu_color="FFC000"   # yellow/amber
+            fps_color="FFFFFF"   # white
+            text_color="E0E0E0"  # light gray
+            ;;
+        tritanopia)
+            gpu_color="FF6B6B"   # red
+            cpu_color="4CAF50"   # green
+            fps_color="FFFFFF"   # white
+            text_color="E0E0E0"  # light gray
+            ;;
+        achromatopsia)
+            gpu_color="FFFFFF"   # white
+            cpu_color="B0B0B0"   # medium gray
+            fps_color="FFFFFF"   # white
+            text_color="D0D0D0"  # light gray
+            ;;
+    esac
+
+    # Back up original if not already backed up
+    if [ ! -f "${MANGOHUD_CONF}.a11y-backup" ]; then
+        cp "$MANGOHUD_CONF" "${MANGOHUD_CONF}.a11y-backup"
+    fi
+
+    # Apply color overrides via sed
+    sed -i \
+        -e "s/^gpu_color=.*/gpu_color=${gpu_color}/" \
+        -e "s/^cpu_color=.*/cpu_color=${cpu_color}/" \
+        -e "s/^fps_color=.*/fps_color=${fps_color}/" \
+        -e "s/^text_color=.*/text_color=${text_color}/" \
+        "$MANGOHUD_CONF"
+
+    log_info "MangoHud colors adjusted for $mode"
+}
+
+apply_conky_colorblind() {
+    local mode="$1"
+    [ -f "$CONKY_CONF" ] || return 0
+
+    if [ ! -f "${CONKY_CONF}.a11y-backup" ]; then
+        cp "$CONKY_CONF" "${CONKY_CONF}.a11y-backup"
+    fi
+
+    local default_color
+    case "$mode" in
+        deuteranopia|protanopia) default_color="5B9BD5" ;;
+        tritanopia)              default_color="FF6B6B" ;;
+        achromatopsia)           default_color="FFFFFF" ;;
+    esac
+
+    sed -i "s/^[[:space:]]*default_color[[:space:]]*=.*/    default_color = '#${default_color}',/" "$CONKY_CONF"
+    log_info "Conky colors adjusted for $mode"
+}
+
+restore_mangohud_colors() {
+    if [ -f "${MANGOHUD_CONF}.a11y-backup" ]; then
+        cp "${MANGOHUD_CONF}.a11y-backup" "$MANGOHUD_CONF"
+        rm -f "${MANGOHUD_CONF}.a11y-backup"
+        log_info "MangoHud colors restored to original"
+    fi
+}
+
+restore_conky_colors() {
+    if [ -f "${CONKY_CONF}.a11y-backup" ]; then
+        cp "${CONKY_CONF}.a11y-backup" "$CONKY_CONF"
+        rm -f "${CONKY_CONF}.a11y-backup"
+        log_info "Conky colors restored to original"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# High Contrast
+# ---------------------------------------------------------------------------
+
+apply_contrast() {
+    local mode="${1:-}"
+
+    case "$mode" in
+        high)
+            # Apply high-contrast color scheme
+            kwrite --file kdeglobals --group General --key ColorScheme "BreezeDark"
+            kwrite --file kdeglobals --group General --key widgetStyle "Breeze"
+
+            # Increase window border width for visibility
+            kwrite --file kwinrc --group org.kde.kdecoration2 --key BorderSize "Huge"
+            kwrite --file kwinrc --group org.kde.kdecoration2 --key BorderSizeAuto false
+
+            # Boost contrast in window decorations
+            kwrite --file kdeglobals --group WM --key activeBackground "0,0,0"
+            kwrite --file kdeglobals --group WM --key activeForeground "255,255,255"
+            kwrite --file kdeglobals --group WM --key inactiveBackground "40,40,40"
+            kwrite --file kdeglobals --group WM --key inactiveForeground "200,200,200"
+
+            # High contrast button/widget colors
+            kwrite --file kdeglobals --group Colors:Button --key BackgroundNormal "30,30,30"
+            kwrite --file kdeglobals --group Colors:Button --key ForegroundNormal "255,255,255"
+            kwrite --file kdeglobals --group Colors:View --key BackgroundNormal "10,10,10"
+            kwrite --file kdeglobals --group Colors:View --key ForegroundNormal "255,255,255"
+            kwrite --file kdeglobals --group Colors:Selection --key BackgroundNormal "255,200,0"
+            kwrite --file kdeglobals --group Colors:Selection --key ForegroundNormal "0,0,0"
+
+            # Focus indicator
+            kwrite --file kdeglobals --group General --key shadeSortColumn true
+
+            reload_kwin
+            reload_plasma
+
+            # MangoHud high contrast
+            apply_mangohud_contrast "high"
+
+            state_set "contrast" "high"
+            log_ok "High contrast mode enabled."
+            notify "High contrast mode enabled"
+            ;;
+        medium)
+            # Apply a moderately boosted contrast (dark theme with enhanced borders)
+            kwrite --file kdeglobals --group General --key ColorScheme "BreezeDark"
+            kwrite --file kwinrc --group org.kde.kdecoration2 --key BorderSize "Large"
+            kwrite --file kwinrc --group org.kde.kdecoration2 --key BorderSizeAuto false
+
+            kwrite --file kdeglobals --group Colors:Selection --key BackgroundNormal "61,174,233"
+            kwrite --file kdeglobals --group Colors:Selection --key ForegroundNormal "255,255,255"
+
+            reload_kwin
+            reload_plasma
+
+            apply_mangohud_contrast "medium"
+
+            state_set "contrast" "medium"
+            log_ok "Medium contrast mode enabled."
+            notify "Medium contrast mode enabled"
+            ;;
+        off)
+            # Restore default Breeze Dark scheme with normal borders
+            kwrite --file kdeglobals --group General --key ColorScheme "BreezeDark"
+            kwrite --file kwinrc --group org.kde.kdecoration2 --key BorderSize "Normal"
+            kwrite --file kwinrc --group org.kde.kdecoration2 --key BorderSizeAuto true
+
+            # Remove custom WM colors (let theme decide)
+            kwrite --file kdeglobals --group WM --key activeBackground ""
+            kwrite --file kdeglobals --group WM --key activeForeground ""
+            kwrite --file kdeglobals --group WM --key inactiveBackground ""
+            kwrite --file kdeglobals --group WM --key inactiveForeground ""
+
+            reload_kwin
+            reload_plasma
+
+            apply_mangohud_contrast "off"
+
+            state_set "contrast" "off"
+            log_ok "Contrast mode reset to defaults."
+            notify "Contrast mode reset"
+            ;;
+        *)
+            log_err "Usage: 24hg-a11y contrast <high|medium|off>"
+            return 1
+            ;;
+    esac
+}
+
+apply_mangohud_contrast() {
+    local mode="$1"
+    [ -f "$MANGOHUD_CONF" ] || return 0
+
+    case "$mode" in
+        high)
+            sed -i \
+                -e "s/^background_alpha=.*/background_alpha=0.9/" \
+                -e "s/^gpu_color=.*/gpu_color=FFFF00/" \
+                -e "s/^cpu_color=.*/cpu_color=00FF00/" \
+                -e "s/^fps_color=.*/fps_color=FFFFFF/" \
+                -e "s/^text_color=.*/text_color=FFFFFF/" \
+                -e "s/^background_color=.*/background_color=000000/" \
+                "$MANGOHUD_CONF"
+            ;;
+        medium)
+            sed -i \
+                -e "s/^background_alpha=.*/background_alpha=0.7/" \
+                -e "s/^text_color=.*/text_color=E0E0E0/" \
+                "$MANGOHUD_CONF"
+            ;;
+        off)
+            if [ -f "${MANGOHUD_CONF}.a11y-backup" ]; then
+                cp "${MANGOHUD_CONF}.a11y-backup" "$MANGOHUD_CONF"
+            fi
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Cursor Size
+# ---------------------------------------------------------------------------
+
+apply_cursor() {
+    local size_name="${1:-}"
+    local size
+
+    case "$size_name" in
+        small)  size=24 ;;
+        medium) size=36 ;;
+        large)  size=48 ;;
+        xlarge) size=64 ;;
+        *)
+            log_err "Usage: 24hg-a11y cursor <small|medium|large|xlarge>"
+            echo "  small=24  medium=36  large=48  xlarge=64"
+            return 1
+            ;;
+    esac
+
+    # KDE cursor size
+    kwrite --file kcminputrc --group Mouse --key cursorSize "$size"
+
+    # GTK cursor size
+    local gtk3_settings="${HOME}/.config/gtk-3.0/settings.ini"
+    if [ -f "$gtk3_settings" ]; then
+        if grep -q "gtk-cursor-theme-size" "$gtk3_settings"; then
+            sed -i "s/gtk-cursor-theme-size=.*/gtk-cursor-theme-size=${size}/" "$gtk3_settings"
+        else
+            echo "gtk-cursor-theme-size=${size}" >> "$gtk3_settings"
+        fi
+    fi
+
+    # Xcursor size for X11/XWayland
+    local xresources="${HOME}/.Xresources"
+    if [ -f "$xresources" ]; then
+        if grep -q "Xcursor.size" "$xresources"; then
+            sed -i "s/Xcursor.size:.*/Xcursor.size: ${size}/" "$xresources"
+        else
+            echo "Xcursor.size: ${size}" >> "$xresources"
+        fi
+        xrdb -merge "$xresources" 2>/dev/null || true
+    fi
+
+    reload_plasma
+
+    state_set "cursor_size" "$size_name"
+    log_ok "Cursor size set to $size_name ($size px)."
+    notify "Cursor size: $size_name (${size}px)"
+}
+
+# ---------------------------------------------------------------------------
+# Text Scaling
+# ---------------------------------------------------------------------------
+
+apply_text_scale() {
+    local size_name="${1:-}"
+    local scale dpi
+
+    case "$size_name" in
+        small)   scale=0.8;  dpi=77  ;;
+        normal)  scale=1.0;  dpi=96  ;;
+        large)   scale=1.25; dpi=120 ;;
+        xlarge)  scale=1.5;  dpi=144 ;;
+        xxlarge) scale=2.0;  dpi=192 ;;
+        *)
+            log_err "Usage: 24hg-a11y text <small|normal|large|xlarge|xxlarge>"
+            echo "  small=0.8x  normal=1.0x  large=1.25x  xlarge=1.5x  xxlarge=2.0x"
+            return 1
+            ;;
+    esac
+
+    # Set KDE font DPI
+    kwrite --file kcmfonts --group General --key forceFontDPI "$dpi"
+    kwrite --file kdeglobals --group KDE --key forceFontDPI "$dpi"
+
+    # Set general text scaling factor (Plasma 5.27+ / 6)
+    kwrite --file kdeglobals --group KDE --key TextScaleFactor "$scale"
+
+    # Adjust MangoHud font size
+    if [ -f "$MANGOHUD_CONF" ]; then
+        local mh_fontsize
+        mh_fontsize=$(awk "BEGIN { printf \"%.0f\", 24 * $scale }")
+        sed -i "s/^font_size=.*/font_size=${mh_fontsize}/" "$MANGOHUD_CONF"
+        log_info "MangoHud font size set to ${mh_fontsize}"
+    fi
+
+    # Adjust Konsole profile font size
+    local konsole_profile
+    konsole_profile=$(find "$KONSOLE_PROFILE_DIR" -name "*.profile" -print -quit 2>/dev/null || true)
+    if [ -n "$konsole_profile" ] && [ -f "$konsole_profile" ]; then
+        local term_fontsize
+        term_fontsize=$(awk "BEGIN { printf \"%.0f\", 10 * $scale }")
+        # Konsole font format: "FontName,size,-1,5,50,0,0,0,0,0"
+        if grep -q "^Font=" "$konsole_profile"; then
+            sed -i -E "s/^Font=(.*),([0-9]+),/Font=\1,${term_fontsize},/" "$konsole_profile"
+        fi
+        log_info "Konsole font size set to ${term_fontsize}"
+    fi
+
+    reload_plasma
+
+    state_set "text_scale" "$size_name"
+    log_ok "Text scaling set to $size_name (${scale}x, ${dpi} DPI)."
+    notify "Text scaling: $size_name (${scale}x)"
+}
+
+# ---------------------------------------------------------------------------
+# Animations
+# ---------------------------------------------------------------------------
+
+apply_animations() {
+    local mode="${1:-}"
+
+    case "$mode" in
+        on)
+            kwrite --file kdeglobals --group KDE --key AnimationDurationFactor 1.0
+            kwrite --file kwinrc --group Compositing --key AnimationSpeed 3
+            kwrite --file kwinrc --group Plugins --key slideEnabled true
+            kwrite --file kwinrc --group Plugins --key fadeEnabled true
+            kwrite --file kwinrc --group Plugins --key scaleEnabled true
+
+            reload_kwin
+            state_set "animations" "on"
+            log_ok "Desktop animations enabled."
+            notify "Animations: on"
+            ;;
+        reduced)
+            kwrite --file kdeglobals --group KDE --key AnimationDurationFactor 0.5
+            kwrite --file kwinrc --group Compositing --key AnimationSpeed 1
+            kwrite --file kwinrc --group Plugins --key slideEnabled true
+            kwrite --file kwinrc --group Plugins --key fadeEnabled true
+            kwrite --file kwinrc --group Plugins --key scaleEnabled false
+
+            reload_kwin
+            state_set "animations" "reduced"
+            log_ok "Desktop animations reduced."
+            notify "Animations: reduced"
+            ;;
+        off)
+            kwrite --file kdeglobals --group KDE --key AnimationDurationFactor 0
+            kwrite --file kwinrc --group Compositing --key AnimationSpeed 0
+            kwrite --file kwinrc --group Plugins --key slideEnabled false
+            kwrite --file kwinrc --group Plugins --key fadeEnabled false
+            kwrite --file kwinrc --group Plugins --key scaleEnabled false
+
+            reload_kwin
+            state_set "animations" "off"
+            log_ok "Desktop animations disabled."
+            notify "Animations: off"
+            ;;
+        *)
+            log_err "Usage: 24hg-a11y animations <on|reduced|off>"
+            return 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Sound / Visual Alerts
+# ---------------------------------------------------------------------------
+
+apply_sounds() {
+    local mode="${1:-}"
+
+    case "$mode" in
+        on)
+            kwrite --file kdeglobals --group Sounds --key Enable true
+            kwrite --file kaaboretum --group Alerts --key VisualBell false
+            kwrite --file kwinrc --group Effect-FlashBang --key Enabled false
+
+            reload_kwin
+            state_set "sounds" "on"
+            log_ok "System sounds enabled."
+            notify "Sounds: on"
+            ;;
+        off)
+            kwrite --file kdeglobals --group Sounds --key Enable false
+            kwrite --file kaaboretum --group Alerts --key VisualBell false
+
+            reload_kwin
+            state_set "sounds" "off"
+            log_ok "System sounds disabled."
+            notify "Sounds: off"
+            ;;
+        visual)
+            kwrite --file kdeglobals --group Sounds --key Enable false
+            kwrite --file kwinrc --group Plugins --key flashbangEnabled true
+            kwrite --file kaccessrc --group Bell --key VisibleBell true
+            kwrite --file kaccessrc --group Bell --key VisibleBellInvert true
+            kwrite --file kaccessrc --group Bell --key VisibleBellPause 300
+
+            reload_kwin
+            state_set "sounds" "visual"
+            log_ok "Visual alerts enabled (sounds replaced with screen flash)."
+            notify "Sounds: visual alerts"
+            ;;
+        *)
+            log_err "Usage: 24hg-a11y sounds <on|off|visual>"
+            return 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# MangoHud Accessibility Presets
+# ---------------------------------------------------------------------------
+
+apply_hud_preset() {
+    local preset="${1:-}"
+
+    if [ ! -f "$MANGOHUD_CONF" ]; then
+        log_err "MangoHud config not found at $MANGOHUD_CONF"
+        return 1
+    fi
+
+    # Back up original on first use
+    if [ ! -f "${MANGOHUD_CONF}.a11y-backup" ]; then
+        cp "$MANGOHUD_CONF" "${MANGOHUD_CONF}.a11y-backup"
+    fi
+
+    case "$preset" in
+        large-text)
+            sed -i \
+                -e "s/^font_size=.*/font_size=36/" \
+                -e "s/^position=.*/position=top-left/" \
+                "$MANGOHUD_CONF"
+            log_ok "MangoHud preset: large-text (36pt, top-left)"
+            ;;
+        high-contrast)
+            sed -i \
+                -e "s/^background_alpha=.*/background_alpha=0.95/" \
+                -e "s/^background_color=.*/background_color=000000/" \
+                -e "s/^gpu_color=.*/gpu_color=FFFF00/" \
+                -e "s/^cpu_color=.*/cpu_color=00FFFF/" \
+                -e "s/^fps_color=.*/fps_color=FFFFFF/" \
+                -e "s/^text_color=.*/text_color=FFFFFF/" \
+                -e "s/^font_size=.*/font_size=28/" \
+                "$MANGOHUD_CONF"
+            log_ok "MangoHud preset: high-contrast (black bg, bright text)"
+            ;;
+        minimal)
+            sed -i \
+                -e "s/^font_size=.*/font_size=20/" \
+                -e "s/^position=.*/position=top-right/" \
+                "$MANGOHUD_CONF"
+            # Reduce shown metrics to FPS only
+            if ! grep -q "^fps_only" "$MANGOHUD_CONF"; then
+                echo "fps_only" >> "$MANGOHUD_CONF"
+            fi
+            log_ok "MangoHud preset: minimal (FPS only, small)"
+            ;;
+        off)
+            if [ -f "${MANGOHUD_CONF}.a11y-backup" ]; then
+                cp "${MANGOHUD_CONF}.a11y-backup" "$MANGOHUD_CONF"
+                log_ok "MangoHud settings restored to original."
+            else
+                log_info "No backup found, MangoHud unchanged."
+            fi
+            ;;
+        *)
+            log_err "Usage: 24hg-a11y hud <large-text|high-contrast|minimal|off>"
+            return 1
+            ;;
+    esac
+
+    state_set "hud_preset" "$preset"
+    notify "MangoHud preset: $preset"
+}
+
+# ---------------------------------------------------------------------------
+# Screen Reader (Orca)
+# ---------------------------------------------------------------------------
+
+apply_reader() {
+    local mode="${1:-}"
+
+    case "$mode" in
+        on)
+            # Enable accessibility in KDE/AT-SPI
+            kwrite --file kdeglobals --group Accessibility --key ScreenReaderEnabled true
+            export QT_ACCESSIBILITY=1
+
+            # Persist QT_ACCESSIBILITY
+            local env_file="${HOME}/.config/plasma-workspace/env/a11y.sh"
+            mkdir -p "$(dirname "$env_file")"
+            echo 'export QT_ACCESSIBILITY=1' > "$env_file"
+
+            # Start Orca
+            if command -v orca &>/dev/null; then
+                if ! pgrep -x orca &>/dev/null; then
+                    orca &
+                    disown
+                    log_info "Orca screen reader started."
+                else
+                    log_info "Orca is already running."
+                fi
+            else
+                log_err "Orca not installed. Install with: rpm-ostree install orca"
+                return 1
+            fi
+
+            state_set "reader" "on"
+            log_ok "Screen reader enabled."
+            notify "Screen reader: on"
+            ;;
+        off)
+            kwrite --file kdeglobals --group Accessibility --key ScreenReaderEnabled false
+
+            # Remove env file
+            rm -f "${HOME}/.config/plasma-workspace/env/a11y.sh"
+
+            # Stop Orca
+            if pgrep -x orca &>/dev/null; then
+                pkill -x orca 2>/dev/null || true
+                log_info "Orca screen reader stopped."
+            fi
+
+            state_set "reader" "off"
+            log_ok "Screen reader disabled."
+            notify "Screen reader: off"
+            ;;
+        *)
+            log_err "Usage: 24hg-a11y reader <on|off>"
+            return 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Sticky Keys
+# ---------------------------------------------------------------------------
+
+apply_sticky_keys() {
+    local mode="${1:-}"
+
+    case "$mode" in
+        on)
+            kwrite --file kaccessrc --group StickyKeys --key StickyKeys true
+            kwrite --file kaccessrc --group StickyKeys --key StickyKeysLatch true
+            kwrite --file kaccessrc --group StickyKeys --key StickyKeysLock true
+
+            reload_plasma
+            state_set "sticky_keys" "on"
+            log_ok "Sticky keys enabled."
+            notify "Sticky keys: on"
+            ;;
+        off)
+            kwrite --file kaccessrc --group StickyKeys --key StickyKeys false
+
+            reload_plasma
+            state_set "sticky_keys" "off"
+            log_ok "Sticky keys disabled."
+            notify "Sticky keys: off"
+            ;;
+        *)
+            log_err "Usage: 24hg-a11y sticky-keys <on|off>"
+            return 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Slow Keys
+# ---------------------------------------------------------------------------
+
+apply_slow_keys() {
+    local mode="${1:-}"
+    local delay="${2:-300}"
+
+    case "$mode" in
+        on)
+            if ! [[ "$delay" =~ ^[0-9]+$ ]]; then
+                log_err "Delay must be a number in milliseconds."
+                return 1
+            fi
+
+            kwrite --file kaccessrc --group SlowKeys --key SlowKeys true
+            kwrite --file kaccessrc --group SlowKeys --key SlowKeysDelay "$delay"
+            kwrite --file kaccessrc --group SlowKeys --key SlowKeysAcceptBeep true
+            kwrite --file kaccessrc --group SlowKeys --key SlowKeysRejectBeep true
+
+            reload_plasma
+            state_set "slow_keys" "on"
+            state_set "slow_keys_delay" "$delay"
+            log_ok "Slow keys enabled (delay: ${delay}ms)."
+            notify "Slow keys: on (${delay}ms)"
+            ;;
+        off)
+            kwrite --file kaccessrc --group SlowKeys --key SlowKeys false
+
+            reload_plasma
+            state_set "slow_keys" "off"
+            log_ok "Slow keys disabled."
+            notify "Slow keys: off"
+            ;;
+        *)
+            log_err "Usage: 24hg-a11y slow-keys <on|off> [delay_ms]"
+            return 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Status
+# ---------------------------------------------------------------------------
+
+show_status() {
+    echo "=== 24HG Accessibility Status ==="
+    echo ""
+
+    local val
+
+    val=$(state_get "colorblind" "off")
+    echo "Color Blind Filter:  $val"
+
+    val=$(state_get "contrast" "off")
+    echo "Contrast Mode:       $val"
+
+    val=$(state_get "cursor_size" "small")
+    echo "Cursor Size:         $val"
+
+    val=$(state_get "text_scale" "normal")
+    echo "Text Scaling:        $val"
+
+    val=$(state_get "animations" "on")
+    echo "Animations:          $val"
+
+    val=$(state_get "sounds" "on")
+    echo "Sounds:              $val"
+
+    val=$(state_get "hud_preset" "off")
+    echo "MangoHud Preset:     $val"
+
+    val=$(state_get "reader" "off")
+    local reader_running="not running"
+    pgrep -x orca &>/dev/null && reader_running="running"
+    echo "Screen Reader:       $val ($reader_running)"
+
+    val=$(state_get "sticky_keys" "off")
+    echo "Sticky Keys:         $val"
+
+    val=$(state_get "slow_keys" "off")
+    local sk_delay
+    sk_delay=$(state_get "slow_keys_delay" "300")
+    if [ "$val" = "on" ]; then
+        echo "Slow Keys:           $val (${sk_delay}ms)"
+    else
+        echo "Slow Keys:           $val"
+    fi
+
+    echo ""
+
+    # List saved profiles
+    local profiles
+    profiles=$(ls "$PROFILE_DIR"/*.profile 2>/dev/null | wc -l)
+    echo "Saved Profiles:      $profiles"
+    if [ "$profiles" -gt 0 ]; then
+        for pf in "$PROFILE_DIR"/*.profile; do
+            echo "  - $(basename "$pf" .profile)"
+        done
+    fi
+
+    echo ""
+    echo "State file: $A11Y_STATE"
+}
+
+# ---------------------------------------------------------------------------
+# Profiles
+# ---------------------------------------------------------------------------
+
+profile_cmd() {
+    local subcmd="${1:-}"
+    local name="${2:-}"
+
+    case "$subcmd" in
+        save)
+            if [ -z "$name" ]; then
+                log_err "Usage: 24hg-a11y profile save <name>"
+                return 1
+            fi
+            ensure_dirs
+            if [ -f "$A11Y_STATE" ]; then
+                cp "$A11Y_STATE" "${PROFILE_DIR}/${name}.profile"
+                log_ok "Profile saved: $name"
+                notify "A11y profile saved: $name"
+            else
+                log_err "No settings to save. Run some commands first."
+                return 1
+            fi
+            ;;
+        load)
+            if [ -z "$name" ]; then
+                log_err "Usage: 24hg-a11y profile load <name>"
+                return 1
+            fi
+            local pfile="${PROFILE_DIR}/${name}.profile"
+            if [ ! -f "$pfile" ]; then
+                log_err "Profile not found: $name"
+                echo "Available profiles:"
+                profile_list
+                return 1
+            fi
+
+            # Load profile state
+            cp "$pfile" "$A11Y_STATE"
+
+            # Re-apply all settings from the loaded state
+            local val
+
+            val=$(state_get "colorblind" "off")
+            [ "$val" != "off" ] && apply_colorblind "$val" || apply_colorblind off
+
+            val=$(state_get "contrast" "off")
+            [ "$val" != "off" ] && apply_contrast "$val" || apply_contrast off
+
+            val=$(state_get "cursor_size" "small")
+            apply_cursor "$val"
+
+            val=$(state_get "text_scale" "normal")
+            apply_text_scale "$val"
+
+            val=$(state_get "animations" "on")
+            apply_animations "$val"
+
+            val=$(state_get "sounds" "on")
+            apply_sounds "$val"
+
+            val=$(state_get "hud_preset" "off")
+            apply_hud_preset "$val"
+
+            val=$(state_get "reader" "off")
+            apply_reader "$val"
+
+            val=$(state_get "sticky_keys" "off")
+            apply_sticky_keys "$val"
+
+            val=$(state_get "slow_keys" "off")
+            if [ "$val" = "on" ]; then
+                local delay
+                delay=$(state_get "slow_keys_delay" "300")
+                apply_slow_keys on "$delay"
+            else
+                apply_slow_keys off
+            fi
+
+            log_ok "Profile loaded: $name"
+            notify "A11y profile loaded: $name"
+            ;;
+        list)
+            profile_list
+            ;;
+        *)
+            log_err "Usage: 24hg-a11y profile <save|load|list> [name]"
+            return 1
+            ;;
+    esac
+}
+
+profile_list() {
+    ensure_dirs
+    local count=0
+    for pf in "$PROFILE_DIR"/*.profile; do
+        [ -f "$pf" ] || continue
+        local pname
+        pname=$(basename "$pf" .profile)
+        local mod_date
+        mod_date=$(stat -c '%Y' "$pf" 2>/dev/null | xargs -I{} date -d "@{}" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "unknown")
+        echo "  $pname  (saved: $mod_date)"
+        count=$((count + 1))
+    done
+    if [ "$count" -eq 0 ]; then
+        echo "  (no saved profiles)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Reset
+# ---------------------------------------------------------------------------
+
+do_reset() {
+    log_info "Resetting all accessibility settings to defaults..."
+
+    apply_colorblind off
+    apply_contrast off
+    apply_cursor small
+    apply_text_scale normal
+    apply_animations on
+    apply_sounds on
+    apply_hud_preset off
+    apply_reader off
+    apply_sticky_keys off
+    apply_slow_keys off
+
+    # Clear state file
+    : > "$A11Y_STATE"
+
+    reload_kwin
+    reload_plasma
+
+    log_ok "All accessibility settings reset to defaults."
+    notify "Accessibility settings reset to defaults"
+}
+
+# ---------------------------------------------------------------------------
+# Interactive Wizard
+# ---------------------------------------------------------------------------
+
+wizard_ask() {
+    local prompt="$1"
+    local default="${2:-}"
+    local response
+
+    if [ -n "$default" ]; then
+        read -rp "$prompt [$default]: " response
+        echo "${response:-$default}"
+    else
+        read -rp "$prompt: " response
+        echo "$response"
+    fi
+}
+
+wizard_ask_yn() {
+    local prompt="$1"
+    local default="${2:-n}"
+    local response
+
+    read -rp "$prompt [y/n] ($default): " response
+    response="${response:-$default}"
+    case "${response,,}" in
+        y|yes) return 0 ;;
+        *)     return 1 ;;
+    esac
+}
+
+run_wizard() {
+    echo ""
+    echo "============================================"
+    echo "  24HG Accessibility Setup Wizard"
+    echo "============================================"
+    echo ""
+    echo "This wizard will help you configure accessibility"
+    echo "settings for your desktop and gaming experience."
+    echo ""
+
+    # --- Vision ---
+    echo "--- Vision ---"
+    echo ""
+
+    local cb_choice="none"
+    echo "Do you have a color vision deficiency?"
+    echo "  1) No"
+    echo "  2) Deuteranopia (red-green, common)"
+    echo "  3) Protanopia (red-green, reduced red)"
+    echo "  4) Tritanopia (blue-yellow)"
+    echo "  5) Achromatopsia (total color blindness)"
+    read -rp "Select [1]: " cb_choice
+    cb_choice="${cb_choice:-1}"
+
+    case "$cb_choice" in
+        2) apply_colorblind deuteranopia ;;
+        3) apply_colorblind protanopia ;;
+        4) apply_colorblind tritanopia ;;
+        5) apply_colorblind achromatopsia ;;
+        *) apply_colorblind off ;;
+    esac
+    echo ""
+
+    local lv_choice="none"
+    echo "Do you need enhanced visibility?"
+    echo "  1) No, default settings are fine"
+    echo "  2) Slightly larger text and higher contrast"
+    echo "  3) Large text, high contrast, large cursor"
+    echo "  4) Very large text, maximum contrast, extra-large cursor"
+    read -rp "Select [1]: " lv_choice
+    lv_choice="${lv_choice:-1}"
+
+    case "$lv_choice" in
+        2)
+            apply_contrast medium
+            apply_text_scale large
+            apply_cursor medium
+            ;;
+        3)
+            apply_contrast high
+            apply_text_scale xlarge
+            apply_cursor large
+            apply_hud_preset large-text
+            ;;
+        4)
+            apply_contrast high
+            apply_text_scale xxlarge
+            apply_cursor xlarge
+            apply_hud_preset large-text
+            ;;
+        *)
+            # defaults
+            ;;
+    esac
+    echo ""
+
+    if wizard_ask_yn "Would you like to reduce or disable desktop animations?" "n"; then
+        echo "  1) Reduce animations (faster, simpler)"
+        echo "  2) Disable animations completely"
+        read -rp "Select [1]: " anim_choice
+        anim_choice="${anim_choice:-1}"
+        case "$anim_choice" in
+            2) apply_animations off ;;
+            *) apply_animations reduced ;;
+        esac
+    fi
+    echo ""
+
+    if wizard_ask_yn "Enable screen reader (Orca)?" "n"; then
+        apply_reader on
+    fi
+    echo ""
+
+    # --- Motor ---
+    echo "--- Motor / Input ---"
+    echo ""
+
+    if wizard_ask_yn "Enable sticky keys (press modifier keys sequentially instead of holding)?" "n"; then
+        apply_sticky_keys on
+    fi
+    echo ""
+
+    if wizard_ask_yn "Enable slow keys (require keys to be held briefly before registering)?" "n"; then
+        local delay
+        delay=$(wizard_ask "  Key press delay in milliseconds" "300")
+        apply_slow_keys on "$delay"
+    fi
+    echo ""
+
+    # --- Hearing ---
+    echo "--- Hearing ---"
+    echo ""
+
+    echo "Sound preferences:"
+    echo "  1) Normal sounds"
+    echo "  2) No sounds"
+    echo "  3) Visual alerts instead of sounds (screen flash)"
+    read -rp "Select [1]: " sound_choice
+    sound_choice="${sound_choice:-1}"
+
+    case "$sound_choice" in
+        2) apply_sounds off ;;
+        3) apply_sounds visual ;;
+        *) apply_sounds on ;;
+    esac
+    echo ""
+
+    # --- Gaming HUD ---
+    echo "--- Gaming HUD ---"
+    echo ""
+
+    echo "MangoHud accessibility preset:"
+    echo "  1) Default (no changes)"
+    echo "  2) Large text overlay"
+    echo "  3) High contrast overlay"
+    echo "  4) Minimal (FPS only)"
+    read -rp "Select [1]: " hud_choice
+    hud_choice="${hud_choice:-1}"
+
+    case "$hud_choice" in
+        2) apply_hud_preset large-text ;;
+        3) apply_hud_preset high-contrast ;;
+        4) apply_hud_preset minimal ;;
+        *) ;; # keep current
+    esac
+    echo ""
+
+    # --- Save Profile ---
+    echo "--- Save ---"
+    echo ""
+    if wizard_ask_yn "Save these settings as a named profile?" "y"; then
+        local pname
+        pname=$(wizard_ask "Profile name" "my-a11y")
+        profile_cmd save "$pname"
+    fi
+
+    echo ""
+    echo "============================================"
+    echo "  Wizard complete! Your settings:"
+    echo "============================================"
+    echo ""
+    show_status
+}
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+
+show_help() {
+    cat << 'HELP'
+24HG Accessibility Tool
+
+Usage: 24hg-a11y <command> [options]
+
+Commands:
+  status                      Show current accessibility settings
+  colorblind <type>           Apply color blind filter
+                              Types: deuteranopia, protanopia, tritanopia, achromatopsia
+  colorblind off              Remove color blind filter
+  contrast <mode>             Set contrast mode (high, medium, off)
+  cursor <size>               Set cursor size (small, medium, large, xlarge)
+  text <size>                 Set text scaling (small, normal, large, xlarge, xxlarge)
+  animations <mode>           Control animations (on, reduced, off)
+  sounds <mode>               Sound settings (on, off, visual)
+  hud <preset>                MangoHud preset (large-text, high-contrast, minimal, off)
+  reader <on|off>             Enable/disable screen reader (Orca)
+  sticky-keys <on|off>        Enable/disable sticky keys
+  slow-keys <on|off> [delay]  Enable/disable slow keys (delay in ms, default 300)
+  wizard                      Interactive accessibility setup wizard
+  reset                       Reset all settings to defaults
+  profile save <name>         Save current settings as a profile
+  profile load <name>         Load a saved profile
+  profile list                List saved profiles
+  help                        Show this help message
+
+Examples:
+  24hg-a11y colorblind deuteranopia
+  24hg-a11y contrast high
+  24hg-a11y text xlarge
+  24hg-a11y cursor large
+  24hg-a11y wizard
+  24hg-a11y profile save low-vision
+  24hg-a11y profile load low-vision
+  24hg-a11y reset
+HELP
+}
+
+# ---------------------------------------------------------------------------
+# Main Dispatch
+# ---------------------------------------------------------------------------
+
+ensure_dirs
+
+case "$ACTION" in
+    status)
+        show_status
+        ;;
+    colorblind)
+        apply_colorblind "${2:-}"
+        ;;
+    contrast)
+        apply_contrast "${2:-}"
+        ;;
+    cursor)
+        apply_cursor "${2:-}"
+        ;;
+    text)
+        apply_text_scale "${2:-}"
+        ;;
+    animations)
+        apply_animations "${2:-}"
+        ;;
+    sounds)
+        apply_sounds "${2:-}"
+        ;;
+    hud)
+        apply_hud_preset "${2:-}"
+        ;;
+    reader)
+        apply_reader "${2:-}"
+        ;;
+    sticky-keys)
+        apply_sticky_keys "${2:-}"
+        ;;
+    slow-keys)
+        apply_slow_keys "${2:-}" "${3:-300}"
+        ;;
+    wizard)
+        run_wizard
+        ;;
+    reset)
+        do_reset
+        ;;
+    profile)
+        profile_cmd "${2:-}" "${3:-}"
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        log_err "Unknown command: $ACTION"
+        show_help
+        exit 1
+        ;;
+esac

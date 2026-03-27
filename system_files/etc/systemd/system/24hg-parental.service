@@ -1,0 +1,32 @@
+[Unit]
+Description=24HG Parental Controls Daemon
+Documentation=man:24hg-parental(1)
+After=network.target graphical.target
+Wants=graphical.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/24hg-parental daemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+PIDFile=/run/24hg-parental.pid
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/etc/24hg /var/lib/24hg /var/log/24hg /run
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=24hg-parental
+
+[Install]
+WantedBy=multi-user.target

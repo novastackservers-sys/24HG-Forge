@@ -1,0 +1,751 @@
+#!/usr/bin/env bash
+# 24hg-audio-router — Per-app audio routing for 24HG Linux
+# Like Voicemeeter but for Linux, powered by PipeWire/WirePlumber
+set -euo pipefail
+
+VERSION="1.0.0"
+CONFIG_DIR="${HOME}/.config/24hg/audio-router"
+PRESETS_DIR="${CONFIG_DIR}/presets"
+AUTORULES_FILE="${CONFIG_DIR}/auto-rules.json"
+STATE_FILE="${CONFIG_DIR}/state.json"
+
+# Colors
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; MAGENTA='\033[0;35m'
+BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+init_config() {
+    mkdir -p "$CONFIG_DIR" "$PRESETS_DIR"
+    [[ -f "$AUTORULES_FILE" ]] || cat > "$AUTORULES_FILE" <<'JSON'
+{
+    "enabled": false,
+    "rules": {
+        "steam_app_": "headphones",
+        "gamescope": "headphones",
+        "discord": "speakers",
+        "Discord": "speakers",
+        "firefox": "default",
+        "chromium": "default",
+        "obs": "monitor",
+        "mpv": "headphones",
+        "spotify": "speakers",
+        "Spotify": "speakers"
+    }
+}
+JSON
+    [[ -f "$STATE_FILE" ]] || echo '{"virtual_sinks":[],"captures":[]}' > "$STATE_FILE"
+}
+
+die() { echo -e "${RED}Error:${NC} $*" >&2; exit 1; }
+info() { echo -e "${CYAN}::${NC} $*"; }
+ok() { echo -e "${GREEN}✓${NC} $*"; }
+warn() { echo -e "${YELLOW}!${NC} $*"; }
+
+require_cmd() {
+    for cmd in "$@"; do
+        command -v "$cmd" &>/dev/null || die "'$cmd' not found. Install PipeWire and wireplumber."
+    done
+}
+
+# ── Device Management ────────────────────────────────────────────────────────
+
+cmd_devices() {
+    require_cmd pactl
+    echo -e "${BOLD}${BLUE}═══ Output Devices (Sinks) ═══${NC}"
+    local default_sink
+    default_sink=$(pactl get-default-sink 2>/dev/null || echo "unknown")
+    while IFS= read -r line; do
+        local name desc
+        name=$(echo "$line" | awk '{print $2}')
+        desc=$(pactl list sinks short 2>/dev/null | grep -F "$name" | cut -f2 || echo "$name")
+        if [[ "$name" == "$default_sink" ]]; then
+            echo -e "  ${GREEN}▸ ${BOLD}${name}${NC} ${DIM}(default)${NC}"
+        else
+            echo -e "  ${DIM}▹${NC} ${name}"
+        fi
+    done < <(pactl list short sinks 2>/dev/null)
+
+    echo ""
+    echo -e "${BOLD}${BLUE}═══ Input Devices (Sources) ═══${NC}"
+    local default_source
+    default_source=$(pactl get-default-source 2>/dev/null || echo "unknown")
+    while IFS= read -r line; do
+        local name
+        name=$(echo "$line" | awk '{print $2}')
+        if [[ "$name" == "$default_source" ]]; then
+            echo -e "  ${GREEN}▸ ${BOLD}${name}${NC} ${DIM}(default)${NC}"
+        else
+            echo -e "  ${DIM}▹${NC} ${name}"
+        fi
+    done < <(pactl list short sources 2>/dev/null | grep -v '\.monitor$')
+
+    echo ""
+    echo -e "${DIM}Set default: pactl set-default-sink <name>${NC}"
+}
+
+# ── Stream Listing / Status ──────────────────────────────────────────────────
+
+get_streams() {
+    # Returns: index|app_name|sink_name|volume|muted
+    pactl list sink-inputs 2>/dev/null | awk '
+    /^Sink Input #/ { idx=$3; gsub(/#/,"",idx) }
+    /^\tSink:/ { sink=$2 }
+    /^\tVolume:/ { match($0, /([0-9]+)%/, a); vol=a[1] }
+    /^\tMute:/ { mute=$2 }
+    /application\.name = / {
+        gsub(/.*= "/,""); gsub(/"/,"");
+        app=$0;
+        print idx"|"app"|"sink"|"vol"|"mute
+    }'
+}
+
+sink_index_to_name() {
+    pactl list short sinks 2>/dev/null | awk -v idx="$1" '$1==idx {print $2}'
+}
+
+cmd_status() {
+    require_cmd pactl
+    echo -e "${BOLD}${MAGENTA}╔════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${MAGENTA}║   24HG Audio Router v${VERSION}              ║${NC}"
+    echo -e "${BOLD}${MAGENTA}╚════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    # Auto-routing status
+    local auto_enabled="false"
+    if [[ -f "$AUTORULES_FILE" ]]; then
+        auto_enabled=$(python3 -c "import json; print(json.load(open('$AUTORULES_FILE'))['enabled'])" 2>/dev/null || echo "false")
+    fi
+    echo -e "${BOLD}Auto-routing:${NC} $([ "$auto_enabled" = "True" ] && echo -e "${GREEN}ON${NC}" || echo -e "${DIM}OFF${NC}")"
+    echo ""
+
+    # Active streams
+    echo -e "${BOLD}${BLUE}═══ Active Audio Streams ═══${NC}"
+    local streams count=0
+    streams=$(get_streams)
+    if [[ -z "$streams" ]]; then
+        echo -e "  ${DIM}No active audio streams${NC}"
+    else
+        printf "  ${BOLD}%-4s %-25s %-35s %6s %s${NC}\n" "ID" "Application" "Output Device" "Vol" "Mute"
+        echo -e "  ${DIM}$(printf '─%.0s' {1..80})${NC}"
+        while IFS='|' read -r idx app sink vol mute; do
+            local sink_name
+            sink_name=$(sink_index_to_name "$sink")
+            [[ -z "$sink_name" ]] && sink_name="sink#${sink}"
+            local mute_icon=""
+            [[ "$mute" == "yes" ]] && mute_icon="${RED}[M]${NC}"
+            printf "  %-4s ${CYAN}%-25s${NC} %-35s ${GREEN}%5s%%${NC} %s\n" \
+                "$idx" "${app:0:24}" "${sink_name:0:34}" "$vol" "$mute_icon"
+            ((count++))
+        done <<< "$streams"
+    fi
+    echo ""
+    echo -e "  ${DIM}${count} stream(s) active${NC}"
+
+    # Virtual sinks
+    echo ""
+    echo -e "${BOLD}${BLUE}═══ Virtual Sinks ═══${NC}"
+    local vsinks
+    vsinks=$(pactl list short sinks 2>/dev/null | grep 'hg24_' || true)
+    if [[ -z "$vsinks" ]]; then
+        echo -e "  ${DIM}No virtual sinks active${NC}"
+    else
+        while IFS=$'\t' read -r id name driver format state; do
+            echo -e "  ${GREEN}▸${NC} ${name} ${DIM}(${state})${NC}"
+        done <<< "$vsinks"
+    fi
+}
+
+# ── Per-app Routing ──────────────────────────────────────────────────────────
+
+find_sink_by_name() {
+    # Fuzzy match a sink by partial name
+    local query="${1,,}"
+    pactl list short sinks 2>/dev/null | while IFS=$'\t' read -r id name rest; do
+        if [[ "${name,,}" == *"$query"* ]]; then
+            echo "$id"
+            return
+        fi
+    done
+}
+
+find_stream_by_app() {
+    local query="${1,,}"
+    get_streams | while IFS='|' read -r idx app sink vol mute; do
+        if [[ "${app,,}" == *"$query"* ]]; then
+            echo "$idx"
+            return
+        fi
+    done
+}
+
+cmd_route() {
+    require_cmd pactl
+    local app="${1:-}" device="${2:-}"
+    [[ -z "$app" || -z "$device" ]] && die "Usage: 24hg-audio-router route <app> <device>"
+
+    # Find the stream
+    local stream_id
+    stream_id=$(find_stream_by_app "$app")
+    [[ -z "$stream_id" ]] && die "No active stream found matching '$app'"
+
+    # Find the sink
+    local sink_id
+    sink_id=$(find_sink_by_name "$device")
+    [[ -z "$sink_id" ]] && die "No output device found matching '$device'"
+
+    pactl move-sink-input "$stream_id" "$sink_id" 2>/dev/null \
+        || die "Failed to move stream $stream_id to sink $sink_id"
+    ok "Routed '${app}' (stream #${stream_id}) → device #${sink_id}"
+}
+
+# ── Virtual Sinks ────────────────────────────────────────────────────────────
+
+cmd_virtual() {
+    require_cmd pactl
+    local action="${1:-}" name="${2:-}"
+
+    case "$action" in
+        create)
+            [[ -z "$name" ]] && die "Usage: 24hg-audio-router virtual create <name>"
+            local sink_name="hg24_${name}"
+
+            # Create the virtual sink via PipeWire
+            pactl load-module module-null-sink \
+                sink_name="$sink_name" \
+                sink_properties=media.class=Audio/Sink \
+                channel_map=stereo 2>/dev/null \
+                || die "Failed to create virtual sink '$sink_name'"
+
+            ok "Created virtual sink: ${CYAN}${sink_name}${NC}"
+            info "Monitor source: ${sink_name}.monitor"
+            info "Use this sink as input in OBS/streaming software"
+
+            # Update state
+            python3 -c "
+import json
+s = json.load(open('$STATE_FILE'))
+if '$sink_name' not in s.get('virtual_sinks', []):
+    s.setdefault('virtual_sinks', []).append('$sink_name')
+json.dump(s, open('$STATE_FILE', 'w'), indent=2)
+" 2>/dev/null || true
+            ;;
+
+        remove)
+            [[ -z "$name" ]] && die "Usage: 24hg-audio-router virtual remove <name>"
+            local sink_name="hg24_${name}"
+            local module_id
+            module_id=$(pactl list short modules 2>/dev/null \
+                | grep "sink_name=${sink_name}" | awk '{print $1}')
+            [[ -z "$module_id" ]] && die "Virtual sink '$sink_name' not found"
+            pactl unload-module "$module_id" 2>/dev/null \
+                || die "Failed to remove virtual sink"
+            ok "Removed virtual sink: ${sink_name}"
+
+            python3 -c "
+import json
+s = json.load(open('$STATE_FILE'))
+s['virtual_sinks'] = [v for v in s.get('virtual_sinks',[]) if v != '$sink_name']
+json.dump(s, open('$STATE_FILE', 'w'), indent=2)
+" 2>/dev/null || true
+            ;;
+
+        list|"")
+            echo -e "${BOLD}${BLUE}═══ Virtual Sinks ═══${NC}"
+            local found=0
+            while IFS=$'\t' read -r id sinkname rest; do
+                if [[ "$sinkname" == hg24_* ]]; then
+                    echo -e "  ${GREEN}▸${NC} ${sinkname} ${DIM}(module #${id})${NC}"
+                    ((found++))
+                fi
+            done < <(pactl list short sinks 2>/dev/null)
+            [[ $found -eq 0 ]] && echo -e "  ${DIM}No virtual sinks${NC}"
+            ;;
+
+        *)
+            die "Usage: 24hg-audio-router virtual [create|remove|list] <name>"
+            ;;
+    esac
+}
+
+# ── Presets ───────────────────────────────────────────────────────────────────
+
+cmd_preset() {
+    require_cmd pactl
+    local action="${1:-}" name="${2:-}"
+
+    case "$action" in
+        save)
+            [[ -z "$name" ]] && die "Usage: 24hg-audio-router preset save <name>"
+            local preset_file="${PRESETS_DIR}/${name}.json"
+
+            # Capture current routing state
+            python3 -c "
+import subprocess, json, re
+
+result = subprocess.run(['pactl', 'list', 'sink-inputs'], capture_output=True, text=True)
+streams = []
+current = {}
+for line in result.stdout.splitlines():
+    if line.startswith('Sink Input #'):
+        if current: streams.append(current)
+        current = {'id': line.split('#')[1]}
+    elif 'Sink:' in line and current:
+        current['sink'] = line.strip().split()[-1]
+    elif 'application.name' in line and current:
+        m = re.search(r'\"(.+?)\"', line)
+        if m: current['app'] = m.group(1)
+    elif 'Volume:' in line and current and 'volume' not in current:
+        m = re.search(r'(\d+)%', line)
+        if m: current['volume'] = int(m.group(1))
+if current: streams.append(current)
+
+# Get sink name mapping
+sink_result = subprocess.run(['pactl', 'list', 'short', 'sinks'], capture_output=True, text=True)
+sink_map = {}
+for line in sink_result.stdout.strip().splitlines():
+    parts = line.split('\t')
+    if len(parts) >= 2: sink_map[parts[0]] = parts[1]
+
+# Build preset
+preset = {
+    'name': '$name',
+    'default_sink': subprocess.run(['pactl', 'get-default-sink'], capture_output=True, text=True).stdout.strip(),
+    'default_source': subprocess.run(['pactl', 'get-default-source'], capture_output=True, text=True).stdout.strip(),
+    'routes': []
+}
+for s in streams:
+    preset['routes'].append({
+        'app': s.get('app', 'unknown'),
+        'sink': sink_map.get(s.get('sink', ''), s.get('sink', '')),
+        'volume': s.get('volume', 100)
+    })
+
+with open('$preset_file', 'w') as f:
+    json.dump(preset, f, indent=2)
+print(f'Saved {len(preset[\"routes\"])} route(s)')
+" 2>/dev/null || die "Failed to save preset"
+            ok "Preset '${name}' saved to ${preset_file}"
+            ;;
+
+        load)
+            [[ -z "$name" ]] && die "Usage: 24hg-audio-router preset load <name>"
+            local preset_file="${PRESETS_DIR}/${name}.json"
+            [[ -f "$preset_file" ]] || die "Preset '${name}' not found"
+
+            python3 -c "
+import subprocess, json
+
+preset = json.load(open('$preset_file'))
+
+# Set defaults
+subprocess.run(['pactl', 'set-default-sink', preset['default_sink']], check=False)
+subprocess.run(['pactl', 'set-default-source', preset['default_source']], check=False)
+print(f\"Default sink: {preset['default_sink']}\")
+print(f\"Default source: {preset['default_source']}\")
+
+# Route streams
+result = subprocess.run(['pactl', 'list', 'sink-inputs'], capture_output=True, text=True)
+import re
+streams = []
+current = {}
+for line in result.stdout.splitlines():
+    if line.startswith('Sink Input #'):
+        if current: streams.append(current)
+        current = {'id': line.split('#')[1]}
+    elif 'application.name' in line and current:
+        m = re.search(r'\"(.+?)\"', line)
+        if m: current['app'] = m.group(1)
+if current: streams.append(current)
+
+routed = 0
+for route in preset.get('routes', []):
+    for s in streams:
+        if s.get('app','').lower() == route['app'].lower():
+            # Find sink index
+            sr = subprocess.run(['pactl', 'list', 'short', 'sinks'], capture_output=True, text=True)
+            for sl in sr.stdout.strip().splitlines():
+                parts = sl.split('\t')
+                if len(parts) >= 2 and parts[1] == route['sink']:
+                    subprocess.run(['pactl', 'move-sink-input', s['id'], parts[0]], check=False)
+                    subprocess.run(['pactl', 'set-sink-input-volume', s['id'], f\"{route['volume']}%\"], check=False)
+                    routed += 1
+                    break
+print(f'Applied {routed} route(s)')
+" 2>/dev/null || die "Failed to load preset"
+            ok "Preset '${name}' loaded"
+            ;;
+
+        list|"")
+            echo -e "${BOLD}${BLUE}═══ Saved Presets ═══${NC}"
+            local found=0
+            for f in "$PRESETS_DIR"/*.json; do
+                [[ -f "$f" ]] || continue
+                local pname
+                pname=$(basename "$f" .json)
+                local routes
+                routes=$(python3 -c "import json; print(len(json.load(open('$f')).get('routes',[])))" 2>/dev/null || echo "?")
+                echo -e "  ${CYAN}▸${NC} ${BOLD}${pname}${NC} ${DIM}(${routes} routes)${NC}"
+                ((found++))
+            done
+            [[ $found -eq 0 ]] && echo -e "  ${DIM}No presets saved. Use 'preset save <name>' to create one.${NC}"
+
+            # Show built-in templates
+            echo ""
+            echo -e "${BOLD}Built-in templates:${NC}"
+            echo -e "  ${DIM}Gaming${NC}  — Games → headphones, comms → speakers"
+            echo -e "  ${DIM}Streaming${NC} — Games → virtual sink + headphones, comms → speakers"
+            echo -e "  ${DIM}Music${NC}   — Everything → speakers, high quality"
+            echo -e "  ${DIM}Movie${NC}   — Everything → speakers, normalized volume"
+            ;;
+
+        *)
+            die "Usage: 24hg-audio-router preset [save|load|list] <name>"
+            ;;
+    esac
+}
+
+# ── Auto-routing ──────────────────────────────────────────────────────────────
+
+cmd_auto() {
+    local action="${1:-}"
+
+    case "$action" in
+        on)
+            python3 -c "
+import json
+r = json.load(open('$AUTORULES_FILE'))
+r['enabled'] = True
+json.dump(r, open('$AUTORULES_FILE','w'), indent=2)
+" 2>/dev/null
+            ok "Auto-routing ${GREEN}enabled${NC}"
+            info "Known app rules:"
+            python3 -c "
+import json
+r = json.load(open('$AUTORULES_FILE'))
+for app, dev in r.get('rules',{}).items():
+    print(f'  {app} → {dev}')
+" 2>/dev/null
+            # Start watcher in background
+            _start_auto_watcher &
+            ;;
+        off)
+            python3 -c "
+import json
+r = json.load(open('$AUTORULES_FILE'))
+r['enabled'] = False
+json.dump(r, open('$AUTORULES_FILE','w'), indent=2)
+" 2>/dev/null
+            # Kill any existing watcher
+            pkill -f "24hg-audio-router.*auto-watch" 2>/dev/null || true
+            ok "Auto-routing ${RED}disabled${NC}"
+            ;;
+        rules)
+            echo -e "${BOLD}${BLUE}═══ Auto-routing Rules ═══${NC}"
+            python3 -c "
+import json
+r = json.load(open('$AUTORULES_FILE'))
+print(f\"Status: {'ENABLED' if r['enabled'] else 'DISABLED'}\")
+print()
+for app, dev in sorted(r.get('rules',{}).items()):
+    print(f'  {app:20s} → {dev}')
+" 2>/dev/null
+            echo ""
+            echo -e "${DIM}Edit rules: ${AUTORULES_FILE}${NC}"
+            ;;
+        "")
+            local enabled
+            enabled=$(python3 -c "import json; print(json.load(open('$AUTORULES_FILE'))['enabled'])" 2>/dev/null)
+            echo -e "Auto-routing is $([ "$enabled" = "True" ] && echo -e "${GREEN}ON${NC}" || echo -e "${RED}OFF${NC}")"
+            echo -e "${DIM}Usage: 24hg-audio-router auto [on|off|rules]${NC}"
+            ;;
+        *)
+            die "Usage: 24hg-audio-router auto [on|off|rules]"
+            ;;
+    esac
+}
+
+_start_auto_watcher() {
+    # Background process that watches for new streams and applies rules
+    exec -a "24hg-audio-router auto-watch" bash -c '
+    CONFIG="'"$AUTORULES_FILE"'"
+    while true; do
+        enabled=$(python3 -c "import json; print(json.load(open(\"$CONFIG\"))[\"enabled\"])" 2>/dev/null)
+        [[ "$enabled" != "True" ]] && exit 0
+
+        pactl list sink-inputs 2>/dev/null | python3 -c "
+import sys, json, subprocess, re
+
+rules = json.load(open(\"$CONFIG\")).get(\"rules\", {})
+lines = sys.stdin.read()
+streams = []
+current = {}
+for line in lines.splitlines():
+    if line.startswith(\"Sink Input #\"):
+        if current: streams.append(current)
+        current = {\"id\": line.split(\"#\")[1]}
+    elif \"application.name\" in line and current:
+        m = re.search(r\"\\\"(.+?)\\\"\", line)
+        if m: current[\"app\"] = m.group(1)
+if current: streams.append(current)
+
+sinks = subprocess.run([\"pactl\",\"list\",\"short\",\"sinks\"], capture_output=True, text=True).stdout
+sink_map = {}
+for sl in sinks.strip().splitlines():
+    parts = sl.split(\"\t\")
+    if len(parts) >= 2: sink_map[parts[1]] = parts[0]
+
+for s in streams:
+    app = s.get(\"app\", \"\")
+    for pattern, target in rules.items():
+        if pattern.lower() in app.lower():
+            for sname, sid in sink_map.items():
+                if target.lower() in sname.lower():
+                    subprocess.run([\"pactl\",\"move-sink-input\",s[\"id\"],sid], check=False,
+                                   capture_output=True)
+                    break
+            break
+" 2>/dev/null
+        sleep 5
+    done
+    ' &
+    disown
+}
+
+# ── Per-app Volume ────────────────────────────────────────────────────────────
+
+cmd_volume() {
+    require_cmd pactl
+    local app="${1:-}" level="${2:-}"
+    [[ -z "$app" || -z "$level" ]] && die "Usage: 24hg-audio-router volume <app> <level>"
+
+    # Validate level
+    if [[ ! "$level" =~ ^[0-9]+%?$ ]]; then
+        die "Volume must be a number (0-150) or percentage (e.g., 80%)"
+    fi
+    [[ "$level" != *% ]] && level="${level}%"
+
+    local stream_id
+    stream_id=$(find_stream_by_app "$app")
+    [[ -z "$stream_id" ]] && die "No active stream found matching '$app'"
+
+    pactl set-sink-input-volume "$stream_id" "$level" 2>/dev/null \
+        || die "Failed to set volume"
+    ok "Set '${app}' (stream #${stream_id}) volume to ${level}"
+}
+
+# ── Live Monitor ──────────────────────────────────────────────────────────────
+
+cmd_monitor() {
+    require_cmd pactl
+    echo -e "${BOLD}${MAGENTA}24HG Audio Monitor${NC} ${DIM}(Ctrl+C to exit)${NC}"
+    echo ""
+
+    trap 'echo -e "\n${DIM}Monitor stopped.${NC}"; exit 0' INT
+
+    while true; do
+        # Move cursor to top (after header)
+        tput cup 2 0 2>/dev/null || true
+
+        local streams
+        streams=$(get_streams)
+        local line_count=0
+
+        if [[ -z "$streams" ]]; then
+            printf "  ${DIM}%-60s${NC}\n" "No active audio streams"
+            ((line_count++))
+        else
+            printf "  ${BOLD}%-22s %-30s %6s  %-20s${NC}\n" \
+                "Application" "Device" "Vol" "Activity"
+            echo -e "  ${DIM}$(printf '─%.0s' {1..80})${NC}"
+            ((line_count += 2))
+
+            while IFS='|' read -r idx app sink vol mute; do
+                local sink_name bar_len bar
+                sink_name=$(sink_index_to_name "$sink")
+                [[ -z "$sink_name" ]] && sink_name="sink#${sink}"
+
+                # Generate a volume bar
+                bar_len=$(( ${vol:-0} / 5 ))
+                bar=$(printf '█%.0s' $(seq 1 "$bar_len" 2>/dev/null) 2>/dev/null || echo "")
+                local bar_color="$GREEN"
+                (( ${vol:-0} > 100 )) && bar_color="$RED"
+                (( ${vol:-0} > 80 && ${vol:-0} <= 100 )) && bar_color="$YELLOW"
+
+                local mute_str=""
+                [[ "$mute" == "yes" ]] && mute_str=" ${RED}[MUTED]${NC}"
+
+                printf "  ${CYAN}%-22s${NC} %-30s ${GREEN}%5s%%${NC}  ${bar_color}%-20s${NC}%b\n" \
+                    "${app:0:21}" "${sink_name:0:29}" "${vol:-0}" "${bar:0:20}" "$mute_str"
+                ((line_count++))
+            done <<< "$streams"
+        fi
+
+        # Clear remaining lines
+        for _ in $(seq 1 5); do
+            printf "%-85s\n" ""
+        done
+
+        sleep 1
+    done
+}
+
+# ── Capture (game audio to virtual sink) ──────────────────────────────────────
+
+cmd_capture() {
+    require_cmd pactl
+    local action="${1:-}"
+
+    case "$action" in
+        start)
+            local game="${2:-game}"
+            local sink_name="hg24_capture"
+
+            # Create capture sink if it doesn't exist
+            if ! pactl list short sinks 2>/dev/null | grep -q "$sink_name"; then
+                pactl load-module module-null-sink \
+                    sink_name="$sink_name" \
+                    sink_properties=media.class=Audio/Sink \
+                    channel_map=stereo 2>/dev/null \
+                    || die "Failed to create capture sink"
+                info "Created capture sink: ${sink_name}"
+            fi
+
+            # Create a combined sink (headphones + capture) so you hear the game too
+            local combined_name="hg24_combined"
+            local default_sink
+            default_sink=$(pactl get-default-sink 2>/dev/null)
+
+            if ! pactl list short sinks 2>/dev/null | grep -q "$combined_name"; then
+                pactl load-module module-combine-sink \
+                    sink_name="$combined_name" \
+                    slaves="${default_sink},${sink_name}" 2>/dev/null \
+                    || warn "Could not create combined sink (you'll need to route manually)"
+            fi
+
+            # Route game audio to combined sink
+            local stream_id
+            stream_id=$(find_stream_by_app "$game")
+            if [[ -n "$stream_id" ]]; then
+                local combined_id
+                combined_id=$(find_sink_by_name "$combined_name")
+                if [[ -n "$combined_id" ]]; then
+                    pactl move-sink-input "$stream_id" "$combined_id" 2>/dev/null
+                    ok "Routed '${game}' to combined sink (headphones + capture)"
+                fi
+            else
+                warn "No stream matching '${game}' found yet. Route manually when it starts."
+            fi
+
+            ok "Capture started"
+            info "In OBS, add Audio Input Capture → ${sink_name}.monitor"
+            info "This captures game audio without your microphone"
+            ;;
+
+        stop)
+            # Remove combined sink
+            local mod_id
+            mod_id=$(pactl list short modules 2>/dev/null \
+                | grep "sink_name=hg24_combined" | awk '{print $1}')
+            [[ -n "$mod_id" ]] && pactl unload-module "$mod_id" 2>/dev/null
+
+            # Remove capture sink
+            mod_id=$(pactl list short modules 2>/dev/null \
+                | grep "sink_name=hg24_capture" | awk '{print $1}')
+            [[ -n "$mod_id" ]] && pactl unload-module "$mod_id" 2>/dev/null
+
+            ok "Capture stopped, virtual sinks removed"
+            ;;
+
+        "")
+            # Show capture status
+            if pactl list short sinks 2>/dev/null | grep -q "hg24_capture"; then
+                echo -e "${GREEN}Capture is active${NC}"
+                echo -e "  Capture sink: hg24_capture"
+                echo -e "  Monitor source: hg24_capture.monitor"
+            else
+                echo -e "${DIM}Capture is not active${NC}"
+                echo -e "${DIM}Usage: 24hg-audio-router capture start [app_name]${NC}"
+            fi
+            ;;
+
+        *)
+            die "Usage: 24hg-audio-router capture [start|stop] [app]"
+            ;;
+    esac
+}
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+
+cmd_help() {
+    cat <<EOF
+${BOLD}${MAGENTA}24HG Audio Router v${VERSION}${NC}
+Per-app audio routing for Linux, powered by PipeWire
+
+${BOLD}USAGE${NC}
+  24hg-audio-router <command> [options]
+
+${BOLD}COMMANDS${NC}
+  ${CYAN}status${NC}                          Show all streams and their routing
+  ${CYAN}route${NC} <app> <device>            Route an app to a specific output device
+  ${CYAN}devices${NC}                         List available audio devices
+  ${CYAN}virtual${NC} [create|remove|list] <name>  Manage virtual sinks
+  ${CYAN}preset${NC} [save|load|list] <name>  Save/load audio routing presets
+  ${CYAN}auto${NC} [on|off|rules]             Toggle/configure auto-routing
+  ${CYAN}volume${NC} <app> <level>            Set per-app volume (0-150)
+  ${CYAN}monitor${NC}                         Live audio activity view
+  ${CYAN}capture${NC} [start|stop] [app]      Capture game audio for streaming
+
+${BOLD}EXAMPLES${NC}
+  ${DIM}# Route Discord to speakers${NC}
+  24hg-audio-router route discord speakers
+
+  ${DIM}# Set Firefox volume to 50%${NC}
+  24hg-audio-router volume firefox 50
+
+  ${DIM}# Create a virtual sink for streaming${NC}
+  24hg-audio-router virtual create stream
+
+  ${DIM}# Save current routing as "gaming" preset${NC}
+  24hg-audio-router preset save gaming
+
+  ${DIM}# Start capturing game audio for OBS${NC}
+  24hg-audio-router capture start
+
+  ${DIM}# Enable auto-routing for known apps${NC}
+  24hg-audio-router auto on
+
+${BOLD}CONFIG${NC}
+  Presets:     ${DIM}${PRESETS_DIR}/${NC}
+  Auto-rules:  ${DIM}${AUTORULES_FILE}${NC}
+
+${BOLD}REQUIREMENTS${NC}
+  PipeWire, WirePlumber, pactl (pipewire-pulse), python3
+EOF
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+    init_config
+    local cmd="${1:-}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        status|"")      cmd_status "$@" ;;
+        route)          cmd_route "$@" ;;
+        devices)        cmd_devices "$@" ;;
+        virtual)        cmd_virtual "$@" ;;
+        preset)         cmd_preset "$@" ;;
+        auto)           cmd_auto "$@" ;;
+        volume)         cmd_volume "$@" ;;
+        monitor)        cmd_monitor "$@" ;;
+        capture)        cmd_capture "$@" ;;
+        help|--help|-h) cmd_help ;;
+        version|--version|-v) echo "24hg-audio-router v${VERSION}" ;;
+        *)              die "Unknown command: $cmd. Run '24hg-audio-router help' for usage." ;;
+    esac
+}
+
+main "$@"

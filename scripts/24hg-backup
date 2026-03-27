@@ -1,0 +1,238 @@
+#!/bin/bash
+# 24HG Game Save Backup
+# Backs up game save data, configs, and Wine prefixes.
+# No other Linux gaming distro does this properly.
+#
+# Usage: 24hg-backup [create|restore|list|auto]
+
+set -euo pipefail
+
+BACKUP_DIR="$HOME/.local/share/24hg/backups"
+ACTION="${1:-list}"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+# Steam paths (Flatpak and native)
+STEAM_FLATPAK="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+STEAM_NATIVE="$HOME/.local/share/Steam"
+
+get_steam_dir() {
+    if [ -d "$STEAM_FLATPAK" ]; then
+        echo "$STEAM_FLATPAK"
+    elif [ -d "$STEAM_NATIVE" ]; then
+        echo "$STEAM_NATIVE"
+    else
+        echo ""
+    fi
+}
+
+# Known save locations for 24HG games
+declare -A SAVE_PATHS=(
+    # Wine/Proton saves (relative to compatdata/<appid>/pfx/drive_c/users/steamuser/)
+    ["rust_252490"]="AppData/LocalLow/Facepunch Studios LTD/Rust"
+    # Native saves
+    ["tf2_440"]="steamapps/common/Team Fortress 2/tf/cfg"
+    ["cs2_730"]="steamapps/common/Counter-Strike Global Offensive/game/csgo/cfg"
+    ["l4d2_550"]="steamapps/common/Left 4 Dead 2/left4dead2/cfg"
+)
+
+# Additional config paths to always back up
+CONFIG_PATHS=(
+    "$HOME/.config/24hg"
+    "$HOME/.config/MangoHud"
+    "$HOME/.config/gamemode.ini"
+    "$HOME/.config/obs-studio"
+    "$HOME/.var/app/com.obsproject.Studio/config/obs-studio"
+)
+
+create_backup() {
+    local NAME="${2:-24hg-backup}"
+    local BACKUP_FILE="$BACKUP_DIR/${NAME}_${TIMESTAMP}.tar.zst"
+    local TEMP_LIST=$(mktemp)
+
+    mkdir -p "$BACKUP_DIR"
+
+    echo "=== 24HG Game Save Backup ==="
+    echo "Creating backup: $BACKUP_FILE"
+    echo ""
+
+    local STEAM_DIR
+    STEAM_DIR=$(get_steam_dir)
+    local FOUND=0
+
+    # Collect Steam cloud saves (userdata)
+    if [ -n "$STEAM_DIR" ] && [ -d "$STEAM_DIR/userdata" ]; then
+        echo "  Steam cloud saves (userdata)..."
+        echo "$STEAM_DIR/userdata" >> "$TEMP_LIST"
+        FOUND=$((FOUND + 1))
+    fi
+
+    # Collect compatdata saves for known games
+    if [ -n "$STEAM_DIR" ]; then
+        for key in "${!SAVE_PATHS[@]}"; do
+            local APPID="${key##*_}"
+            local COMPAT="$STEAM_DIR/steamapps/compatdata/$APPID"
+            if [ -d "$COMPAT" ]; then
+                echo "  Proton prefix: $key (AppID $APPID)..."
+                # Back up the entire pfx for safety, but compressed
+                echo "$COMPAT/pfx" >> "$TEMP_LIST"
+                FOUND=$((FOUND + 1))
+            fi
+        done
+
+        # Collect native game configs
+        for key in "${!SAVE_PATHS[@]}"; do
+            local SAVE_REL="${SAVE_PATHS[$key]}"
+            local SAVE_ABS="$STEAM_DIR/$SAVE_REL"
+            if [ -d "$SAVE_ABS" ]; then
+                echo "  Game config: $SAVE_ABS..."
+                echo "$SAVE_ABS" >> "$TEMP_LIST"
+                FOUND=$((FOUND + 1))
+            fi
+        done
+    fi
+
+    # Collect 24HG and gaming configs
+    for CFG in "${CONFIG_PATHS[@]}"; do
+        if [ -e "$CFG" ]; then
+            echo "  Config: $CFG..."
+            echo "$CFG" >> "$TEMP_LIST"
+            FOUND=$((FOUND + 1))
+        fi
+    done
+
+    # Collect Lutris saves
+    if [ -d "$HOME/.var/app/net.lutris.Lutris/data/lutris" ]; then
+        echo "  Lutris data..."
+        echo "$HOME/.var/app/net.lutris.Lutris/data/lutris" >> "$TEMP_LIST"
+        FOUND=$((FOUND + 1))
+    fi
+
+    if [ "$FOUND" -eq 0 ]; then
+        echo ""
+        echo "Nothing to back up — no game data found yet."
+        rm -f "$TEMP_LIST"
+        exit 0
+    fi
+
+    echo ""
+    echo "Compressing $FOUND items with zstd..."
+
+    # Create compressed tarball
+    tar -cf - -T "$TEMP_LIST" 2>/dev/null | zstd -3 -T0 -o "$BACKUP_FILE" 2>/dev/null
+
+    rm -f "$TEMP_LIST"
+
+    if [ -f "$BACKUP_FILE" ]; then
+        local SIZE
+        SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
+        echo ""
+        echo "Backup complete: $BACKUP_FILE ($SIZE)"
+        notify-send -a "24HG" -i "24hg-logo" "Backup Complete" \
+            "$NAME ($SIZE)" 2>/dev/null || true
+    else
+        echo "Backup failed!"
+        exit 1
+    fi
+}
+
+restore_backup() {
+    local BACKUP_FILE="${2:-}"
+
+    if [ -z "$BACKUP_FILE" ]; then
+        # Show available backups
+        echo "Available backups:"
+        list_backups
+        echo ""
+        echo "Usage: 24hg-backup restore <path-to-backup.tar.zst>"
+        exit 1
+    fi
+
+    if [ ! -f "$BACKUP_FILE" ]; then
+        echo "Backup file not found: $BACKUP_FILE"
+        exit 1
+    fi
+
+    echo "=== Restore Game Saves ==="
+    echo "From: $BACKUP_FILE"
+    echo ""
+
+    # Show what's in the backup
+    echo "Contents:"
+    zstd -d < "$BACKUP_FILE" | tar -tf - 2>/dev/null | head -20
+    echo "..."
+    echo ""
+
+    read -rp "Restore these files? This will OVERWRITE existing saves. [y/N] " CONFIRM
+    if [ "${CONFIRM,,}" != "y" ]; then
+        echo "Cancelled."
+        exit 0
+    fi
+
+    echo "Restoring..."
+    zstd -d < "$BACKUP_FILE" | tar -xf - -C / 2>/dev/null
+
+    echo "Restore complete."
+    notify-send -a "24HG" -i "24hg-logo" "Restore Complete" \
+        "Game saves restored from backup" 2>/dev/null || true
+}
+
+list_backups() {
+    if [ ! -d "$BACKUP_DIR" ] || [ -z "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]; then
+        echo "No backups found in $BACKUP_DIR"
+        return
+    fi
+
+    echo "=== 24HG Backups ==="
+    echo "Location: $BACKUP_DIR"
+    echo ""
+
+    local TOTAL_SIZE
+    TOTAL_SIZE=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
+    local COUNT
+    COUNT=$(find "$BACKUP_DIR" -name "*.tar.zst" 2>/dev/null | wc -l)
+    echo "Total: $COUNT backups ($TOTAL_SIZE)"
+    echo ""
+
+    ls -lht "$BACKUP_DIR"/*.tar.zst 2>/dev/null | while read -r line; do
+        FILE=$(echo "$line" | awk '{print $NF}')
+        SIZE=$(echo "$line" | awk '{print $5}')
+        DATE=$(echo "$line" | awk '{print $6, $7, $8}')
+        NAME=$(basename "$FILE")
+        echo "  $DATE  $SIZE  $NAME"
+    done
+}
+
+auto_backup() {
+    # Non-interactive backup for use in cron/systemd timer
+    echo "Running automatic backup..."
+    create_backup auto "auto"
+
+    # Prune old auto-backups (keep last 5)
+    local AUTO_BACKUPS
+    AUTO_BACKUPS=$(ls -t "$BACKUP_DIR"/auto_*.tar.zst 2>/dev/null)
+    local COUNT=0
+    while IFS= read -r f; do
+        COUNT=$((COUNT + 1))
+        if [ "$COUNT" -gt 5 ]; then
+            echo "Pruning old backup: $(basename "$f")"
+            rm -f "$f"
+        fi
+    done <<< "$AUTO_BACKUPS"
+}
+
+case "$ACTION" in
+    create)  create_backup "$@" ;;
+    restore) restore_backup "$@" ;;
+    list)    list_backups ;;
+    auto)    auto_backup ;;
+    *)
+        echo "24HG Game Save Backup"
+        echo "Usage: 24hg-backup [create|restore|list|auto]"
+        echo ""
+        echo "  create [name]    — Create a backup of all game saves"
+        echo "  restore <file>   — Restore from a backup file"
+        echo "  list             — List all backups"
+        echo "  auto             — Auto-backup (for scheduled use)"
+        exit 1
+        ;;
+esac

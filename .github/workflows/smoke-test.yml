@@ -1,15 +1,15 @@
-# 24HG Forge — Smoke Test Pipeline
-# Boots the generated ISO in QEMU and validates core Forge components.
+# 24HG — Smoke Test Pipeline
+# Boots the generated ISO in QEMU and validates core 24HG components.
 # Runs after the build-iso workflow completes successfully.
 #
 # Status badge:
-#   ![Smoke Test](https://github.com/24hgaming/forge/actions/workflows/smoke-test.yml/badge.svg)
+#   ![Smoke Test](https://github.com/24hgaming/24hg/actions/workflows/smoke-test.yml/badge.svg)
 
 name: Smoke Test
 
 on:
   workflow_run:
-    workflows: ["Build 24HG Forge ISO"]
+    workflows: ["Build 24HG ISO"]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -48,7 +48,7 @@ jobs:
       - name: Download ISO artifact
         uses: actions/download-artifact@v4
         with:
-          name: forge-${{ matrix.variant }}-iso
+          name: 24hg-${{ matrix.variant }}-iso
           path: ./iso
           run-id: ${{ github.event.inputs.run_id || github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -85,11 +85,11 @@ jobs:
           cat > ./cidata/user-data <<'USERDATA'
           #cloud-config
           users:
-            - name: forge
+            - name: 24hg
               groups: wheel
               shell: /bin/bash
               lock_passwd: false
-              plain_text_passwd: forge
+              plain_text_passwd: 24hg
               sudo: ALL=(ALL) NOPASSWD:ALL
 
           write_files:
@@ -114,37 +114,37 @@ jobs:
                   fi
                 }
 
-                echo "=== 24HG Forge Smoke Test ==="
+                echo "=== 24HG Smoke Test ==="
                 echo "Date: $(date -u)"
                 echo ""
 
-                # 1. forge-neofetch runs without error
-                check "forge-neofetch executes" "forge-neofetch --help || forge-neofetch 2>&1 | head -1"
+                # 1. 24hg-neofetch runs without error
+                check "24hg-neofetch executes" "24hg-neofetch --help || 24hg-neofetch 2>&1 | head -1"
 
-                # 2. All forge-* binaries exist in /usr/bin/
+                # 2. All 24hg-* binaries exist in /usr/bin/
                 EXPECTED_BINS=(
-                  forge-neofetch forge-diag forge-performance forge-server-status
-                  forge-netguard forge-proton-fix forge-replay forge-input
-                  forge-audio forge-discord-fix forge-screenshot forge-backup
-                  forge-nightlight forge-benchmark forge-hub-bridge forge-hub
-                  forge-tray forge-first-boot forge-game-profiles forge-game-setup
-                  forge-controller forge-proton-updater forge-game-timer
-                  forge-stream forge-shader-cache forge-sounds forge-tips
-                  forge-achievements forge-wallpaper forge-notify-style
-                  forge-desktop-setup forge-lock-info forge-compat forge-crash-fix
-                  forge-display forge-discord-screen forge-prefix forge-dualboot
-                  forge-migrate forge-benchmark-compare forge-perks forge-creator-kit
-                  forge-demo forge-smart-launch forge-session-summary
-                  forge-crash-recovery forge-download-mgr forge-games forge-thermal
-                  forge-anticheat-tracker forge-mod-manager forge-hdr
-                  forge-flatpak-fix forge-update-guard forge-save-manager
-                  forge-nvidia-wayland forge-update-prompt forge-sunshine-setup
-                  forge-clip forge-lan-party forge-radio forge-rig-score
-                  forge-invite forge-game-compat forge-tournament
-                  forge-live-wallpaper forge-hw-optimizer forge-overlay
-                  forge-cloud-saves forge-launch forge-ping-optimizer forge-rescue
-                  forge-gallery forge-mods forge-vpn forge-retro forge-voice
-                  forge-gamescope-session
+                  24hg-neofetch 24hg-diag 24hg-performance 24hg-server-status
+                  24hg-netguard 24hg-proton-fix 24hg-replay 24hg-input
+                  24hg-audio 24hg-discord-fix 24hg-screenshot 24hg-backup
+                  24hg-nightlight 24hg-benchmark 24hg-hub-bridge 24hg-hub
+                  24hg-tray 24hg-first-boot 24hg-game-profiles 24hg-game-setup
+                  24hg-controller 24hg-proton-updater 24hg-game-timer
+                  24hg-stream 24hg-shader-cache 24hg-sounds 24hg-tips
+                  24hg-achievements 24hg-wallpaper 24hg-notify-style
+                  24hg-desktop-setup 24hg-lock-info 24hg-compat 24hg-crash-fix
+                  24hg-display 24hg-discord-screen 24hg-prefix 24hg-dualboot
+                  24hg-migrate 24hg-benchmark-compare 24hg-perks 24hg-creator-kit
+                  24hg-demo 24hg-smart-launch 24hg-session-summary
+                  24hg-crash-recovery 24hg-download-mgr 24hg-games 24hg-thermal
+                  24hg-anticheat-tracker 24hg-mod-manager 24hg-hdr
+                  24hg-flatpak-fix 24hg-update-guard 24hg-save-manager
+                  24hg-nvidia-wayland 24hg-update-prompt 24hg-sunshine-setup
+                  24hg-clip 24hg-lan-party 24hg-radio 24hg-rig-score
+                  24hg-invite 24hg-game-compat 24hg-tournament
+                  24hg-live-wallpaper 24hg-hw-optimizer 24hg-overlay
+                  24hg-cloud-saves 24hg-launch 24hg-ping-optimizer 24hg-rescue
+                  24hg-gallery 24hg-mods 24hg-vpn 24hg-retro 24hg-voice
+                  24hg-gamescope-session
                 )
                 MISSING_BINS=0
                 for bin in "${EXPECTED_BINS[@]}"; do
@@ -153,29 +153,29 @@ jobs:
                     echo "  MISSING: /usr/bin/${bin}"
                   fi
                 done
-                check "forge-* binaries in /usr/bin (${#EXPECTED_BINS[@]} expected, ${MISSING_BINS} missing)" "[ ${MISSING_BINS} -eq 0 ]"
+                check "24hg-* binaries in /usr/bin (${#EXPECTED_BINS[@]} expected, ${MISSING_BINS} missing)" "[ ${MISSING_BINS} -eq 0 ]"
 
                 # 3. Systemd user services are enabled (check symlinks in skel)
-                check "forge-server-status.service in skel default.target.wants" \
-                  "[ -L /etc/skel/.config/systemd/user/default.target.wants/forge-server-status.service ]"
-                check "forge-hub-bridge.service in skel default.target.wants" \
-                  "[ -L /etc/skel/.config/systemd/user/default.target.wants/forge-hub-bridge.service ]"
-                check "forge-backup.timer in skel timers.target.wants" \
-                  "[ -L /etc/skel/.config/systemd/user/timers.target.wants/forge-backup.timer ]"
-                check "forge-proton-updater.timer in skel timers.target.wants" \
-                  "[ -L /etc/skel/.config/systemd/user/timers.target.wants/forge-proton-updater.timer ]"
+                check "24hg-server-status.service in skel default.target.wants" \
+                  "[ -L /etc/skel/.config/systemd/user/default.target.wants/24hg-server-status.service ]"
+                check "24hg-hub-bridge.service in skel default.target.wants" \
+                  "[ -L /etc/skel/.config/systemd/user/default.target.wants/24hg-hub-bridge.service ]"
+                check "24hg-backup.timer in skel timers.target.wants" \
+                  "[ -L /etc/skel/.config/systemd/user/timers.target.wants/24hg-backup.timer ]"
+                check "24hg-proton-updater.timer in skel timers.target.wants" \
+                  "[ -L /etc/skel/.config/systemd/user/timers.target.wants/24hg-proton-updater.timer ]"
 
                 # 4. System services enabled
-                check "forge-gaming-tweaks.service enabled" \
-                  "systemctl is-enabled forge-gaming-tweaks.service 2>/dev/null || [ -L /etc/systemd/system/multi-user.target.wants/forge-gaming-tweaks.service ]"
-                check "forge-auto-update.timer enabled" \
-                  "systemctl is-enabled forge-auto-update.timer 2>/dev/null || [ -f /etc/systemd/system/forge-auto-update.timer ]"
+                check "24hg-gaming-tweaks.service enabled" \
+                  "systemctl is-enabled 24hg-gaming-tweaks.service 2>/dev/null || [ -L /etc/systemd/system/multi-user.target.wants/24hg-gaming-tweaks.service ]"
+                check "24hg-auto-update.timer enabled" \
+                  "systemctl is-enabled 24hg-auto-update.timer 2>/dev/null || [ -f /etc/systemd/system/24hg-auto-update.timer ]"
 
                 # 5. Plymouth theme is installed
-                check "Plymouth forge theme directory exists" \
-                  "[ -d /usr/share/plymouth/themes/forge ]"
-                check "Plymouth forge theme has logo" \
-                  "[ -f /usr/share/plymouth/themes/forge/logo.png ] || [ -f /usr/share/plymouth/themes/forge/forge.plymouth ]"
+                check "Plymouth 24hg theme directory exists" \
+                  "[ -d /usr/share/plymouth/themes/24hg ]"
+                check "Plymouth 24hg theme has logo" \
+                  "[ -f /usr/share/plymouth/themes/24hg/logo.png ] || [ -f /usr/share/plymouth/themes/24hg/24hg.plymouth ]"
 
                 # 6. Firefox policies.json exists
                 check "Firefox policies.json exists" \
@@ -189,9 +189,9 @@ jobs:
 
                 # 8. Sound theme files exist
                 check "Sound theme index.theme exists" \
-                  "[ -f /usr/share/sounds/forge/index.theme ]"
+                  "[ -f /usr/share/sounds/24hg/index.theme ]"
                 check "Sound theme stereo directory has files" \
-                  "[ -d /usr/share/sounds/forge/stereo ] && ls /usr/share/sounds/forge/stereo/ | head -1"
+                  "[ -d /usr/share/sounds/24hg/stereo ] && ls /usr/share/sounds/24hg/stereo/ | head -1"
 
                 # 9. Plasmoid is installed
                 check "Hub plasmoid directory exists" \
@@ -200,14 +200,14 @@ jobs:
                   "[ -f /usr/share/plasma/plasmoids/com.24hg.hubwidget/metadata.json ] || [ -f /usr/share/plasma/plasmoids/com.24hg.hubwidget/metadata.desktop ]"
 
                 # Bonus checks
-                check "SDDM forge theme installed" \
-                  "[ -d /usr/share/sddm/themes/forge ]"
-                check "OS release shows 24HG Forge" \
-                  "grep -q '24HG Forge' /usr/lib/os-release"
-                check "Forge data servers.json exists" \
-                  "[ -f /usr/share/forge/servers.json ]"
+                check "SDDM 24hg theme installed" \
+                  "[ -d /usr/share/sddm/themes/24hg ]"
+                check "OS release shows 24HG" \
+                  "grep -q '24HG' /usr/lib/os-release"
+                check "24HG data servers.json exists" \
+                  "[ -f /usr/share/24hg/servers.json ]"
                 check "Calamares branding installed" \
-                  "[ -d /usr/share/calamares/branding/forge ]"
+                  "[ -d /usr/share/calamares/branding/24hg ]"
 
                 echo ""
                 echo "=== Results ==="
@@ -231,8 +231,8 @@ jobs:
           USERDATA
 
           cat > ./cidata/meta-data <<'METADATA'
-          instance-id: forge-smoke-test
-          local-hostname: forge-test
+          instance-id: 24hg-smoke-test
+          local-hostname: 24hg-test
           METADATA
 
           # Build cloud-init ISO

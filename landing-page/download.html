@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Download 24HG Forge — Free Gaming Linux</title>
-    <meta name="description" content="Download 24HG Forge for free. Choose Desktop, NVIDIA, or Steam Deck edition. The gaming Linux that boots into the 24HG ecosystem.">
-    <meta property="og:title" content="Download 24HG Forge">
+    <title>Download 24HG — Free Gaming Linux</title>
+    <meta name="description" content="Download 24HG for free. Choose Desktop, NVIDIA, or Steam Deck edition. The gaming Linux that boots into the 24HG ecosystem.">
+    <meta property="og:title" content="Download 24HG">
     <meta property="og:description" content="Free, open source gaming Linux. 150+ tools, 89 game servers, 30-day free VIP.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://os.24hgaming.com/download.html">
@@ -18,7 +18,7 @@
 <body>
 
 <nav class="nav">
-    <a href="index.html" class="nav-logo">24HG Forge</a>
+    <a href="index.html" class="nav-logo">24HG</a>
     <div class="nav-links">
         <a href="download.html" class="active">Download</a>
         <a href="features.html">Features</a>
@@ -32,7 +32,7 @@
 </nav>
 
 <section class="hero">
-    <h1>Download 24HG Forge</h1>
+    <h1>Download 24HG</h1>
     <p>The gaming Linux that boots into the 24HG ecosystem. Free, open source, built for gamers.</p>
     <p style="font-size: 0.95rem; color: var(--text-dim);">Current version: <strong>v3.0 (2026-03-26)</strong></p>
 </section>
@@ -47,20 +47,20 @@
             <div class="tool-card" style="flex: 1; min-width: 260px; text-align: center;">
                 <h3>Desktop Edition</h3>
                 <p style="color: var(--text-dim); font-size: 0.9rem; margin-bottom: 0.5rem;">AMD, Intel, or integrated GPU</p>
-                <p>Includes Mesa drivers, Vulkan, and the full 24HG Forge toolkit.</p>
+                <p>Includes Mesa drivers, Vulkan, and the full 24HG toolkit.</p>
                 <p style="font-size: 0.85rem; color: var(--text-dim);">~6.5 GB</p>
-                <a href="/iso/forge-amd-20260326.iso" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">Download Desktop ISO</a>
+                <a href="/iso/24hg-amd-20260326.iso" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">Download Desktop ISO</a>
                 <br>
-                <a href="/iso/forge-amd-20260326.iso.sha256" style="font-size: 0.8rem; margin-top: 0.5rem; display: inline-block;">SHA256 checksum</a>
+                <a href="/iso/24hg-amd-20260326.iso.sha256" style="font-size: 0.8rem; margin-top: 0.5rem; display: inline-block;">SHA256 checksum</a>
             </div>
             <div class="tool-card" style="flex: 1; min-width: 260px; text-align: center;">
                 <h3>NVIDIA Edition</h3>
                 <p style="color: var(--text-dim); font-size: 0.9rem; margin-bottom: 0.5rem;">NVIDIA GTX 900 series and newer</p>
                 <p>Includes proprietary NVIDIA drivers, CUDA, and NVENC.</p>
                 <p style="font-size: 0.85rem; color: var(--text-dim);">~6.4 GB</p>
-                <a href="/iso/forge-nvidia-20260326.iso" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">Download NVIDIA ISO</a>
+                <a href="/iso/24hg-nvidia-20260326.iso" class="btn btn-primary" style="display: inline-block; margin-top: 0.75rem;">Download NVIDIA ISO</a>
                 <br>
-                <a href="/iso/forge-nvidia-20260326.iso.sha256" style="font-size: 0.8rem; margin-top: 0.5rem; display: inline-block;">SHA256 checksum</a>
+                <a href="/iso/24hg-nvidia-20260326.iso.sha256" style="font-size: 0.8rem; margin-top: 0.5rem; display: inline-block;">SHA256 checksum</a>
             </div>
             <div class="tool-card" style="flex: 1; min-width: 260px; text-align: center; opacity: 0.5;">
                 <h3>Steam Deck Edition</h3>
@@ -75,7 +75,7 @@
     <section>
         <h2>Verify your download</h2>
         <p>After downloading, verify the file integrity with a SHA256 checksum:</p>
-        <code class="code-block">sha256sum forge-amd-20260326.iso
+        <code class="code-block">sha256sum 24hg-amd-20260326.iso
 # Compare with the .sha256 file</code>
     </section>
 
@@ -95,7 +95,7 @@
             <div class="feature-card">
                 <div class="icon">&#x1f381;</div>
                 <h3>30-Day Free VIP</h3>
-                <p>Every 24HG Forge install gets 30 days of VIP on all 24HG servers, plus a permanent [24HG Forge] badge.</p>
+                <p>Every 24HG install gets 30 days of VIP on all 24HG servers, plus a permanent [24HG] badge.</p>
             </div>
             <div class="feature-card">
                 <div class="icon">&#x1f5a5;&#xfe0f;</div>
@@ -132,12 +132,12 @@
         <p class="subtitle">Already on Fedora Atomic? Rebase directly — no ISO needed.</p>
 
         <h3>Rebase from Bazzite or any Fedora Atomic</h3>
-        <p>Run this single command to replace your current OS image with 24HG Forge:</p>
+        <p>Run this single command to replace your current OS image with 24HG:</p>
         <code class="code-block"># AMD/Intel GPU:
-rpm-ostree rebase ostree-unverified-registry:ghcr.io/novastackservers-sys/forge:latest-amd
+rpm-ostree rebase ostree-unverified-registry:ghcr.io/novastackservers-sys/24hg:latest-amd
 
 # NVIDIA GPU:
-rpm-ostree rebase ostree-unverified-registry:ghcr.io/novastackservers-sys/forge:latest-nvidia</code>
+rpm-ostree rebase ostree-unverified-registry:ghcr.io/novastackservers-sys/24hg:latest-nvidia</code>
         <p>Then reboot:</p>
         <code class="code-block">systemctl reboot</code>
 
@@ -151,7 +151,7 @@ rpm-ostree rebase ostree-unverified-registry:ghcr.io/novastackservers-sys/forge:
         <div class="tool-cards">
             <div class="tool-card" style="flex: 1; min-width: 200px; text-align: center;">
                 <h3>Install Guide</h3>
-                <p>Step-by-step instructions to flash, boot, and install 24HG Forge.</p>
+                <p>Step-by-step instructions to flash, boot, and install 24HG.</p>
                 <a href="install.html" class="btn btn-small btn-primary">Read the Guide</a>
             </div>
             <div class="tool-card" style="flex: 1; min-width: 200px; text-align: center;">
@@ -172,7 +172,7 @@ rpm-ostree rebase ostree-unverified-registry:ghcr.io/novastackservers-sys/forge:
 <footer>
     <div class="footer-grid">
         <div class="footer-col">
-            <h4>24HG Forge</h4>
+            <h4>24HG</h4>
             <a href="download.html">Download</a>
             <a href="install.html">Install Guide</a>
             <a href="roadmap.html">Roadmap</a>

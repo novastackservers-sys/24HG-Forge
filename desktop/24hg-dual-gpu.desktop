@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Dual GPU
+Comment=Hybrid GPU switching
+Exec=/usr/bin/24hg-dual-gpu
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=System;HardwareSettings;
+Keywords=gpu;hybrid;nvidia;optimus;prime;switch;

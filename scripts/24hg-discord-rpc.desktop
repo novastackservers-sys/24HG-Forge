@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=24HG Discord RPC
+Comment=Show gaming activity in Discord Rich Presence
+Exec=24hg-discord-rpc start
+Icon=24hg-logo
+Terminal=false
+Categories=Game;Utility;
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
+StartupNotify=false
+NoDisplay=true

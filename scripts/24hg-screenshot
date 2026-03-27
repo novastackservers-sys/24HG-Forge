@@ -1,0 +1,154 @@
+#!/bin/bash
+# 24HG Screenshot Tool
+# Captures screenshots with optional annotation and sharing.
+# Integrates with the 24HG Hub clip gallery.
+#
+# Usage: 24hg-screenshot [full|area|window|last]
+# Keybind: Print = full, Shift+Print = area, Alt+Print = window
+
+set -euo pipefail
+
+SCREENSHOTS_DIR="$HOME/Pictures/24HG Screenshots"
+ACTION="${1:-full}"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+FILENAME="hg24_${TIMESTAMP}.png"
+FILEPATH="$SCREENSHOTS_DIR/$FILENAME"
+
+mkdir -p "$SCREENSHOTS_DIR"
+
+take_screenshot() {
+    local MODE="$1"
+
+    case "$MODE" in
+        full)
+            # Full screen capture
+            if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+                # Wayland: use grim or spectacle
+                if command -v grim &>/dev/null; then
+                    grim "$FILEPATH"
+                elif command -v spectacle &>/dev/null; then
+                    spectacle -b -n -f -o "$FILEPATH"
+                else
+                    echo "No screenshot tool found. Install grim or spectacle."
+                    exit 1
+                fi
+            else
+                # X11: use scrot or spectacle
+                if command -v spectacle &>/dev/null; then
+                    spectacle -b -n -f -o "$FILEPATH"
+                elif command -v scrot &>/dev/null; then
+                    scrot "$FILEPATH"
+                else
+                    echo "No screenshot tool found."
+                    exit 1
+                fi
+            fi
+            ;;
+        area)
+            # Region selection
+            if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+                if command -v grim &>/dev/null && command -v slurp &>/dev/null; then
+                    grim -g "$(slurp)" "$FILEPATH"
+                elif command -v spectacle &>/dev/null; then
+                    spectacle -b -n -r -o "$FILEPATH"
+                fi
+            else
+                if command -v spectacle &>/dev/null; then
+                    spectacle -b -n -r -o "$FILEPATH"
+                elif command -v scrot &>/dev/null; then
+                    scrot -s "$FILEPATH"
+                fi
+            fi
+            ;;
+        window)
+            # Active window
+            if command -v spectacle &>/dev/null; then
+                spectacle -b -n -a -o "$FILEPATH"
+            elif [ -n "${WAYLAND_DISPLAY:-}" ] && command -v grim &>/dev/null; then
+                # Wayland active window is tricky, fallback to full
+                grim "$FILEPATH"
+            elif command -v scrot &>/dev/null; then
+                scrot -u "$FILEPATH"
+            fi
+            ;;
+    esac
+}
+
+copy_to_clipboard() {
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        if command -v wl-copy &>/dev/null; then
+            wl-copy < "$FILEPATH"
+            return 0
+        fi
+    else
+        if command -v xclip &>/dev/null; then
+            xclip -selection clipboard -t image/png < "$FILEPATH"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+show_last() {
+    local LAST
+    LAST=$(ls -t "$SCREENSHOTS_DIR"/*.png 2>/dev/null | head -1)
+    if [ -z "$LAST" ]; then
+        echo "No screenshots found in $SCREENSHOTS_DIR"
+        exit 1
+    fi
+    echo "Last screenshot: $LAST"
+    echo "Size: $(du -h "$LAST" | cut -f1)"
+
+    # Open with default viewer
+    xdg-open "$LAST" 2>/dev/null &
+}
+
+case "$ACTION" in
+    full|area|window)
+        take_screenshot "$ACTION"
+
+        if [ -f "$FILEPATH" ]; then
+            SIZE=$(du -h "$FILEPATH" | cut -f1)
+
+            # Copy to clipboard
+            CLIPBOARD_MSG=""
+            if copy_to_clipboard; then
+                CLIPBOARD_MSG=" (copied to clipboard)"
+            fi
+
+            echo "Screenshot saved: $FILEPATH ($SIZE)$CLIPBOARD_MSG"
+
+            # Desktop notification with the screenshot as icon
+            notify-send -a "24HG" -i "$FILEPATH" "Screenshot Saved" \
+                "$FILENAME ($SIZE)$CLIPBOARD_MSG" 2>/dev/null || true
+        else
+            echo "Screenshot failed"
+            exit 1
+        fi
+        ;;
+    last)
+        show_last
+        ;;
+    list)
+        echo "=== 24HG Screenshots ==="
+        echo "Directory: $SCREENSHOTS_DIR"
+        echo ""
+        COUNT=$(find "$SCREENSHOTS_DIR" -name "*.png" 2>/dev/null | wc -l)
+        TOTAL=$(du -sh "$SCREENSHOTS_DIR" 2>/dev/null | cut -f1)
+        echo "Total: $COUNT screenshots ($TOTAL)"
+        echo ""
+        ls -lht "$SCREENSHOTS_DIR"/*.png 2>/dev/null | head -10 | \
+            awk '{print "  " $NF " (" $5 ")"}'
+        ;;
+    *)
+        echo "24HG Screenshot Tool"
+        echo "Usage: 24hg-screenshot [full|area|window|last|list]"
+        echo ""
+        echo "  full   — Capture entire screen"
+        echo "  area   — Select region to capture"
+        echo "  window — Capture active window"
+        echo "  last   — View last screenshot"
+        echo "  list   — List all screenshots"
+        exit 1
+        ;;
+esac

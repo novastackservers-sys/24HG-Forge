@@ -1,0 +1,1856 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Host — One-click game server hosting
+# Run dedicated game servers locally via Docker/Podman containers.
+# Supports auto-discovery on LAN, Hub registration, and resource management.
+#
+# Usage: 24hg-host [command] [game] [options]
+#   list                     List available game servers
+#   start <game> [options]   Start hosting a game server
+#   stop <game>              Stop a game server
+#   status                   Show running servers with player counts
+#   logs <game>              View server logs
+#   config <game>            Edit server configuration
+#   update <game>            Update server files
+#   players <game>           Show connected players
+#   announce                 Announce servers on LAN and Hub
+#   backup <game>            Backup server world/data
+#   restore <game> <backup>  Restore from backup
+
+HG24_VERSION="1.0"
+SCRIPT_NAME="24hg-host"
+
+# ── Paths ───────────────────────────────────────────────────────────────────
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/24hg/servers"
+DATA_DIR="$HOME/Games/Servers"
+BACKUP_DIR="$HOME/Games/Servers/.backups"
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/24hg/server-logs"
+HUB_API_URL="https://hub.24hgaming.com/api/24hg/servers"
+
+# ── Colors ──────────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+
+log() {
+    logger -t "$SCRIPT_NAME" "$*" 2>/dev/null || true
+}
+
+die() {
+    echo -e "${RED}Error:${RESET} $*" >&2
+    log "ERROR: $*"
+    exit 1
+}
+
+info() {
+    echo -e "${CYAN}[HOST]${RESET} $*"
+}
+
+warn() {
+    echo -e "${YELLOW}[WARN]${RESET} $*"
+}
+
+success() {
+    echo -e "${GREEN}[OK]${RESET} $*"
+}
+
+# ── Container Runtime Detection ─────────────────────────────────────────────
+
+CONTAINER_RT=""
+
+detect_container_runtime() {
+    if command -v podman &>/dev/null; then
+        CONTAINER_RT="podman"
+    elif command -v docker &>/dev/null; then
+        CONTAINER_RT="docker"
+    else
+        die "No container runtime found. Install podman or docker first.\n  ${DIM}sudo dnf install podman${RESET}  or  ${DIM}sudo dnf install docker${RESET}"
+    fi
+    log "Using container runtime: $CONTAINER_RT"
+}
+
+# ── Supported Games ─────────────────────────────────────────────────────────
+
+# Game registry: slug|name|image|type|default_ram|default_port|description
+declare -a GAME_REGISTRY=(
+    "minecraft|Minecraft Java|itzg/minecraft-server|docker|2048|25565|Vanilla or modded Minecraft Java Edition"
+    "minecraft-bedrock|Minecraft Bedrock|itzg/minecraft-bedrock-server|docker|1024|19132|Minecraft Bedrock Edition (crossplay)"
+    "valheim|Valheim|lloesche/valheim-server|docker|2048|2456|Viking survival co-op"
+    "terraria|Terraria|ryshe/terraria|docker|512|7777|2D sandbox adventure"
+    "factorio|Factorio|factoriotools/factorio|docker|1024|34197|Factory building automation"
+    "zomboid|Project Zomboid|steamcmd/steamcmd:latest|steamcmd|2048|16261|Zombie survival RPG"
+    "7days|7 Days to Die|steamcmd/steamcmd:latest|steamcmd|4096|26900|Zombie survival crafting"
+    "satisfactory|Satisfactory|steamcmd/steamcmd:latest|steamcmd|4096|7777|First-person factory building"
+    "palworld|Palworld|steamcmd/steamcmd:latest|steamcmd|4096|8211|Creature collection survival"
+    "cs2|CS2|steamcmd/steamcmd:latest|steamcmd|2048|27015|Counter-Strike 2 casual/practice"
+)
+
+# SteamCMD App IDs for steam-based servers
+declare -A STEAM_APP_IDS=(
+    [zomboid]=380870
+    [7days]=294420
+    [satisfactory]=1690800
+    [palworld]=2394010
+    [cs2]=730
+)
+
+# ── Game Registry Helpers ───────────────────────────────────────────────────
+
+get_game_field() {
+    local slug="$1" field="$2"
+    local entry
+    for entry in "${GAME_REGISTRY[@]}"; do
+        if [[ "$entry" == "$slug|"* ]]; then
+            echo "$entry" | cut -d'|' -f"$field"
+            return 0
+        fi
+    done
+    return 1
+}
+
+game_exists() {
+    local slug="$1"
+    for entry in "${GAME_REGISTRY[@]}"; do
+        [[ "$entry" == "$slug|"* ]] && return 0
+    done
+    return 1
+}
+
+get_game_name()   { get_game_field "$1" 2; }
+get_game_image()  { get_game_field "$1" 3; }
+get_game_type()   { get_game_field "$1" 4; }
+get_game_ram()    { get_game_field "$1" 5; }
+get_game_port()   { get_game_field "$1" 6; }
+get_game_desc()   { get_game_field "$1" 7; }
+
+container_name() {
+    echo "24hg-server-${1}"
+}
+
+# ── Resource Checks ─────────────────────────────────────────────────────────
+
+get_total_ram_mb() {
+    awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo
+}
+
+get_available_ram_mb() {
+    awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo
+}
+
+get_cpu_count() {
+    nproc
+}
+
+check_resources() {
+    local game="$1"
+    local required_ram
+    required_ram=$(load_config_value "$game" "ram" "$(get_game_ram "$game")")
+    local available_ram
+    available_ram=$(get_available_ram_mb)
+    local total_ram
+    total_ram=$(get_total_ram_mb)
+    local cpu_count
+    cpu_count=$(get_cpu_count)
+
+    info "System resources: ${BOLD}${total_ram}MB${RESET} total RAM, ${BOLD}${available_ram}MB${RESET} available, ${BOLD}${cpu_count}${RESET} CPUs"
+
+    if (( available_ram < required_ram )); then
+        warn "Server requires ${BOLD}${required_ram}MB${RESET} RAM but only ${BOLD}${available_ram}MB${RESET} is available"
+        echo -e "  ${DIM}The server may run poorly or fail to start.${RESET}"
+        echo ""
+        read -rp "Continue anyway? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy] ]] || die "Cancelled by user"
+    else
+        success "Sufficient RAM: ${required_ram}MB required, ${available_ram}MB available"
+    fi
+
+    # Warn if total RAM is low for gaming + hosting
+    if (( total_ram < 8192 )); then
+        warn "Total system RAM is under 8GB. Hosting a server while gaming may cause issues."
+    fi
+}
+
+# ── Port Management ─────────────────────────────────────────────────────────
+
+check_port_available() {
+    local port="$1"
+    if ss -tlnp 2>/dev/null | grep -q ":${port} " || \
+       ss -ulnp 2>/dev/null | grep -q ":${port} "; then
+        return 1
+    fi
+    return 0
+}
+
+setup_upnp() {
+    local port="$1" protocol="${2:-both}" description="${3:-24HG Server}"
+
+    if ! command -v upnpc &>/dev/null; then
+        warn "UPnP client (miniupnpc) not installed. Skipping auto port forwarding."
+        echo -e "  ${DIM}Install with: sudo dnf install miniupnpc${RESET}"
+        echo -e "  ${DIM}Or manually forward port ${BOLD}$port${RESET}${DIM} (TCP+UDP) on your router.${RESET}"
+        return 1
+    fi
+
+    info "Setting up UPnP port forwarding for port $port..."
+    local local_ip
+    local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+
+    if [[ -z "$local_ip" ]]; then
+        warn "Could not detect local IP address"
+        return 1
+    fi
+
+    local ok=0
+    if [[ "$protocol" == "both" || "$protocol" == "tcp" ]]; then
+        if upnpc -a "$local_ip" "$port" "$port" TCP 86400 &>/dev/null; then
+            success "UPnP: TCP port $port forwarded to $local_ip"
+        else
+            warn "UPnP: Failed to forward TCP port $port"
+            ok=1
+        fi
+    fi
+
+    if [[ "$protocol" == "both" || "$protocol" == "udp" ]]; then
+        if upnpc -a "$local_ip" "$port" "$port" UDP 86400 &>/dev/null; then
+            success "UPnP: UDP port $port forwarded to $local_ip"
+        else
+            warn "UPnP: Failed to forward UDP port $port"
+            ok=1
+        fi
+    fi
+
+    if (( ok != 0 )); then
+        echo -e "  ${DIM}Manual fallback: Forward port ${BOLD}$port${RESET}${DIM} on your router to ${local_ip}${RESET}"
+    fi
+    return $ok
+}
+
+remove_upnp() {
+    local port="$1"
+    if command -v upnpc &>/dev/null; then
+        upnpc -d "$port" TCP &>/dev/null || true
+        upnpc -d "$port" UDP &>/dev/null || true
+        info "Removed UPnP mapping for port $port"
+    fi
+}
+
+# ── Configuration Management ────────────────────────────────────────────────
+
+ensure_config_dir() {
+    local game="$1"
+    mkdir -p "$CONFIG_DIR/$game"
+    mkdir -p "$DATA_DIR/$game"
+    mkdir -p "$LOG_DIR"
+}
+
+init_default_config() {
+    local game="$1"
+    local config_file="$CONFIG_DIR/$game/server.conf"
+
+    [[ -f "$config_file" ]] && return 0
+
+    ensure_config_dir "$game"
+    local default_ram default_port
+    default_ram=$(get_game_ram "$game")
+    default_port=$(get_game_port "$game")
+
+    cat > "$config_file" <<CONF
+# 24HG Host — Server Configuration
+# Game: $(get_game_name "$game")
+# Generated: $(date -Iseconds)
+
+# Server name (shown to players)
+SERVER_NAME="24HG - $(get_game_name "$game")"
+
+# RAM limit in MB
+RAM=${default_ram}
+
+# Primary port (game-specific additional ports are auto-calculated)
+PORT=${default_port}
+
+# Maximum players (0 = game default)
+MAX_PLAYERS=0
+
+# Server password (empty = no password)
+PASSWORD=""
+
+# Auto-announce on LAN when server starts (requires 24hg-lan-party)
+AUTO_ANNOUNCE=true
+
+# Register on 24HG Hub community server browser
+HUB_REGISTER=true
+
+# UPnP auto port forwarding
+UPNP_ENABLED=true
+
+# CPU limit (number of cores, 0 = unlimited)
+CPU_LIMIT=0
+
+CONF
+
+    # Write game-specific defaults
+    case "$game" in
+        minecraft)
+            cat >> "$config_file" <<CONF
+
+# ── Minecraft Java ──────────────────────────────────────────────
+# Server version (LATEST, or specific e.g. 1.20.4)
+MC_VERSION=LATEST
+# Game mode: survival, creative, adventure, spectator
+MC_GAMEMODE=survival
+# Difficulty: peaceful, easy, normal, hard
+MC_DIFFICULTY=normal
+# Server type: VANILLA, PAPER, SPIGOT, FABRIC, HG24, QUILT
+MC_TYPE=VANILLA
+# World seed (empty = random)
+MC_SEED=""
+# Enable command blocks
+MC_ENABLE_COMMAND_BLOCK=true
+# MOTD (message of the day)
+MC_MOTD="24HG Server"
+# Allow PvP
+MC_PVP=true
+# Online mode (Mojang auth). Set false for offline/cracked
+MC_ONLINE_MODE=true
+# View distance in chunks
+MC_VIEW_DISTANCE=10
+# Level type: DEFAULT, FLAT, LARGEBIOMES, AMPLIFIED
+MC_LEVEL_TYPE=DEFAULT
+# Modpack URL (for HG24/FABRIC modpacks, leave empty for vanilla)
+MC_MODPACK_URL=""
+CONF
+            ;;
+        minecraft-bedrock)
+            cat >> "$config_file" <<CONF
+
+# ── Minecraft Bedrock ───────────────────────────────────────────
+MCB_GAMEMODE=survival
+MCB_DIFFICULTY=normal
+MCB_SEED=""
+MCB_ONLINE_MODE=true
+MCB_VIEW_DISTANCE=10
+MCB_TICK_DISTANCE=4
+MCB_LEVEL_NAME="24HG World"
+CONF
+            ;;
+        valheim)
+            cat >> "$config_file" <<CONF
+
+# ── Valheim ─────────────────────────────────────────────────────
+VH_WORLD_NAME="24HGWorld"
+VH_SEED=""
+# Enable crossplay
+VH_CROSSPLAY=false
+# Public server (visible in server browser)
+VH_PUBLIC=true
+# Modifiers: combat, deathpenalty, resources, raids, portals
+# Values: veryeasy, easy, default, hard, veryhard, none
+VH_MODIFIER_COMBAT=default
+VH_MODIFIER_DEATHPENALTY=default
+CONF
+            ;;
+        terraria)
+            cat >> "$config_file" <<CONF
+
+# ── Terraria ────────────────────────────────────────────────────
+# World size: 1=small, 2=medium, 3=large
+TR_WORLD_SIZE=2
+# Difficulty: 0=classic, 1=expert, 2=master, 3=journey
+TR_DIFFICULTY=0
+TR_WORLD_NAME="24HGWorld"
+TR_SEED=""
+# Auto-create world if missing
+TR_AUTOCREATE=true
+# Secure mode (server-side character)
+TR_SECURE=false
+CONF
+            ;;
+        factorio)
+            cat >> "$config_file" <<CONF
+
+# ── Factorio ────────────────────────────────────────────────────
+# Factorio username and token (required for downloading server)
+FACTORIO_USER=""
+FACTORIO_TOKEN=""
+# World generation preset: default, rich-resources, marathon, rail-world,
+#   ribbon-world, island, death-world, death-world-marathon
+FACTORIO_PRESET=default
+# Save name
+FACTORIO_SAVE="24hg-world"
+# Auto-pause when no players
+FACTORIO_AUTO_PAUSE=true
+CONF
+            ;;
+        zomboid)
+            cat >> "$config_file" <<CONF
+
+# ── Project Zomboid ─────────────────────────────────────────────
+PZ_ADMIN_PASSWORD="changeme"
+PZ_WORLD_NAME="24HGWorld"
+# Map: Muldraugh, Riverside, Rosewood, WestPoint
+PZ_MAP="Muldraugh, KY"
+# Sandbox preset: Apocalypse, Survivor, Builder, or custom
+PZ_PRESET=Apocalypse
+# PvP enabled
+PZ_PVP=true
+# Additional query port (UDP)
+PZ_QUERY_PORT=16262
+CONF
+            ;;
+        7days)
+            cat >> "$config_file" <<CONF
+
+# ── 7 Days to Die ───────────────────────────────────────────────
+SDTD_WORLD_GEN_SEED="24HGSeed"
+SDTD_WORLD_GEN_SIZE=6144
+# Game difficulty: 0-5
+SDTD_DIFFICULTY=2
+# Day length in minutes
+SDTD_DAY_LENGTH=60
+# Blood moon frequency (every N days, 0=disabled)
+SDTD_BLOOD_MOON_FREQ=7
+# Loot abundance: 25, 50, 75, 100, 150, 200
+SDTD_LOOT_ABUNDANCE=100
+# Zombie speed: 0=walk, 1=jog, 2=run, 3=sprint, 4=nightmare
+SDTD_ZOMBIE_SPEED_DAY=0
+SDTD_ZOMBIE_SPEED_NIGHT=2
+CONF
+            ;;
+        satisfactory)
+            cat >> "$config_file" <<CONF
+
+# ── Satisfactory ────────────────────────────────────────────────
+# Additional beacon port
+SAT_BEACON_PORT=15000
+# Auto-save interval in seconds (300 = 5min)
+SAT_AUTOSAVE_INTERVAL=300
+# Max players
+SAT_MAX_PLAYERS=4
+CONF
+            ;;
+        palworld)
+            cat >> "$config_file" <<CONF
+
+# ── Palworld ────────────────────────────────────────────────────
+PW_ADMIN_PASSWORD="changeme"
+# Experience rate
+PW_EXP_RATE=1.0
+# Pal capture rate
+PW_CAPTURE_RATE=1.0
+# Day/night speed scale
+PW_DAY_TIME_SPEED=1.0
+PW_NIGHT_TIME_SPEED=1.0
+# Death penalty: None, Item, ItemAndEquipment, All
+PW_DEATH_PENALTY=ItemAndEquipment
+# Enable PvP
+PW_PVP=false
+# Community server (visible in browser)
+PW_PUBLIC=false
+CONF
+            ;;
+        cs2)
+            cat >> "$config_file" <<CONF
+
+# ── CS2 ─────────────────────────────────────────────────────────
+# Game mode: casual, competitive, deathmatch, armsrace, wingman
+CS2_GAME_MODE=casual
+# Map: de_dust2, de_mirage, de_inferno, de_nuke, de_ancient, de_anubis
+CS2_MAP=de_dust2
+# Max rounds
+CS2_MAXROUNDS=15
+# Bot difficulty: 0=easy, 1=normal, 2=hard, 3=expert
+CS2_BOT_DIFFICULTY=1
+# Fill with bots
+CS2_BOT_FILL=true
+# GSLT token (optional, for Steam server browser listing)
+CS2_GSLT=""
+# RCON password
+CS2_RCON_PASSWORD="changeme"
+# Tick rate
+CS2_TICKRATE=128
+CONF
+            ;;
+    esac
+
+    success "Created default config: $config_file"
+}
+
+load_config() {
+    local game="$1"
+    local config_file="$CONFIG_DIR/$game/server.conf"
+
+    if [[ ! -f "$config_file" ]]; then
+        init_default_config "$game"
+    fi
+
+    # Source the config (variables become available)
+    # shellcheck disable=SC1090
+    source "$config_file"
+}
+
+load_config_value() {
+    local game="$1" key="$2" default="$3"
+    local config_file="$CONFIG_DIR/$game/server.conf"
+
+    if [[ -f "$config_file" ]]; then
+        local val
+        val=$(grep -E "^${key}=" "$config_file" 2>/dev/null | tail -1 | cut -d'=' -f2- | sed 's/^"//;s/"$//')
+        if [[ -n "$val" ]]; then
+            echo "$val"
+            return
+        fi
+    fi
+    echo "$default"
+}
+
+# ── Container Operations ────────────────────────────────────────────────────
+
+is_server_running() {
+    local game="$1"
+    local cname
+    cname=$(container_name "$game")
+    $CONTAINER_RT inspect --format='{{.State.Running}}' "$cname" 2>/dev/null | grep -q "true"
+}
+
+get_container_uptime() {
+    local game="$1"
+    local cname
+    cname=$(container_name "$game")
+    local started
+    started=$($CONTAINER_RT inspect --format='{{.State.StartedAt}}' "$cname" 2>/dev/null) || return 1
+    local start_epoch now_epoch diff
+    start_epoch=$(date -d "$started" +%s 2>/dev/null) || return 1
+    now_epoch=$(date +%s)
+    diff=$((now_epoch - start_epoch))
+
+    local days=$((diff / 86400))
+    local hours=$(( (diff % 86400) / 3600 ))
+    local mins=$(( (diff % 3600) / 60 ))
+
+    if (( days > 0 )); then
+        echo "${days}d ${hours}h ${mins}m"
+    elif (( hours > 0 )); then
+        echo "${hours}h ${mins}m"
+    else
+        echo "${mins}m"
+    fi
+}
+
+get_container_ram_usage() {
+    local game="$1"
+    local cname
+    cname=$(container_name "$game")
+    $CONTAINER_RT stats --no-stream --format '{{.MemUsage}}' "$cname" 2>/dev/null | head -1
+}
+
+# ── Game-Specific Start Logic ───────────────────────────────────────────────
+
+build_steamcmd_container() {
+    local game="$1"
+    local app_id="${STEAM_APP_IDS[$game]:-}"
+    local cname
+    cname=$(container_name "$game")
+    local game_dir="$DATA_DIR/$game"
+    local ram port server_name
+    ram=$(load_config_value "$game" "RAM" "$(get_game_ram "$game")")
+    port=$(load_config_value "$game" "PORT" "$(get_game_port "$game")")
+    server_name=$(load_config_value "$game" "SERVER_NAME" "24HG - $(get_game_name "$game")")
+
+    [[ -z "$app_id" ]] && die "No Steam App ID configured for $game"
+
+    mkdir -p "$game_dir/server" "$game_dir/steamcmd"
+
+    info "Preparing SteamCMD container for $(get_game_name "$game")..."
+
+    local run_args=(
+        run -d
+        --name "$cname"
+        --memory "${ram}m"
+        --restart unless-stopped
+        -v "$game_dir/server:/server"
+        -v "$game_dir/steamcmd:/root/Steam"
+    )
+
+    # Game-specific port mappings and launch commands
+    local launch_cmd=""
+    case "$game" in
+        zomboid)
+            local query_port
+            query_port=$(load_config_value "$game" "PZ_QUERY_PORT" "16262")
+            run_args+=(-p "${port}:16261/udp" -p "${query_port}:16262/udp")
+            launch_cmd="bash -c 'steamcmd +force_install_dir /server +login anonymous +app_update ${app_id} validate +quit && cd /server && ./start-server.sh -servername 24HGServer'"
+            ;;
+        7days)
+            run_args+=(-p "${port}:26900/tcp" -p "${port}:26900/udp" -p "$((port+1)):26901/udp" -p "$((port+2)):26902/udp")
+            launch_cmd="bash -c 'steamcmd +force_install_dir /server +login anonymous +app_update ${app_id} validate +quit && cd /server && ./7DaysToDieServer.x86_64 -configfile=serverconfig.xml -quit -batchmode -nographics -dedicated'"
+            ;;
+        satisfactory)
+            local beacon_port
+            beacon_port=$(load_config_value "$game" "SAT_BEACON_PORT" "15000")
+            run_args+=(-p "${port}:7777/tcp" -p "${port}:7777/udp" -p "${beacon_port}:15000/tcp" -p "${beacon_port}:15000/udp")
+            launch_cmd="bash -c 'steamcmd +force_install_dir /server +login anonymous +app_update ${app_id} validate +quit && cd /server && ./FactoryServer.sh -unattended'"
+            ;;
+        palworld)
+            run_args+=(-p "${port}:8211/udp")
+            launch_cmd="bash -c 'steamcmd +force_install_dir /server +login anonymous +app_update ${app_id} validate +quit && cd /server && ./PalServer.sh -port=${port} -players=32 -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS'"
+            ;;
+        cs2)
+            local map gslt tickrate game_mode rcon_pw
+            map=$(load_config_value "$game" "CS2_MAP" "de_dust2")
+            gslt=$(load_config_value "$game" "CS2_GSLT" "")
+            tickrate=$(load_config_value "$game" "CS2_TICKRATE" "128")
+            game_mode=$(load_config_value "$game" "CS2_GAME_MODE" "casual")
+            rcon_pw=$(load_config_value "$game" "CS2_RCON_PASSWORD" "changeme")
+
+            local mode_num=0 type_num=0
+            case "$game_mode" in
+                casual)       mode_num=0; type_num=0 ;;
+                competitive)  mode_num=1; type_num=0 ;;
+                deathmatch)   mode_num=2; type_num=1 ;;
+                armsrace)     mode_num=1; type_num=1 ;;
+                wingman)      mode_num=2; type_num=0 ;;
+            esac
+
+            run_args+=(-p "${port}:27015/tcp" -p "${port}:27015/udp" -p "$((port+1)):27020/udp")
+
+            local gslt_arg=""
+            [[ -n "$gslt" ]] && gslt_arg="+sv_setsteamaccount $gslt"
+
+            launch_cmd="bash -c 'steamcmd +force_install_dir /server +login anonymous +app_update ${app_id} validate +quit && cd /server && ./game/bin/linuxsteamrt64/cs2 -dedicated -console -usercon +game_type ${type_num} +game_mode ${mode_num} +map ${map} +rcon_password ${rcon_pw} -tickrate ${tickrate} ${gslt_arg} +sv_lan 1'"
+            ;;
+    esac
+
+    local cpu_limit
+    cpu_limit=$(load_config_value "$game" "CPU_LIMIT" "0")
+    if (( cpu_limit > 0 )); then
+        run_args+=(--cpus "$cpu_limit")
+    fi
+
+    # Run the container
+    # shellcheck disable=SC2086
+    $CONTAINER_RT "${run_args[@]}" steamcmd/steamcmd:latest bash -c "$launch_cmd"
+}
+
+start_docker_server() {
+    local game="$1"
+    local cname
+    cname=$(container_name "$game")
+    local game_dir="$DATA_DIR/$game"
+    local ram port server_name password max_players
+    ram=$(load_config_value "$game" "RAM" "$(get_game_ram "$game")")
+    port=$(load_config_value "$game" "PORT" "$(get_game_port "$game")")
+    server_name=$(load_config_value "$game" "SERVER_NAME" "24HG - $(get_game_name "$game")")
+    password=$(load_config_value "$game" "PASSWORD" "")
+    max_players=$(load_config_value "$game" "MAX_PLAYERS" "0")
+
+    mkdir -p "$game_dir"
+
+    local run_args=(
+        run -d
+        --name "$cname"
+        --memory "${ram}m"
+        --restart unless-stopped
+    )
+
+    local cpu_limit
+    cpu_limit=$(load_config_value "$game" "CPU_LIMIT" "0")
+    if (( cpu_limit > 0 )); then
+        run_args+=(--cpus "$cpu_limit")
+    fi
+
+    case "$game" in
+        minecraft)
+            local mc_version mc_type mc_gamemode mc_difficulty mc_seed
+            local mc_motd mc_pvp mc_online mc_view mc_level mc_modpack mc_cmdblock
+            mc_version=$(load_config_value "$game" "MC_VERSION" "LATEST")
+            mc_type=$(load_config_value "$game" "MC_TYPE" "VANILLA")
+            mc_gamemode=$(load_config_value "$game" "MC_GAMEMODE" "survival")
+            mc_difficulty=$(load_config_value "$game" "MC_DIFFICULTY" "normal")
+            mc_seed=$(load_config_value "$game" "MC_SEED" "")
+            mc_motd=$(load_config_value "$game" "MC_MOTD" "24HG Server")
+            mc_pvp=$(load_config_value "$game" "MC_PVP" "true")
+            mc_online=$(load_config_value "$game" "MC_ONLINE_MODE" "true")
+            mc_view=$(load_config_value "$game" "MC_VIEW_DISTANCE" "10")
+            mc_level=$(load_config_value "$game" "MC_LEVEL_TYPE" "DEFAULT")
+            mc_modpack=$(load_config_value "$game" "MC_MODPACK_URL" "")
+            mc_cmdblock=$(load_config_value "$game" "MC_ENABLE_COMMAND_BLOCK" "true")
+
+            run_args+=(
+                -p "${port}:25565"
+                -v "$game_dir:/data"
+                -e EULA=TRUE
+                -e VERSION="$mc_version"
+                -e TYPE="$mc_type"
+                -e MODE="$mc_gamemode"
+                -e DIFFICULTY="$mc_difficulty"
+                -e MOTD="$mc_motd"
+                -e PVP="$mc_pvp"
+                -e ONLINE_MODE="$mc_online"
+                -e VIEW_DISTANCE="$mc_view"
+                -e LEVEL_TYPE="$mc_level"
+                -e MEMORY="${ram}M"
+                -e ENABLE_COMMAND_BLOCK="$mc_cmdblock"
+                -e SERVER_NAME="$server_name"
+            )
+
+            [[ -n "$mc_seed" ]] && run_args+=(-e SEED="$mc_seed")
+            [[ -n "$password" ]] && run_args+=(-e SERVER_PASSWORD="$password")
+            [[ -n "$mc_modpack" ]] && run_args+=(-e MODPACK="$mc_modpack")
+            (( max_players > 0 )) && run_args+=(-e MAX_PLAYERS="$max_players")
+
+            run_args+=(itzg/minecraft-server)
+            ;;
+
+        minecraft-bedrock)
+            local mcb_gamemode mcb_difficulty mcb_seed mcb_online mcb_view mcb_tick mcb_level
+            mcb_gamemode=$(load_config_value "$game" "MCB_GAMEMODE" "survival")
+            mcb_difficulty=$(load_config_value "$game" "MCB_DIFFICULTY" "normal")
+            mcb_seed=$(load_config_value "$game" "MCB_SEED" "")
+            mcb_online=$(load_config_value "$game" "MCB_ONLINE_MODE" "true")
+            mcb_view=$(load_config_value "$game" "MCB_VIEW_DISTANCE" "10")
+            mcb_tick=$(load_config_value "$game" "MCB_TICK_DISTANCE" "4")
+            mcb_level=$(load_config_value "$game" "MCB_LEVEL_NAME" "24HG World")
+
+            run_args+=(
+                -p "${port}:19132/udp"
+                -v "$game_dir:/data"
+                -e EULA=TRUE
+                -e GAMEMODE="$mcb_gamemode"
+                -e DIFFICULTY="$mcb_difficulty"
+                -e SERVER_NAME="$server_name"
+                -e ONLINE_MODE="$mcb_online"
+                -e VIEW_DISTANCE="$mcb_view"
+                -e TICK_DISTANCE="$mcb_tick"
+                -e LEVEL_NAME="$mcb_level"
+            )
+
+            [[ -n "$mcb_seed" ]] && run_args+=(-e LEVEL_SEED="$mcb_seed")
+            [[ -n "$password" ]] && run_args+=(-e SERVER_PASSWORD="$password")
+            (( max_players > 0 )) && run_args+=(-e MAX_PLAYERS="$max_players")
+
+            run_args+=(itzg/minecraft-bedrock-server)
+            ;;
+
+        valheim)
+            local vh_world vh_seed vh_crossplay vh_public
+            vh_world=$(load_config_value "$game" "VH_WORLD_NAME" "24HGWorld")
+            vh_seed=$(load_config_value "$game" "VH_SEED" "")
+            vh_crossplay=$(load_config_value "$game" "VH_CROSSPLAY" "false")
+            vh_public=$(load_config_value "$game" "VH_PUBLIC" "true")
+
+            run_args+=(
+                -p "${port}:2456-2458/udp"
+                -v "$game_dir/config:/config"
+                -v "$game_dir/data:/opt/valheim"
+                -e SERVER_NAME="$server_name"
+                -e WORLD_NAME="$vh_world"
+                -e SERVER_PUBLIC="$vh_public"
+            )
+
+            [[ -n "$password" ]] && run_args+=(-e SERVER_PASS="$password")
+            [[ -n "$vh_seed" ]] && run_args+=(-e SEED="$vh_seed")
+            [[ "$vh_crossplay" == "true" ]] && run_args+=(-e CROSSPLAY="true")
+
+            run_args+=(lloesche/valheim-server)
+            ;;
+
+        terraria)
+            local tr_size tr_diff tr_world tr_seed tr_autocreate tr_secure
+            tr_size=$(load_config_value "$game" "TR_WORLD_SIZE" "2")
+            tr_diff=$(load_config_value "$game" "TR_DIFFICULTY" "0")
+            tr_world=$(load_config_value "$game" "TR_WORLD_NAME" "24HGWorld")
+            tr_seed=$(load_config_value "$game" "TR_SEED" "")
+            tr_autocreate=$(load_config_value "$game" "TR_AUTOCREATE" "true")
+            tr_secure=$(load_config_value "$game" "TR_SECURE" "false")
+
+            run_args+=(
+                -p "${port}:7777"
+                -v "$game_dir:/root/.local/share/Terraria/Worlds"
+                -e WORLD_FILENAME="${tr_world}.wld"
+            )
+
+            if [[ "$tr_autocreate" == "true" ]]; then
+                run_args+=(-e AUTOCREATE="$tr_size")
+            fi
+
+            [[ -n "$password" ]] && run_args+=(-e PASSWORD="$password")
+            (( max_players > 0 )) && run_args+=(-e MAXPLAYERS="$max_players")
+            [[ "$tr_secure" == "true" ]] && run_args+=(-e SECURE=1)
+
+            run_args+=(ryshe/terraria)
+            ;;
+
+        factorio)
+            local fac_user fac_token fac_preset fac_save fac_pause
+            fac_user=$(load_config_value "$game" "FACTORIO_USER" "")
+            fac_token=$(load_config_value "$game" "FACTORIO_TOKEN" "")
+            fac_preset=$(load_config_value "$game" "FACTORIO_PRESET" "default")
+            fac_save=$(load_config_value "$game" "FACTORIO_SAVE" "24hg-world")
+            fac_pause=$(load_config_value "$game" "FACTORIO_AUTO_PAUSE" "true")
+
+            run_args+=(
+                -p "${port}:34197/udp"
+                -v "$game_dir:/factorio"
+                -e SAVE_NAME="$fac_save"
+                -e GENERATE_NEW_SAVE="true"
+            )
+
+            [[ -n "$fac_user" ]] && run_args+=(-e USERNAME="$fac_user")
+            [[ -n "$fac_token" ]] && run_args+=(-e TOKEN="$fac_token")
+            [[ "$fac_pause" == "true" ]] && run_args+=(-e AUTO_PAUSE="true")
+
+            run_args+=(factoriotools/factorio)
+            ;;
+    esac
+
+    $CONTAINER_RT "${run_args[@]}"
+}
+
+# ── Player Query Helpers ────────────────────────────────────────────────────
+
+query_players_minecraft() {
+    local port="$1"
+    # Use container exec to run RCON list command
+    local cname
+    cname=$(container_name "minecraft")
+    if $CONTAINER_RT exec "$cname" rcon-cli list 2>/dev/null; then
+        return 0
+    fi
+    echo "Player query unavailable (RCON not ready)"
+}
+
+query_players_generic() {
+    local game="$1" port="$2"
+    # Attempt a simple A2S_INFO query via python if available
+    if command -v python3 &>/dev/null; then
+        python3 -c "
+import socket, struct, sys
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+# A2S_INFO query
+query = b'\\xff\\xff\\xff\\xff\\x54Source Engine Query\\x00'
+try:
+    sock.sendto(query, ('127.0.0.1', $port))
+    data = sock.recv(4096)
+    # Parse minimal response
+    if len(data) > 10:
+        # Skip header, find player count at known offset
+        idx = 6
+        # Skip name, map, folder, game strings
+        for _ in range(4):
+            while idx < len(data) and data[idx] != 0:
+                idx += 1
+            idx += 1
+        if idx + 2 < len(data):
+            players = data[idx]
+            max_p = data[idx+1]
+            print(f'{players}/{max_p} players online')
+        else:
+            print('Server is running (could not parse player count)')
+    else:
+        print('Server is running (minimal response)')
+except socket.timeout:
+    print('Server not responding to queries')
+except Exception as e:
+    print(f'Query failed: {e}')
+finally:
+    sock.close()
+" 2>/dev/null
+        return
+    fi
+    echo "Player query requires python3 (install: sudo dnf install python3)"
+}
+
+query_player_count() {
+    local game="$1"
+    local port
+    port=$(load_config_value "$game" "PORT" "$(get_game_port "$game")")
+
+    case "$game" in
+        minecraft)
+            query_players_minecraft "$port"
+            ;;
+        minecraft-bedrock)
+            echo "Bedrock player query not supported in CLI"
+            ;;
+        valheim)
+            query_players_generic "$game" "$((port+1))"
+            ;;
+        cs2|7days|zomboid)
+            query_players_generic "$game" "$port"
+            ;;
+        *)
+            echo "Player query not supported for $(get_game_name "$game")"
+            ;;
+    esac
+}
+
+# ── Hub & LAN Announce ──────────────────────────────────────────────────────
+
+get_local_ip() {
+    hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+get_public_ip() {
+    curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
+    curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
+    echo "unknown"
+}
+
+announce_lan() {
+    local game="$1"
+    if command -v 24hg-lan-party &>/dev/null; then
+        local port
+        port=$(load_config_value "$game" "PORT" "$(get_game_port "$game")")
+        local server_name
+        server_name=$(load_config_value "$game" "SERVER_NAME" "24HG - $(get_game_name "$game")")
+        info "Announcing on LAN via 24hg-lan-party..."
+        24hg-lan-party announce --game "$(get_game_name "$game")" --port "$port" --name "$server_name" 2>/dev/null && \
+            success "LAN announcement sent" || \
+            warn "LAN announcement failed (is 24hg-lan-party running?)"
+    else
+        info "LAN announcement skipped (24hg-lan-party not available)"
+    fi
+}
+
+announce_hub() {
+    local game="$1"
+    local port server_name local_ip public_ip
+    port=$(load_config_value "$game" "PORT" "$(get_game_port "$game")")
+    server_name=$(load_config_value "$game" "SERVER_NAME" "24HG - $(get_game_name "$game")")
+    local_ip=$(get_local_ip)
+    public_ip=$(get_public_ip)
+
+    info "Registering on 24HG Hub..."
+    local payload
+    payload=$(cat <<JSON
+{
+  "game": "$(get_game_name "$game")",
+  "game_slug": "$game",
+  "name": "$server_name",
+  "host_ip": "$public_ip",
+  "local_ip": "$local_ip",
+  "port": $port,
+  "status": "online"
+}
+JSON
+)
+
+    local hub_token_file="${XDG_CONFIG_HOME:-$HOME/.config}/24hg/hub-token"
+    if [[ -f "$hub_token_file" ]]; then
+        local token
+        token=$(cat "$hub_token_file")
+        local response
+        response=$(curl -s --max-time 10 -X POST "$HUB_API_URL/register" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $token" \
+            -d "$payload" 2>/dev/null)
+        if echo "$response" | grep -q '"success"' 2>/dev/null; then
+            success "Registered on 24HG Hub community server browser"
+        else
+            warn "Hub registration failed: $response"
+        fi
+    else
+        info "Hub registration skipped (no token found at $hub_token_file)"
+        echo -e "  ${DIM}Run: 24hg-hub login${RESET}"
+    fi
+}
+
+deregister_hub() {
+    local game="$1"
+    local hub_token_file="${XDG_CONFIG_HOME:-$HOME/.config}/24hg/hub-token"
+    if [[ -f "$hub_token_file" ]]; then
+        local token
+        token=$(cat "$hub_token_file")
+        curl -s --max-time 10 -X POST "$HUB_API_URL/deregister" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $token" \
+            -d "{\"game_slug\": \"$game\"}" &>/dev/null || true
+    fi
+}
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    echo ""
+    echo -e "${BOLD}${WHITE}  24HG — Game Server Hosting${RESET}"
+    echo -e "${DIM}  ─────────────────────────────────────────────────${RESET}"
+    echo ""
+    printf "  ${BOLD}%-20s %-8s %-8s %s${RESET}\n" "GAME" "RAM" "PORT" "DESCRIPTION"
+    echo -e "  ${DIM}────────────────────────────────────────────────────────────────────${RESET}"
+
+    for entry in "${GAME_REGISTRY[@]}"; do
+        local slug name ram port desc type
+        slug=$(echo "$entry" | cut -d'|' -f1)
+        name=$(echo "$entry" | cut -d'|' -f2)
+        type=$(echo "$entry" | cut -d'|' -f4)
+        ram=$(echo "$entry" | cut -d'|' -f5)
+        port=$(echo "$entry" | cut -d'|' -f6)
+        desc=$(echo "$entry" | cut -d'|' -f7)
+
+        local status_icon="${DIM}-${RESET}"
+        if is_server_running "$slug" 2>/dev/null; then
+            status_icon="${GREEN}*${RESET}"
+        fi
+
+        local type_badge=""
+        [[ "$type" == "steamcmd" ]] && type_badge="${DIM}[steam]${RESET} "
+
+        printf "  ${status_icon} ${CYAN}%-18s${RESET} ${YELLOW}%-8s${RESET} %-8s ${type_badge}%s\n" "$slug" "${ram}MB" "$port" "$desc"
+    done
+
+    echo ""
+    echo -e "  ${GREEN}*${RESET} = running  ${DIM}-${RESET} = stopped"
+    echo ""
+    echo -e "  ${DIM}Start a server:${RESET}  24hg-host start <game>"
+    echo -e "  ${DIM}Example:${RESET}         24hg-host start minecraft"
+    echo ""
+}
+
+cmd_start() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-host start <game>\n  Run '24hg-host list' to see available games."
+
+    game_exists "$game" || die "Unknown game: $game\n  Run '24hg-host list' to see available games."
+
+    if is_server_running "$game"; then
+        die "$(get_game_name "$game") is already running.\n  Use '24hg-host stop $game' first, or '24hg-host status' to check."
+    fi
+
+    # Remove any stopped container with the same name
+    local cname
+    cname=$(container_name "$game")
+    $CONTAINER_RT rm -f "$cname" &>/dev/null || true
+
+    echo ""
+    echo -e "${BOLD}${WHITE}  Starting $(get_game_name "$game") Server${RESET}"
+    echo -e "${DIM}  ─────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    # Initialize and load config
+    init_default_config "$game"
+    load_config "$game"
+
+    # Check resources
+    check_resources "$game"
+
+    # Check port
+    local port
+    port=$(load_config_value "$game" "PORT" "$(get_game_port "$game")")
+    if ! check_port_available "$port"; then
+        warn "Port $port is already in use!"
+        echo -e "  ${DIM}Change the port in: $CONFIG_DIR/$game/server.conf${RESET}"
+        echo ""
+        read -rp "Continue anyway? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy] ]] || die "Cancelled by user"
+    fi
+
+    # Pull image
+    local image
+    image=$(get_game_image "$game")
+    info "Pulling container image: $image"
+    if ! $CONTAINER_RT pull "$image" 2>&1 | tail -3; then
+        warn "Image pull failed (may still work if cached locally)"
+    fi
+    echo ""
+
+    # Start based on type
+    local game_type
+    game_type=$(get_game_type "$game")
+    info "Starting server container..."
+
+    local container_id
+    if [[ "$game_type" == "steamcmd" ]]; then
+        container_id=$(build_steamcmd_container "$game" 2>&1 | tail -1)
+    else
+        container_id=$(start_docker_server "$game" 2>&1 | tail -1)
+    fi
+
+    if [[ -z "$container_id" ]] || ! is_server_running "$game"; then
+        # Show last few log lines for debugging
+        echo ""
+        warn "Server may have failed to start. Recent logs:"
+        $CONTAINER_RT logs "$cname" --tail 20 2>&1 || true
+        die "Container did not start successfully."
+    fi
+
+    success "Server started: ${BOLD}$(get_game_name "$game")${RESET}"
+    echo ""
+
+    # UPnP
+    local upnp_enabled
+    upnp_enabled=$(load_config_value "$game" "UPNP_ENABLED" "true")
+    if [[ "$upnp_enabled" == "true" ]]; then
+        setup_upnp "$port" || true
+    fi
+
+    # Auto-announce
+    local auto_announce
+    auto_announce=$(load_config_value "$game" "AUTO_ANNOUNCE" "true")
+    if [[ "$auto_announce" == "true" ]]; then
+        announce_lan "$game"
+    fi
+
+    local hub_register
+    hub_register=$(load_config_value "$game" "HUB_REGISTER" "true")
+    if [[ "$hub_register" == "true" ]]; then
+        announce_hub "$game"
+    fi
+
+    echo ""
+    echo -e "${DIM}  ─────────────────────────────────────────────────${RESET}"
+    local server_name
+    server_name=$(load_config_value "$game" "SERVER_NAME" "24HG - $(get_game_name "$game")")
+    local local_ip
+    local_ip=$(get_local_ip)
+    echo -e "  ${BOLD}Server:${RESET}  $server_name"
+    echo -e "  ${BOLD}LAN IP:${RESET}  ${local_ip}:${port}"
+    echo -e "  ${BOLD}Config:${RESET}  $CONFIG_DIR/$game/server.conf"
+    echo -e "  ${BOLD}Data:${RESET}    $DATA_DIR/$game/"
+    echo ""
+    echo -e "  ${DIM}View logs:${RESET}    24hg-host logs $game"
+    echo -e "  ${DIM}Stop server:${RESET}  24hg-host stop $game"
+    echo ""
+
+    log "Started $game server on port $port"
+}
+
+cmd_stop() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-host stop <game>"
+
+    game_exists "$game" || die "Unknown game: $game"
+
+    local cname
+    cname=$(container_name "$game")
+
+    if ! is_server_running "$game"; then
+        # Clean up stopped container if it exists
+        $CONTAINER_RT rm -f "$cname" &>/dev/null || true
+        info "$(get_game_name "$game") is not running."
+        return 0
+    fi
+
+    local port
+    port=$(load_config_value "$game" "PORT" "$(get_game_port "$game")")
+
+    info "Stopping $(get_game_name "$game") server..."
+
+    # Graceful shutdown
+    $CONTAINER_RT stop -t 30 "$cname" 2>/dev/null || true
+    $CONTAINER_RT rm -f "$cname" &>/dev/null || true
+
+    # Remove UPnP mapping
+    local upnp_enabled
+    upnp_enabled=$(load_config_value "$game" "UPNP_ENABLED" "true")
+    if [[ "$upnp_enabled" == "true" ]]; then
+        remove_upnp "$port"
+    fi
+
+    # Deregister from hub
+    deregister_hub "$game"
+
+    success "$(get_game_name "$game") server stopped."
+    log "Stopped $game server"
+}
+
+cmd_status() {
+    echo ""
+    echo -e "${BOLD}${WHITE}  24HG — Server Status${RESET}"
+    echo -e "${DIM}  ─────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    local any_running=false
+
+    printf "  ${BOLD}%-18s %-10s %-10s %-14s %-16s${RESET}\n" "GAME" "STATUS" "PORT" "UPTIME" "RAM USAGE"
+    echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────${RESET}"
+
+    for entry in "${GAME_REGISTRY[@]}"; do
+        local slug name
+        slug=$(echo "$entry" | cut -d'|' -f1)
+        name=$(echo "$entry" | cut -d'|' -f2)
+
+        local cname
+        cname=$(container_name "$slug")
+        local status_text status_color port_text uptime_text ram_text
+
+        if is_server_running "$slug" 2>/dev/null; then
+            any_running=true
+            status_text="running"
+            status_color="$GREEN"
+            port_text=$(load_config_value "$slug" "PORT" "$(get_game_port "$slug")")
+            uptime_text=$(get_container_uptime "$slug" 2>/dev/null || echo "?")
+            ram_text=$(get_container_ram_usage "$slug" 2>/dev/null || echo "?")
+        elif $CONTAINER_RT inspect "$cname" &>/dev/null; then
+            status_text="stopped"
+            status_color="$RED"
+            port_text="-"
+            uptime_text="-"
+            ram_text="-"
+        else
+            continue
+        fi
+
+        printf "  ${CYAN}%-18s${RESET} ${status_color}%-10s${RESET} %-10s %-14s %-16s\n" \
+            "$slug" "$status_text" "$port_text" "$uptime_text" "$ram_text"
+    done
+
+    if ! $any_running; then
+        # Check if any containers exist at all
+        local found=false
+        for entry in "${GAME_REGISTRY[@]}"; do
+            local slug
+            slug=$(echo "$entry" | cut -d'|' -f1)
+            if $CONTAINER_RT inspect "$(container_name "$slug")" &>/dev/null 2>&1; then
+                found=true
+                break
+            fi
+        done
+
+        if ! $found; then
+            echo -e "  ${DIM}No servers running. Start one with: 24hg-host start <game>${RESET}"
+        fi
+    fi
+
+    echo ""
+
+    # System resources
+    local total_ram avail_ram cpu_count
+    total_ram=$(get_total_ram_mb)
+    avail_ram=$(get_available_ram_mb)
+    cpu_count=$(get_cpu_count)
+    echo -e "  ${BOLD}System:${RESET} ${avail_ram}MB / ${total_ram}MB RAM available, ${cpu_count} CPUs"
+    echo ""
+}
+
+cmd_logs() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-host logs <game>"
+    game_exists "$game" || die "Unknown game: $game"
+
+    local cname
+    cname=$(container_name "$game")
+
+    if ! $CONTAINER_RT inspect "$cname" &>/dev/null; then
+        die "No container found for $(get_game_name "$game"). Has it been started?"
+    fi
+
+    local lines="${2:-100}"
+    info "Showing last $lines log lines for $(get_game_name "$game")..."
+    echo ""
+    $CONTAINER_RT logs --tail "$lines" -f "$cname" 2>&1
+}
+
+cmd_config() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-host config <game>"
+    game_exists "$game" || die "Unknown game: $game"
+
+    init_default_config "$game"
+
+    local config_file="$CONFIG_DIR/$game/server.conf"
+    local editor="${EDITOR:-${VISUAL:-nano}}"
+
+    info "Opening config: $config_file"
+    echo -e "${DIM}  Using editor: $editor${RESET}"
+    echo ""
+
+    # Check if editor exists
+    if ! command -v "$editor" &>/dev/null; then
+        warn "Editor '$editor' not found. Trying alternatives..."
+        for try_editor in nano vim vi; do
+            if command -v "$try_editor" &>/dev/null; then
+                editor="$try_editor"
+                break
+            fi
+        done
+    fi
+
+    $editor "$config_file"
+
+    # Validate config after edit
+    if ! bash -n "$config_file" 2>/dev/null; then
+        warn "Config file has syntax errors! The server may not start correctly."
+    else
+        success "Config saved. Restart the server for changes to take effect."
+    fi
+
+    if is_server_running "$game"; then
+        echo ""
+        read -rp "Restart server now to apply changes? [y/N] " confirm
+        if [[ "$confirm" =~ ^[Yy] ]]; then
+            cmd_stop "$game"
+            cmd_start "$game"
+        fi
+    fi
+}
+
+cmd_update() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-host update <game>"
+    game_exists "$game" || die "Unknown game: $game"
+
+    local was_running=false
+    if is_server_running "$game"; then
+        was_running=true
+        warn "Server is running. It will be stopped for the update."
+        read -rp "Continue? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy] ]] || die "Cancelled by user"
+        cmd_stop "$game"
+    fi
+
+    local image game_type
+    image=$(get_game_image "$game")
+    game_type=$(get_game_type "$game")
+
+    echo ""
+    info "Updating $(get_game_name "$game")..."
+
+    if [[ "$game_type" == "docker" ]]; then
+        # Pull latest image
+        info "Pulling latest image: $image"
+        $CONTAINER_RT pull "$image"
+        success "Image updated to latest version"
+    elif [[ "$game_type" == "steamcmd" ]]; then
+        # Run SteamCMD update in a temporary container
+        local app_id="${STEAM_APP_IDS[$game]:-}"
+        local game_dir="$DATA_DIR/$game"
+        info "Updating via SteamCMD (App ID: $app_id)..."
+        $CONTAINER_RT run --rm \
+            -v "$game_dir/server:/server" \
+            -v "$game_dir/steamcmd:/root/Steam" \
+            steamcmd/steamcmd:latest \
+            bash -c "steamcmd +force_install_dir /server +login anonymous +app_update $app_id validate +quit"
+        success "Game files updated"
+    fi
+
+    echo ""
+
+    if $was_running; then
+        read -rp "Restart server now? [Y/n] " confirm
+        if [[ ! "$confirm" =~ ^[Nn] ]]; then
+            cmd_start "$game"
+        fi
+    fi
+}
+
+cmd_players() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-host players <game>"
+    game_exists "$game" || die "Unknown game: $game"
+
+    if ! is_server_running "$game"; then
+        die "$(get_game_name "$game") is not running."
+    fi
+
+    echo ""
+    echo -e "${BOLD}${WHITE}  Players — $(get_game_name "$game")${RESET}"
+    echo -e "${DIM}  ─────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    query_player_count "$game"
+    echo ""
+}
+
+cmd_announce() {
+    echo ""
+    echo -e "${BOLD}${WHITE}  Announcing Servers${RESET}"
+    echo -e "${DIM}  ─────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    local any_running=false
+
+    for entry in "${GAME_REGISTRY[@]}"; do
+        local slug
+        slug=$(echo "$entry" | cut -d'|' -f1)
+
+        if is_server_running "$slug" 2>/dev/null; then
+            any_running=true
+            info "Announcing $(get_game_name "$slug")..."
+            announce_lan "$slug"
+            announce_hub "$slug"
+            echo ""
+        fi
+    done
+
+    if ! $any_running; then
+        info "No servers are running. Start one first: 24hg-host start <game>"
+    fi
+}
+
+cmd_backup() {
+    local game="${1:-}"
+    [[ -z "$game" ]] && die "Usage: 24hg-host backup <game>"
+    game_exists "$game" || die "Unknown game: $game"
+
+    local game_dir="$DATA_DIR/$game"
+    if [[ ! -d "$game_dir" ]] || [[ -z "$(ls -A "$game_dir" 2>/dev/null)" ]]; then
+        die "No server data found for $(get_game_name "$game") at $game_dir"
+    fi
+
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_name="${game}_${timestamp}"
+    local backup_path="$BACKUP_DIR/$game"
+    mkdir -p "$backup_path"
+
+    echo ""
+    info "Backing up $(get_game_name "$game") server data..."
+
+    # If server is running, warn about consistency
+    if is_server_running "$game"; then
+        warn "Server is running. Backup may not be fully consistent."
+        echo -e "  ${DIM}For best results, stop the server first: 24hg-host stop $game${RESET}"
+        echo ""
+    fi
+
+    # Calculate size
+    local dir_size
+    dir_size=$(du -sh "$game_dir" 2>/dev/null | awk '{print $1}')
+    info "Data size: $dir_size"
+
+    # Create compressed backup
+    local backup_file="$backup_path/${backup_name}.tar.zst"
+    if command -v zstd &>/dev/null; then
+        tar -cf - -C "$DATA_DIR" "$game" | zstd -T0 -3 -o "$backup_file" 2>/dev/null
+    else
+        backup_file="$backup_path/${backup_name}.tar.gz"
+        tar -czf "$backup_file" -C "$DATA_DIR" "$game"
+    fi
+
+    local backup_size
+    backup_size=$(du -sh "$backup_file" 2>/dev/null | awk '{print $1}')
+    success "Backup created: $backup_file ($backup_size)"
+
+    # Prune old backups (keep last 5)
+    local backup_count
+    backup_count=$(ls -1 "$backup_path"/*.tar.* 2>/dev/null | wc -l)
+    if (( backup_count > 5 )); then
+        local to_delete=$((backup_count - 5))
+        info "Pruning $to_delete old backup(s)..."
+        ls -1t "$backup_path"/*.tar.* | tail -n "$to_delete" | xargs rm -f
+        success "Old backups pruned (keeping last 5)"
+    fi
+
+    echo ""
+    log "Backup created for $game: $backup_file"
+}
+
+cmd_restore() {
+    local game="${1:-}"
+    local backup_file="${2:-}"
+
+    [[ -z "$game" ]] && die "Usage: 24hg-host restore <game> <backup>"
+    game_exists "$game" || die "Unknown game: $game"
+
+    local backup_path="$BACKUP_DIR/$game"
+
+    # If no backup file specified, list available and prompt
+    if [[ -z "$backup_file" ]]; then
+        if [[ ! -d "$backup_path" ]] || [[ -z "$(ls -A "$backup_path"/*.tar.* 2>/dev/null)" ]]; then
+            die "No backups found for $(get_game_name "$game") in $backup_path"
+        fi
+
+        echo ""
+        echo -e "${BOLD}${WHITE}  Available Backups — $(get_game_name "$game")${RESET}"
+        echo -e "${DIM}  ─────────────────────────────────────────────────${RESET}"
+        echo ""
+
+        local i=1
+        declare -a backup_list=()
+        while IFS= read -r f; do
+            local bname bsize bdate
+            bname=$(basename "$f")
+            bsize=$(du -sh "$f" 2>/dev/null | awk '{print $1}')
+            bdate=$(stat -c '%y' "$f" 2>/dev/null | cut -d'.' -f1)
+            printf "  ${CYAN}%2d)${RESET} %-40s ${DIM}%s  %s${RESET}\n" "$i" "$bname" "$bsize" "$bdate"
+            backup_list+=("$f")
+            ((i++))
+        done < <(ls -1t "$backup_path"/*.tar.* 2>/dev/null)
+
+        echo ""
+        read -rp "  Select backup number (or 'q' to cancel): " choice
+        [[ "$choice" == "q" || -z "$choice" ]] && die "Cancelled"
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#backup_list[@]} )); then
+            backup_file="${backup_list[$((choice-1))]}"
+        else
+            die "Invalid selection"
+        fi
+    else
+        # Check if it's a full path or just a filename
+        if [[ ! -f "$backup_file" ]]; then
+            if [[ -f "$backup_path/$backup_file" ]]; then
+                backup_file="$backup_path/$backup_file"
+            else
+                die "Backup not found: $backup_file"
+            fi
+        fi
+    fi
+
+    echo ""
+    warn "This will REPLACE all server data for $(get_game_name "$game") with the backup."
+    read -rp "Are you sure? [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy] ]] || die "Cancelled by user"
+
+    # Stop server if running
+    if is_server_running "$game"; then
+        info "Stopping server for restore..."
+        cmd_stop "$game"
+    fi
+
+    local game_dir="$DATA_DIR/$game"
+
+    # Create safety backup of current data
+    if [[ -d "$game_dir" ]] && [[ -n "$(ls -A "$game_dir" 2>/dev/null)" ]]; then
+        local safety_backup="$backup_path/${game}_pre-restore_$(date +%Y%m%d_%H%M%S).tar.gz"
+        info "Creating safety backup of current data..."
+        tar -czf "$safety_backup" -C "$DATA_DIR" "$game" 2>/dev/null || true
+    fi
+
+    # Remove current data
+    info "Removing current server data..."
+    rm -rf "$game_dir"
+    mkdir -p "$game_dir"
+
+    # Extract backup
+    info "Restoring from: $(basename "$backup_file")"
+    if [[ "$backup_file" == *.zst ]]; then
+        zstd -d "$backup_file" --stdout | tar -xf - -C "$DATA_DIR"
+    else
+        tar -xzf "$backup_file" -C "$DATA_DIR"
+    fi
+
+    success "Server data restored successfully."
+    echo ""
+    echo -e "  ${DIM}Start the server:${RESET}  24hg-host start $game"
+    echo ""
+
+    log "Restored $game from backup: $backup_file"
+}
+
+# ── Help ────────────────────────────────────────────────────────────────────
+
+cmd_help() {
+    echo ""
+    echo -e "${BOLD}${WHITE}  24HG Host${RESET} — One-Click Game Server Hosting"
+    echo -e "${DIM}  ─────────────────────────────────────────────────${RESET}"
+    echo ""
+    echo -e "  ${BOLD}USAGE${RESET}"
+    echo -e "    24hg-host ${CYAN}<command>${RESET} ${DIM}[game] [options]${RESET}"
+    echo ""
+    echo -e "  ${BOLD}COMMANDS${RESET}"
+    echo -e "    ${CYAN}list${RESET}                       List available game servers"
+    echo -e "    ${CYAN}start${RESET} <game>               Start hosting a game server"
+    echo -e "    ${CYAN}stop${RESET} <game>                Stop a game server"
+    echo -e "    ${CYAN}status${RESET}                     Show running servers"
+    echo -e "    ${CYAN}logs${RESET} <game>                View server logs (follow mode)"
+    echo -e "    ${CYAN}config${RESET} <game>              Edit server configuration"
+    echo -e "    ${CYAN}update${RESET} <game>              Update server files"
+    echo -e "    ${CYAN}players${RESET} <game>             Show connected players"
+    echo -e "    ${CYAN}announce${RESET}                   Announce on LAN + Hub"
+    echo -e "    ${CYAN}backup${RESET} <game>              Backup server data"
+    echo -e "    ${CYAN}restore${RESET} <game> [backup]    Restore from backup"
+    echo ""
+    echo -e "  ${BOLD}GAMES${RESET}"
+    echo -e "    ${CYAN}minecraft${RESET}          Minecraft Java Edition"
+    echo -e "    ${CYAN}minecraft-bedrock${RESET}  Minecraft Bedrock Edition"
+    echo -e "    ${CYAN}valheim${RESET}            Viking survival co-op"
+    echo -e "    ${CYAN}terraria${RESET}           2D sandbox adventure"
+    echo -e "    ${CYAN}factorio${RESET}           Factory building automation"
+    echo -e "    ${CYAN}zomboid${RESET}            Project Zomboid"
+    echo -e "    ${CYAN}7days${RESET}              7 Days to Die"
+    echo -e "    ${CYAN}satisfactory${RESET}       First-person factory"
+    echo -e "    ${CYAN}palworld${RESET}           Creature collection survival"
+    echo -e "    ${CYAN}cs2${RESET}                Counter-Strike 2"
+    echo ""
+    echo -e "  ${BOLD}EXAMPLES${RESET}"
+    echo -e "    ${DIM}# Start a Minecraft server with defaults${RESET}"
+    echo -e "    24hg-host start minecraft"
+    echo ""
+    echo -e "    ${DIM}# Configure before starting${RESET}"
+    echo -e "    24hg-host config valheim"
+    echo -e "    24hg-host start valheim"
+    echo ""
+    echo -e "    ${DIM}# Check what's running${RESET}"
+    echo -e "    24hg-host status"
+    echo ""
+    echo -e "    ${DIM}# Backup and restore${RESET}"
+    echo -e "    24hg-host backup minecraft"
+    echo -e "    24hg-host restore minecraft"
+    echo ""
+    echo -e "  ${BOLD}SERVER DATA${RESET}"
+    echo -e "    Configs:  ${DIM}~/.config/24hg/servers/<game>/server.conf${RESET}"
+    echo -e "    Worlds:   ${DIM}~/Games/Servers/<game>/${RESET}"
+    echo -e "    Backups:  ${DIM}~/Games/Servers/.backups/<game>/${RESET}"
+    echo ""
+    echo -e "  ${BOLD}REQUIREMENTS${RESET}"
+    echo -e "    Container runtime: ${DIM}podman (preferred) or docker${RESET}"
+    echo -e "    Port forwarding:   ${DIM}miniupnpc (auto) or manual router config${RESET}"
+    echo ""
+}
+
+# ── CLI Options Parsing ─────────────────────────────────────────────────────
+
+parse_start_options() {
+    local game="$1"
+    shift
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port|-p)
+                [[ -n "${2:-}" ]] || die "--port requires a value"
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                sed -i "s/^PORT=.*/PORT=$2/" "$config_file"
+                info "Port set to $2"
+                shift 2
+                ;;
+            --ram|-m)
+                [[ -n "${2:-}" ]] || die "--ram requires a value (in MB)"
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                sed -i "s/^RAM=.*/RAM=$2/" "$config_file"
+                info "RAM set to ${2}MB"
+                shift 2
+                ;;
+            --password)
+                [[ -n "${2:-}" ]] || die "--password requires a value"
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                sed -i "s/^PASSWORD=.*/PASSWORD=\"$2\"/" "$config_file"
+                info "Password set"
+                shift 2
+                ;;
+            --name)
+                [[ -n "${2:-}" ]] || die "--name requires a value"
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                sed -i "s/^SERVER_NAME=.*/SERVER_NAME=\"$2\"/" "$config_file"
+                info "Server name set to: $2"
+                shift 2
+                ;;
+            --players)
+                [[ -n "${2:-}" ]] || die "--players requires a value"
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                sed -i "s/^MAX_PLAYERS=.*/MAX_PLAYERS=$2/" "$config_file"
+                info "Max players set to $2"
+                shift 2
+                ;;
+            --no-announce)
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                sed -i "s/^AUTO_ANNOUNCE=.*/AUTO_ANNOUNCE=false/" "$config_file"
+                sed -i "s/^HUB_REGISTER=.*/HUB_REGISTER=false/" "$config_file"
+                info "Announcements disabled"
+                shift
+                ;;
+            --no-upnp)
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                sed -i "s/^UPNP_ENABLED=.*/UPNP_ENABLED=false/" "$config_file"
+                info "UPnP disabled"
+                shift
+                ;;
+            --version|-V)
+                [[ -n "${2:-}" ]] || die "--version requires a value"
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                case "$game" in
+                    minecraft)
+                        sed -i "s/^MC_VERSION=.*/MC_VERSION=$2/" "$config_file"
+                        info "Minecraft version set to $2"
+                        ;;
+                    *)
+                        warn "--version is only supported for Minecraft"
+                        ;;
+                esac
+                shift 2
+                ;;
+            --seed|-s)
+                [[ -n "${2:-}" ]] || die "--seed requires a value"
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                case "$game" in
+                    minecraft)   sed -i "s/^MC_SEED=.*/MC_SEED=\"$2\"/" "$config_file" ;;
+                    valheim)     sed -i "s/^VH_SEED=.*/VH_SEED=\"$2\"/" "$config_file" ;;
+                    terraria)    sed -i "s/^TR_SEED=.*/TR_SEED=\"$2\"/" "$config_file" ;;
+                    7days)       sed -i "s/^SDTD_WORLD_GEN_SEED=.*/SDTD_WORLD_GEN_SEED=\"$2\"/" "$config_file" ;;
+                    *)           warn "--seed not supported for $game" ;;
+                esac
+                info "World seed set to: $2"
+                shift 2
+                ;;
+            --mode)
+                [[ -n "${2:-}" ]] || die "--mode requires a value"
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                case "$game" in
+                    minecraft)
+                        sed -i "s/^MC_GAMEMODE=.*/MC_GAMEMODE=$2/" "$config_file"
+                        info "Game mode set to $2"
+                        ;;
+                    cs2)
+                        sed -i "s/^CS2_GAME_MODE=.*/CS2_GAME_MODE=$2/" "$config_file"
+                        info "Game mode set to $2"
+                        ;;
+                    *)
+                        warn "--mode not supported for $game"
+                        ;;
+                esac
+                shift 2
+                ;;
+            --map)
+                [[ -n "${2:-}" ]] || die "--map requires a value"
+                local config_file="$CONFIG_DIR/$game/server.conf"
+                init_default_config "$game"
+                case "$game" in
+                    cs2)
+                        sed -i "s/^CS2_MAP=.*/CS2_MAP=$2/" "$config_file"
+                        info "Map set to $2"
+                        ;;
+                    *)
+                        warn "--map not supported for $game"
+                        ;;
+                esac
+                shift 2
+                ;;
+            --help|-h)
+                cmd_help
+                exit 0
+                ;;
+            *)
+                die "Unknown option: $1\n  Run '24hg-host start --help' for usage."
+                ;;
+        esac
+    done
+}
+
+# ── Completions ─────────────────────────────────────────────────────────────
+
+generate_completions() {
+    local shell="${1:-bash}"
+    case "$shell" in
+        bash)
+            cat <<'COMP'
+_hg24_host() {
+    local cur prev commands games
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    commands="list start stop status logs config update players announce backup restore help"
+    games="minecraft minecraft-bedrock valheim terraria factorio zomboid 7days satisfactory palworld cs2"
+
+    case "$prev" in
+        24hg-host)
+            COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+            ;;
+        start|stop|logs|config|update|players|backup|restore)
+            COMPREPLY=( $(compgen -W "$games" -- "$cur") )
+            ;;
+    esac
+    return 0
+}
+complete -F _hg24_host 24hg-host
+COMP
+            ;;
+        zsh)
+            cat <<'COMP'
+#compdef 24hg-host
+_hg24_host() {
+    local -a commands games
+    commands=(list start stop status logs config update players announce backup restore help)
+    games=(minecraft minecraft-bedrock valheim terraria factorio zomboid 7days satisfactory palworld cs2)
+
+    _arguments '1:command:($commands)' '2:game:($games)'
+}
+_hg24_host
+COMP
+            ;;
+    esac
+}
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+main() {
+    local command="${1:-list}"
+    shift 2>/dev/null || true
+
+    # Special non-container commands
+    case "$command" in
+        --help|-h|help)
+            cmd_help
+            exit 0
+            ;;
+        --version)
+            echo "24hg-host $HG24_VERSION"
+            exit 0
+            ;;
+        --completions)
+            generate_completions "${1:-bash}"
+            exit 0
+            ;;
+    esac
+
+    # All other commands need a container runtime
+    detect_container_runtime
+
+    case "$command" in
+        list|ls)
+            cmd_list
+            ;;
+        start)
+            local game="${1:-}"
+            shift 2>/dev/null || true
+            if [[ -n "$game" ]]; then
+                parse_start_options "$game" "$@"
+            fi
+            cmd_start "$game"
+            ;;
+        stop)
+            cmd_stop "${1:-}"
+            ;;
+        status|st)
+            cmd_status
+            ;;
+        logs|log)
+            cmd_logs "${1:-}" "${2:-100}"
+            ;;
+        config|cfg)
+            cmd_config "${1:-}"
+            ;;
+        update|up)
+            cmd_update "${1:-}"
+            ;;
+        players|pl)
+            cmd_players "${1:-}"
+            ;;
+        announce)
+            cmd_announce
+            ;;
+        backup|bk)
+            cmd_backup "${1:-}"
+            ;;
+        restore|rs)
+            cmd_restore "${1:-}" "${2:-}"
+            ;;
+        *)
+            die "Unknown command: $command\n  Run '24hg-host help' for usage."
+            ;;
+    esac
+}
+
+main "$@"

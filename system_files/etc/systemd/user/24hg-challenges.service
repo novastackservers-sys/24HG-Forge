@@ -1,0 +1,13 @@
+[Unit]
+Description=24HG Challenge Tracker — auto-track weekly challenge progress
+After=graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -c '/usr/bin/24hg-challenges daemon --once'
+TimeoutStartSec=120
+Environment=HOME=%h
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,44 @@
+[Unit]
+Description=24HG Crash Report Daemon
+Documentation=https://24hgaming.com/docs/crash-reporting
+After=default.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/24hg-crash-report daemon
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+# Environment
+Environment=24HG_DEBUG=0
+
+# Resource limits — lightweight daemon
+MemoryHigh=64M
+MemoryMax=128M
+CPUQuota=5%
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/24hg %h/.cache/24hg %h/.config/24hg
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=24hg-crash-report
+
+[Install]
+WantedBy=default.target

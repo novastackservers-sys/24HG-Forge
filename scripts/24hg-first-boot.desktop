@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG First Boot Wizard
+Comment=Configure your 24HG installation
+Exec=/usr/bin/24hg-first-boot
+Icon=24hg-logo
+Type=Application
+Categories=System;Settings;
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

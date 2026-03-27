@@ -1,0 +1,12 @@
+[Unit]
+Description=24HG Achievement Tracker
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/24hg-achievements watch
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target

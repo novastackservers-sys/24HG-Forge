@@ -1,4 +1,4 @@
-PRETTY_HOSTNAME="forge-desktop"
-ICON_NAME=forge-logo
+PRETTY_HOSTNAME="24hg-desktop"
+ICON_NAME=24hg-logo
 CHASSIS=desktop
 DEPLOYMENT=production

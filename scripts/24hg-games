@@ -1,0 +1,1668 @@
+#!/usr/bin/env python3
+"""24HG Unified Game Library — All your games from every launcher in one place
+
+Commands:
+    list                 Show all installed games across all launchers
+    search <query>       Fuzzy search across all games
+    launch <name|id>     Launch a game from any launcher
+    info <name|id>       Detailed info about a game
+    recent               Show recently played games
+    stats                Library statistics
+    refresh              Force rescan all launchers
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import sqlite3
+import struct
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# ─── Color Helpers ───────────────────────────────────────────────────────────
+
+class C:
+    """ANSI color codes."""
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    RED     = "\033[91m"
+    GREEN   = "\033[92m"
+    YELLOW  = "\033[93m"
+    BLUE    = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN    = "\033[96m"
+    WHITE   = "\033[97m"
+    GRAY    = "\033[90m"
+    BG_RED    = "\033[41m"
+    BG_GREEN  = "\033[42m"
+    BG_YELLOW = "\033[43m"
+    BG_BLUE   = "\033[44m"
+
+    @staticmethod
+    def enabled():
+        return sys.stdout.isatty()
+
+def c(text, *codes):
+    """Colorize text if stdout is a tty."""
+    if not C.enabled():
+        return text
+    return "".join(codes) + str(text) + C.RESET
+
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+CACHE_DIR = Path.home() / ".cache" / "24hg"
+CACHE_FILE = CACHE_DIR / "game-library.json"
+CACHE_TTL = 1800  # 30 minutes
+
+HOME = Path.home()
+
+# Steam paths (Flatpak + native)
+STEAM_PATHS = [
+    HOME / ".steam" / "steam",
+    HOME / ".local" / "share" / "Steam",
+    HOME / ".var" / "app" / "com.valvesoftware.Steam" / ".steam" / "steam",
+    HOME / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam",
+]
+
+# Heroic paths (Flatpak + native)
+HEROIC_PATHS = [
+    HOME / ".config" / "heroic",
+    HOME / ".var" / "app" / "com.heroicgameslauncher.hgl" / "config" / "heroic",
+]
+
+# Lutris paths
+LUTRIS_DB_PATHS = [
+    HOME / ".local" / "share" / "lutris" / "pga.db",
+    HOME / ".var" / "app" / "net.lutris.Lutris" / "data" / "lutris" / "pga.db",
+]
+
+LUTRIS_GAME_DIRS = [
+    HOME / ".config" / "lutris" / "games",
+    HOME / ".var" / "app" / "net.lutris.Lutris" / "config" / "lutris" / "games",
+]
+
+# Bottles paths
+BOTTLES_PATHS = [
+    HOME / ".local" / "share" / "bottles" / "bottles",
+    HOME / ".var" / "app" / "com.usebottles.bottles" / "data" / "bottles" / "bottles",
+]
+
+# Known Flatpak game IDs (partial list of popular ones)
+FLATPAK_GAME_PREFIXES = [
+    "com.mojang.Minecraft", "io.mrarm.mcpelauncher",
+    "org.prismlauncher.PrismLauncher", "org.polymc.PolyMC",
+    "net.minetest.Minetest", "org.supertuxkart.SuperTuxKart",
+    "io.openrct2.OpenRCT2", "org.wesnoth.Wesnoth",
+    "net.sourceforge.fretsonfire", "org.frozen_bubble.FrozenBubble",
+    "com.endlessnetwork.aqueern",
+]
+
+
+# ─── VDF Parser ──────────────────────────────────────────────────────────────
+
+def parse_vdf(text):
+    """Parse Valve's VDF format into nested dictionaries.
+
+    VDF looks like:
+        "key" "value"
+        "key" { ... }
+    """
+    result = {}
+    stack = [result]
+    tokens = _vdf_tokenize(text)
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "}":
+            if len(stack) > 1:
+                stack.pop()
+            i += 1
+            continue
+        if token == "{":
+            i += 1
+            continue
+        # Token is a key
+        key = token
+        i += 1
+        if i >= len(tokens):
+            break
+        next_token = tokens[i]
+        if next_token == "{":
+            # Nested section
+            new_dict = {}
+            stack[-1][key] = new_dict
+            stack.append(new_dict)
+            i += 1
+        else:
+            # Key-value pair
+            stack[-1][key] = next_token
+            i += 1
+    return result
+
+
+def _vdf_tokenize(text):
+    """Tokenize VDF text into a list of strings and braces."""
+    tokens = []
+    i = 0
+    length = len(text)
+    while i < length:
+        ch = text[i]
+        # Skip whitespace
+        if ch in (" ", "\t", "\r", "\n"):
+            i += 1
+            continue
+        # Skip comments
+        if ch == "/" and i + 1 < length and text[i + 1] == "/":
+            while i < length and text[i] != "\n":
+                i += 1
+            continue
+        # Braces
+        if ch in ("{", "}"):
+            tokens.append(ch)
+            i += 1
+            continue
+        # Quoted string
+        if ch == '"':
+            i += 1
+            start = i
+            while i < length and text[i] != '"':
+                if text[i] == "\\" and i + 1 < length:
+                    i += 2
+                else:
+                    i += 1
+            tokens.append(text[start:i].replace('\\"', '"').replace("\\\\", "\\"))
+            i += 1  # skip closing quote
+            continue
+        # Unquoted token (some VDF files omit quotes)
+        start = i
+        while i < length and text[i] not in (" ", "\t", "\r", "\n", '"', "{", "}"):
+            i += 1
+        tokens.append(text[start:i])
+    return tokens
+
+
+def read_vdf_file(path):
+    """Read and parse a VDF file, returning {} on any error."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return parse_vdf(f.read())
+    except (OSError, UnicodeDecodeError):
+        return {}
+
+
+# ─── Utility Helpers ─────────────────────────────────────────────────────────
+
+def human_size(size_bytes):
+    """Convert bytes to human-readable string."""
+    if size_bytes <= 0:
+        return "—"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(size_bytes) < 1024:
+            if unit in ("B", "KB"):
+                return f"{size_bytes:.0f} {unit}"
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} PB"
+
+
+def relative_time(timestamp):
+    """Convert a Unix timestamp to relative time string."""
+    if not timestamp or timestamp <= 0:
+        return "Never"
+    now = time.time()
+    diff = now - timestamp
+    if diff < 0:
+        return "Just now"
+    if diff < 60:
+        return "Just now"
+    if diff < 3600:
+        m = int(diff / 60)
+        return f"{m}m ago"
+    if diff < 86400:
+        h = int(diff / 3600)
+        return f"{h}h ago"
+    if diff < 172800:
+        return "Yesterday"
+    if diff < 604800:
+        d = int(diff / 86400)
+        return f"{d} days ago"
+    if diff < 2592000:
+        w = int(diff / 604800)
+        return f"{w} week{'s' if w > 1 else ''} ago"
+    if diff < 31536000:
+        m = int(diff / 2592000)
+        return f"{m} month{'s' if m > 1 else ''} ago"
+    y = int(diff / 31536000)
+    return f"{y} year{'s' if y > 1 else ''} ago"
+
+
+def fuzzy_score(query, text):
+    """Simple fuzzy match scoring. Higher = better match. Returns 0 for no match."""
+    q = query.lower()
+    t = text.lower()
+    # Exact match
+    if q == t:
+        return 1000
+    # Starts with
+    if t.startswith(q):
+        return 900
+    # Contains as substring
+    if q in t:
+        return 800 - len(t)  # prefer shorter names
+    # Word match — query matches start of a word
+    words = re.split(r"[\s\-_:]+", t)
+    for w in words:
+        if w.startswith(q):
+            return 700
+    # Character-level subsequence matching (Levenshtein-like)
+    qi = 0
+    consecutive = 0
+    max_consecutive = 0
+    score = 0
+    for ti, ch in enumerate(t):
+        if qi < len(q) and ch == q[qi]:
+            qi += 1
+            consecutive += 1
+            max_consecutive = max(max_consecutive, consecutive)
+            score += 10 + consecutive * 5  # reward consecutive matches
+        else:
+            consecutive = 0
+    if qi < len(q):
+        return 0  # Not all query chars matched
+    return min(score + max_consecutive * 20, 699)
+
+
+def dir_size_bytes(path):
+    """Get directory size in bytes. Returns 0 on error."""
+    total = 0
+    try:
+        for dirpath, _, filenames in os.walk(path):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                try:
+                    total += os.path.getsize(fp)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+# ─── Game Entry ──────────────────────────────────────────────────────────────
+
+class Game:
+    """Represents an installed game from any launcher."""
+
+    def __init__(self, name, launcher, **kwargs):
+        self.name = name
+        self.launcher = launcher          # "Steam", "Heroic/GOG", "Heroic/Epic", "Lutris", "Flatpak", "Native", "Bottles"
+        self.app_id = kwargs.get("app_id", "")
+        self.install_path = kwargs.get("install_path", "")
+        self.size_bytes = kwargs.get("size_bytes", 0)
+        self.last_played = kwargs.get("last_played", 0)  # Unix timestamp
+        self.playtime_minutes = kwargs.get("playtime_minutes", 0)
+        self.status = kwargs.get("status", "Unknown")     # Native, Proton X, Wine-GE, Java, etc.
+        self.proton_version = kwargs.get("proton_version", "")
+        self.slug = kwargs.get("slug", "")                # For Lutris
+        self.launch_cmd = kwargs.get("launch_cmd", "")
+        self.flatpak_id = kwargs.get("flatpak_id", "")
+        self.prefix_path = kwargs.get("prefix_path", "")
+        self.runner = kwargs.get("runner", "")
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "launcher": self.launcher,
+            "app_id": str(self.app_id),
+            "install_path": self.install_path,
+            "size_bytes": self.size_bytes,
+            "last_played": self.last_played,
+            "playtime_minutes": self.playtime_minutes,
+            "status": self.status,
+            "proton_version": self.proton_version,
+            "slug": self.slug,
+            "launch_cmd": self.launch_cmd,
+            "flatpak_id": self.flatpak_id,
+            "prefix_path": self.prefix_path,
+            "runner": self.runner,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(
+            name=d["name"],
+            launcher=d["launcher"],
+            app_id=d.get("app_id", ""),
+            install_path=d.get("install_path", ""),
+            size_bytes=d.get("size_bytes", 0),
+            last_played=d.get("last_played", 0),
+            playtime_minutes=d.get("playtime_minutes", 0),
+            status=d.get("status", "Unknown"),
+            proton_version=d.get("proton_version", ""),
+            slug=d.get("slug", ""),
+            launch_cmd=d.get("launch_cmd", ""),
+            flatpak_id=d.get("flatpak_id", ""),
+            prefix_path=d.get("prefix_path", ""),
+            runner=d.get("runner", ""),
+        )
+
+
+# ─── Scanner: Steam ─────────────────────────────────────────────────────────
+
+def _find_steam_root():
+    """Find the active Steam root directory."""
+    for p in STEAM_PATHS:
+        if p.is_dir():
+            return p
+    return None
+
+
+def _get_steam_library_paths(steam_root):
+    """Parse libraryfolders.vdf to find all Steam library paths."""
+    paths = []
+    vdf_path = steam_root / "steamapps" / "libraryfolders.vdf"
+    if not vdf_path.exists():
+        vdf_path = steam_root / "config" / "libraryfolders.vdf"
+    if not vdf_path.exists():
+        # Fallback: just use the steam root
+        sa = steam_root / "steamapps"
+        if sa.is_dir():
+            paths.append(sa)
+        return paths
+
+    data = read_vdf_file(vdf_path)
+    # Navigate into the nested structure
+    folders = data.get("libraryfolders", data.get("LibraryFolders", data))
+    for key, val in folders.items():
+        if not key.isdigit() and key not in ("contentstatsid",):
+            continue
+        if isinstance(val, dict):
+            folder_path = val.get("path", "")
+        else:
+            folder_path = val
+        if folder_path:
+            sa = Path(folder_path) / "steamapps"
+            if sa.is_dir():
+                paths.append(sa)
+
+    # Always include main steamapps too
+    main = steam_root / "steamapps"
+    if main.is_dir() and main not in paths:
+        paths.insert(0, main)
+
+    return paths
+
+
+def _get_steam_last_played(steam_root):
+    """Parse localconfig.vdf to get last-played timestamps per appid."""
+    last_played = {}
+    userdata = steam_root / "userdata"
+    if not userdata.is_dir():
+        return last_played
+
+    for user_dir in userdata.iterdir():
+        if not user_dir.is_dir():
+            continue
+        config_path = user_dir / "config" / "localconfig.vdf"
+        if not config_path.exists():
+            continue
+        data = read_vdf_file(config_path)
+        # Navigate: UserLocalConfigStore -> Software -> Valve -> Steam -> apps
+        apps = None
+        for key_chain in [
+            ["UserLocalConfigStore", "Software", "Valve", "Steam", "apps"],
+            ["UserLocalConfigStore", "Software", "valve", "Steam", "apps"],
+            ["UserLocalConfigStore", "Software", "Valve", "Steam", "Apps"],
+        ]:
+            node = data
+            for k in key_chain:
+                if isinstance(node, dict):
+                    # Case-insensitive lookup
+                    found = None
+                    for dk in node:
+                        if dk.lower() == k.lower():
+                            found = dk
+                            break
+                    node = node.get(found, {}) if found else {}
+                else:
+                    node = {}
+            if node and isinstance(node, dict):
+                apps = node
+                break
+
+        if not apps:
+            continue
+
+        for appid, info in apps.items():
+            if isinstance(info, dict):
+                lp = info.get("LastPlayed", info.get("lastplayed", "0"))
+                try:
+                    ts = int(lp)
+                    if ts > last_played.get(appid, 0):
+                        last_played[appid] = ts
+                except (ValueError, TypeError):
+                    pass
+    return last_played
+
+
+def _detect_proton_version(steam_root, library_path, appid):
+    """Detect Proton version used for a game."""
+    # Check compatdata for compat tool mapping
+    compat_dir = library_path / "compatdata" / str(appid)
+    prefix_path = ""
+    if compat_dir.is_dir():
+        prefix_path = str(compat_dir)
+
+    # Check config for forced compat tool
+    config_path = steam_root / "config" / "config.vdf"
+    if config_path.exists():
+        data = read_vdf_file(config_path)
+        # Navigate to CompatToolMapping
+        mapping = None
+        # InstallConfigStore -> Software -> Valve -> Steam -> CompatToolMapping
+        node = data
+        for k in ["InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping"]:
+            if isinstance(node, dict):
+                found_key = None
+                for dk in node:
+                    if dk.lower() == k.lower():
+                        found_key = dk
+                        break
+                node = node.get(found_key, {}) if found_key else {}
+            else:
+                node = {}
+        if isinstance(node, dict) and str(appid) in node:
+            entry = node[str(appid)]
+            if isinstance(entry, dict):
+                tool_name = entry.get("name", "")
+                if tool_name:
+                    # Clean up name: proton_9 -> Proton 9, proton_experimental -> Proton Exp.
+                    nice = tool_name.replace("proton_", "Proton ").replace("_", " ")
+                    nice = nice.replace("experimental", "Exp.")
+                    nice = nice.replace("Proton ge", "Proton-GE")
+                    return nice.strip(), prefix_path
+
+    # If compatdata exists but no explicit config, it's likely Proton
+    if compat_dir.is_dir():
+        return "Proton", prefix_path
+
+    return "", prefix_path
+
+
+def scan_steam():
+    """Scan Steam for installed games."""
+    games = []
+    steam_root = _find_steam_root()
+    if not steam_root:
+        return games
+
+    library_paths = _get_steam_library_paths(steam_root)
+    last_played_map = _get_steam_last_played(steam_root)
+
+    seen_appids = set()
+
+    for lib_path in library_paths:
+        for manifest in lib_path.glob("appmanifest_*.acf"):
+            try:
+                data = read_vdf_file(manifest)
+                app_state = data.get("AppState", data)
+                if not isinstance(app_state, dict):
+                    continue
+
+                appid = app_state.get("appid", "")
+                name = app_state.get("name", "")
+                install_dir = app_state.get("installdir", "")
+                size_str = app_state.get("SizeOnDisk", "0")
+
+                if not appid or not name:
+                    continue
+                if appid in seen_appids:
+                    continue
+                seen_appids.add(appid)
+
+                # Skip tools/redistributables
+                app_type = app_state.get("StateFlags", "4")
+                if name.lower().startswith(("steamworks", "proton ", "steam linux")):
+                    continue
+                if "redistributable" in name.lower() or "sdk" == name.lower():
+                    continue
+
+                size_bytes = 0
+                try:
+                    size_bytes = int(size_str)
+                except (ValueError, TypeError):
+                    pass
+
+                install_path = str(lib_path / "common" / install_dir) if install_dir else ""
+                last_played_ts = last_played_map.get(appid, 0)
+
+                # Detect Proton/native
+                proton_ver, prefix_path = _detect_proton_version(steam_root, lib_path, appid)
+                if proton_ver:
+                    status = proton_ver
+                else:
+                    status = "Native"
+
+                games.append(Game(
+                    name=name,
+                    launcher="Steam",
+                    app_id=appid,
+                    install_path=install_path,
+                    size_bytes=size_bytes,
+                    last_played=last_played_ts,
+                    status=status,
+                    proton_version=proton_ver,
+                    prefix_path=prefix_path,
+                    launch_cmd=f"steam steam://rungameid/{appid}",
+                ))
+            except Exception:
+                continue
+
+    return games
+
+
+# ─── Scanner: Heroic ────────────────────────────────────────────────────────
+
+def _find_heroic_root():
+    """Find the Heroic config directory."""
+    for p in HEROIC_PATHS:
+        if p.is_dir():
+            return p
+    return None
+
+
+def _scan_heroic_gog(heroic_root):
+    """Scan Heroic GOG library."""
+    games = []
+    gog_lib = heroic_root / "store_cache" / "gog_library.json"
+    if not gog_lib.exists():
+        return games
+
+    try:
+        with open(gog_lib, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return games
+
+    # Get installed info
+    installed = {}
+    installed_file = heroic_root / "gog_store" / "installed.json"
+    if installed_file.exists():
+        try:
+            with open(installed_file, "r", encoding="utf-8", errors="replace") as f:
+                inst_data = json.load(f)
+            if isinstance(inst_data, list):
+                for entry in inst_data:
+                    aid = entry.get("appName", "")
+                    if aid:
+                        installed[aid] = entry
+            elif isinstance(inst_data, dict):
+                installed = inst_data.get("installed", inst_data)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    library = data if isinstance(data, list) else data.get("games", data.get("library", []))
+    if not isinstance(library, list):
+        return games
+
+    for entry in library:
+        app_name = entry.get("app_name", "")
+        title = entry.get("title", entry.get("name", "Unknown"))
+
+        inst = installed.get(app_name, {})
+        is_installed = bool(inst) or entry.get("is_installed", False)
+        if not is_installed:
+            continue
+
+        install_path = inst.get("install_path", entry.get("install_path", ""))
+        size_bytes = 0
+        if install_path and os.path.isdir(install_path):
+            # Estimate from disk_size field or compute
+            size_bytes = inst.get("install_size", 0)
+            if not size_bytes:
+                try:
+                    size_bytes = int(inst.get("installed_size", 0))
+                except (ValueError, TypeError):
+                    pass
+
+        # Detect Wine/Proton usage from game config
+        status = "Heroic/GOG"
+        wine_ver = ""
+        gc_file = heroic_root / "GamesConfig" / f"{app_name}.json"
+        if gc_file.exists():
+            try:
+                with open(gc_file, "r", encoding="utf-8", errors="replace") as f:
+                    gc = json.load(f)
+                wine_info = gc.get(app_name, gc).get("wineVersion", {})
+                if isinstance(wine_info, dict):
+                    wine_ver = wine_info.get("name", "")
+                    wtype = wine_info.get("type", "")
+                    if "proton" in wine_ver.lower() or "proton" in wtype.lower():
+                        status = wine_ver or "Proton"
+                    elif wine_ver:
+                        status = wine_ver
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        games.append(Game(
+            name=title,
+            launcher="Heroic/GOG",
+            app_id=app_name,
+            install_path=install_path,
+            size_bytes=size_bytes,
+            status=status,
+            proton_version=wine_ver,
+            launch_cmd=f"xdg-open heroic://launch/gog/{app_name}",
+        ))
+
+    return games
+
+
+def _scan_heroic_epic(heroic_root):
+    """Scan Heroic Epic/Legendary library."""
+    games = []
+
+    # Check legendary installed.json
+    installed = {}
+    for inst_path in [
+        heroic_root / "legendaryConfig" / "legendary" / "installed.json",
+        heroic_root / "legendaryConfig" / "installed.json",
+        HOME / ".config" / "legendary" / "installed.json",
+    ]:
+        if inst_path.exists():
+            try:
+                with open(inst_path, "r", encoding="utf-8", errors="replace") as f:
+                    installed = json.load(f)
+                break
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    # Also check epic library cache
+    epic_lib = heroic_root / "store_cache" / "legendary_library.json"
+    library_data = []
+    if epic_lib.exists():
+        try:
+            with open(epic_lib, "r", encoding="utf-8", errors="replace") as f:
+                data = json.load(f)
+            library_data = data if isinstance(data, list) else data.get("library", [])
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Build from installed games
+    for app_name, info in installed.items():
+        if not isinstance(info, dict):
+            continue
+        title = info.get("title", app_name)
+        install_path = info.get("install_path", "")
+        size_bytes = 0
+        try:
+            size_bytes = int(info.get("install_size", 0))
+        except (ValueError, TypeError):
+            pass
+
+        status = "Heroic/Epic"
+        wine_ver = ""
+        gc_file = heroic_root / "GamesConfig" / f"{app_name}.json"
+        if gc_file.exists():
+            try:
+                with open(gc_file, "r", encoding="utf-8", errors="replace") as f:
+                    gc = json.load(f)
+                wine_info = gc.get(app_name, gc).get("wineVersion", {})
+                if isinstance(wine_info, dict):
+                    wine_ver = wine_info.get("name", "")
+                    if wine_ver:
+                        status = wine_ver
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        games.append(Game(
+            name=title,
+            launcher="Heroic/Epic",
+            app_id=app_name,
+            install_path=install_path,
+            size_bytes=size_bytes,
+            status=status,
+            proton_version=wine_ver,
+            launch_cmd=f"xdg-open heroic://launch/legendary/{app_name}",
+        ))
+
+    return games
+
+
+def scan_heroic():
+    """Scan Heroic for installed games."""
+    heroic_root = _find_heroic_root()
+    if not heroic_root:
+        return []
+    gog = _scan_heroic_gog(heroic_root)
+    epic = _scan_heroic_epic(heroic_root)
+    return gog + epic
+
+
+# ─── Scanner: Lutris ────────────────────────────────────────────────────────
+
+def scan_lutris():
+    """Scan Lutris for installed games."""
+    games = []
+
+    # Try SQLite database first
+    for db_path in LUTRIS_DB_PATHS:
+        if db_path.exists():
+            try:
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT name, slug, runner, directory, installed,
+                           lastplayed, playtime, configpath
+                    FROM games
+                    WHERE installed = 1
+                """)
+                for row in cur.fetchall():
+                    name = row["name"] or "Unknown"
+                    slug = row["slug"] or ""
+                    runner = row["runner"] or ""
+                    directory = row["directory"] or ""
+                    last_played = row["lastplayed"] or 0
+                    playtime_hrs = row["playtime"] or 0
+
+                    # Determine status from runner
+                    status = "Lutris"
+                    if runner == "linux":
+                        status = "Native"
+                    elif runner == "wine":
+                        status = "Wine"
+                    elif runner == "steam":
+                        status = "Steam (Lutris)"
+                    elif runner:
+                        status = runner.capitalize()
+
+                    size_bytes = 0
+                    if directory and os.path.isdir(directory):
+                        # Don't compute size for perf, leave at 0 unless cached
+                        pass
+
+                    games.append(Game(
+                        name=name,
+                        launcher="Lutris",
+                        slug=slug,
+                        runner=runner,
+                        install_path=directory,
+                        size_bytes=size_bytes,
+                        last_played=int(last_played) if last_played else 0,
+                        playtime_minutes=int(float(playtime_hrs) * 60) if playtime_hrs else 0,
+                        status=status,
+                        launch_cmd=f"lutris lutris:rungameid/{slug}" if slug else "",
+                    ))
+                conn.close()
+                return games
+            except sqlite3.Error:
+                continue
+
+    # Fallback: parse YAML game configs
+    try:
+        import yaml as yaml_mod
+        has_yaml = True
+    except ImportError:
+        has_yaml = False
+
+    if has_yaml:
+        for game_dir in LUTRIS_GAME_DIRS:
+            if not game_dir.is_dir():
+                continue
+            for yml_file in game_dir.glob("*.yml"):
+                try:
+                    with open(yml_file, "r", encoding="utf-8", errors="replace") as f:
+                        cfg = yaml_mod.safe_load(f)
+                    if not isinstance(cfg, dict):
+                        continue
+                    name = cfg.get("name", yml_file.stem)
+                    runner = cfg.get("runner", "")
+                    slug = cfg.get("game_slug", yml_file.stem)
+                    games.append(Game(
+                        name=name,
+                        launcher="Lutris",
+                        slug=slug,
+                        runner=runner,
+                        status=runner.capitalize() if runner else "Lutris",
+                        launch_cmd=f"lutris lutris:rungameid/{slug}",
+                    ))
+                except Exception:
+                    continue
+
+    return games
+
+
+# ─── Scanner: Flatpak Games ─────────────────────────────────────────────────
+
+def scan_flatpak():
+    """Scan Flatpak for installed games."""
+    games = []
+    try:
+        result = subprocess.run(
+            ["flatpak", "list", "--app", "--columns=application,name,size"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return games
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return games
+
+    # Also get .desktop files to check categories
+    desktop_dirs = [
+        Path("/var/lib/flatpak/exports/share/applications"),
+        HOME / ".local" / "share" / "flatpak" / "exports" / "share" / "applications",
+    ]
+
+    game_app_ids = set()
+    for dd in desktop_dirs:
+        if not dd.is_dir():
+            continue
+        for desktop_file in dd.glob("*.desktop"):
+            try:
+                content = desktop_file.read_text(encoding="utf-8", errors="replace")
+                if "Categories=" in content:
+                    cats = ""
+                    for line in content.splitlines():
+                        if line.startswith("Categories="):
+                            cats = line.split("=", 1)[1].lower()
+                            break
+                    if "game" in cats:
+                        app_id = desktop_file.stem
+                        game_app_ids.add(app_id)
+            except OSError:
+                continue
+
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        app_id = parts[0].strip()
+        name = parts[1].strip()
+        size_str = parts[2].strip() if len(parts) > 2 else ""
+
+        # Only include if it's a game (by category or known prefix)
+        is_game = app_id in game_app_ids
+        if not is_game:
+            for prefix in FLATPAK_GAME_PREFIXES:
+                if app_id.startswith(prefix) or app_id == prefix:
+                    is_game = True
+                    break
+        if not is_game:
+            continue
+
+        # Parse size (e.g., "1.2 GB")
+        size_bytes = 0
+        size_match = re.match(r"([\d.]+)\s*(bytes|[KMGTP]B)", size_str, re.IGNORECASE)
+        if size_match:
+            val = float(size_match.group(1))
+            unit = size_match.group(2).upper()
+            multipliers = {"BYTES": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+            size_bytes = int(val * multipliers.get(unit, 1))
+
+        # Determine status
+        status = "Flatpak"
+        if "minecraft" in name.lower():
+            status = "Java"
+        elif "prism" in name.lower() or "polymc" in name.lower():
+            status = "Java"
+
+        games.append(Game(
+            name=name,
+            launcher="Flatpak",
+            flatpak_id=app_id,
+            size_bytes=size_bytes,
+            status=status,
+            launch_cmd=f"flatpak run {app_id}",
+        ))
+
+    return games
+
+
+# ─── Scanner: Native / Misc ─────────────────────────────────────────────────
+
+def scan_native():
+    """Scan for native games in common locations."""
+    games = []
+    game_dirs = [
+        HOME / "Games",
+        HOME / "games",
+        Path("/opt/games"),
+    ]
+
+    for gd in game_dirs:
+        if not gd.is_dir():
+            continue
+        for entry in gd.iterdir():
+            if not entry.is_dir():
+                continue
+            # Look for executables
+            has_exec = False
+            for f in entry.iterdir():
+                if f.is_file() and os.access(f, os.X_OK):
+                    has_exec = True
+                    break
+            if not has_exec:
+                # Check for shell scripts
+                for f in entry.glob("*.sh"):
+                    has_exec = True
+                    break
+            if has_exec:
+                name = entry.name.replace("-", " ").replace("_", " ").title()
+                games.append(Game(
+                    name=name,
+                    launcher="Native",
+                    install_path=str(entry),
+                    status="Native",
+                ))
+
+    # Check for Minecraft (non-Flatpak)
+    mc_launcher = HOME / ".minecraft" / "launcher_profiles.json"
+    if mc_launcher.exists():
+        games.append(Game(
+            name="Minecraft (Java)",
+            launcher="Native",
+            install_path=str(HOME / ".minecraft"),
+            status="Java",
+            launch_cmd="minecraft-launcher",
+        ))
+
+    return games
+
+
+# ─── Scanner: Bottles ────────────────────────────────────────────────────────
+
+def scan_bottles():
+    """Scan Bottles for installed applications/games."""
+    games = []
+
+    for bottles_dir in BOTTLES_PATHS:
+        if not bottles_dir.is_dir():
+            continue
+        for bottle_dir in bottles_dir.iterdir():
+            if not bottle_dir.is_dir():
+                continue
+            config_file = bottle_dir / "bottle.yml"
+            if not config_file.exists():
+                continue
+
+            try:
+                # Simple YAML parse for bottle.yml (avoid full yaml dependency)
+                content = config_file.read_text(encoding="utf-8", errors="replace")
+                bottle_name = ""
+                env = ""
+                for line in content.splitlines():
+                    line = line.strip()
+                    if line.startswith("Name:") or line.startswith("name:"):
+                        bottle_name = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    elif line.startswith("Environment:") or line.startswith("environment:"):
+                        env = line.split(":", 1)[1].strip().strip('"').strip("'")
+
+                if not bottle_name:
+                    bottle_name = bottle_dir.name
+
+                # Only include gaming bottles
+                if env and env.lower() == "gaming":
+                    # Look for installed programs in the bottle
+                    programs_dir = bottle_dir / "drive_c" / "Program Files"
+                    if programs_dir.is_dir():
+                        for prog in programs_dir.iterdir():
+                            if prog.is_dir() and not prog.name.startswith(("Common", "Windows", "Internet")):
+                                games.append(Game(
+                                    name=f"{prog.name} ({bottle_name})",
+                                    launcher="Bottles",
+                                    install_path=str(prog),
+                                    status=f"Wine ({bottle_name})",
+                                    prefix_path=str(bottle_dir),
+                                ))
+
+            except OSError:
+                continue
+
+    return games
+
+
+# ─── Library Manager ─────────────────────────────────────────────────────────
+
+class GameLibrary:
+    """Manages the unified game library with caching."""
+
+    def __init__(self):
+        self.games = []
+        self._loaded = False
+
+    def load(self, force_refresh=False):
+        """Load the game library, using cache if valid."""
+        if not force_refresh and self._load_cache():
+            self._loaded = True
+            return
+        self.scan_all()
+        self._save_cache()
+        self._loaded = True
+
+    def scan_all(self):
+        """Scan all launchers for installed games."""
+        self.games = []
+        scanners = [
+            ("Steam", scan_steam),
+            ("Heroic", scan_heroic),
+            ("Lutris", scan_lutris),
+            ("Flatpak", scan_flatpak),
+            ("Native", scan_native),
+            ("Bottles", scan_bottles),
+        ]
+        for name, scanner in scanners:
+            try:
+                found = scanner()
+                self.games.extend(found)
+            except Exception as e:
+                print(c(f"  Warning: {name} scan failed: {e}", C.YELLOW), file=sys.stderr)
+
+        # Deduplicate: same name in Steam managed by Lutris → keep Steam entry
+        self._deduplicate()
+
+        # Sort by last played (most recent first), then by name
+        self.games.sort(key=lambda g: (-g.last_played, g.name.lower()))
+
+    def _deduplicate(self):
+        """Remove duplicate entries (same game from multiple scanners)."""
+        seen = {}
+        unique = []
+        for g in self.games:
+            key = g.name.lower().strip()
+            # Prefer Steam > Heroic > Lutris > others
+            priority = {"Steam": 0, "Heroic/GOG": 1, "Heroic/Epic": 1,
+                         "Lutris": 2, "Flatpak": 3, "Native": 4, "Bottles": 5}
+            p = priority.get(g.launcher, 9)
+            if key in seen:
+                if p < seen[key][0]:
+                    # Replace with higher-priority source
+                    idx = seen[key][1]
+                    unique[idx] = g
+                    seen[key] = (p, idx)
+            else:
+                seen[key] = (p, len(unique))
+                unique.append(g)
+        self.games = unique
+
+    def _load_cache(self):
+        """Load from cache file if it exists and is fresh."""
+        if not CACHE_FILE.exists():
+            return False
+        try:
+            mtime = CACHE_FILE.stat().st_mtime
+            if time.time() - mtime > CACHE_TTL:
+                return False
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.games = [Game.from_dict(d) for d in data.get("games", [])]
+            return True
+        except (json.JSONDecodeError, OSError, KeyError):
+            return False
+
+    def _save_cache(self):
+        """Save library to cache file."""
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            data = {
+                "version": 1,
+                "timestamp": time.time(),
+                "games": [g.to_dict() for g in self.games],
+            }
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except OSError:
+            pass
+
+    def search(self, query):
+        """Fuzzy search across all games. Returns list of (game, score)."""
+        results = []
+        for g in self.games:
+            score = fuzzy_score(query, g.name)
+            if score > 0:
+                results.append((g, score))
+        results.sort(key=lambda x: -x[1])
+        return results
+
+    def find_game(self, identifier):
+        """Find a game by name, id number (1-based), or app_id."""
+        # Try numeric index first
+        try:
+            idx = int(identifier) - 1
+            if 0 <= idx < len(self.games):
+                return self.games[idx]
+        except ValueError:
+            pass
+
+        # Try exact app_id match
+        for g in self.games:
+            if g.app_id and g.app_id == identifier:
+                return g
+
+        # Fuzzy search, return best match
+        results = self.search(identifier)
+        if results:
+            return results[0][0]
+        return None
+
+    def to_json(self):
+        """Return full library as JSON."""
+        return json.dumps([g.to_dict() for g in self.games], indent=2)
+
+
+# ─── Output Formatting ──────────────────────────────────────────────────────
+
+def _status_color(status):
+    """Return the appropriate color codes for a game status."""
+    s = status.lower()
+    if s == "native" or s == "java":
+        return C.GREEN
+    if "proton" in s:
+        return C.CYAN
+    if "wine" in s:
+        return C.YELLOW
+    if "heroic" in s:
+        return C.BLUE
+    if s == "flatpak":
+        return C.MAGENTA
+    if "broken" in s or "error" in s:
+        return C.RED
+    return C.WHITE
+
+
+def _launcher_color(launcher):
+    """Return the appropriate color for a launcher name."""
+    l = launcher.lower()
+    if "steam" in l:
+        return C.CYAN
+    if "heroic" in l:
+        return C.BLUE
+    if "lutris" in l:
+        return C.YELLOW
+    if "flatpak" in l:
+        return C.MAGENTA
+    if "native" in l:
+        return C.GREEN
+    if "bottles" in l:
+        return C.RED
+    return C.WHITE
+
+
+def print_game_table(games, title=None, short=False):
+    """Print a formatted table of games."""
+    if not games:
+        print(c("  No games found.", C.DIM))
+        return
+
+    if title:
+        print(f"\n  {c(title, C.BOLD, C.WHITE)}")
+        print()
+
+    if short:
+        # Compact format
+        for i, g in enumerate(games, 1):
+            status_col = _status_color(g.status)
+            launcher_col = _launcher_color(g.launcher)
+            print(f"  {c(f'{i:>3}', C.DIM)}  {g.name:<40s}  {c(g.launcher, launcher_col):<20s}  {c(g.status, status_col)}")
+        return
+
+    # Full table
+    header = f"  {'#':>3}  {'Game':<30s}  {'Launcher':<14s}  {'Size':>9s}  {'Last Played':<14s}  Status"
+    sep = "━" * 90
+    print(f"  {c(sep, C.DIM)}")
+    print(c(header, C.BOLD))
+    print(f"  {c(sep, C.DIM)}")
+
+    for i, g in enumerate(games, 1):
+        num = c(f"{i:>3}", C.DIM)
+        name = g.name[:30]
+        launcher_col = _launcher_color(g.launcher)
+        launcher = c(f"{g.launcher:<14s}", launcher_col)
+        size = human_size(g.size_bytes) if g.size_bytes else "—"
+        lp = relative_time(g.last_played)
+        status_col = _status_color(g.status)
+        status = c(g.status, status_col)
+
+        print(f"  {num}  {name:<30s}  {launcher}  {size:>9s}  {lp:<14s}  {status}")
+
+    print(f"  {c(sep, C.DIM)}")
+    print(c(f"  {len(games)} game{'s' if len(games) != 1 else ''} total", C.DIM))
+
+
+def print_game_info(game, idx=None):
+    """Print detailed info about a game."""
+    print()
+    print(f"  {c(game.name, C.BOLD, C.WHITE)}")
+    print(f"  {c('─' * 50, C.DIM)}")
+
+    fields = [
+        ("Launcher", game.launcher, _launcher_color(game.launcher)),
+        ("Status", game.status, _status_color(game.status)),
+    ]
+
+    if game.app_id:
+        fields.append(("App ID", game.app_id, C.WHITE))
+    if game.install_path:
+        fields.append(("Install Path", game.install_path, C.WHITE))
+    if game.size_bytes:
+        fields.append(("Size on Disk", human_size(game.size_bytes), C.WHITE))
+    if game.proton_version:
+        fields.append(("Proton/Wine", game.proton_version, C.CYAN))
+    if game.prefix_path:
+        fields.append(("Prefix Path", game.prefix_path, C.WHITE))
+    if game.playtime_minutes:
+        hrs = game.playtime_minutes / 60
+        if hrs >= 1:
+            fields.append(("Playtime", f"{hrs:.1f} hours", C.WHITE))
+        else:
+            fields.append(("Playtime", f"{game.playtime_minutes} minutes", C.WHITE))
+    fields.append(("Last Played", relative_time(game.last_played), C.WHITE))
+    if game.launch_cmd:
+        fields.append(("Launch Cmd", game.launch_cmd, C.DIM))
+    if game.slug:
+        fields.append(("Slug", game.slug, C.DIM))
+    if game.flatpak_id:
+        fields.append(("Flatpak ID", game.flatpak_id, C.DIM))
+    if game.runner:
+        fields.append(("Runner", game.runner, C.DIM))
+
+    for label, value, color in fields:
+        print(f"  {c(f'{label}:', C.DIM):>22s}  {c(value, color)}")
+
+    print()
+
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+def cmd_list(lib, args):
+    """List all installed games."""
+    lib.load()
+    if args.json:
+        print(lib.to_json())
+        return
+
+    games = lib.games
+    if args.launcher:
+        filt = args.launcher.lower()
+        games = [g for g in games if filt in g.launcher.lower()]
+
+    if args.sort == "name":
+        games = sorted(games, key=lambda g: g.name.lower())
+    elif args.sort == "size":
+        games = sorted(games, key=lambda g: -g.size_bytes)
+    elif args.sort == "launcher":
+        games = sorted(games, key=lambda g: (g.launcher, g.name.lower()))
+    # Default sort is by last_played (already done)
+
+    print_game_table(games, "Installed Games", short=args.short)
+
+
+def cmd_search(lib, args):
+    """Search for games."""
+    lib.load()
+    query = " ".join(args.query)
+    if not query:
+        print(c("  Usage: 24hg-games search <query>", C.YELLOW))
+        return
+
+    results = lib.search(query)
+    if args.json:
+        print(json.dumps([{"game": g.to_dict(), "score": s} for g, s in results], indent=2))
+        return
+
+    if not results:
+        print(c(f"  No games matching '{query}'", C.YELLOW))
+        return
+
+    games = [g for g, _ in results[:20]]
+    print_game_table(games, f"Search results for '{query}'", short=args.short)
+
+
+def cmd_launch(lib, args):
+    """Launch a game."""
+    lib.load()
+    identifier = " ".join(args.game)
+    if not identifier:
+        print(c("  Usage: 24hg-games launch <name|id>", C.YELLOW))
+        return
+
+    game = lib.find_game(identifier)
+    if not game:
+        print(c(f"  Game not found: '{identifier}'", C.RED))
+        print(c("  Try: 24hg-games search <query>", C.DIM))
+        return
+
+    print(f"  Launching {c(game.name, C.BOLD)} via {c(game.launcher, _launcher_color(game.launcher))}...")
+
+    if not game.launch_cmd:
+        # Build launch command based on launcher
+        if game.launcher == "Steam" and game.app_id:
+            game.launch_cmd = f"steam steam://rungameid/{game.app_id}"
+        elif game.launcher.startswith("Heroic") and game.app_id:
+            store = "gog" if "GOG" in game.launcher else "legendary"
+            game.launch_cmd = f"xdg-open heroic://launch/{store}/{game.app_id}"
+        elif game.launcher == "Lutris" and game.slug:
+            game.launch_cmd = f"lutris lutris:rungameid/{game.slug}"
+        elif game.launcher == "Flatpak" and game.flatpak_id:
+            game.launch_cmd = f"flatpak run {game.flatpak_id}"
+        else:
+            print(c("  No launch command available for this game.", C.RED))
+            return
+
+    # Parse and execute the launch command
+    cmd_parts = game.launch_cmd.split()
+    try:
+        # Use Popen to launch in background (don't wait for game to exit)
+        subprocess.Popen(
+            cmd_parts,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        print(c("  ✓ Game launched!", C.GREEN))
+    except FileNotFoundError:
+        # Try with xdg-open as fallback for URI schemes
+        if "://" in game.launch_cmd:
+            try:
+                subprocess.Popen(
+                    ["xdg-open", game.launch_cmd.split(None, 1)[-1]],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                print(c("  ✓ Game launched!", C.GREEN))
+            except Exception as e:
+                print(c(f"  Failed to launch: {e}", C.RED))
+        else:
+            print(c(f"  Launcher not found: {cmd_parts[0]}", C.RED))
+            print(c(f"  Command was: {game.launch_cmd}", C.DIM))
+    except Exception as e:
+        print(c(f"  Failed to launch: {e}", C.RED))
+
+
+def cmd_info(lib, args):
+    """Show detailed info about a game."""
+    lib.load()
+    identifier = " ".join(args.game)
+    if not identifier:
+        print(c("  Usage: 24hg-games info <name|id>", C.YELLOW))
+        return
+
+    game = lib.find_game(identifier)
+    if not game:
+        print(c(f"  Game not found: '{identifier}'", C.RED))
+        return
+
+    if args.json:
+        print(json.dumps(game.to_dict(), indent=2))
+        return
+
+    print_game_info(game)
+
+
+def cmd_recent(lib, args):
+    """Show recently played games."""
+    lib.load()
+
+    # Filter to games with last_played > 0, sort by most recent
+    recent = [g for g in lib.games if g.last_played > 0]
+    recent.sort(key=lambda g: -g.last_played)
+    recent = recent[:10]
+
+    if args.json:
+        print(json.dumps([g.to_dict() for g in recent], indent=2))
+        return
+
+    if not recent:
+        print(c("  No recently played games found.", C.DIM))
+        return
+
+    print(f"\n  {c('Recently Played', C.BOLD, C.WHITE)}")
+    print()
+    print(f"  {c('━' * 70, C.DIM)}")
+
+    for i, g in enumerate(recent, 1):
+        lp = relative_time(g.last_played)
+        launcher_col = _launcher_color(g.launcher)
+        status_col = _status_color(g.status)
+        print(f"  {c(f'[{i}]', C.BOLD, C.CYAN)}  {g.name:<35s}  {c(g.launcher, launcher_col):<15s}  {lp:<14s}  {c(g.status, status_col)}")
+
+    print(f"  {c('━' * 70, C.DIM)}")
+    print(c("  Launch with: 24hg-games launch <number>", C.DIM))
+
+
+def cmd_stats(lib, args):
+    """Show library statistics."""
+    lib.load()
+
+    if not lib.games:
+        if args.json:
+            print(json.dumps({"total_games": 0}, indent=2))
+        else:
+            print(c("  No games found. Run: 24hg-games refresh", C.YELLOW))
+        return
+
+    total = len(lib.games)
+    total_size = sum(g.size_bytes for g in lib.games)
+
+    # By launcher
+    by_launcher = {}
+    for g in lib.games:
+        by_launcher[g.launcher] = by_launcher.get(g.launcher, 0) + 1
+
+    # By status category
+    native_count = 0
+    proton_count = 0
+    wine_count = 0
+    other_count = 0
+    for g in lib.games:
+        s = g.status.lower()
+        if s in ("native", "java", "flatpak"):
+            native_count += 1
+        elif "proton" in s:
+            proton_count += 1
+        elif "wine" in s:
+            wine_count += 1
+        else:
+            other_count += 1
+
+    # Never played
+    never_played = [g for g in lib.games if g.last_played <= 0]
+
+    # Played this week
+    week_ago = time.time() - 604800
+    played_this_week = [g for g in lib.games if g.last_played > week_ago]
+
+    # Played this month
+    month_ago = time.time() - 2592000
+    played_this_month = [g for g in lib.games if g.last_played > month_ago]
+
+    if args.json:
+        stats = {
+            "total_games": total,
+            "total_size_bytes": total_size,
+            "by_launcher": by_launcher,
+            "compatibility": {
+                "native": native_count,
+                "proton": proton_count,
+                "wine": wine_count,
+                "other": other_count,
+            },
+            "never_played": len(never_played),
+            "played_this_week": len(played_this_week),
+            "played_this_month": len(played_this_month),
+        }
+        print(json.dumps(stats, indent=2))
+        return
+
+    print(f"\n  {c('Library Statistics', C.BOLD, C.WHITE)}")
+    print(f"  {c('━' * 50, C.DIM)}")
+    print()
+    print(f"  {c('Total Games:', C.DIM):>25s}  {c(total, C.BOLD, C.WHITE)}")
+    print(f"  {c('Total Size:', C.DIM):>25s}  {c(human_size(total_size), C.BOLD)}")
+    print()
+
+    # By launcher
+    print(f"  {c('By Launcher:', C.BOLD)}")
+    for launcher, count in sorted(by_launcher.items(), key=lambda x: -x[1]):
+        bar = "█" * min(count, 40)
+        col = _launcher_color(launcher)
+        print(f"    {c(f'{launcher}:', col):>22s}  {c(count, C.BOLD):>3s}  {c(bar, col)}")
+    print()
+
+    # Compatibility
+    print(f"  {c('Compatibility:', C.BOLD)}")
+    if native_count:
+        bar = "█" * min(native_count, 40)
+        print(f"    {c('Native/Java:', C.GREEN):>22s}  {c(str(native_count), C.BOLD):>3s}  {c(bar, C.GREEN)}")
+    if proton_count:
+        bar = "█" * min(proton_count, 40)
+        print(f"    {c('Proton:', C.CYAN):>22s}  {c(str(proton_count), C.BOLD):>3s}  {c(bar, C.CYAN)}")
+    if wine_count:
+        bar = "█" * min(wine_count, 40)
+        print(f"    {c('Wine:', C.YELLOW):>22s}  {c(str(wine_count), C.BOLD):>3s}  {c(bar, C.YELLOW)}")
+    if other_count:
+        bar = "█" * min(other_count, 40)
+        print(f"    {c('Other:', C.WHITE):>22s}  {c(str(other_count), C.BOLD):>3s}  {c(bar, C.DIM)}")
+    print()
+
+    # Activity
+    print(f"  {c('Activity:', C.BOLD)}")
+    print(f"    {c('Played this week:', C.DIM):>25s}  {c(str(len(played_this_week)), C.BOLD)}")
+    print(f"    {c('Played this month:', C.DIM):>25s}  {c(str(len(played_this_month)), C.BOLD)}")
+    if never_played:
+        print(f"    {c('Never played:', C.DIM):>25s}  {c(str(len(never_played)), C.YELLOW)} {c('(shame pile)', C.DIM)}")
+    print()
+
+
+def cmd_refresh(lib, args):
+    """Force rescan all launchers."""
+    print(f"  {c('Scanning all game launchers...', C.BOLD)}")
+    print()
+
+    t0 = time.time()
+    lib.scan_all()
+    lib._save_cache()
+    elapsed = time.time() - t0
+
+    # Show scan summary
+    by_launcher = {}
+    for g in lib.games:
+        by_launcher[g.launcher] = by_launcher.get(g.launcher, 0) + 1
+
+    for launcher, count in sorted(by_launcher.items(), key=lambda x: -x[1]):
+        col = _launcher_color(launcher)
+        print(f"    {c(launcher + ':', col):>18s}  {count} game{'s' if count != 1 else ''}")
+
+    print()
+    print(f"  {c(f'Found {len(lib.games)} games in {elapsed:.2f}s', C.BOLD, C.GREEN)}")
+    print(c(f"  Cache saved to {CACHE_FILE}", C.DIM))
+
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="24hg-games",
+        description="24HG Unified Game Library — All your games from every launcher in one place",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  24hg-games list                  Show all installed games
+  24hg-games list --sort name      Sort by name
+  24hg-games list --launcher steam Only Steam games
+  24hg-games search witcher        Find games matching 'witcher'
+  24hg-games launch rust           Launch Rust via its launcher
+  24hg-games launch 3              Launch game #3 from the list
+  24hg-games info "cyberpunk"      Detailed info about a game
+  24hg-games recent                Recently played games
+  24hg-games stats                 Library statistics
+  24hg-games refresh               Force rescan all launchers
+""",
+    )
+
+    # Global flags (on parent parser for `24hg-games --json list` style)
+    parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    parser.add_argument("--short", action="store_true", help="Compact listing")
+
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+
+    # Helper to add common flags to every subparser
+    def _add_common(sp):
+        sp.add_argument("--json", action="store_true", help="Output in JSON format")
+        sp.add_argument("--short", action="store_true", help="Compact listing")
+        return sp
+
+    # list
+    p_list = _add_common(subparsers.add_parser("list", aliases=["ls"], help="List all installed games"))
+    p_list.add_argument("--sort", choices=["recent", "name", "size", "launcher"], default="recent",
+                        help="Sort order (default: recent)")
+    p_list.add_argument("--launcher", "-l", help="Filter by launcher name")
+
+    # search
+    p_search = _add_common(subparsers.add_parser("search", aliases=["find"], help="Search for games"))
+    p_search.add_argument("query", nargs="+", help="Search query")
+
+    # launch
+    p_launch = _add_common(subparsers.add_parser("launch", aliases=["run", "play"], help="Launch a game"))
+    p_launch.add_argument("game", nargs="+", help="Game name or list number")
+
+    # info
+    p_info = _add_common(subparsers.add_parser("info", aliases=["show"], help="Show game details"))
+    p_info.add_argument("game", nargs="+", help="Game name or list number")
+
+    # recent
+    _add_common(subparsers.add_parser("recent", help="Recently played games"))
+
+    # stats
+    _add_common(subparsers.add_parser("stats", help="Library statistics"))
+
+    # refresh
+    _add_common(subparsers.add_parser("refresh", aliases=["scan"], help="Force rescan all launchers"))
+
+    # Use parse_known_args to handle global flags before subcommand
+    # Then re-parse the remainder with the full parser
+    args = parser.parse_args()
+
+    # Merge: if the parent-level --json/--short was set, propagate to subparser
+    # (argparse subparser defaults can shadow parent values)
+    raw = sys.argv[1:]
+    if "--json" in raw:
+        args.json = True
+    if "--short" in raw:
+        args.short = True
+
+    if not args.command:
+        # Default to list if no command given
+        args.command = "list"
+        args.sort = "recent"
+        args.launcher = None
+
+    lib = GameLibrary()
+
+    commands = {
+        "list": cmd_list, "ls": cmd_list,
+        "search": cmd_search, "find": cmd_search,
+        "launch": cmd_launch, "run": cmd_launch, "play": cmd_launch,
+        "info": cmd_info, "show": cmd_info,
+        "recent": cmd_recent,
+        "stats": cmd_stats,
+        "refresh": cmd_refresh, "scan": cmd_refresh,
+    }
+
+    cmd_func = commands.get(args.command)
+    if cmd_func:
+        cmd_func(lib, args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

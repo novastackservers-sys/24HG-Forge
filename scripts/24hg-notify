@@ -1,0 +1,1380 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG Notify — Notification center daemon and helper for KDE/Plasma
+
+# ── Colors ────────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    BOLD="\033[1m"
+    DIM="\033[2m"
+    RESET="\033[0m"
+    RED="\033[31m"
+    GREEN="\033[32m"
+    YELLOW="\033[33m"
+    BLUE="\033[34m"
+    MAGENTA="\033[35m"
+    CYAN="\033[36m"
+    WHITE="\033[37m"
+    GRAY="\033[38;5;242m"
+    ORANGE="\033[38;5;208m"
+    GOLD="\033[38;5;220m"
+else
+    BOLD="" DIM="" RESET="" RED="" GREEN="" YELLOW="" BLUE=""
+    MAGENTA="" CYAN="" WHITE="" GRAY="" ORANGE="" GOLD=""
+fi
+
+# ── Paths & Configuration ────────────────────────────────────────────────────
+CONFIG_DIR="${HOME}/.config/24hg"
+DATA_DIR="${HOME}/.local/share/24hg"
+HISTORY_FILE="${DATA_DIR}/notification-history.json"
+NOTIFY_DIR="/tmp/24hg-notifications"
+PID_FILE="/tmp/24hg-notify-daemon.pid"
+DBUS_MONITOR_PID_FILE="/tmp/24hg-notify-dbus.pid"
+LOG_TAG="24hg-notify"
+MAX_HISTORY=200
+VERSION="1.0.0"
+
+# Hub integration
+HUB_TOKEN_FILE="${CONFIG_DIR}/hub-token"
+HUB_API="https://hub.24hgaming.com/api"
+
+# ── Icon Paths ────────────────────────────────────────────────────────────────
+# Prefer 24HG branded icons, fall back to system theme icons
+ICON_BASE="/usr/share/icons/24hg"
+declare -A TYPE_ICONS=(
+    [clip-saved]="media-record"
+    [achievement]="trophy-gold"
+    [friend-online]="user-online"
+    [update-available]="system-software-update"
+    [download-complete]="download"
+    [tournament]="flag-checkered"
+    [voice]="audio-headphones"
+    [lan-player]="network-wired"
+    [rig-score]="speedometer"
+    [save-synced]="cloud-upload"
+)
+
+# Branded icon overrides (if installed)
+declare -A HG24_ICONS=(
+    [clip-saved]="${ICON_BASE}/24hg-clip.svg"
+    [achievement]="${ICON_BASE}/24hg-achievement.svg"
+    [friend-online]="${ICON_BASE}/24hg-friend.svg"
+    [update-available]="${ICON_BASE}/24hg-update.svg"
+    [download-complete]="${ICON_BASE}/24hg-download.svg"
+    [tournament]="${ICON_BASE}/24hg-tournament.svg"
+    [voice]="${ICON_BASE}/24hg-voice.svg"
+    [lan-player]="${ICON_BASE}/24hg-lan.svg"
+    [rig-score]="${ICON_BASE}/24hg-benchmark.svg"
+    [save-synced]="${ICON_BASE}/24hg-cloud.svg"
+)
+
+# ── Urgency Mapping ──────────────────────────────────────────────────────────
+declare -A TYPE_URGENCY=(
+    [clip-saved]="normal"
+    [achievement]="normal"
+    [friend-online]="low"
+    [update-available]="normal"
+    [download-complete]="normal"
+    [tournament]="critical"
+    [voice]="low"
+    [lan-player]="low"
+    [rig-score]="normal"
+    [save-synced]="low"
+)
+
+# ── Category Mapping (freedesktop notification categories) ────────────────────
+declare -A TYPE_CATEGORY=(
+    [clip-saved]="transfer.complete"
+    [achievement]="x-24hg.achievement"
+    [friend-online]="presence.online"
+    [update-available]="device.added"
+    [download-complete]="transfer.complete"
+    [tournament]="x-24hg.tournament"
+    [voice]="presence.online"
+    [lan-player]="network.connected"
+    [rig-score]="x-24hg.benchmark"
+    [save-synced]="transfer.complete"
+)
+
+# ── Timeout Mapping (ms) ─────────────────────────────────────────────────────
+declare -A TYPE_TIMEOUT=(
+    [clip-saved]="8000"
+    [achievement]="10000"
+    [friend-online]="5000"
+    [update-available]="15000"
+    [download-complete]="10000"
+    [tournament]="20000"
+    [voice]="5000"
+    [lan-player]="8000"
+    [rig-score]="10000"
+    [save-synced]="5000"
+)
+
+# ── Sound Mapping ─────────────────────────────────────────────────────────────
+SOUND_DIR="/usr/share/sounds/24hg"
+declare -A TYPE_SOUNDS=(
+    [clip-saved]="${SOUND_DIR}/clip-saved.ogg"
+    [achievement]="${SOUND_DIR}/achievement.ogg"
+    [friend-online]="${SOUND_DIR}/friend-online.ogg"
+    [update-available]="${SOUND_DIR}/update.ogg"
+    [download-complete]="${SOUND_DIR}/download-complete.ogg"
+    [tournament]="${SOUND_DIR}/tournament.ogg"
+    [voice]="${SOUND_DIR}/voice-join.ogg"
+    [lan-player]="${SOUND_DIR}/lan-detected.ogg"
+    [rig-score]="${SOUND_DIR}/leaderboard.ogg"
+    [save-synced]="${SOUND_DIR}/cloud-sync.ogg"
+)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+log()     { logger -t "$LOG_TAG" "$*"; }
+info()    { echo -e "${BLUE}${BOLD}[INFO]${RESET}  $*"; }
+success() { echo -e "${GREEN}${BOLD}[  OK]${RESET}  $*"; }
+warn()    { echo -e "${YELLOW}${BOLD}[WARN]${RESET}  $*"; }
+error()   { echo -e "${RED}${BOLD}[ ERR]${RESET}  $*" >&2; }
+
+die() {
+    error "$*"
+    log "ERROR: $*"
+    exit 1
+}
+
+banner() {
+    echo -e "${MAGENTA}${BOLD}"
+    cat << 'ART'
+  ╔═══════════════════════════════════════════════════╗
+  ║        24HG — Notification Center           ║
+  ╚═══════════════════════════════════════════════════╝
+ART
+    echo -e "${RESET}"
+}
+
+ensure_dirs() {
+    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$NOTIFY_DIR"
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        echo '[]' > "$HISTORY_FILE"
+    fi
+}
+
+timestamp_iso() {
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+timestamp_epoch() {
+    date +%s
+}
+
+# ── Icon Resolution ───────────────────────────────────────────────────────────
+# Prefer branded 24HG icons if they exist, otherwise use freedesktop names
+resolve_icon() {
+    local ntype="$1"
+    local branded="${HG24_ICONS[$ntype]:-}"
+    if [[ -n "$branded" && -f "$branded" ]]; then
+        echo "$branded"
+        return
+    fi
+    echo "${TYPE_ICONS[$ntype]:-dialog-information}"
+}
+
+# ── Notification History ──────────────────────────────────────────────────────
+# Append an entry to the JSON history file, enforcing the max size limit.
+# Uses a lockfile to prevent corruption from concurrent writes.
+history_append() {
+    local ntype="$1" title="$2" message="$3" nid="${4:-0}"
+    local ts
+    ts="$(timestamp_iso)"
+    local lockfile="/tmp/24hg-notify-history.lock"
+
+    (
+        flock -w 5 200 || return 1
+
+        # Build new entry as JSON
+        local entry
+        entry=$(cat <<JSONEOF
+{"type":"${ntype}","title":"$(json_escape "$title")","message":"$(json_escape "$message")","notification_id":${nid},"timestamp":"${ts}"}
+JSONEOF
+        )
+
+        # Read current history, append entry, trim to max
+        local current
+        current="$(cat "$HISTORY_FILE" 2>/dev/null || echo '[]')"
+
+        # Use python3 if available for robust JSON manipulation, else jq
+        if command -v python3 &>/dev/null; then
+            python3 -c "
+import json, sys
+try:
+    hist = json.loads('''${current}''')
+except:
+    hist = []
+entry = json.loads('''${entry}''')
+hist.append(entry)
+hist = hist[-${MAX_HISTORY}:]
+json.dump(hist, sys.stdout, indent=2)
+" > "${HISTORY_FILE}.tmp" 2>/dev/null && mv "${HISTORY_FILE}.tmp" "$HISTORY_FILE"
+        elif command -v jq &>/dev/null; then
+            echo "$current" | jq --argjson e "$entry" \
+                '. + [$e] | .[-'"$MAX_HISTORY"':]' \
+                > "${HISTORY_FILE}.tmp" 2>/dev/null && mv "${HISTORY_FILE}.tmp" "$HISTORY_FILE"
+        else
+            # Minimal fallback: just append lines (less ideal)
+            echo "$entry" >> "${HISTORY_FILE}.lines"
+            tail -n "$MAX_HISTORY" "${HISTORY_FILE}.lines" > "${HISTORY_FILE}.lines.tmp" 2>/dev/null
+            mv "${HISTORY_FILE}.lines.tmp" "${HISTORY_FILE}.lines"
+        fi
+    ) 200>"$lockfile"
+}
+
+# Escape a string for safe JSON embedding
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    echo -n "$s"
+}
+
+# ── D-Bus Notification Sending ────────────────────────────────────────────────
+# Send a notification via D-Bus org.freedesktop.Notifications with action support.
+# Returns the notification ID on stdout.
+send_dbus_notification() {
+    local app_name="24HG"
+    local replaces_id="${1:-0}"
+    local icon="$2"
+    local summary="$3"
+    local body="$4"
+    local urgency="$5"
+    local timeout="$6"
+    local category="$7"
+    shift 7
+    # Remaining args are action pairs: id1 label1 id2 label2 ...
+    local actions=("$@")
+
+    # Build the actions array string for D-Bus
+    local actions_str="[]"
+    if [[ ${#actions[@]} -gt 0 ]]; then
+        local items=""
+        for a in "${actions[@]}"; do
+            if [[ -n "$items" ]]; then
+                items="${items},"
+            fi
+            items="${items}'${a}'"
+        done
+        actions_str="[${items}]"
+    fi
+
+    # Map urgency string to integer (low=0, normal=1, critical=2)
+    local urgency_int=1
+    case "$urgency" in
+        low)      urgency_int=0 ;;
+        normal)   urgency_int=1 ;;
+        critical) urgency_int=2 ;;
+    esac
+
+    # Build hints dictionary
+    local hints="{'urgency': <byte ${urgency_int}>, 'category': <'${category}'>, 'desktop-entry': <'24hg-notify'>, 'x-kde-origin-name': <'24HG'>}"
+
+    # Call D-Bus
+    local result
+    result=$(gdbus call --session \
+        --dest org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
+        --method org.freedesktop.Notifications.Notify \
+        "$app_name" \
+        "$replaces_id" \
+        "$icon" \
+        "$summary" \
+        "$body" \
+        "$actions_str" \
+        "$hints" \
+        "$timeout" 2>/dev/null) || true
+
+    # Extract notification ID from result like "(uint32 42,)"
+    local nid=0
+    if [[ "$result" =~ \(uint32\ ([0-9]+),?\) ]]; then
+        nid="${BASH_REMATCH[1]}"
+    fi
+    echo "$nid"
+}
+
+# Fallback: use notify-send when D-Bus call is not available
+send_notify_fallback() {
+    local icon="$1" summary="$2" body="$3" urgency="$4" timeout="$5" category="$6"
+
+    local args=(
+        --app-name="24HG"
+        --icon="$icon"
+        --urgency="$urgency"
+        --expire-time="$timeout"
+        --category="$category"
+    )
+
+    # notify-send supports --action on newer versions
+    if notify-send --help 2>&1 | grep -q -- '--action'; then
+        shift 6
+        while [[ $# -ge 2 ]]; do
+            args+=(--action="$1=$2")
+            shift 2
+        done
+    fi
+
+    notify-send "${args[@]}" "$summary" "$body" 2>/dev/null
+    echo "0"
+}
+
+# ── Play Notification Sound ──────────────────────────────────────────────────
+play_sound() {
+    local ntype="$1"
+    local sound_file="${TYPE_SOUNDS[$ntype]:-}"
+
+    # Skip if no sound file or sound is disabled
+    [[ -z "$sound_file" ]] && return 0
+    [[ ! -f "$sound_file" ]] && return 0
+
+    # Check if user has sounds disabled
+    local sound_config="${CONFIG_DIR}/notify.conf"
+    if [[ -f "$sound_config" ]] && grep -q "^sounds=off" "$sound_config" 2>/dev/null; then
+        return 0
+    fi
+
+    # Play with pw-play (PipeWire), paplay (PulseAudio), or aplay (ALSA)
+    if command -v pw-play &>/dev/null; then
+        pw-play "$sound_file" &>/dev/null &
+    elif command -v paplay &>/dev/null; then
+        paplay "$sound_file" &>/dev/null &
+    elif command -v aplay &>/dev/null; then
+        aplay "$sound_file" &>/dev/null &
+    fi
+}
+
+# ── Action Definitions ────────────────────────────────────────────────────────
+# Each notification type has a set of action IDs and labels, plus the commands
+# to execute when an action is invoked.
+
+# Returns action pairs (id label id label ...) for a given type
+get_actions_for_type() {
+    local ntype="$1"
+    local extra="$2"  # extra context (e.g., clip path, player name, version)
+
+    case "$ntype" in
+        clip-saved)
+            echo "open-folder" "Open Folder" "share-clip" "Share to Hub" "delete-clip" "Delete"
+            ;;
+        achievement)
+            echo "view-achievements" "View All Achievements"
+            ;;
+        friend-online)
+            echo "send-invite" "Send Invite" "view-profile" "View Profile"
+            ;;
+        update-available)
+            echo "update-now" "Update Now" "update-later" "Later" "release-notes" "Release Notes"
+            ;;
+        download-complete)
+            echo "play-now" "Play Now"
+            ;;
+        tournament)
+            echo "tournament-join" "Join" "tournament-details" "Details"
+            ;;
+        voice)
+            echo "join-channel" "Join Channel"
+            ;;
+        lan-player)
+            echo "lan-invite" "Send Invite"
+            ;;
+        rig-score)
+            echo "view-leaderboard" "View Leaderboard"
+            ;;
+        save-synced)
+            echo "view-saves" "View Saves"
+            ;;
+        *)
+            # No actions for unknown types
+            ;;
+    esac
+}
+
+# Execute a notification action based on action ID
+execute_action() {
+    local action_id="$1"
+    local context="${2:-}"
+
+    log "Action invoked: ${action_id} context=${context}"
+
+    case "$action_id" in
+        # Clip actions
+        open-folder)
+            local clip_dir="${context:-$HOME/Videos/24HG Clips}"
+            if command -v xdg-open &>/dev/null; then
+                xdg-open "$clip_dir" &>/dev/null &
+            elif command -v dolphin &>/dev/null; then
+                dolphin "$clip_dir" &>/dev/null &
+            fi
+            ;;
+        share-clip)
+            if [[ -n "$context" && -f "$context" ]]; then
+                24hg-clip share "$context" &>/dev/null &
+            else
+                24hg-clip share &>/dev/null &
+            fi
+            ;;
+        delete-clip)
+            if [[ -n "$context" && -f "$context" ]]; then
+                rm -f "$context"
+                send_notification "clip-saved" "Clip Deleted" "Removed: $(basename "$context")" ""
+            fi
+            ;;
+
+        # Achievement actions
+        view-achievements)
+            24hg-achievements list &>/dev/null &
+            if command -v xdg-open &>/dev/null; then
+                xdg-open "https://hub.24hgaming.com/achievements" &>/dev/null &
+            fi
+            ;;
+
+        # Friend actions
+        send-invite)
+            if [[ -n "$context" ]]; then
+                24hg-hub-bridge invite "$context" &>/dev/null &
+            fi
+            ;;
+        view-profile)
+            if [[ -n "$context" ]]; then
+                local profile_url="${HUB_API%/api}/profile/${context}"
+                xdg-open "$profile_url" &>/dev/null &
+            fi
+            ;;
+
+        # Update actions
+        update-now)
+            # Trigger system update via 24hg-auto-update
+            if command -v 24hg-auto-update.sh &>/dev/null; then
+                24hg-auto-update.sh --apply &>/dev/null &
+            elif command -v rpm-ostree &>/dev/null; then
+                rpm-ostree upgrade &>/dev/null &
+                send_notification "update-available" "Updating..." "System update in progress. You'll be notified when it's done." ""
+            fi
+            ;;
+        update-later)
+            log "User deferred update"
+            # Schedule a reminder in 24 hours
+            local reminder_file="${NOTIFY_DIR}/update-reminder-$(date +%s).json"
+            cat > "$reminder_file.pending" <<REMIND_EOF
+{"type":"update-available","title":"Update Reminder","message":"A 24HG update is still available. ${context}","context":"${context}","delay_until":$(($(timestamp_epoch) + 86400))}
+REMIND_EOF
+            mv "$reminder_file.pending" "$reminder_file"
+            ;;
+        release-notes)
+            local version="${context:-latest}"
+            xdg-open "https://os.24hgaming.com/releases/${version}" &>/dev/null &
+            ;;
+
+        # Download actions
+        play-now)
+            if [[ -n "$context" ]]; then
+                # context should be game ID or name
+                24hg-smart-launch "$context" &>/dev/null &
+            fi
+            ;;
+
+        # Tournament actions
+        tournament-join)
+            if [[ -n "$context" ]]; then
+                xdg-open "https://hub.24hgaming.com/tournament/${context}/join" &>/dev/null &
+            fi
+            ;;
+        tournament-details)
+            if [[ -n "$context" ]]; then
+                xdg-open "https://hub.24hgaming.com/tournament/${context}" &>/dev/null &
+            fi
+            ;;
+
+        # Voice actions
+        join-channel)
+            if [[ -n "$context" ]]; then
+                24hg-hub-bridge voice-join "$context" &>/dev/null &
+            fi
+            ;;
+
+        # LAN actions
+        lan-invite)
+            if [[ -n "$context" ]]; then
+                24hg-hub-bridge lan-invite "$context" &>/dev/null &
+            fi
+            ;;
+
+        # Benchmark/rig-score actions
+        view-leaderboard)
+            xdg-open "https://hub.24hgaming.com/leaderboard/rig-scores" &>/dev/null &
+            ;;
+
+        # Cloud save actions
+        view-saves)
+            if [[ -n "$context" ]]; then
+                24hg-cloud-saves list "$context" 2>/dev/null || \
+                    xdg-open "https://hub.24hgaming.com/saves" &>/dev/null &
+            else
+                xdg-open "https://hub.24hgaming.com/saves" &>/dev/null &
+            fi
+            ;;
+
+        # Default / unknown
+        default|*)
+            log "Unknown action: ${action_id}"
+            ;;
+    esac
+}
+
+# ── Main Notification Dispatcher ──────────────────────────────────────────────
+# Public interface: send a typed notification with title, message, and optional context.
+send_notification() {
+    local ntype="$1"
+    local title="$2"
+    local message="$3"
+    local context="${4:-}"
+
+    # Validate type
+    if [[ -z "${TYPE_URGENCY[$ntype]+x}" ]]; then
+        warn "Unknown notification type: $ntype — using defaults"
+        local icon="dialog-information"
+        local urgency="normal"
+        local timeout="8000"
+        local category="x-24hg.unknown"
+    else
+        local icon urgency timeout category
+        icon="$(resolve_icon "$ntype")"
+        urgency="${TYPE_URGENCY[$ntype]}"
+        timeout="${TYPE_TIMEOUT[$ntype]}"
+        category="${TYPE_CATEGORY[$ntype]}"
+    fi
+
+    # Gather actions
+    local -a action_list=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && action_list+=("$line")
+    done < <(get_actions_for_type "$ntype" "$context" | tr ' ' '\n' | paste -d' ' - - | while read -r aid alabel; do
+        echo "$aid"
+        echo "$alabel"
+    done)
+
+    # Re-parse: get_actions_for_type returns space-separated pairs
+    local -a actions=()
+    local raw_actions
+    raw_actions="$(get_actions_for_type "$ntype" "$context")"
+    if [[ -n "$raw_actions" ]]; then
+        # Parse pairs: "id1" "label1" "id2" "label2" ...
+        eval "actions=($raw_actions)"
+    fi
+
+    # Store context for action handler
+    if [[ -n "$context" ]]; then
+        local context_file="${NOTIFY_DIR}/.context-${ntype}-$(timestamp_epoch)"
+        echo "$context" > "$context_file"
+    fi
+
+    # Try D-Bus first (supports actions), fall back to notify-send
+    local nid=0
+    if command -v gdbus &>/dev/null && [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        nid=$(send_dbus_notification 0 "$icon" "$title" "$message" "$urgency" "$timeout" "$category" "${actions[@]}")
+    else
+        nid=$(send_notify_fallback "$icon" "$title" "$message" "$urgency" "$timeout" "$category" "${actions[@]}")
+    fi
+
+    # Store notification ID → action context mapping
+    if [[ "$nid" -gt 0 && -n "$context" ]]; then
+        echo "${ntype}:${context}" > "${NOTIFY_DIR}/.nid-${nid}"
+    fi
+
+    # Play sound
+    play_sound "$ntype"
+
+    # Record in history
+    history_append "$ntype" "$title" "$message" "$nid"
+
+    log "Sent notification: type=${ntype} id=${nid} title='${title}'"
+    echo "$nid"
+}
+
+# ── D-Bus Action Monitor ─────────────────────────────────────────────────────
+# Monitor for ActionInvoked signals from the notification daemon and dispatch
+# the corresponding 24hg commands.
+start_dbus_monitor() {
+    log "Starting D-Bus action monitor"
+
+    # Monitor ActionInvoked and NotificationClosed signals
+    gdbus monitor --session \
+        --dest org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications 2>/dev/null | \
+    while IFS= read -r line; do
+        # ActionInvoked signal: (uint32 nid, 'action-id')
+        if [[ "$line" =~ ActionInvoked.*\(uint32\ ([0-9]+),\ \'([^\']+)\'\) ]]; then
+            local nid="${BASH_REMATCH[1]}"
+            local action_id="${BASH_REMATCH[2]}"
+            local context=""
+
+            # Look up context for this notification ID
+            local nid_file="${NOTIFY_DIR}/.nid-${nid}"
+            if [[ -f "$nid_file" ]]; then
+                local mapping
+                mapping="$(cat "$nid_file")"
+                context="${mapping#*:}"
+                rm -f "$nid_file"
+            fi
+
+            log "D-Bus ActionInvoked: nid=${nid} action=${action_id} context=${context}"
+            execute_action "$action_id" "$context" &
+        fi
+
+        # NotificationClosed signal: clean up context files
+        if [[ "$line" =~ NotificationClosed.*\(uint32\ ([0-9]+),\ uint32\ ([0-9]+)\) ]]; then
+            local nid="${BASH_REMATCH[1]}"
+            rm -f "${NOTIFY_DIR}/.nid-${nid}" 2>/dev/null
+        fi
+    done
+}
+
+# ── Notification File Parsing ─────────────────────────────────────────────────
+# Parse a JSON notification request file and dispatch the notification.
+# Expected format:
+# {
+#   "type": "clip-saved",
+#   "title": "Clip Saved!",
+#   "message": "Saved as awesome_frag.mp4",
+#   "context": "/home/user/Videos/24HG Clips/awesome_frag.mp4"
+# }
+parse_and_dispatch() {
+    local file="$1"
+
+    # Skip dotfiles (context/nid tracking files)
+    local basename
+    basename="$(basename "$file")"
+    [[ "$basename" == .* ]] && return 0
+
+    # Wait briefly for file write to complete
+    sleep 0.1
+
+    if [[ ! -f "$file" ]]; then
+        return 0
+    fi
+
+    local ntype="" title="" message="" context=""
+
+    # Try python3 first for robust JSON parsing
+    if command -v python3 &>/dev/null; then
+        local parsed
+        parsed=$(python3 -c "
+import json, sys
+try:
+    with open('${file}') as f:
+        d = json.load(f)
+    print(d.get('type',''))
+    print(d.get('title',''))
+    print(d.get('message',''))
+    print(d.get('context',''))
+except Exception as e:
+    print(f'ERROR:{e}', file=sys.stderr)
+    sys.exit(1)
+" 2>/dev/null) || {
+            warn "Failed to parse notification file: $file"
+            rm -f "$file"
+            return 1
+        }
+
+        ntype="$(sed -n '1p' <<< "$parsed")"
+        title="$(sed -n '2p' <<< "$parsed")"
+        message="$(sed -n '3p' <<< "$parsed")"
+        context="$(sed -n '4p' <<< "$parsed")"
+
+    elif command -v jq &>/dev/null; then
+        ntype="$(jq -r '.type // ""' "$file" 2>/dev/null)"
+        title="$(jq -r '.title // ""' "$file" 2>/dev/null)"
+        message="$(jq -r '.message // ""' "$file" 2>/dev/null)"
+        context="$(jq -r '.context // ""' "$file" 2>/dev/null)"
+    else
+        # Fallback: basic grep extraction (fragile but functional)
+        ntype="$(grep -oP '"type"\s*:\s*"\K[^"]+' "$file" 2>/dev/null || true)"
+        title="$(grep -oP '"title"\s*:\s*"\K[^"]+' "$file" 2>/dev/null || true)"
+        message="$(grep -oP '"message"\s*:\s*"\K[^"]+' "$file" 2>/dev/null || true)"
+        context="$(grep -oP '"context"\s*:\s*"\K[^"]+' "$file" 2>/dev/null || true)"
+    fi
+
+    # Check for delayed notifications
+    local delay_until=""
+    if command -v jq &>/dev/null; then
+        delay_until="$(jq -r '.delay_until // ""' "$file" 2>/dev/null || true)"
+    fi
+    if [[ -n "$delay_until" && "$delay_until" != "null" ]]; then
+        local now
+        now="$(timestamp_epoch)"
+        if [[ "$now" -lt "$delay_until" ]]; then
+            # Not time yet — skip, file stays in place
+            return 0
+        fi
+    fi
+
+    # Remove the request file now that we've read it
+    rm -f "$file"
+
+    # Validate
+    if [[ -z "$ntype" || -z "$title" ]]; then
+        warn "Invalid notification file (missing type or title): $basename"
+        return 1
+    fi
+
+    # Dispatch
+    send_notification "$ntype" "$title" "$message" "$context"
+}
+
+# ── Daemon: Process Existing Files ────────────────────────────────────────────
+# On startup, process any notification files that accumulated while daemon was down.
+process_existing_files() {
+    local count=0
+    for file in "${NOTIFY_DIR}"/*.json; do
+        [[ -f "$file" ]] || continue
+        parse_and_dispatch "$file" && ((count++)) || true
+    done
+    if [[ "$count" -gt 0 ]]; then
+        log "Processed $count queued notification(s) on startup"
+    fi
+}
+
+# ── Daemon: Cleanup ──────────────────────────────────────────────────────────
+cleanup_daemon() {
+    log "Shutting down 24hg-notify daemon"
+
+    # Kill D-Bus monitor if running
+    if [[ -f "$DBUS_MONITOR_PID_FILE" ]]; then
+        local dbus_pid
+        dbus_pid="$(cat "$DBUS_MONITOR_PID_FILE" 2>/dev/null || true)"
+        if [[ -n "$dbus_pid" ]] && kill -0 "$dbus_pid" 2>/dev/null; then
+            kill "$dbus_pid" 2>/dev/null || true
+        fi
+        rm -f "$DBUS_MONITOR_PID_FILE"
+    fi
+
+    # Kill any inotifywait children
+    jobs -p | xargs -r kill 2>/dev/null || true
+
+    # Remove PID file
+    rm -f "$PID_FILE"
+
+    # Clean up stale context/nid files
+    rm -f "${NOTIFY_DIR}"/.nid-* "${NOTIFY_DIR}"/.context-* 2>/dev/null || true
+
+    log "Daemon stopped"
+}
+
+# ── Daemon Mode ───────────────────────────────────────────────────────────────
+cmd_daemon() {
+    ensure_dirs
+
+    # Check for inotifywait
+    if ! command -v inotifywait &>/dev/null; then
+        die "inotifywait not found. Install inotify-tools: sudo dnf install inotify-tools"
+    fi
+
+    # Check if already running
+    if [[ -f "$PID_FILE" ]]; then
+        local old_pid
+        old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+            die "Daemon already running (PID $old_pid). Use '24hg-notify stop' to stop it."
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    # Write PID file
+    echo $$ > "$PID_FILE"
+    trap cleanup_daemon EXIT INT TERM
+
+    log "Starting 24hg-notify daemon (PID $$)"
+    log "Watching directory: $NOTIFY_DIR"
+
+    # Start D-Bus action monitor in background
+    if command -v gdbus &>/dev/null && [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        start_dbus_monitor &
+        local dbus_pid=$!
+        echo "$dbus_pid" > "$DBUS_MONITOR_PID_FILE"
+        log "D-Bus action monitor started (PID $dbus_pid)"
+    else
+        warn "gdbus not available or no D-Bus session — action buttons will not work"
+    fi
+
+    # Process any files already waiting
+    process_existing_files
+
+    # Watch for new notification files via inotify
+    # CLOSE_WRITE ensures the file is fully written before we process it
+    inotifywait -m -q -e close_write -e moved_to --format '%f' "$NOTIFY_DIR" | \
+    while IFS= read -r filename; do
+        # Only process .json files
+        [[ "$filename" == *.json ]] || continue
+        # Skip dotfiles
+        [[ "$filename" == .* ]] && continue
+
+        local filepath="${NOTIFY_DIR}/${filename}"
+        parse_and_dispatch "$filepath" &
+    done
+}
+
+# ── Stop Daemon ───────────────────────────────────────────────────────────────
+cmd_stop() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            success "Daemon stopped (PID $pid)"
+            log "Daemon stopped by user (PID $pid)"
+        else
+            warn "Stale PID file (process $pid not running)"
+            rm -f "$PID_FILE"
+        fi
+    else
+        warn "No daemon PID file found — daemon may not be running"
+    fi
+}
+
+# ── Status ────────────────────────────────────────────────────────────────────
+cmd_status() {
+    banner
+    echo -e "${BOLD}Daemon:${RESET}"
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            echo -e "  ${GREEN}Running${RESET} (PID $pid)"
+        else
+            echo -e "  ${RED}Stale PID file${RESET} (process $pid not running)"
+        fi
+    else
+        echo -e "  ${YELLOW}Not running${RESET}"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Watch directory:${RESET}  $NOTIFY_DIR"
+    echo -e "${BOLD}History file:${RESET}     $HISTORY_FILE"
+
+    # Count pending files
+    local pending=0
+    for f in "${NOTIFY_DIR}"/*.json; do
+        [[ -f "$f" ]] && ((pending++))
+    done
+    echo -e "${BOLD}Pending files:${RESET}    $pending"
+
+    # Count history entries
+    local hist_count=0
+    if [[ -f "$HISTORY_FILE" ]] && command -v jq &>/dev/null; then
+        hist_count="$(jq 'length' "$HISTORY_FILE" 2>/dev/null || echo 0)"
+    elif [[ -f "$HISTORY_FILE" ]] && command -v python3 &>/dev/null; then
+        hist_count="$(python3 -c "import json; print(len(json.load(open('$HISTORY_FILE'))))" 2>/dev/null || echo 0)"
+    fi
+    echo -e "${BOLD}History entries:${RESET}  $hist_count / $MAX_HISTORY"
+
+    # D-Bus status
+    echo ""
+    echo -e "${BOLD}D-Bus session:${RESET}"
+    if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        echo -e "  ${GREEN}Available${RESET}"
+        if [[ -f "$DBUS_MONITOR_PID_FILE" ]]; then
+            local dbus_pid
+            dbus_pid="$(cat "$DBUS_MONITOR_PID_FILE" 2>/dev/null || true)"
+            if [[ -n "$dbus_pid" ]] && kill -0 "$dbus_pid" 2>/dev/null; then
+                echo -e "  Action monitor: ${GREEN}Active${RESET} (PID $dbus_pid)"
+            else
+                echo -e "  Action monitor: ${RED}Not running${RESET}"
+            fi
+        else
+            echo -e "  Action monitor: ${YELLOW}Not started${RESET}"
+        fi
+    else
+        echo -e "  ${YELLOW}Not available${RESET} (action buttons disabled)"
+    fi
+
+    # Notification types
+    echo ""
+    echo -e "${BOLD}Supported types:${RESET}"
+    for ntype in clip-saved achievement friend-online update-available download-complete tournament voice lan-player rig-score save-synced; do
+        local icon urgency
+        icon="$(resolve_icon "$ntype")"
+        urgency="${TYPE_URGENCY[$ntype]}"
+        printf "  ${CYAN}%-20s${RESET} icon=%-24s urgency=%s\n" "$ntype" "$icon" "$urgency"
+    done
+}
+
+# ── Send Command ──────────────────────────────────────────────────────────────
+cmd_send() {
+    local ntype="${1:-}"
+    local title="${2:-}"
+    local message="${3:-}"
+    local context="${4:-}"
+
+    if [[ -z "$ntype" || -z "$title" ]]; then
+        error "Usage: 24hg-notify send <type> <title> [message] [context]"
+        echo ""
+        echo "Types: clip-saved, achievement, friend-online, update-available,"
+        echo "       download-complete, tournament, voice, lan-player, rig-score, save-synced"
+        exit 1
+    fi
+
+    ensure_dirs
+    local nid
+    nid="$(send_notification "$ntype" "$title" "${message:-}" "$context")"
+    success "Notification sent (ID: $nid)"
+}
+
+# ── Queue Command ─────────────────────────────────────────────────────────────
+# Write a notification JSON file that the daemon will pick up.
+# Useful when the daemon is running and you want async delivery.
+cmd_queue() {
+    local ntype="${1:-}"
+    local title="${2:-}"
+    local message="${3:-}"
+    local context="${4:-}"
+
+    if [[ -z "$ntype" || -z "$title" ]]; then
+        error "Usage: 24hg-notify queue <type> <title> [message] [context]"
+        exit 1
+    fi
+
+    ensure_dirs
+
+    local filename="${ntype}-$(date +%s%N).json"
+    local filepath="${NOTIFY_DIR}/${filename}"
+
+    cat > "${filepath}.tmp" <<QEOF
+{
+  "type": "$(json_escape "$ntype")",
+  "title": "$(json_escape "$title")",
+  "message": "$(json_escape "$message")",
+  "context": "$(json_escape "$context")"
+}
+QEOF
+
+    # Atomic rename to trigger inotify MOVED_TO
+    mv "${filepath}.tmp" "$filepath"
+    success "Queued notification: $filepath"
+}
+
+# ── History Command ───────────────────────────────────────────────────────────
+cmd_history() {
+    local count="${1:-20}"
+    local filter_type="${2:-}"
+
+    ensure_dirs
+
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        warn "No notification history found"
+        return 0
+    fi
+
+    banner
+    echo -e "${BOLD}Notification History${RESET} (last $count entries)"
+    echo -e "${DIM}$(printf '%.0s─' {1..60})${RESET}"
+
+    if command -v python3 &>/dev/null; then
+        python3 -c "
+import json, sys
+
+with open('${HISTORY_FILE}') as f:
+    hist = json.load(f)
+
+filter_type = '${filter_type}'
+if filter_type:
+    hist = [h for h in hist if h.get('type') == filter_type]
+
+hist = hist[-${count}:]
+hist.reverse()
+
+type_colors = {
+    'clip-saved': '\033[35m',
+    'achievement': '\033[38;5;220m',
+    'friend-online': '\033[32m',
+    'update-available': '\033[33m',
+    'download-complete': '\033[36m',
+    'tournament': '\033[31m',
+    'voice': '\033[34m',
+    'lan-player': '\033[36m',
+    'rig-score': '\033[38;5;208m',
+    'save-synced': '\033[34m',
+}
+RESET = '\033[0m'
+BOLD = '\033[1m'
+DIM = '\033[2m'
+
+for entry in hist:
+    ntype = entry.get('type', 'unknown')
+    color = type_colors.get(ntype, '\033[37m')
+    ts = entry.get('timestamp', '?')
+    title = entry.get('title', '?')
+    message = entry.get('message', '')
+    nid = entry.get('notification_id', 0)
+
+    # Format timestamp
+    ts_short = ts.replace('T', ' ').replace('Z', '') if 'T' in ts else ts
+
+    print(f'  {DIM}{ts_short}{RESET}  {color}{BOLD}{ntype:<20}{RESET}  {title}')
+    if message:
+        print(f'  {\" \" * 20}  {DIM}{message}{RESET}')
+" 2>/dev/null
+    elif command -v jq &>/dev/null; then
+        jq -r "
+            $([ -n "$filter_type" ] && echo "[ .[] | select(.type == \"$filter_type\") ]" || echo ".")
+            | .[-${count}:]
+            | reverse[]
+            | \"  \\(.timestamp)  \\(.type)  \\(.title)  \\(.message // \"\")\"
+        " "$HISTORY_FILE" 2>/dev/null
+    else
+        warn "Install python3 or jq for formatted history output"
+        tail -n "$count" "${HISTORY_FILE}.lines" 2>/dev/null || echo "  (no history)"
+    fi
+
+    echo ""
+}
+
+# ── Clear Command ─────────────────────────────────────────────────────────────
+cmd_clear() {
+    local target="${1:-all}"
+
+    ensure_dirs
+
+    case "$target" in
+        all|history)
+            echo '[]' > "$HISTORY_FILE"
+            success "Notification history cleared"
+            ;;
+        queue|pending)
+            local count=0
+            for f in "${NOTIFY_DIR}"/*.json; do
+                [[ -f "$f" ]] && rm -f "$f" && ((count++))
+            done
+            success "Cleared $count pending notification(s)"
+            ;;
+        stale)
+            rm -f "${NOTIFY_DIR}"/.nid-* "${NOTIFY_DIR}"/.context-* 2>/dev/null
+            success "Cleared stale context files"
+            ;;
+        *)
+            error "Usage: 24hg-notify clear [all|history|queue|stale]"
+            exit 1
+            ;;
+    esac
+}
+
+# ── Test Command ──────────────────────────────────────────────────────────────
+cmd_test() {
+    local specific_type="${1:-}"
+
+    ensure_dirs
+    banner
+    echo -e "${BOLD}Sending test notifications...${RESET}"
+    echo ""
+
+    # Define test data for each type
+    declare -A test_titles=(
+        [clip-saved]="Clip Saved!"
+        [achievement]="Achievement Unlocked: First Blood"
+        [friend-online]="FragMaster420 is online"
+        [update-available]="24HG update available: v1.4.2"
+        [download-complete]="Counter-Strike 2 download finished"
+        [tournament]="Tournament starting in 10 min"
+        [voice]="FragMaster420 joined voice"
+        [lan-player]="New player on LAN: SteamDeck-7F3A"
+        [rig-score]="New leaderboard position: #42"
+        [save-synced]="Cloud save synced for Valheim"
+    )
+
+    declare -A test_messages=(
+        [clip-saved]="awesome_headshot_2026-03-19.mp4 (42 MB)"
+        [achievement]="Earn your first kill in any game. +25 XP"
+        [friend-online]="Playing Counter-Strike 2 on de_dust2"
+        [update-available]="Includes 3 new features and 7 bug fixes"
+        [download-complete]="Ready to play! 32.4 GB installed."
+        [tournament]="24HG Friday Night Frags — CS2 5v5"
+        [voice]="Channel: General Gaming (3 players)"
+        [lan-player]="Detected on 192.168.1.105"
+        [rig-score]="RTX 4070 + Ryzen 7 7800X3D — Score: 18,420"
+        [save-synced]="Last played 2 hours ago. 3 save files synced."
+    )
+
+    declare -A test_contexts=(
+        [clip-saved]="$HOME/Videos/24HG Clips/awesome_headshot.mp4"
+        [achievement]="first-blood"
+        [friend-online]="FragMaster420"
+        [update-available]="v1.4.2"
+        [download-complete]="cs2"
+        [tournament]="friday-night-frags-42"
+        [voice]="general-gaming"
+        [lan-player]="SteamDeck-7F3A"
+        [rig-score]="42"
+        [save-synced]="valheim"
+    )
+
+    local types_to_test
+    if [[ -n "$specific_type" ]]; then
+        if [[ -z "${test_titles[$specific_type]+x}" ]]; then
+            die "Unknown type: $specific_type"
+        fi
+        types_to_test=("$specific_type")
+    else
+        types_to_test=(clip-saved achievement friend-online update-available download-complete tournament voice lan-player rig-score save-synced)
+    fi
+
+    local delay=1
+    for ntype in "${types_to_test[@]}"; do
+        local title="${test_titles[$ntype]}"
+        local msg="${test_messages[$ntype]}"
+        local ctx="${test_contexts[$ntype]}"
+
+        echo -ne "  ${CYAN}${ntype}${RESET} ... "
+        local nid
+        nid="$(send_notification "$ntype" "$title" "$msg" "$ctx")"
+        echo -e "${GREEN}sent${RESET} (ID: $nid)"
+
+        # Small delay between notifications so they don't pile up
+        if [[ "${#types_to_test[@]}" -gt 1 ]]; then
+            sleep "$delay"
+        fi
+    done
+
+    echo ""
+    success "All test notifications sent!"
+}
+
+# ── Inspect Command ───────────────────────────────────────────────────────────
+# Show details about a specific notification type: its icon, urgency, actions, etc.
+cmd_inspect() {
+    local ntype="${1:-}"
+
+    if [[ -z "$ntype" ]]; then
+        error "Usage: 24hg-notify inspect <type>"
+        exit 1
+    fi
+
+    if [[ -z "${TYPE_URGENCY[$ntype]+x}" ]]; then
+        die "Unknown type: $ntype"
+    fi
+
+    banner
+    echo -e "${BOLD}Type:${RESET}      ${CYAN}${ntype}${RESET}"
+    echo -e "${BOLD}Icon:${RESET}      $(resolve_icon "$ntype")"
+    echo -e "${BOLD}Urgency:${RESET}   ${TYPE_URGENCY[$ntype]}"
+    echo -e "${BOLD}Category:${RESET}  ${TYPE_CATEGORY[$ntype]}"
+    echo -e "${BOLD}Timeout:${RESET}   ${TYPE_TIMEOUT[$ntype]} ms"
+    echo -e "${BOLD}Sound:${RESET}     ${TYPE_SOUNDS[$ntype]}"
+
+    echo ""
+    echo -e "${BOLD}Actions:${RESET}"
+    local raw_actions
+    raw_actions="$(get_actions_for_type "$ntype" "")"
+    if [[ -n "$raw_actions" ]]; then
+        local -a actions=()
+        eval "actions=($raw_actions)"
+        local i=0
+        while [[ $i -lt ${#actions[@]} ]]; do
+            local aid="${actions[$i]}"
+            local alabel="${actions[$((i+1))]}"
+            echo -e "  ${GREEN}[${alabel}]${RESET} -> action_id=${DIM}${aid}${RESET}"
+            ((i+=2))
+        done
+    else
+        echo -e "  ${DIM}(none)${RESET}"
+    fi
+}
+
+# ── Config Command ────────────────────────────────────────────────────────────
+cmd_config() {
+    local action="${1:-show}"
+    local key="${2:-}"
+    local value="${3:-}"
+
+    local config_file="${CONFIG_DIR}/notify.conf"
+    ensure_dirs
+
+    case "$action" in
+        show)
+            banner
+            echo -e "${BOLD}Configuration:${RESET} $config_file"
+            echo ""
+            if [[ -f "$config_file" ]]; then
+                while IFS='=' read -r k v; do
+                    [[ "$k" =~ ^#.*$ || -z "$k" ]] && continue
+                    echo -e "  ${CYAN}${k}${RESET} = ${v}"
+                done < "$config_file"
+            else
+                echo -e "  ${DIM}(using defaults — no config file)${RESET}"
+            fi
+            echo ""
+            echo -e "${BOLD}Available settings:${RESET}"
+            echo -e "  ${CYAN}sounds${RESET}          on/off   Enable notification sounds"
+            echo -e "  ${CYAN}do_not_disturb${RESET}  on/off   Suppress all notifications"
+            echo -e "  ${CYAN}max_history${RESET}     <num>    Max history entries (default: 200)"
+            echo -e "  ${CYAN}quiet_hours${RESET}     HH-HH    Quiet hours range (e.g., 23-07)"
+            ;;
+        set)
+            if [[ -z "$key" || -z "$value" ]]; then
+                error "Usage: 24hg-notify config set <key> <value>"
+                exit 1
+            fi
+            # Update or add key
+            if [[ -f "$config_file" ]] && grep -q "^${key}=" "$config_file" 2>/dev/null; then
+                sed -i "s|^${key}=.*|${key}=${value}|" "$config_file"
+            else
+                echo "${key}=${value}" >> "$config_file"
+            fi
+            success "Set ${key}=${value}"
+            ;;
+        get)
+            if [[ -z "$key" ]]; then
+                error "Usage: 24hg-notify config get <key>"
+                exit 1
+            fi
+            if [[ -f "$config_file" ]]; then
+                grep "^${key}=" "$config_file" 2>/dev/null | cut -d= -f2- || echo "(not set)"
+            else
+                echo "(not set)"
+            fi
+            ;;
+        *)
+            error "Usage: 24hg-notify config [show|set|get] [key] [value]"
+            exit 1
+            ;;
+    esac
+}
+
+# ── Do Not Disturb Check ─────────────────────────────────────────────────────
+is_do_not_disturb() {
+    local config_file="${CONFIG_DIR}/notify.conf"
+
+    # Check explicit DND setting
+    if [[ -f "$config_file" ]] && grep -q "^do_not_disturb=on" "$config_file" 2>/dev/null; then
+        return 0
+    fi
+
+    # Check quiet hours
+    if [[ -f "$config_file" ]]; then
+        local quiet_hours
+        quiet_hours="$(grep "^quiet_hours=" "$config_file" 2>/dev/null | cut -d= -f2-)" || true
+        if [[ -n "$quiet_hours" && "$quiet_hours" =~ ^([0-9]{1,2})-([0-9]{1,2})$ ]]; then
+            local start="${BASH_REMATCH[1]}"
+            local end="${BASH_REMATCH[2]}"
+            local now
+            now="$(date +%H)"
+            now="${now#0}"  # Remove leading zero
+
+            if [[ "$start" -gt "$end" ]]; then
+                # Spans midnight (e.g., 23-07)
+                if [[ "$now" -ge "$start" || "$now" -lt "$end" ]]; then
+                    return 0
+                fi
+            else
+                if [[ "$now" -ge "$start" && "$now" -lt "$end" ]]; then
+                    return 0
+                fi
+            fi
+        fi
+    fi
+
+    # Check KDE DND status
+    if command -v qdbus &>/dev/null; then
+        local kde_dnd
+        kde_dnd="$(qdbus org.freedesktop.Notifications /org/freedesktop/Notifications \
+            org.freedesktop.Notifications.Inhibited 2>/dev/null || echo "false")"
+        if [[ "$kde_dnd" == "true" ]]; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# ── Usage / Help ──────────────────────────────────────────────────────────────
+usage() {
+    banner
+    echo -e "${BOLD}Usage:${RESET} 24hg-notify <command> [args...]"
+    echo ""
+    echo -e "${BOLD}Commands:${RESET}"
+    echo -e "  ${CYAN}daemon${RESET}                          Run as background daemon (inotify watcher)"
+    echo -e "  ${CYAN}stop${RESET}                            Stop the running daemon"
+    echo -e "  ${CYAN}status${RESET}                          Show daemon status and configuration"
+    echo -e "  ${CYAN}send${RESET}  <type> <title> [msg] [ctx] Send a notification immediately"
+    echo -e "  ${CYAN}queue${RESET} <type> <title> [msg] [ctx] Queue a notification for the daemon"
+    echo -e "  ${CYAN}history${RESET} [count] [type]           Show notification history"
+    echo -e "  ${CYAN}clear${RESET}   [all|history|queue|stale] Clear notifications"
+    echo -e "  ${CYAN}test${RESET}    [type]                   Send test notification(s)"
+    echo -e "  ${CYAN}inspect${RESET} <type>                   Show details about a notification type"
+    echo -e "  ${CYAN}config${RESET}  [show|set|get] [k] [v]   Manage notification settings"
+    echo ""
+    echo -e "${BOLD}Notification Types:${RESET}"
+    echo -e "  ${CYAN}clip-saved${RESET}         Clip saved with share/delete actions"
+    echo -e "  ${CYAN}achievement${RESET}        Achievement unlocked badge"
+    echo -e "  ${CYAN}friend-online${RESET}      Friend came online with invite action"
+    echo -e "  ${CYAN}update-available${RESET}   System update with install/defer/notes actions"
+    echo -e "  ${CYAN}download-complete${RESET}  Game download finished with play action"
+    echo -e "  ${CYAN}tournament${RESET}         Tournament alert with join/details actions"
+    echo -e "  ${CYAN}voice${RESET}              Voice channel activity with join action"
+    echo -e "  ${CYAN}lan-player${RESET}         LAN player discovered with invite action"
+    echo -e "  ${CYAN}rig-score${RESET}          Benchmark leaderboard with view action"
+    echo -e "  ${CYAN}save-synced${RESET}        Cloud save sync complete with view action"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo -e "  ${DIM}# Start the daemon (usually via systemd)${RESET}"
+    echo -e "  24hg-notify daemon"
+    echo ""
+    echo -e "  ${DIM}# Send a notification directly${RESET}"
+    echo -e "  24hg-notify send clip-saved 'Clip Saved!' 'headshot.mp4 (42 MB)'"
+    echo ""
+    echo -e "  ${DIM}# Queue a notification for the daemon to dispatch${RESET}"
+    echo -e "  24hg-notify queue achievement 'Achievement Unlocked' 'First Blood!'"
+    echo ""
+    echo -e "  ${DIM}# From another script, write JSON to the watch directory:${RESET}"
+    echo -e '  echo '"'"'{"type":"friend-online","title":"GamerBro is online","message":"Playing Rust"}'"'"' \\'
+    echo -e "    > /tmp/24hg-notifications/friend-\$(date +%s).json"
+    echo ""
+    echo -e "  ${DIM}# Show last 50 notifications of a specific type${RESET}"
+    echo -e "  24hg-notify history 50 achievement"
+    echo ""
+    echo -e "  ${DIM}# Configure quiet hours${RESET}"
+    echo -e "  24hg-notify config set quiet_hours 23-07"
+    echo ""
+    echo -e "${BOLD}Daemon Integration:${RESET}"
+    echo -e "  Other 24hg tools can trigger notifications by writing JSON files to:"
+    echo -e "  ${CYAN}${NOTIFY_DIR}/${RESET}"
+    echo ""
+    echo -e "  File format:"
+    echo -e '  {"type":"<type>","title":"<title>","message":"<msg>","context":"<ctx>"}'
+    echo ""
+    echo -e "  The daemon watches this directory via inotify and dispatches notifications"
+    echo -e "  through D-Bus (org.freedesktop.Notifications) with full action button support."
+    echo ""
+    echo -e "${DIM}Version ${VERSION} — 24HG${RESET}"
+}
+
+# ── Main Entry Point ──────────────────────────────────────────────────────────
+main() {
+    local cmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        daemon)           cmd_daemon "$@" ;;
+        stop)             cmd_stop "$@" ;;
+        status)           cmd_status "$@" ;;
+        send)             cmd_send "$@" ;;
+        queue)            cmd_queue "$@" ;;
+        history)          cmd_history "$@" ;;
+        clear)            cmd_clear "$@" ;;
+        test)             cmd_test "$@" ;;
+        inspect)          cmd_inspect "$@" ;;
+        config)           cmd_config "$@" ;;
+        help|--help|-h)   usage ;;
+        version|--version|-v) echo "24hg-notify ${VERSION}" ;;
+        *)
+            error "Unknown command: $cmd"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

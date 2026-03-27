@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Peripherals
+Comment=Mouse, RGB & macro management
+Exec=/usr/bin/24hg-peripherals
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=HardwareSettings;Game;
+Keywords=mouse;rgb;macro;keyboard;peripheral;

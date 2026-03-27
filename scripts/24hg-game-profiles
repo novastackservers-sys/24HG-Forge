@@ -1,0 +1,928 @@
+#!/bin/bash
+# 24HG Game Profile Manager
+# Manages per-game launch profiles with Proton versions, env vars, resolution,
+# MangoHud configs, launch arguments, and performance profiles.
+#
+# Profiles stored as JSON in ~/.config/24hg/game-profiles/<appid>.json
+#
+# Usage: 24hg-game-profiles <command> [options]
+# Commands: create, edit, apply, list, delete, search, import, export, help
+
+set -euo pipefail
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+PROFILES_DIR="${HOME}/.config/24hg/game-profiles"
+HG24_PROTON_DIR="/var/lib/24hg/proton-ge"
+
+# Possible Steam root directories (checked in order)
+STEAM_PATHS=(
+    "${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+    "${HOME}/.local/share/Steam"
+    "${HOME}/.steam/steam"
+)
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+_log() { echo "[24hg-game-profiles] $*"; }
+_err() { echo "[24hg-game-profiles] ERROR: $*" >&2; }
+_die() { _err "$@"; exit 1; }
+
+_has_zenity() { command -v zenity &>/dev/null && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; }
+
+# Prompt with zenity if available, otherwise read from terminal
+_prompt() {
+    local title="$1" text="$2" default="${3:-}"
+    if _has_zenity; then
+        zenity --entry --title="$title" --text="$text" --entry-text="$default" 2>/dev/null || echo "$default"
+    else
+        read -rp "$text [$default]: " val
+        echo "${val:-$default}"
+    fi
+}
+
+_prompt_yesno() {
+    local text="$1" default="${2:-no}"
+    if _has_zenity; then
+        zenity --question --text="$text" --no-wrap 2>/dev/null && echo "yes" || echo "no"
+    else
+        read -rp "$text (yes/no) [$default]: " val
+        val="${val:-$default}"
+        [[ "$val" =~ ^[Yy] ]] && echo "yes" || echo "no"
+    fi
+}
+
+_prompt_list() {
+    local title="$1" text="$2"; shift 2
+    local items=("$@")
+    if _has_zenity; then
+        printf '%s\n' "${items[@]}" | zenity --list --title="$title" --text="$text" \
+            --column="Option" --height=400 --width=500 2>/dev/null || echo ""
+    else
+        echo "$text" >&2
+        local i=1
+        for item in "${items[@]}"; do
+            echo "  $i) $item" >&2
+            ((i++))
+        done
+        read -rp "Selection [1]: " sel
+        sel="${sel:-1}"
+        if [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#items[@]} )); then
+            echo "${items[$((sel-1))]}"
+        else
+            echo ""
+        fi
+    fi
+}
+
+# ─── Steam Detection ────────────────────────────────────────────────────────
+
+_find_steam_root() {
+    for p in "${STEAM_PATHS[@]}"; do
+        if [ -d "$p" ] && [ -f "$p/steamapps/libraryfolders.vdf" ]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    # Try resolving symlink
+    if [ -L "${HOME}/.steam/steam" ]; then
+        local resolved
+        resolved="$(readlink -f "${HOME}/.steam/steam")"
+        if [ -d "$resolved" ] && [ -f "$resolved/steamapps/libraryfolders.vdf" ]; then
+            echo "$resolved"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Parse libraryfolders.vdf and find all steamapps directories
+_find_library_folders() {
+    local steam_root
+    steam_root="$(_find_steam_root)" || return 1
+    echo "${steam_root}/steamapps"
+    # Parse additional library folders from libraryfolders.vdf
+    python3 -c "
+import re, os
+vdf_path = '${steam_root}/steamapps/libraryfolders.vdf'
+if not os.path.exists(vdf_path):
+    exit()
+with open(vdf_path, 'r') as f:
+    content = f.read()
+# Match path entries
+for m in re.finditer(r'\"path\"\s+\"([^\"]+)\"', content):
+    p = os.path.join(m.group(1), 'steamapps')
+    base = '${steam_root}/steamapps'
+    if os.path.isdir(p) and os.path.realpath(p) != os.path.realpath(base):
+        print(p)
+" 2>/dev/null
+}
+
+# Scan for installed Steam games: output "appid|name" lines
+_scan_installed_games() {
+    local folders
+    folders="$(_find_library_folders 2>/dev/null)" || return 1
+    while IFS= read -r lib; do
+        [ -d "$lib" ] || continue
+        for manifest in "$lib"/appmanifest_*.acf; do
+            [ -f "$manifest" ] || continue
+            python3 -c "
+import re, sys
+with open('${manifest}', 'r') as f:
+    c = f.read()
+appid = re.search(r'\"appid\"\s+\"(\d+)\"', c)
+name = re.search(r'\"name\"\s+\"([^\"]+)\"', c)
+if appid and name:
+    print(f'{appid.group(1)}|{name.group(1)}')
+" 2>/dev/null
+        done
+    done <<< "$folders" | sort -t'|' -k2 -u
+}
+
+# ─── Proton Detection ───────────────────────────────────────────────────────
+
+_find_proton_versions() {
+    local versions=()
+    local steam_root
+    steam_root="$(_find_steam_root 2>/dev/null)" || true
+
+    # Steam built-in Proton (e.g. Proton 9.0, Proton Experimental)
+    if [ -n "$steam_root" ]; then
+        local common="${steam_root}/steamapps/common"
+        if [ -d "$common" ]; then
+            for d in "$common"/Proton*/; do
+                [ -d "$d" ] || continue
+                local name
+                name="$(basename "$d")"
+                versions+=("steam:${name}")
+            done
+        fi
+    fi
+
+    # GE-Proton in Steam compatibilitytools.d
+    local compat_dirs=(
+        "${steam_root}/compatibilitytools.d"
+        "${HOME}/.steam/root/compatibilitytools.d"
+        "${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d"
+    )
+    for cdir in "${compat_dirs[@]}"; do
+        [ -d "$cdir" ] || continue
+        for d in "$cdir"/GE-Proton*/ "$cdir"/Proton-*/; do
+            [ -d "$d" ] || continue
+            local name
+            name="$(basename "$d")"
+            versions+=("ge:${name}")
+        done
+    done
+
+    # 24HG-managed Proton-GE
+    if [ -d "$HG24_PROTON_DIR" ]; then
+        for d in "$HG24_PROTON_DIR"/*/; do
+            [ -d "$d" ] || continue
+            local name
+            name="$(basename "$d")"
+            versions+=("24hg:${name}")
+        done
+    fi
+
+    # Deduplicate
+    printf '%s\n' "${versions[@]}" | sort -u
+}
+
+# ─── Profile JSON Handling (python3 stdlib) ──────────────────────────────────
+
+_profile_path() {
+    local id="$1"
+    # Sanitize: use appid if numeric, otherwise slugify
+    if [[ "$id" =~ ^[0-9]+$ ]]; then
+        echo "${PROFILES_DIR}/${id}.json"
+    else
+        local slug
+        slug="$(echo "$id" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '-' | sed 's/^-//;s/-$//')"
+        echo "${PROFILES_DIR}/${slug}.json"
+    fi
+}
+
+# Resolve a name or appid to an appid, searching installed games
+_resolve_game() {
+    local input="$1"
+    # If numeric, treat as appid
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        echo "$input"
+        return 0
+    fi
+    # Search installed games for name match
+    local match
+    match="$(_scan_installed_games 2>/dev/null | grep -i "|.*${input}" | head -1)" || true
+    if [ -n "$match" ]; then
+        echo "${match%%|*}"
+        return 0
+    fi
+    # Fall back to slug
+    echo "$input"
+}
+
+_game_name_for_appid() {
+    local appid="$1"
+    local match
+    match="$(_scan_installed_games 2>/dev/null | grep "^${appid}|" | head -1)" || true
+    if [ -n "$match" ]; then
+        echo "${match#*|}"
+    else
+        echo "Unknown ($appid)"
+    fi
+}
+
+_read_profile() {
+    local path="$1"
+    [ -f "$path" ] || return 1
+    cat "$path"
+}
+
+_write_profile() {
+    local path="$1" json="$2"
+    mkdir -p "$(dirname "$path")"
+    echo "$json" > "$path"
+}
+
+# Create or update a profile JSON using python3
+_build_profile_json() {
+    local appid="$1" name="$2" proton="$3" resolution="$4" mangohud="$5" \
+          mangohud_config="$6" env_vars="$7" launch_args="$8" perf_profile="$9"
+    python3 -c "
+import json, sys
+profile = {
+    'appid': '${appid}',
+    'name': $(python3 -c "import json; print(json.dumps('${name}'))"),
+    'proton_version': $(python3 -c "import json; print(json.dumps('${proton}'))"),
+    'resolution': $(python3 -c "import json; print(json.dumps('${resolution}'))"),
+    'mangohud': $(python3 -c "import json; print(json.dumps('${mangohud}'))"),
+    'mangohud_config': $(python3 -c "import json; print(json.dumps('${mangohud_config}'))"),
+    'env_vars': $(python3 -c "import json; print(json.dumps('${env_vars}'))"),
+    'launch_args': $(python3 -c "import json; print(json.dumps('${launch_args}'))"),
+    'performance_profile': $(python3 -c "import json; print(json.dumps('${perf_profile}'))"),
+}
+print(json.dumps(profile, indent=2))
+"
+}
+
+# Safer JSON builder that handles arbitrary strings via stdin
+_build_profile_json_safe() {
+    python3 << 'PYEOF'
+import json, sys, os
+
+profile = {
+    "appid": os.environ.get("_GP_APPID", ""),
+    "name": os.environ.get("_GP_NAME", ""),
+    "proton_version": os.environ.get("_GP_PROTON", ""),
+    "resolution": os.environ.get("_GP_RESOLUTION", ""),
+    "mangohud": os.environ.get("_GP_MANGOHUD", "no"),
+    "mangohud_config": os.environ.get("_GP_MANGOHUD_CONFIG", ""),
+    "env_vars": os.environ.get("_GP_ENV_VARS", ""),
+    "launch_args": os.environ.get("_GP_LAUNCH_ARGS", ""),
+    "performance_profile": os.environ.get("_GP_PERF_PROFILE", "balanced"),
+}
+print(json.dumps(profile, indent=2))
+PYEOF
+}
+
+# Read a field from a profile JSON
+_profile_field() {
+    local path="$1" field="$2"
+    python3 -c "
+import json
+with open('${path}') as f:
+    d = json.load(f)
+print(d.get('${field}', ''))
+" 2>/dev/null
+}
+
+# ─── Build Launch Options String ─────────────────────────────────────────────
+
+_build_launch_string() {
+    local path="$1"
+    python3 << PYEOF
+import json
+
+with open("${path}") as f:
+    p = json.load(f)
+
+parts = []
+
+# MangoHud
+if p.get("mangohud", "no") == "yes":
+    mc = p.get("mangohud_config", "").strip()
+    if mc:
+        parts.append(f"MANGOHUD_CONFIG={mc}")
+    parts.append("MANGOHUD=1 mangohud")
+
+# Resolution override
+res = p.get("resolution", "").strip()
+if res and "x" in res:
+    w, h = res.split("x", 1)
+    parts.append(f"STEAM_GAME_RESOLUTION={res}")
+
+# Custom env vars
+env = p.get("env_vars", "").strip()
+if env:
+    parts.append(env)
+
+# The actual command placeholder
+parts.append("%command%")
+
+# Launch args
+args = p.get("launch_args", "").strip()
+if args:
+    parts.append(args)
+
+print(" ".join(parts))
+PYEOF
+}
+
+# ─── localconfig.vdf Writer ─────────────────────────────────────────────────
+
+_write_to_localconfig() {
+    local appid="$1" launch_opts="$2"
+    local steam_root
+    steam_root="$(_find_steam_root 2>/dev/null)" || return 1
+
+    # Find user's localconfig.vdf
+    local userdata_dir="${steam_root}/userdata"
+    [ -d "$userdata_dir" ] || return 1
+
+    local config_found=0
+    for udir in "$userdata_dir"/*/config/localconfig.vdf; do
+        [ -f "$udir" ] || continue
+        config_found=1
+
+        # Use python to safely modify VDF
+        python3 << PYEOF
+import re, sys, os, shutil
+
+vdf_path = "${udir}"
+appid = "${appid}"
+launch_opts = """${launch_opts}"""
+
+if not os.path.exists(vdf_path):
+    sys.exit(1)
+
+with open(vdf_path, 'r', errors='replace') as f:
+    content = f.read()
+
+# Back up first
+backup = vdf_path + ".24hg-backup"
+if not os.path.exists(backup):
+    shutil.copy2(vdf_path, backup)
+
+# VDF is a nested key-value format. We look for the app's section under
+# "Apps"/"apps" and set LaunchOptions.
+# This is a best-effort approach — VDF is not a standard format.
+# Pattern: find the app's block and insert/replace LaunchOptions
+
+# Look for the appid block under UserLocalConfigStore > Software > Valve > Steam > apps
+app_pattern = re.compile(
+    r'("' + re.escape(appid) + r'")\s*\{([^}]*)\}',
+    re.DOTALL
+)
+
+def replace_launch_opts(match):
+    block_key = match.group(1)
+    block_content = match.group(2)
+    # Remove existing LaunchOptions line
+    block_content = re.sub(r'\s*"LaunchOptions"\s+"[^"]*"', '', block_content)
+    # Add new LaunchOptions
+    indent = '\t\t\t\t\t\t'
+    new_line = f'\n{indent}"LaunchOptions"\t\t"{launch_opts}"'
+    block_content = block_content.rstrip() + new_line + '\n'
+    return f'{block_key}\n\t\t\t\t\t{{{block_content}\t\t\t\t\t}}'
+
+new_content, count = app_pattern.subn(replace_launch_opts, content)
+if count > 0:
+    with open(vdf_path, 'w') as f:
+        f.write(new_content)
+    print(f"Updated localconfig.vdf for AppID {appid}")
+else:
+    print(f"AppID {appid} not found in localconfig.vdf — copy launch options manually", file=sys.stderr)
+    sys.exit(2)
+PYEOF
+        return $?
+    done
+
+    if (( config_found == 0 )); then
+        return 1
+    fi
+}
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+cmd_create() {
+    local input="${1:-}"
+    [ -z "$input" ] && _die "Usage: 24hg-game-profiles create <appid|name>"
+
+    local appid game_name
+    appid="$(_resolve_game "$input")"
+    game_name="$(_game_name_for_appid "$appid")"
+
+    if [[ "$game_name" == "Unknown ("*")" && ! "$input" =~ ^[0-9]+$ ]]; then
+        game_name="$input"
+    fi
+
+    local profile_path
+    profile_path="$(_profile_path "$appid")"
+
+    if [ -f "$profile_path" ]; then
+        local overwrite
+        overwrite="$(_prompt_yesno "Profile for '$game_name' ($appid) already exists. Overwrite?")"
+        [[ "$overwrite" == "yes" ]] || { _log "Cancelled."; return 0; }
+    fi
+
+    _log "Creating profile for: $game_name (AppID: $appid)"
+
+    # Game name
+    game_name="$(_prompt "Game Name" "Game name:" "$game_name")"
+
+    # Proton version
+    _log "Detecting Proton versions..."
+    local proton_versions proton_arr proton_choice
+    proton_versions="$(_find_proton_versions 2>/dev/null)" || true
+    if [ -n "$proton_versions" ]; then
+        mapfile -t proton_arr <<< "$proton_versions"
+        proton_arr=("(none/default)" "${proton_arr[@]}")
+        proton_choice="$(_prompt_list "Proton Version" "Select Proton version:" "${proton_arr[@]}")"
+        [[ "$proton_choice" == "(none/default)" ]] && proton_choice=""
+    else
+        proton_choice="$(_prompt "Proton Version" "Proton version (leave empty for default):" "")"
+    fi
+
+    # Resolution
+    local resolution
+    resolution="$(_prompt "Resolution" "Resolution override (e.g. 1920x1080, leave empty for default):" "")"
+
+    # MangoHud
+    local mangohud mangohud_config=""
+    mangohud="$(_prompt_yesno "Enable MangoHud overlay?" "no")"
+    if [[ "$mangohud" == "yes" ]]; then
+        mangohud_config="$(_prompt "MangoHud Config" "MangoHud config string (e.g. fps,gpu_temp,cpu_temp — leave empty for default):" "")"
+    fi
+
+    # Environment variables
+    local env_vars
+    env_vars="$(_prompt "Environment Variables" "Custom environment variables (e.g. DXVK_ASYNC=1 WINE_FULLSCREEN_FSR=1):" "")"
+
+    # Launch arguments
+    local launch_args
+    launch_args="$(_prompt "Launch Arguments" "Extra launch arguments (e.g. -novid -high):" "")"
+
+    # Performance profile
+    local perf_arr=("balanced" "gaming")
+    local perf_profile
+    perf_profile="$(_prompt_list "Performance Profile" "Select performance profile:" "${perf_arr[@]}")"
+    perf_profile="${perf_profile:-balanced}"
+
+    # Build and save
+    local json
+    json="$(
+        _GP_APPID="$appid" \
+        _GP_NAME="$game_name" \
+        _GP_PROTON="$proton_choice" \
+        _GP_RESOLUTION="$resolution" \
+        _GP_MANGOHUD="$mangohud" \
+        _GP_MANGOHUD_CONFIG="$mangohud_config" \
+        _GP_ENV_VARS="$env_vars" \
+        _GP_LAUNCH_ARGS="$launch_args" \
+        _GP_PERF_PROFILE="$perf_profile" \
+        _build_profile_json_safe
+    )"
+
+    _write_profile "$profile_path" "$json"
+    _log "Profile saved to $profile_path"
+    echo ""
+    echo "$json"
+}
+
+cmd_edit() {
+    local input="${1:-}"
+    [ -z "$input" ] && _die "Usage: 24hg-game-profiles edit <appid|name>"
+
+    local appid profile_path
+    appid="$(_resolve_game "$input")"
+    profile_path="$(_profile_path "$appid")"
+
+    [ -f "$profile_path" ] || _die "No profile found for '$input' (resolved AppID: $appid). Create one first."
+
+    # Read existing values
+    local cur_name cur_proton cur_res cur_mh cur_mhc cur_env cur_args cur_perf
+    cur_name="$(_profile_field "$profile_path" "name")"
+    cur_proton="$(_profile_field "$profile_path" "proton_version")"
+    cur_res="$(_profile_field "$profile_path" "resolution")"
+    cur_mh="$(_profile_field "$profile_path" "mangohud")"
+    cur_mhc="$(_profile_field "$profile_path" "mangohud_config")"
+    cur_env="$(_profile_field "$profile_path" "env_vars")"
+    cur_args="$(_profile_field "$profile_path" "launch_args")"
+    cur_perf="$(_profile_field "$profile_path" "performance_profile")"
+
+    _log "Editing profile: $cur_name ($appid)"
+
+    local game_name proton_choice resolution mangohud mangohud_config env_vars launch_args perf_profile
+
+    game_name="$(_prompt "Game Name" "Game name:" "$cur_name")"
+
+    # Proton
+    local proton_versions proton_arr
+    proton_versions="$(_find_proton_versions 2>/dev/null)" || true
+    if [ -n "$proton_versions" ]; then
+        mapfile -t proton_arr <<< "$proton_versions"
+        proton_arr=("(none/default)" "${proton_arr[@]}")
+        _log "Current Proton: ${cur_proton:-default}"
+        proton_choice="$(_prompt_list "Proton Version" "Select Proton version (current: ${cur_proton:-default}):" "${proton_arr[@]}")"
+        [[ "$proton_choice" == "(none/default)" ]] && proton_choice=""
+    else
+        proton_choice="$(_prompt "Proton Version" "Proton version:" "$cur_proton")"
+    fi
+
+    resolution="$(_prompt "Resolution" "Resolution override:" "$cur_res")"
+
+    mangohud="$(_prompt_yesno "Enable MangoHud?" "$cur_mh")"
+    mangohud_config=""
+    if [[ "$mangohud" == "yes" ]]; then
+        mangohud_config="$(_prompt "MangoHud Config" "MangoHud config string:" "$cur_mhc")"
+    fi
+
+    env_vars="$(_prompt "Environment Variables" "Environment variables:" "$cur_env")"
+    launch_args="$(_prompt "Launch Arguments" "Launch arguments:" "$cur_args")"
+
+    local perf_arr=("balanced" "gaming")
+    perf_profile="$(_prompt_list "Performance Profile" "Performance profile (current: $cur_perf):" "${perf_arr[@]}")"
+    perf_profile="${perf_profile:-$cur_perf}"
+
+    local json
+    json="$(
+        _GP_APPID="$appid" \
+        _GP_NAME="$game_name" \
+        _GP_PROTON="$proton_choice" \
+        _GP_RESOLUTION="$resolution" \
+        _GP_MANGOHUD="$mangohud" \
+        _GP_MANGOHUD_CONFIG="$mangohud_config" \
+        _GP_ENV_VARS="$env_vars" \
+        _GP_LAUNCH_ARGS="$launch_args" \
+        _GP_PERF_PROFILE="$perf_profile" \
+        _build_profile_json_safe
+    )"
+
+    _write_profile "$profile_path" "$json"
+    _log "Profile updated: $profile_path"
+    echo ""
+    echo "$json"
+}
+
+cmd_apply() {
+    local input="${1:-}"
+    [ -z "$input" ] && _die "Usage: 24hg-game-profiles apply <appid|name>"
+
+    local appid profile_path
+    appid="$(_resolve_game "$input")"
+    profile_path="$(_profile_path "$appid")"
+
+    [ -f "$profile_path" ] || _die "No profile found for '$input' (resolved AppID: $appid)."
+
+    local game_name launch_string perf_profile proton_version
+    game_name="$(_profile_field "$profile_path" "name")"
+    perf_profile="$(_profile_field "$profile_path" "performance_profile")"
+    proton_version="$(_profile_field "$profile_path" "proton_version")"
+
+    _log "Applying profile for: $game_name ($appid)"
+
+    # Build launch options string
+    launch_string="$(_build_launch_string "$profile_path")"
+
+    # Apply performance profile
+    if [ -n "$perf_profile" ] && [ "$perf_profile" != "balanced" ]; then
+        if command -v 24hg-performance &>/dev/null; then
+            _log "Setting performance profile: $perf_profile"
+            24hg-performance "$perf_profile" 2>/dev/null || true
+        fi
+    fi
+
+    # Proton compatibility tool hint
+    if [ -n "$proton_version" ]; then
+        _log "Proton version: $proton_version"
+        _log "Note: Set this in Steam > Properties > Compatibility for the game."
+        local ptype pname
+        ptype="${proton_version%%:*}"
+        pname="${proton_version#*:}"
+        case "$ptype" in
+            steam)  _log "  Steam built-in: $pname" ;;
+            ge)     _log "  GE-Proton: $pname (in compatibilitytools.d)" ;;
+            24hg)  _log "  24HG Proton-GE: $pname (in $HG24_PROTON_DIR)" ;;
+        esac
+    fi
+
+    # Try writing to localconfig.vdf
+    if [[ "$appid" =~ ^[0-9]+$ ]]; then
+        local clean_launch
+        clean_launch="$(echo "$launch_string" | sed 's/  */ /g' | xargs)"
+
+        if _write_to_localconfig "$appid" "$clean_launch" 2>/dev/null; then
+            _log "Launch options written to Steam localconfig.vdf"
+            _log "Restart Steam for changes to take effect."
+        else
+            _log "Could not write to localconfig.vdf automatically."
+            echo ""
+            echo "Copy this to Steam > Properties > Launch Options for $game_name:"
+            echo "────────────────────────────────────────────────────────────"
+            echo "$clean_launch"
+            echo "────────────────────────────────────────────────────────────"
+        fi
+    else
+        echo ""
+        echo "Launch options string:"
+        echo "────────────────────────────────────────────────────────────"
+        echo "$launch_string"
+        echo "────────────────────────────────────────────────────────────"
+    fi
+}
+
+cmd_list() {
+    mkdir -p "$PROFILES_DIR"
+
+    local profiles
+    profiles=("$PROFILES_DIR"/*.json)
+    if [ ! -f "${profiles[0]:-}" ]; then
+        _log "No game profiles found."
+        _log "Create one with: 24hg-game-profiles create <appid|name>"
+        return 0
+    fi
+
+    printf "%-8s  %-35s  %-20s  %-12s  %-8s  %s\n" \
+        "AppID" "Name" "Proton" "Resolution" "MangoHud" "Perf"
+    printf '%0.s─' {1..110}
+    echo ""
+
+    for pfile in "${profiles[@]}"; do
+        [ -f "$pfile" ] || continue
+        python3 << PYEOF
+import json
+with open("${pfile}") as f:
+    p = json.load(f)
+appid = p.get("appid", "?")
+name = p.get("name", "Unknown")
+if len(name) > 33:
+    name = name[:30] + "..."
+proton = p.get("proton_version", "default")
+if not proton:
+    proton = "default"
+if len(proton) > 18:
+    proton = proton[:15] + "..."
+res = p.get("resolution", "-") or "-"
+mh = "yes" if p.get("mangohud") == "yes" else "no"
+perf = p.get("performance_profile", "balanced") or "balanced"
+print(f"{appid:<8}  {name:<35}  {proton:<20}  {res:<12}  {mh:<8}  {perf}")
+PYEOF
+    done
+}
+
+cmd_delete() {
+    local input="${1:-}"
+    [ -z "$input" ] && _die "Usage: 24hg-game-profiles delete <appid|name>"
+
+    local appid profile_path
+    appid="$(_resolve_game "$input")"
+    profile_path="$(_profile_path "$appid")"
+
+    [ -f "$profile_path" ] || _die "No profile found for '$input'."
+
+    local game_name
+    game_name="$(_profile_field "$profile_path" "name")"
+
+    local confirm
+    confirm="$(_prompt_yesno "Delete profile for '$game_name' ($appid)?")"
+    if [[ "$confirm" == "yes" ]]; then
+        rm -f "$profile_path"
+        _log "Deleted profile: $game_name ($appid)"
+    else
+        _log "Cancelled."
+    fi
+}
+
+cmd_search() {
+    local query="${1:-}"
+    [ -z "$query" ] && _die "Usage: 24hg-game-profiles search <name>"
+
+    _log "Searching installed Steam games for '$query'..."
+
+    local games
+    games="$(_scan_installed_games 2>/dev/null)" || _die "Could not scan Steam games. Is Steam installed?"
+
+    if [ -z "$games" ]; then
+        _die "No installed Steam games found."
+    fi
+
+    # Fuzzy match using python3
+    python3 << PYEOF
+import sys
+
+query = "${query}".lower()
+games = """${games}""".strip().split("\n")
+
+results = []
+for line in games:
+    if "|" not in line:
+        continue
+    appid, name = line.split("|", 1)
+    name_lower = name.lower()
+
+    # Scoring: exact substring > word start > character sequence
+    score = 0
+    if query == name_lower:
+        score = 100
+    elif query in name_lower:
+        score = 80
+    elif name_lower.startswith(query):
+        score = 70
+    else:
+        # Fuzzy: check if all query chars appear in order
+        qi = 0
+        for c in name_lower:
+            if qi < len(query) and c == query[qi]:
+                qi += 1
+        if qi == len(query):
+            score = 30 + (qi / len(name_lower)) * 20
+        else:
+            # Partial word match
+            words = name_lower.split()
+            for w in words:
+                if w.startswith(query[:3]) if len(query) >= 3 else query in w:
+                    score = 20
+                    break
+
+    if score > 0:
+        results.append((score, appid, name))
+
+results.sort(key=lambda x: -x[0])
+if not results:
+    print("No matches found.")
+    sys.exit(0)
+
+print(f"{'AppID':<10}  {'Name':<50}  {'Match'}")
+print("─" * 75)
+for score, appid, name in results[:20]:
+    label = "exact" if score >= 80 else "close" if score >= 50 else "fuzzy"
+    print(f"{appid:<10}  {name:<50}  {label}")
+PYEOF
+}
+
+cmd_export() {
+    local input="${1:-}"
+    [ -z "$input" ] && _die "Usage: 24hg-game-profiles export <appid|name> [output_file]"
+
+    local output="${2:-}"
+    local appid profile_path
+    appid="$(_resolve_game "$input")"
+    profile_path="$(_profile_path "$appid")"
+
+    [ -f "$profile_path" ] || _die "No profile found for '$input'."
+
+    if [ -n "$output" ]; then
+        cp "$profile_path" "$output"
+        _log "Profile exported to: $output"
+    else
+        cat "$profile_path"
+    fi
+}
+
+cmd_import() {
+    local source="${1:-}"
+    [ -z "$source" ] && _die "Usage: 24hg-game-profiles import <file|url>"
+
+    local json=""
+
+    if [[ "$source" =~ ^https?:// ]]; then
+        _log "Downloading profile from URL..."
+        if command -v curl &>/dev/null; then
+            json="$(curl -fsSL "$source")" || _die "Failed to download from $source"
+        elif command -v wget &>/dev/null; then
+            json="$(wget -qO- "$source")" || _die "Failed to download from $source"
+        else
+            _die "Neither curl nor wget available."
+        fi
+    elif [ -f "$source" ]; then
+        json="$(cat "$source")"
+    else
+        _die "Source not found: $source"
+    fi
+
+    # Validate JSON and extract appid
+    local appid game_name
+    appid="$(echo "$json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['appid'])" 2>/dev/null)" \
+        || _die "Invalid profile JSON: missing 'appid' field."
+    game_name="$(echo "$json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('name','Unknown'))" 2>/dev/null)"
+
+    local profile_path
+    profile_path="$(_profile_path "$appid")"
+
+    if [ -f "$profile_path" ]; then
+        local overwrite
+        overwrite="$(_prompt_yesno "Profile for '$game_name' ($appid) already exists. Overwrite?")"
+        [[ "$overwrite" == "yes" ]] || { _log "Cancelled."; return 0; }
+    fi
+
+    _write_profile "$profile_path" "$json"
+    _log "Imported profile: $game_name ($appid)"
+    echo "$json" | python3 -m json.tool 2>/dev/null || echo "$json"
+}
+
+cmd_help() {
+    cat << 'EOF'
+24HG Game Profile Manager
+===========================
+Manage per-game launch profiles for Steam games with Proton, MangoHud,
+resolution overrides, environment variables, and performance tuning.
+
+USAGE
+    24hg-game-profiles <command> [arguments]
+
+COMMANDS
+    create <appid|name>         Create a new game profile (interactive)
+    edit <appid|name>           Edit an existing profile
+    apply <appid|name>          Apply profile (write Steam launch options)
+    list                        List all configured profiles
+    delete <appid|name>         Delete a profile
+    search <name>               Fuzzy-search installed Steam games
+    import <file|url>           Import a profile from a JSON file or URL
+    export <appid|name> [file]  Export a profile as JSON (stdout or file)
+    help                        Show this help text
+
+EXAMPLES
+    # Search for a game by name
+    24hg-game-profiles search counter-strike
+
+    # Create a profile for CS2 (AppID 730)
+    24hg-game-profiles create 730
+
+    # Create by name (fuzzy-matched to installed games)
+    24hg-game-profiles create "Rust"
+
+    # Apply the profile (writes to Steam's localconfig.vdf)
+    24hg-game-profiles apply 730
+
+    # List all profiles
+    24hg-game-profiles list
+
+    # Export and share a profile
+    24hg-game-profiles export 730 ~/cs2-profile.json
+
+    # Import a shared profile
+    24hg-game-profiles import ~/cs2-profile.json
+    24hg-game-profiles import https://example.com/profiles/cs2.json
+
+PROFILE FIELDS
+    proton_version       Proton/GE-Proton version to use
+    resolution           Resolution override (e.g. 1920x1080)
+    mangohud             Enable MangoHud overlay (yes/no)
+    mangohud_config      Custom MangoHud config string
+    env_vars             Space-separated KEY=VALUE environment variables
+    launch_args          Extra command-line arguments
+    performance_profile  24HG perf profile: gaming or balanced
+
+PROTON DETECTION
+    The script scans for Proton versions in:
+    - Steam built-in:    <steam>/steamapps/common/Proton*/
+    - GE-Proton:         <steam>/compatibilitytools.d/GE-Proton*/
+    - 24HG managed:     /var/lib/24hg/proton-ge/
+
+PROFILE STORAGE
+    Profiles are stored as JSON files in:
+    ~/.config/24hg/game-profiles/<appid>.json
+
+STEAM PATHS
+    Auto-detects Steam installation at:
+    - ~/.var/app/com.valvesoftware.Steam/.local/share/Steam (Flatpak)
+    - ~/.local/share/Steam (native)
+    - ~/.steam/steam (symlink)
+
+EOF
+}
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+main() {
+    mkdir -p "$PROFILES_DIR"
+
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        create)  cmd_create "$@" ;;
+        edit)    cmd_edit "$@" ;;
+        apply)   cmd_apply "$@" ;;
+        list)    cmd_list ;;
+        delete)  cmd_delete "$@" ;;
+        search)  cmd_search "$@" ;;
+        import)  cmd_import "$@" ;;
+        export)  cmd_export "$@" ;;
+        help|--help|-h)  cmd_help ;;
+        *)       _die "Unknown command: $cmd. Run '24hg-game-profiles help' for usage." ;;
+    esac
+}
+
+main "$@"

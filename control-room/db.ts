@@ -78,7 +78,7 @@ export function recordHeartbeat(data: {
       INSERT INTO heartbeats (machine_id, version, gpu, cpu, ram_gb, display)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(data.machine_id, data.version ?? null, data.gpu ?? null, data.cpu ?? null, data.ram_gb ?? null, data.display ?? null);
-    logActivity("new_install", null, `New 24HG Forge install: ${data.version || "unknown"}`);
+    logActivity("new_install", null, `New 24HG install: ${data.version || "unknown"}`);
   }
   return true;
 }

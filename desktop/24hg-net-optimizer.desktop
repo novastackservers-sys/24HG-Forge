@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Network Optimizer
+Comment=Gaming network optimization
+Exec=/usr/bin/24hg-net-optimizer
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Network;Game;
+Keywords=network;latency;ping;optimize;gaming;

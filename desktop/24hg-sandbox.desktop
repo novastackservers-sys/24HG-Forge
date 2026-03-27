@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Sandbox
+Comment=Sandboxed game launcher
+Exec=/usr/bin/24hg-sandbox
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Game;Security;
+Keywords=sandbox;isolate;secure;launch;game;

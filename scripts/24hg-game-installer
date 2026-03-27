@@ -1,0 +1,394 @@
+#!/usr/bin/env bash
+# 24HG Game Installer — Unified multi-source game installer
+# Sources: Steam, Heroic (Epic/GOG), Lutris, Flatpak
+# Part of 24HG — https://24hgaming.com
+set -euo pipefail
+
+readonly VERSION="1.0.0" PROG="24hg-game-installer"
+readonly CFG="$HOME/.config/24hg/game-installer"
+readonly STATE="$CFG/state" CACHE="$HOME/.cache/24hg/game-installer"
+readonly DB="$CFG/state/installed.json"
+
+STEAM_DIR="" HEROIC_DIR="" LUTRIS_DIR=""
+
+RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m'
+CYAN='\033[0;36m' BLUE='\033[0;34m' MAG='\033[0;35m'
+BOLD='\033[1m' DIM='\033[2m' NC='\033[0m'
+
+declare -A SRC_CLR=([steam]="$CYAN" [epic]="$BLUE" [gog]="$MAG" [lutris]="$YELLOW" [flatpak]="$GREEN")
+declare -A SRC_LBL=([steam]="Steam" [epic]="Epic Games" [gog]="GOG" [lutris]="Lutris" [flatpak]="Flatpak")
+declare -A AC_GAMES=([730]=eac [440]=vac [1172470]=eac [578080]=battleye [252490]=eac [1063730]=eac [1245620]=eac [892970]=eac)
+declare -A GAME_DEPS=([730]="vcrun2019" [1245620]="vcrun2019 dxvk" [892970]="vcrun2019" [1091500]="dotnet48 vcrun2019")
+
+info() { echo -e "  ${CYAN}●${NC}  $1"; }
+ok()   { echo -e "  ${GREEN}✓${NC}  $1"; }
+warn() { echo -e "  ${YELLOW}!${NC}  $1"; }
+fail() { echo -e "  ${RED}✗${NC}  $1"; }
+step() { echo -e "  ${BOLD}→${NC} $1"; }
+hdr()  { echo -e "\n${BOLD}━━━ 24HG Game Installer: $1 ━━━${NC}\n"; }
+
+progress() {
+    local p=$1 w=40 f=$(($1*40/100)) e=$((40-$1*40/100))
+    printf "\r  ${CYAN}[${NC}%*s%*s${CYAN}]${NC} %3d%% %s" "$f" "" "$e" "" "$p" "${2:-}"
+    ((p==100)) && echo ""
+}
+
+init() {
+    mkdir -p "$CFG" "$STATE" "$CACHE" "$CFG/logs"
+    [[ -f "$DB" ]] || echo '{"games":[]}' > "$DB"
+}
+
+detect_sources() {
+    for d in "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam" "$HOME/.local/share/Steam"; do
+        [[ -d "$d" ]] && { STEAM_DIR="$d"; break; } || true
+    done
+    for d in "$HOME/.var/app/com.heroicgameslauncher.hgl/config/heroic" "$HOME/.config/heroic"; do
+        [[ -d "$d" ]] && { HEROIC_DIR="$d"; break; } || true
+    done
+    for d in "$HOME/.var/app/net.lutris.Lutris/config/lutris" "$HOME/.config/lutris"; do
+        [[ -d "$d" ]] && { LUTRIS_DIR="$d"; break; } || true
+    done
+}
+
+src_ok() {
+    case "$1" in
+        steam) [[ -n "$STEAM_DIR" ]] ;;
+        epic|gog) [[ -n "$HEROIC_DIR" ]] ;;
+        lutris) command -v lutris &>/dev/null || flatpak list 2>/dev/null | grep -q net.lutris.Lutris ;;
+        flatpak) command -v flatpak &>/dev/null ;;
+        *) return 1 ;;
+    esac
+}
+
+steam_cmd() {
+    if flatpak list 2>/dev/null | grep -q com.valvesoftware.Steam; then
+        flatpak run com.valvesoftware.Steam "$1" &>/dev/null &
+    else
+        steam "$1" &>/dev/null &
+    fi
+}
+
+record() {
+    local tmp; tmp=$(mktemp)
+    jq --arg s "$1" --arg i "$2" --arg n "$3" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.games += [{"source":$s,"id":$i,"name":$n,"installed_at":$t}]' "$DB" > "$tmp" && mv "$tmp" "$DB"
+}
+
+unrecord() {
+    local tmp; tmp=$(mktemp)
+    jq --arg s "$1" --arg i "$2" '.games |= map(select(.source != $s or .id != $i))' "$DB" > "$tmp" && mv "$tmp" "$DB"
+}
+
+install_deps() {
+    local id="$1" src="$2" deps="${GAME_DEPS[$1]:-}"
+    [[ -z "$deps" ]] && return 0
+    step "Installing dependencies: ${BOLD}$deps${NC}"
+    for dep in $deps; do
+        case "$dep" in
+            vcrun*|dotnet*)
+                if [[ "$src" == "steam" ]] && command -v protontricks &>/dev/null; then
+                    protontricks "$id" "$dep" -q 2>/dev/null && ok "$dep" || warn "$dep needs manual install"
+                elif command -v winetricks &>/dev/null; then
+                    winetricks "$dep" -q 2>/dev/null && ok "$dep" || warn "$dep needs manual install"
+                fi ;;
+            dxvk) ok "DXVK bundled with Proton/Wine-GE" ;;
+        esac
+    done
+}
+
+setup_anticheat() {
+    local ac="${AC_GAMES[$1]:-}"; [[ -z "$ac" ]] && return 0
+    step "Anti-cheat: ${BOLD}$ac${NC}"
+    case "$ac" in
+        eac)      ok "EAC via Proton runtime (requires developer opt-in)" ;;
+        battleye) ok "BattlEye via Proton runtime (requires developer opt-in)" ;;
+        vac)      ok "VAC works natively through Steam" ;;
+    esac
+}
+
+setup_prefix() {
+    local pfx="$1" arch="${2:-win64}"
+    step "Creating Wine prefix ($arch)..."
+    WINEPREFIX="$pfx" WINEARCH="$arch" wine wineboot --init &>/dev/null 2>&1 || true
+    ok "Wine prefix ready"
+}
+
+# ─── Commands ─────────────────────────────────────────────────────────────
+
+cmd_search() {
+    [[ -z "${1:-}" ]] && { fail "Usage: $PROG search <query>"; exit 1; }
+    hdr "Search: $1"
+    local q="$1"
+    if src_ok steam; then
+        step "Searching ${SRC_CLR[steam]}Steam${NC}..."
+        local r; r=$(curl -sf "https://store.steampowered.com/api/storesearch/?term=$(jq -rn --arg q "$q" '$q|@uri')&l=english&cc=us" 2>/dev/null || echo '{}')
+        echo "$r" | jq -r '.items[]? | "\(.id) — \(.name)"' 2>/dev/null | head -8 | while read -r l; do
+            echo -e "  ${SRC_CLR[steam]}[Steam]${NC}   $l"; done
+    fi
+    if src_ok epic; then
+        step "Searching ${SRC_CLR[epic]}Epic${NC}..."
+        local lib="$HEROIC_DIR/store_cache/legendary_library.json"
+        [[ -f "$lib" ]] && jq -r --arg q "$q" '.library[]?|select(.title|ascii_downcase|contains($q|ascii_downcase))|"\(.app_name) — \(.title)"' "$lib" 2>/dev/null | head -8 | while read -r l; do
+            echo -e "  ${SRC_CLR[epic]}[Epic]${NC}    $l"; done
+    fi
+    if src_ok gog; then
+        step "Searching ${SRC_CLR[gog]}GOG${NC}..."
+        local lib="$HEROIC_DIR/gog_store/library.json"
+        [[ -f "$lib" ]] && jq -r --arg q "$q" '.games[]?|select(.title|ascii_downcase|contains($q|ascii_downcase))|"\(.app_name) — \(.title)"' "$lib" 2>/dev/null | head -8 | while read -r l; do
+            echo -e "  ${SRC_CLR[gog]}[GOG]${NC}     $l"; done
+    fi
+    if src_ok lutris; then
+        step "Searching ${SRC_CLR[lutris]}Lutris${NC}..."
+        (lutris -lo 2>/dev/null || true) | grep -i "$q" | head -8 | while read -r l; do
+            echo -e "  ${SRC_CLR[lutris]}[Lutris]${NC}  $l"; done
+    fi
+    if src_ok flatpak; then
+        step "Searching ${SRC_CLR[flatpak]}Flatpak${NC}..."
+        flatpak search --columns=application,name "$q" 2>/dev/null | head -8 | while read -r l; do
+            echo -e "  ${SRC_CLR[flatpak]}[Flatpak]${NC} $l"; done
+    fi
+    echo ""; info "Install: ${BOLD}$PROG install <source>:<id>${NC}"
+}
+
+cmd_install() {
+    [[ -z "${1:-}" ]] && { fail "Usage: $PROG install <source>:<id>"; exit 1; }
+    [[ "$1" != *:* ]] && { fail "Format: source:id (steam:730, epic:fortnite)"; exit 1; }
+    local src="${1%%:*}" id="${1#*:}"
+    case "$src" in
+        steam)
+            [[ -z "$STEAM_DIR" ]] && { fail "Steam not found"; exit 1; }
+            hdr "Steam App $id"
+            local mf="$STEAM_DIR/steamapps/appmanifest_${id}.acf"
+            if [[ -f "$mf" ]]; then warn "Already installed"; return 0; fi
+            step "Requesting install..."; steam_cmd "steam://install/$id"
+            ok "Steam install dialog opened"
+            local n=0; while [[ ! -f "$mf" ]] && ((n<30)); do sleep 2; ((n++)); progress $((n*3)) "waiting..."; done
+            local name="App $id"
+            [[ -f "$mf" ]] && name=$(grep -oP '"name"\s+"\K[^"]+' "$mf" 2>/dev/null || echo "$name")
+            install_deps "$id" steam; setup_anticheat "$id"
+            record steam "$id" "$name"; ok "Download started for ${BOLD}$name${NC}" ;;
+        epic)
+            [[ -z "$HEROIC_DIR" ]] && { fail "Heroic Launcher not found"; exit 1; }
+            hdr "Epic: $id"
+            if command -v legendary &>/dev/null; then
+                step "Installing via Legendary..."; legendary install "$id" --yes 2>&1 | while IFS= read -r l; do
+                    [[ "$l" =~ ([0-9]+)% ]] && progress "${BASH_REMATCH[1]}" "downloading..."; done
+                ok "Done"
+            elif flatpak list 2>/dev/null | grep -q com.heroicgameslauncher.hgl; then
+                flatpak run com.heroicgameslauncher.hgl --install "$id" &>/dev/null &
+                ok "Heroic install started"
+            else fail "No Epic installer (install Heroic or legendary)"; exit 1; fi
+            record epic "$id" "$id" ;;
+        gog)
+            [[ -z "$HEROIC_DIR" ]] && { fail "Heroic Launcher not found"; exit 1; }
+            hdr "GOG: $id"
+            if flatpak list 2>/dev/null | grep -q com.heroicgameslauncher.hgl; then
+                flatpak run com.heroicgameslauncher.hgl &>/dev/null &
+            elif command -v heroic &>/dev/null; then heroic &>/dev/null &
+            fi
+            record gog "$id" "$id"; info "Select ${BOLD}$id${NC} in Heroic to install" ;;
+        lutris)
+            hdr "Lutris: $id"
+            local cmd="lutris"
+            command -v lutris &>/dev/null || { flatpak list 2>/dev/null | grep -q net.lutris.Lutris && cmd="flatpak run net.lutris.Lutris"; } || { fail "Lutris not found"; exit 1; }
+            $cmd "lutris:$id" &>/dev/null &
+            record lutris "$id" "$id"; ok "Lutris installer launched" ;;
+        flatpak)
+            hdr "Flatpak: $id"
+            command -v flatpak &>/dev/null || { fail "Flatpak unavailable"; exit 1; }
+            step "Installing from Flathub..."
+            flatpak install -y flathub "$id" 2>&1 | while IFS= read -r l; do echo -e "  ${DIM}$l${NC}"; done
+            record flatpak "$id" "$id"; ok "Installed" ;;
+        *) fail "Unknown source: $src (steam/epic/gog/lutris/flatpak)"; exit 1 ;;
+    esac
+    echo ""
+    if command -v 24hg-game-ready &>/dev/null; then
+        step "Post-install optimization..."; 24hg-game-ready 2>/dev/null || true; ok "Optimized"
+    else info "Tip: Run ${BOLD}24hg-game-ready${NC} to optimize for gaming"; fi
+}
+
+cmd_list() {
+    hdr "Installed Games"; local total=0
+    if [[ -n "$STEAM_DIR" ]] && [[ -d "$STEAM_DIR/steamapps" ]]; then
+        echo -e "  ${SRC_CLR[steam]}${BOLD}Steam${NC}"
+        for mf in "$STEAM_DIR"/steamapps/appmanifest_*.acf; do
+            [[ -f "$mf" ]] || continue
+            local nm aid sz; nm=$(grep -oP '"name"\s+"\K[^"]+' "$mf" 2>/dev/null || echo "?")
+            aid=$(grep -oP '"appid"\s+"\K[^"]+' "$mf" 2>/dev/null || echo "?")
+            sz=$(grep -oP '"SizeOnDisk"\s+"\K[^"]+' "$mf" 2>/dev/null || echo "0")
+            echo -e "    ${DIM}$aid${NC}  $nm  ${DIM}($(numfmt --to=iec "$sz" 2>/dev/null || echo "${sz}B"))${NC}"
+            ((total++))
+        done; echo ""
+    fi
+    if [[ -n "$HEROIC_DIR" ]] && [[ -d "$HEROIC_DIR/GamesConfig" ]]; then
+        echo -e "  ${SRC_CLR[epic]}${BOLD}Epic/GOG (Heroic)${NC}"
+        for c in "$HEROIC_DIR"/GamesConfig/*.json; do
+            [[ -f "$c" ]] || continue
+            echo -e "    $(jq -r '.title // .app_name // "?"' "$c" 2>/dev/null || basename "$c" .json)"
+            ((total++))
+        done; echo ""
+    fi
+    if src_ok lutris; then
+        local lg; lg=$(lutris -lo 2>/dev/null || flatpak run net.lutris.Lutris -lo 2>/dev/null || true)
+        if [[ -n "$lg" ]]; then echo -e "  ${SRC_CLR[lutris]}${BOLD}Lutris${NC}"
+            echo "$lg" | while read -r l; do echo -e "    $l"; ((total++)); done; echo ""; fi
+    fi
+    if src_ok flatpak; then
+        local fg; fg=$(flatpak list --app --columns=application,name 2>/dev/null | grep -iE 'game|steam|lutris|heroic|minecraft|wine' || true)
+        if [[ -n "$fg" ]]; then echo -e "  ${SRC_CLR[flatpak]}${BOLD}Flatpak (Gaming)${NC}"
+            echo "$fg" | while read -r l; do echo -e "    $l"; done; echo ""; fi
+    fi
+    local tr; tr=$(jq -r '.games[]?|"\(.source):\(.id) — \(.name) (\(.installed_at))"' "$DB" 2>/dev/null || true)
+    if [[ -n "$tr" ]]; then echo -e "  ${BOLD}Tracked${NC}"
+        echo "$tr" | while read -r l; do echo -e "    ${DIM}$l${NC}"; done; echo ""; fi
+    info "Total: ${BOLD}$total${NC} games"
+}
+
+cmd_info() {
+    [[ -z "${1:-}" ]] && { fail "Usage: $PROG info <appid|name>"; exit 1; }
+    hdr "Info: $1"
+    if [[ -n "$STEAM_DIR" ]] && [[ "$1" =~ ^[0-9]+$ ]]; then
+        local mf="$STEAM_DIR/steamapps/appmanifest_${1}.acf"
+        if [[ -f "$mf" ]]; then
+            local nm sz st idir
+            nm=$(grep -oP '"name"\s+"\K[^"]+' "$mf" 2>/dev/null)
+            sz=$(grep -oP '"SizeOnDisk"\s+"\K[^"]+' "$mf" 2>/dev/null || echo 0)
+            st=$(grep -oP '"StateFlags"\s+"\K[^"]+' "$mf" 2>/dev/null || echo 0)
+            idir=$(grep -oP '"installdir"\s+"\K[^"]+' "$mf" 2>/dev/null)
+            echo -e "  ${BOLD}Name:${NC}       $nm"
+            echo -e "  ${BOLD}App ID:${NC}     $1"
+            echo -e "  ${BOLD}Source:${NC}     Steam"
+            echo -e "  ${BOLD}Size:${NC}       $(numfmt --to=iec "$sz" 2>/dev/null || echo "${sz}B")"
+            echo -e "  ${BOLD}State:${NC}      $st (4=installed)"
+            echo -e "  ${BOLD}Path:${NC}       $STEAM_DIR/steamapps/common/$idir"
+            local cd="$STEAM_DIR/steamapps/compatdata/$1"
+            [[ -d "$cd" ]] && echo -e "  ${BOLD}Proton:${NC}     $(cat "$cd/version" 2>/dev/null || echo unknown)\n  ${BOLD}Prefix:${NC}     $cd/pfx"
+            echo -e "  ${BOLD}Anti-Cheat:${NC} ${AC_GAMES[$1]:-none}"
+            step "Checking ProtonDB..."
+            local tier; tier=$(curl -sf "https://www.protondb.com/api/v1/reports/summaries/$1.json" 2>/dev/null | jq -r '.tier//"unknown"' 2>/dev/null || echo unknown)
+            case "$tier" in
+                platinum|native) echo -e "  ${BOLD}ProtonDB:${NC}   ${GREEN}$tier${NC}" ;;
+                gold|silver)     echo -e "  ${BOLD}ProtonDB:${NC}   ${YELLOW}$tier${NC}" ;;
+                *)               echo -e "  ${BOLD}ProtonDB:${NC}   ${RED}$tier${NC}" ;;
+            esac; return 0
+        fi
+    fi
+    local e; e=$(jq -r --arg g "$1" '.games[]?|select(.id==$g or (.name|ascii_downcase|contains($g|ascii_downcase)))' "$DB" 2>/dev/null | head -1)
+    if [[ -n "$e" ]]; then echo "$e" | jq -r '"  Name:      \(.name)\n  Source:    \(.source)\n  ID:        \(.id)\n  Installed: \(.installed_at)"'
+    else warn "Not found locally. Try: $PROG search $1"; fi
+}
+
+cmd_uninstall() {
+    [[ -z "${1:-}" ]] && { fail "Usage: $PROG uninstall <source>:<id>"; exit 1; }
+    local src="" id=""
+    if [[ "$1" == *:* ]]; then src="${1%%:*}" id="${1#*:}"; else id="$1"; fi
+    hdr "Uninstall: $id"
+    [[ -z "$src" ]] && [[ "$id" =~ ^[0-9]+$ ]] && [[ -n "$STEAM_DIR" ]] && [[ -f "$STEAM_DIR/steamapps/appmanifest_${id}.acf" ]] && src=steam
+    case "$src" in
+        steam)
+            local nm; nm=$(grep -oP '"name"\s+"\K[^"]+' "$STEAM_DIR/steamapps/appmanifest_${id}.acf" 2>/dev/null || echo "App $id")
+            step "Uninstalling ${BOLD}$nm${NC}..."; steam_cmd "steam://uninstall/$id"; ok "Uninstall dialog opened"
+            local cp="$STEAM_DIR/steamapps/compatdata/$id"
+            [[ -d "$cp" ]] && info "Prefix at $cp ($(du -sh "$cp" 2>/dev/null|cut -f1)) removable manually" ;;
+        epic)
+            if command -v legendary &>/dev/null; then legendary uninstall "$id" --yes 2>/dev/null && ok "Removed"
+            else info "Open Heroic to uninstall $id"; fi ;;
+        flatpak) flatpak uninstall -y "$id" 2>/dev/null && ok "Removed" ;;
+        lutris) info "Open Lutris to uninstall $id" ;;
+        *) warn "Specify source:id (steam:730)"; return 1 ;;
+    esac
+    unrecord "${src:-unknown}" "$id"
+}
+
+cmd_update() {
+    hdr "Update"
+    if [[ -n "${1:-}" ]]; then
+        [[ "$1" =~ ^[0-9]+$ ]] && src_ok steam && { step "Validating Steam $1..."; steam_cmd "steam://validate/$1"; ok "Started"; }
+    else
+        src_ok steam && step "Steam: auto-updates via client"
+        command -v legendary &>/dev/null && { step "Epic updates..."; legendary update --yes 2>/dev/null || true; }
+        src_ok flatpak && { step "Flatpak updates..."; flatpak update -y 2>/dev/null | tail -3; ok "Done"; }
+    fi
+}
+
+cmd_fix() {
+    [[ -z "${1:-}" ]] && { fail "Usage: $PROG fix <appid>"; exit 1; }
+    hdr "Fix: $1"
+    if [[ "$1" =~ ^[0-9]+$ ]] && [[ -n "$STEAM_DIR" ]]; then
+        local cp="$STEAM_DIR/steamapps/compatdata/$1"
+        step "Checking prefix..."
+        if [[ -d "$cp/pfx" ]]; then
+            for f in system.reg user.reg; do [[ -f "$cp/pfx/$f" ]] && ok "$f" || warn "$f missing"; done
+        else warn "No prefix (native game?)"; fi
+        install_deps "$1" steam; setup_anticheat "$1"
+        step "Validating files..."; steam_cmd "steam://validate/$1"; ok "Validation started"
+        echo ""; info "More fixes:"
+        echo -e "    ${DIM}24hg-prefix reset $1 | 24hg-proton-pick $1 | 24hg-proton-fix $1${NC}"
+    else warn "Fix supports Steam app IDs only"; fi
+}
+
+cmd_sources() {
+    hdr "Game Sources"
+    for s in steam epic gog lutris flatpak; do
+        if src_ok "$s"; then
+            echo -e "  ${SRC_CLR[$s]}●${NC} ${BOLD}${SRC_LBL[$s]}${NC} — ${GREEN}available${NC}"
+            case "$s" in
+                steam) echo -e "    ${DIM}$STEAM_DIR ($(ls "$STEAM_DIR"/steamapps/appmanifest_*.acf 2>/dev/null|wc -l) games)${NC}" ;;
+                epic|gog) echo -e "    ${DIM}Heroic: $HEROIC_DIR${NC}" ;;
+                lutris) echo -e "    ${DIM}$(lutris --version 2>/dev/null || echo flatpak)${NC}" ;;
+                flatpak) echo -e "    ${DIM}Remotes: $(flatpak remotes 2>/dev/null|tr '\n' ' ')${NC}" ;;
+            esac
+        else
+            echo -e "  ${DIM}○ ${SRC_LBL[$s]} — not found${NC}"
+            case "$s" in
+                steam) echo -e "    ${DIM}flatpak install com.valvesoftware.Steam${NC}" ;;
+                epic|gog) echo -e "    ${DIM}flatpak install com.heroicgameslauncher.hgl${NC}" ;;
+                lutris) echo -e "    ${DIM}flatpak install net.lutris.Lutris${NC}" ;;
+                flatpak) echo -e "    ${DIM}rpm-ostree install flatpak${NC}" ;;
+            esac
+        fi; echo ""
+    done
+}
+
+usage() {
+    echo -e "${BOLD}$PROG${NC} v$VERSION — Unified Game Installer for 24HG"
+    echo ""
+    echo -e "  ${BOLD}Usage:${NC} $PROG <command> [args]"
+    echo ""
+    echo -e "  ${BOLD}Commands:${NC}"
+    echo "    search <query>         Search all sources for a game"
+    echo "    install <source>:<id>  Install (steam:730, epic:fortnite, flatpak:com.app.Id)"
+    echo "    list                   List all installed games across platforms"
+    echo "    info <game>            Show game details and compatibility"
+    echo "    uninstall <game>       Remove game and clean up"
+    echo "    update [game]          Update game(s)"
+    echo "    fix <game>             Fix common issues (deps, prefix, files)"
+    echo "    sources                Show configured game sources"
+    echo ""
+    echo -e "  ${BOLD}Sources:${NC} steam, epic, gog, lutris, flatpak"
+    echo -e "  ${BOLD}Examples:${NC}"
+    echo "    $PROG search counter-strike"
+    echo "    $PROG install steam:730"
+    echo "    $PROG install epic:fortnite"
+    echo "    $PROG fix 1245620"
+}
+
+main() {
+    init; detect_sources
+    local cmd="${1:-help}"; shift || true
+    case "$cmd" in
+        search)    cmd_search "$@" ;;
+        install)   cmd_install "$@" ;;
+        list)      cmd_list ;;
+        info)      cmd_info "$@" ;;
+        uninstall) cmd_uninstall "$@" ;;
+        update)    cmd_update "$@" ;;
+        fix)       cmd_fix "$@" ;;
+        sources)   cmd_sources ;;
+        help|--help|-h) usage ;;
+        version|--version|-v) echo "$PROG v$VERSION" ;;
+        *) fail "Unknown: $cmd"; usage; exit 1 ;;
+    esac
+}
+
+main "$@"

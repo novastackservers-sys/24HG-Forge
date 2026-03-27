@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Driver Manager
+Comment=GPU driver management
+Exec=/usr/bin/24hg-driver-mgr
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=System;
+Keywords=driver;gpu;nvidia;amd;mesa;

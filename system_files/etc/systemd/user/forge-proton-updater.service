@@ -1,8 +1,0 @@
-[Unit]
-Description=24HG Forge Proton-GE Auto-Update Check
-Documentation=https://os.24hgaming.com
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/forge-proton-updater auto

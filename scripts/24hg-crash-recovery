@@ -1,0 +1,1245 @@
+#!/usr/bin/env bash
+# 24HG Post-Crash Recovery — Automatic desktop restoration after game crashes
+# Detects abnormal game exits and restores compositor, resolution, audio,
+# input, performance profile, and desktop state to pre-game settings.
+#
+# Usage: 24hg-crash-recovery <command> [options]
+#   recover              — Immediately restore desktop to healthy state
+#   watch                — Background daemon monitoring for game crashes
+#   status               — Show recovery status and desktop health
+#   test                 — Test recovery without a real crash
+#   save-state           — Save current desktop state (called by smart-launch)
+#
+# Options:
+#   --minimal            — Only restore compositor and resolution (clean exit)
+#   --no-notify          — Suppress desktop notifications
+#   --verbose            — Extra detail in output
+#   --no-color           — Disable colored output
+#   -h, --help           — Show this help
+
+set -euo pipefail
+
+# ─── Constants & Globals ─────────────────────────────────────────────────────
+
+readonly VERSION="1.0.0"
+readonly PROG_NAME="24hg-crash-recovery"
+
+readonly CACHE_DIR="${HOME}/.cache/24hg"
+readonly STATE_FILE="${CACHE_DIR}/pre-game-display.json"
+readonly WATCH_PID_FILE="${CACHE_DIR}/crash-recovery-watch.pid"
+readonly WATCH_LOG="${CACHE_DIR}/crash-recovery.log"
+readonly RECOVERY_HISTORY="${CACHE_DIR}/recovery-history.json"
+readonly TRACKED_GAMES_FILE="${CACHE_DIR}/tracked-games.list"
+
+MINIMAL=false
+NO_NOTIFY=false
+VERBOSE=false
+NO_COLOR=false
+SESSION_TYPE=""
+
+# Colors
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# Recovery step tracking
+declare -a STEPS_OK=()
+declare -a STEPS_SKIPPED=()
+declare -a STEPS_FAILED=()
+
+# ─── Utility Functions ───────────────────────────────────────────────────────
+
+disable_colors() {
+    RED="" YELLOW="" GREEN="" CYAN="" MAGENTA="" BOLD="" DIM="" NC=""
+}
+
+log_ok()    { echo -e "  ${GREEN}[OK]${NC}       $1"; }
+log_warn()  { echo -e "  ${YELLOW}[WARN]${NC}     $1"; }
+log_err()   { echo -e "  ${RED}[ERROR]${NC}    $1"; }
+log_info()  { echo -e "  ${CYAN}[INFO]${NC}     $1"; }
+log_step()  { echo -e "  ${MAGENTA}[STEP]${NC}     $1"; }
+log_debug() { $VERBOSE && echo -e "  ${DIM}[DEBUG]    $1${NC}" || true; }
+
+step_ok()      { STEPS_OK+=("$1"); log_ok "$1"; }
+step_skip()    { STEPS_SKIPPED+=("$1"); log_debug "Skipped: $1"; }
+step_fail()    { STEPS_FAILED+=("$1"); log_err "$1"; }
+
+detect_session() {
+    if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
+        SESSION_TYPE="wayland"
+    elif [[ "${XDG_SESSION_TYPE:-}" == "x11" ]]; then
+        SESSION_TYPE="x11"
+    elif [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+        SESSION_TYPE="wayland"
+    elif [[ -n "${DISPLAY:-}" ]]; then
+        SESSION_TYPE="x11"
+    else
+        SESSION_TYPE="unknown"
+    fi
+    log_debug "Session type: $SESSION_TYPE"
+}
+
+ensure_cache_dir() {
+    mkdir -p "$CACHE_DIR"
+}
+
+has_state() {
+    [[ -f "$STATE_FILE" ]] && [[ -s "$STATE_FILE" ]]
+}
+
+read_state_field() {
+    local field="$1"
+    if has_state; then
+        python3 -c "
+import json, sys
+with open('$STATE_FILE') as f:
+    data = json.load(f)
+keys = '$field'.split('.')
+for k in keys:
+    data = data.get(k, '')
+    if data == '': break
+print(data)
+" 2>/dev/null || echo ""
+    fi
+}
+
+timestamp() {
+    date -Iseconds
+}
+
+notify() {
+    if $NO_NOTIFY; then return 0; fi
+    local title="$1"
+    local body="${2:-}"
+    local icon="${3:-dialog-information}"
+    notify-send -a "24HG" -i "$icon" "$title" "$body" 2>/dev/null || true
+}
+
+show_help() {
+    echo -e "${BOLD}24HG Post-Crash Recovery${NC} v${VERSION}"
+    echo ""
+    echo "Automatically restores your desktop after a game crash."
+    echo ""
+    echo -e "${BOLD}Usage:${NC} $PROG_NAME <command> [options]"
+    echo ""
+    echo -e "${BOLD}Commands:${NC}"
+    echo "  recover      Immediately restore desktop to healthy state"
+    echo "  watch        Background daemon monitoring for game crashes"
+    echo "  status       Show recovery status and desktop health"
+    echo "  test         Test recovery without a real crash"
+    echo "  save-state   Save current desktop state (called by smart-launch)"
+    echo ""
+    echo -e "${BOLD}Options:${NC}"
+    echo "  --minimal    Only restore compositor and resolution"
+    echo "  --no-notify  Suppress desktop notifications"
+    echo "  --verbose    Extra detail in output"
+    echo "  --no-color   Disable colored output"
+    echo "  -h, --help   Show this help"
+}
+
+# ─── Pre-Game State Saving ─────────────────────────────────────────────────
+
+get_current_resolution() {
+    if [[ "$SESSION_TYPE" == "wayland" ]]; then
+        kscreen-doctor --outputs 2>/dev/null | grep -oP '\d+x\d+@\d+' | head -1 || echo ""
+    else
+        xrandr --current 2>/dev/null | grep '\*' | awk '{print $1}' | head -1 || echo ""
+    fi
+}
+
+get_current_refresh() {
+    if [[ "$SESSION_TYPE" == "wayland" ]]; then
+        kscreen-doctor --outputs 2>/dev/null | grep -oP '@\K\d+' | head -1 || echo ""
+    else
+        xrandr --current 2>/dev/null | grep '\*' | grep -oP '[\d.]+\*' | tr -d '*' | head -1 || echo ""
+    fi
+}
+
+get_vrr_state() {
+    if [[ "$SESSION_TYPE" == "wayland" ]]; then
+        kreadconfig6 --file kwinrc --group Compositing --key AllowVRR 2>/dev/null || echo "false"
+    else
+        echo "false"
+    fi
+}
+
+get_monitors_json() {
+    if [[ "$SESSION_TYPE" == "wayland" ]]; then
+        kscreen-doctor --outputs 2>/dev/null | python3 -c "
+import sys, json
+monitors = []
+for line in sys.stdin:
+    line = line.strip()
+    if line.startswith('Output'):
+        parts = line.split()
+        name = parts[1] if len(parts) > 1 else 'unknown'
+        monitors.append({'name': name, 'info': line})
+print(json.dumps(monitors))
+" 2>/dev/null || echo "[]"
+    else
+        xrandr --current 2>/dev/null | python3 -c "
+import sys, json
+monitors = []
+for line in sys.stdin:
+    if ' connected' in line:
+        parts = line.split()
+        monitors.append({'name': parts[0], 'info': line.strip()})
+print(json.dumps(monitors))
+" 2>/dev/null || echo "[]"
+    fi
+}
+
+get_pipewire_quantum() {
+    pw-metadata -n settings 2>/dev/null | grep "clock.force-quantum" | grep -oP "value:'[^']*'" | cut -d"'" -f2 || echo ""
+}
+
+get_default_sink() {
+    pactl get-default-sink 2>/dev/null || wpctl status 2>/dev/null | grep -A1 "Audio/Sink" | tail -1 | xargs || echo ""
+}
+
+get_volume() {
+    pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | grep -oP '\d+%' | head -1 | tr -d '%' || echo "100"
+}
+
+get_cursor_theme() {
+    kreadconfig6 --file kcminputrc --group Mouse --key cursorTheme 2>/dev/null || echo "breeze_cursors"
+}
+
+get_cursor_size() {
+    kreadconfig6 --file kcminputrc --group Mouse --key cursorSize 2>/dev/null || echo "24"
+}
+
+get_performance_profile() {
+    if command -v powerprofilesctl &>/dev/null; then
+        powerprofilesctl get 2>/dev/null || echo "balanced"
+    else
+        echo "balanced"
+    fi
+}
+
+get_compositor_active() {
+    if command -v qdbus &>/dev/null; then
+        local active
+        active=$(qdbus org.kde.KWin /Compositor active 2>/dev/null || echo "true")
+        echo "$active"
+    else
+        echo "true"
+    fi
+}
+
+cmd_save_state() {
+    ensure_cache_dir
+    detect_session
+
+    log_step "Saving pre-game desktop state..."
+
+    local resolution refresh vrr monitors sink volume quantum profile compositor cursor_theme cursor_size
+
+    resolution=$(get_current_resolution)
+    refresh=$(get_current_refresh)
+    vrr=$(get_vrr_state)
+    monitors=$(get_monitors_json)
+    sink=$(get_default_sink)
+    volume=$(get_volume)
+    quantum=$(get_pipewire_quantum)
+    profile=$(get_performance_profile)
+    compositor=$(get_compositor_active)
+    cursor_theme=$(get_cursor_theme)
+    cursor_size=$(get_cursor_size)
+
+    python3 -c "
+import json
+state = {
+    'timestamp': '$(timestamp)',
+    'session_type': '$SESSION_TYPE',
+    'display': {
+        'resolution': '$resolution',
+        'refresh': '$refresh',
+        'vrr': $([[ "$vrr" == "true" ]] && echo "True" || echo "False"),
+        'monitors': $monitors
+    },
+    'audio': {
+        'default_sink': '$sink',
+        'volume': $volume,
+        'quantum': '$quantum'
+    },
+    'performance_profile': '$profile',
+    'compositor_active': $([[ "$compositor" == "true" ]] && echo "True" || echo "False"),
+    'cursor_theme': '$cursor_theme',
+    'cursor_size': $cursor_size
+}
+with open('$STATE_FILE', 'w') as f:
+    json.dump(state, f, indent=2, default=str)
+"
+    log_ok "State saved to $STATE_FILE"
+    log_debug "Resolution: $resolution @ ${refresh}Hz | Sink: $sink | Profile: $profile"
+}
+
+# ─── Recovery Steps ──────────────────────────────────────────────────────────
+
+recover_compositor() {
+    log_step "Checking compositor..."
+
+    if ! command -v qdbus &>/dev/null; then
+        step_skip "Compositor (qdbus not available)"
+        return 0
+    fi
+
+    # Check if KWin is running at all
+    if ! pgrep -x "kwin_wayland\|kwin_x11" &>/dev/null; then
+        log_warn "KWin not running — restarting"
+        if [[ "$SESSION_TYPE" == "wayland" ]]; then
+            kwin_wayland --replace &>/dev/null &
+        else
+            kwin_x11 --replace &>/dev/null &
+        fi
+        sleep 1
+        if pgrep -x "kwin_wayland\|kwin_x11" &>/dev/null; then
+            step_ok "Compositor restarted"
+        else
+            step_fail "Compositor restart failed"
+            return 1
+        fi
+        return 0
+    fi
+
+    # Check if compositor is suspended
+    local active
+    active=$(qdbus org.kde.KWin /Compositor active 2>/dev/null || echo "true")
+
+    if [[ "$active" == "false" ]]; then
+        qdbus org.kde.KWin /Compositor resume 2>/dev/null || true
+        sleep 0.3
+        local check
+        check=$(qdbus org.kde.KWin /Compositor active 2>/dev/null || echo "false")
+        if [[ "$check" == "true" ]]; then
+            step_ok "Compositor resumed"
+        else
+            step_fail "Compositor resume failed"
+            return 1
+        fi
+    else
+        step_skip "Compositor already active"
+    fi
+    return 0
+}
+
+recover_resolution() {
+    log_step "Checking resolution..."
+
+    if ! has_state; then
+        step_skip "Resolution (no saved state)"
+        return 0
+    fi
+
+    local saved_res saved_refresh current_res current_refresh
+    saved_res=$(read_state_field "display.resolution")
+    saved_refresh=$(read_state_field "display.refresh")
+    current_res=$(get_current_resolution)
+    current_refresh=$(get_current_refresh)
+
+    if [[ -z "$saved_res" ]]; then
+        step_skip "Resolution (no saved resolution)"
+        return 0
+    fi
+
+    local needs_fix=false
+    [[ -n "$current_res" && "$current_res" != *"$saved_res"* ]] && needs_fix=true
+    [[ -n "$saved_refresh" && -n "$current_refresh" && "$current_refresh" != "$saved_refresh" ]] && needs_fix=true
+
+    if $needs_fix; then
+        log_info "Restoring resolution: $saved_res @ ${saved_refresh}Hz"
+        if [[ "$SESSION_TYPE" == "wayland" ]]; then
+            # kscreen-doctor uses output.N format
+            local output
+            output=$(kscreen-doctor --outputs 2>/dev/null | grep -oP 'Output \d+' | head -1 | awk '{print $2}')
+            if [[ -n "$output" ]]; then
+                local mode="${saved_res}"
+                [[ -n "$saved_refresh" ]] && mode="${mode}@${saved_refresh}"
+                kscreen-doctor "output.${output}.mode.${mode}" 2>/dev/null || true
+            fi
+        else
+            local primary
+            primary=$(xrandr --current 2>/dev/null | grep ' connected primary' | awk '{print $1}')
+            [[ -z "$primary" ]] && primary=$(xrandr --current 2>/dev/null | grep ' connected' | head -1 | awk '{print $1}')
+            if [[ -n "$primary" ]]; then
+                local args=("--output" "$primary" "--mode" "$saved_res")
+                [[ -n "$saved_refresh" ]] && args+=("--rate" "$saved_refresh")
+                xrandr "${args[@]}" 2>/dev/null || true
+            fi
+        fi
+
+        # Restore VRR if it was enabled
+        local saved_vrr
+        saved_vrr=$(read_state_field "display.vrr")
+        if [[ "$saved_vrr" == "True" ]]; then
+            kwriteconfig6 --file kwinrc --group Compositing --key AllowVRR true 2>/dev/null || true
+            qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
+        fi
+
+        step_ok "Resolution restored to $saved_res @ ${saved_refresh}Hz"
+    else
+        step_skip "Resolution already correct"
+    fi
+    return 0
+}
+
+recover_audio() {
+    log_step "Checking audio..."
+
+    # Check if PipeWire is running
+    if ! pgrep -x pipewire &>/dev/null; then
+        log_warn "PipeWire not running — restarting"
+        systemctl --user restart pipewire pipewire-pulse wireplumber 2>/dev/null || true
+        sleep 1
+        if pgrep -x pipewire &>/dev/null; then
+            step_ok "PipeWire restarted"
+        else
+            step_fail "PipeWire restart failed"
+            return 1
+        fi
+    fi
+
+    # Check if PulseAudio layer is running
+    if ! pactl info &>/dev/null; then
+        log_warn "PipeWire-Pulse not responding — restarting"
+        systemctl --user restart pipewire-pulse 2>/dev/null || true
+        sleep 0.5
+    fi
+
+    local recovered_something=false
+
+    # Restore default sink if game changed it
+    if has_state; then
+        local saved_sink current_sink
+        saved_sink=$(read_state_field "audio.default_sink")
+        current_sink=$(get_default_sink)
+        if [[ -n "$saved_sink" && "$current_sink" != "$saved_sink" ]]; then
+            pactl set-default-sink "$saved_sink" 2>/dev/null || true
+            log_info "Restored audio sink: $saved_sink"
+            recovered_something=true
+        fi
+
+        # Restore volume
+        local saved_vol current_vol
+        saved_vol=$(read_state_field "audio.volume")
+        current_vol=$(get_volume)
+        if [[ -n "$saved_vol" && "$current_vol" != "$saved_vol" ]]; then
+            pactl set-sink-volume @DEFAULT_SINK@ "${saved_vol}%" 2>/dev/null || true
+            log_debug "Restored volume: ${saved_vol}%"
+            recovered_something=true
+        fi
+    fi
+
+    # Reset PipeWire quantum to desktop defaults (1024/48000)
+    local current_quantum
+    current_quantum=$(get_pipewire_quantum)
+    if [[ -n "$current_quantum" && "$current_quantum" != "1024" && "$current_quantum" != "" ]]; then
+        pw-metadata -n settings 0 clock.force-quantum 1024 2>/dev/null || true
+        pw-metadata -n settings 0 clock.force-rate 48000 2>/dev/null || true
+        log_info "Reset PipeWire quantum to desktop defaults (1024/48000)"
+        recovered_something=true
+    fi
+
+    # Kill lingering game audio streams
+    local game_streams
+    game_streams=$(pw-cli list-objects 2>/dev/null | grep -c "application.process.binary.*\(wine\|proton\|steam_app\)" || echo "0")
+    if [[ "$game_streams" -gt 0 ]]; then
+        # Use pactl to unload orphaned streams
+        pactl list sink-inputs short 2>/dev/null | while read -r idx rest; do
+            local app
+            app=$(pactl list sink-inputs 2>/dev/null | grep -A30 "Sink Input #${idx}" | grep "application.process.binary" | grep -oP '= "\K[^"]+' || echo "")
+            if echo "$app" | grep -qiE "wine|proton|steam_app"; then
+                pactl kill-sink-input "$idx" 2>/dev/null || true
+                log_debug "Killed orphan audio stream: $app (#$idx)"
+            fi
+        done
+        recovered_something=true
+    fi
+
+    if $recovered_something; then
+        step_ok "Audio restored"
+    else
+        step_skip "Audio already healthy"
+    fi
+    return 0
+}
+
+recover_zombies() {
+    log_step "Checking for zombie game processes..."
+
+    local killed=0
+
+    # Kill orphaned wine/proton processes
+    local wine_procs
+    wine_procs=$(pgrep -cf "wine|wineserver|proton|pressure-vessel" 2>/dev/null || echo "0")
+    if [[ "$wine_procs" -gt 0 ]]; then
+        pkill -f "wineserver" 2>/dev/null || true
+        sleep 0.5
+        pkill -f "wine64-preloader|wine-preloader" 2>/dev/null || true
+        pkill -f "proton waitforexitandrun" 2>/dev/null || true
+        pkill -f "pressure-vessel" 2>/dev/null || true
+        killed=$((killed + wine_procs))
+        log_info "Killed $wine_procs wine/proton processes"
+    fi
+
+    # Kill orphaned shader compilers
+    local shader_procs
+    shader_procs=$(pgrep -cf "fossilize_replay|shader-compiler|vkd3d-proton" 2>/dev/null || echo "0")
+    if [[ "$shader_procs" -gt 0 ]]; then
+        pkill -f "fossilize_replay" 2>/dev/null || true
+        pkill -f "shader-compiler" 2>/dev/null || true
+        pkill -f "vkd3d-proton" 2>/dev/null || true
+        killed=$((killed + shader_procs))
+        log_info "Killed $shader_procs shader compiler processes"
+    fi
+
+    # Kill lingering Steam game processes (but not Steam itself)
+    local game_procs
+    game_procs=$(pgrep -cf "reaper|steam_app_" 2>/dev/null || echo "0")
+    if [[ "$game_procs" -gt 0 ]]; then
+        pkill -f "steam_app_" 2>/dev/null || true
+        pkill -f "^reaper " 2>/dev/null || true
+        killed=$((killed + game_procs))
+        log_info "Killed $game_procs lingering game processes"
+    fi
+
+    if [[ "$killed" -gt 0 ]]; then
+        step_ok "Killed $killed zombie processes"
+    else
+        step_skip "No zombie processes found"
+    fi
+    return 0
+}
+
+recover_input() {
+    log_step "Checking input devices..."
+
+    local recovered=false
+
+    # Restore mouse to desktop profile (adaptive acceleration)
+    if command -v 24hg-input &>/dev/null || [[ -x /usr/bin/24hg-input ]]; then
+        /usr/bin/24hg-input desktop 2>/dev/null || 24hg-input desktop 2>/dev/null || true
+        recovered=true
+        log_debug "Restored input to desktop profile"
+    else
+        # Manual restoration
+        if [[ "$SESSION_TYPE" == "x11" ]]; then
+            # Restore adaptive acceleration
+            for id in $(xinput list 2>/dev/null | grep -i "pointer\|mouse" | grep -oP 'id=\K\d+'); do
+                xinput set-prop "$id" "libinput Accel Profile Enabled" 1 0 2>/dev/null || true
+            done
+            recovered=true
+        fi
+        if command -v kwriteconfig6 &>/dev/null; then
+            kwriteconfig6 --file kcminputrc --group Mouse --key XLbInptAccelProfileFlat false 2>/dev/null || true
+            recovered=true
+        fi
+    fi
+
+    # Ungrab keyboard/mouse if game held exclusive grab
+    if [[ "$SESSION_TYPE" == "x11" ]]; then
+        # Force ungrab via xdotool
+        if command -v xdotool &>/dev/null; then
+            xdotool key --clearmodifiers super 2>/dev/null || true
+            log_debug "Cleared stuck modifier keys"
+        fi
+        # xinput can force-ungrab
+        xdotool mousemove_relative 0 0 2>/dev/null || true
+        recovered=true
+    elif [[ "$SESSION_TYPE" == "wayland" ]]; then
+        # On Wayland, KWin handles grabs — reactivating the compositor should fix it
+        qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
+    fi
+
+    # Restore cursor visibility and theme
+    if has_state; then
+        local saved_theme saved_size
+        saved_theme=$(read_state_field "cursor_theme")
+        saved_size=$(read_state_field "cursor_size")
+        if [[ -n "$saved_theme" ]]; then
+            # Ensure cursor theme is applied (games sometimes corrupt it)
+            if command -v kwriteconfig6 &>/dev/null; then
+                kwriteconfig6 --file kcminputrc --group Mouse --key cursorTheme "$saved_theme" 2>/dev/null || true
+                kwriteconfig6 --file kcminputrc --group Mouse --key cursorSize "$saved_size" 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    if $recovered; then
+        step_ok "Input devices restored to desktop profile"
+    else
+        step_skip "Input devices unchanged"
+    fi
+    return 0
+}
+
+recover_performance() {
+    log_step "Checking performance profile..."
+
+    local current_profile saved_profile
+    current_profile=$(get_performance_profile)
+    saved_profile="balanced"
+    if has_state; then
+        saved_profile=$(read_state_field "performance_profile")
+        [[ -z "$saved_profile" ]] && saved_profile="balanced"
+    fi
+
+    if [[ "$current_profile" != "$saved_profile" ]]; then
+        if command -v 24hg-performance &>/dev/null || [[ -x /usr/bin/24hg-performance ]]; then
+            /usr/bin/24hg-performance "$saved_profile" 2>/dev/null || 24hg-performance "$saved_profile" 2>/dev/null || true
+        else
+            # Fallback: use powerprofilesctl directly
+            if command -v powerprofilesctl &>/dev/null; then
+                powerprofilesctl set "$saved_profile" 2>/dev/null || true
+            fi
+        fi
+        step_ok "Performance profile restored to $saved_profile"
+    else
+        step_skip "Performance profile already $current_profile"
+    fi
+
+    # Resume background services that gaming mode may have paused
+    systemctl --user start tracker-miner-fs-3.service 2>/dev/null || true
+    systemctl --user start baloo.service 2>/dev/null || true
+    return 0
+}
+
+recover_downloads() {
+    log_step "Resuming downloads..."
+
+    local resumed=false
+
+    # Resume Steam downloads
+    if pgrep -x steam &>/dev/null; then
+        xdg-open "steam://command/ResumeDownloads" 2>/dev/null || true
+        resumed=true
+        log_debug "Sent Steam download resume signal"
+    fi
+
+    # Resume Flatpak updates if they were paused
+    if command -v flatpak &>/dev/null; then
+        local pending
+        pending=$(flatpak update --no-deploy 2>/dev/null | grep -c "update" || echo "0")
+        if [[ "$pending" -gt 0 ]]; then
+            log_debug "Flatpak updates available (not auto-resuming, user may want control)"
+        fi
+    fi
+
+    if $resumed; then
+        step_ok "Downloads resumed"
+    else
+        step_skip "No downloads to resume"
+    fi
+    return 0
+}
+
+recover_desktop() {
+    log_step "Checking desktop shell..."
+
+    local recovered=false
+
+    # Ensure Plasma panel is visible
+    if ! pgrep -x plasmashell &>/dev/null; then
+        log_warn "Plasma shell not running — restarting"
+        plasmashell --replace &>/dev/null &
+        disown
+        sleep 2
+        if pgrep -x plasmashell &>/dev/null; then
+            step_ok "Plasma shell restarted"
+        else
+            step_fail "Plasma shell restart failed"
+            return 1
+        fi
+        return 0
+    fi
+
+    # Check if panel is actually visible (D-Bus check)
+    if command -v qdbus &>/dev/null; then
+        # Force Plasma to refresh its panels
+        qdbus org.kde.plasmashell /PlasmaShell refreshCurrentActivity 2>/dev/null || true
+        recovered=true
+    fi
+
+    # Focus the desktop — bring something to front instead of black screen
+    if command -v xdotool &>/dev/null && [[ "$SESSION_TYPE" == "x11" ]]; then
+        xdotool key --clearmodifiers super+d 2>/dev/null || true
+        recovered=true
+    elif [[ "$SESSION_TYPE" == "wayland" ]]; then
+        # On Wayland, use D-Bus to show desktop
+        qdbus org.kde.KWin /KWin org.kde.KWin.showDesktop true 2>/dev/null || true
+        sleep 0.3
+        qdbus org.kde.KWin /KWin org.kde.KWin.showDesktop false 2>/dev/null || true
+        recovered=true
+    fi
+
+    if $recovered; then
+        step_ok "Desktop shell healthy"
+    else
+        step_skip "Desktop shell unchanged"
+    fi
+    return 0
+}
+
+# ─── Main Recovery Orchestrator ──────────────────────────────────────────────
+
+run_recovery() {
+    local start_time
+    start_time=$(date +%s%N)
+
+    echo -e "${BOLD}24HG Crash Recovery${NC} v${VERSION}"
+    echo ""
+
+    detect_session
+
+    if $MINIMAL; then
+        log_info "Running minimal recovery (compositor + resolution only)"
+        echo ""
+        recover_compositor || true
+        recover_resolution || true
+    else
+        log_info "Running full recovery..."
+        echo ""
+        recover_compositor || true
+        recover_resolution || true
+        recover_audio || true
+        recover_zombies || true
+        recover_input || true
+        recover_performance || true
+        recover_downloads || true
+        recover_desktop || true
+    fi
+
+    # Calculate elapsed time
+    local end_time elapsed_ms
+    end_time=$(date +%s%N)
+    elapsed_ms=$(( (end_time - start_time) / 1000000 ))
+
+    echo ""
+    echo -e "${BOLD}─── Recovery Summary ───${NC}"
+    echo -e "  Restored: ${GREEN}${#STEPS_OK[@]}${NC}  Skipped: ${DIM}${#STEPS_SKIPPED[@]}${NC}  Failed: ${RED}${#STEPS_FAILED[@]}${NC}"
+    echo -e "  Completed in ${CYAN}${elapsed_ms}ms${NC}"
+
+    # Save recovery to history
+    save_recovery_history "$elapsed_ms"
+
+    # Send notification
+    if [[ ${#STEPS_FAILED[@]} -eq 0 ]]; then
+        notify "Desktop Recovered" "${#STEPS_OK[@]} items restored in ${elapsed_ms}ms" "dialog-positive"
+    else
+        notify "Desktop Partially Recovered" "${#STEPS_FAILED[@]} items failed — run 24hg-crash-fix for diagnosis" "dialog-warning"
+    fi
+
+    return 0
+}
+
+save_recovery_history() {
+    local elapsed_ms="${1:-0}"
+    ensure_cache_dir
+
+    python3 -c "
+import json, os
+
+history_file = '$RECOVERY_HISTORY'
+entry = {
+    'timestamp': '$(timestamp)',
+    'elapsed_ms': $elapsed_ms,
+    'restored': $(printf '%s\n' "${STEPS_OK[@]:-}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))" 2>/dev/null || echo "[]"),
+    'skipped': $(printf '%s\n' "${STEPS_SKIPPED[@]:-}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))" 2>/dev/null || echo "[]"),
+    'failed': $(printf '%s\n' "${STEPS_FAILED[@]:-}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))" 2>/dev/null || echo "[]")
+}
+
+history = []
+if os.path.exists(history_file):
+    try:
+        with open(history_file) as f:
+            history = json.load(f)
+    except Exception:
+        history = []
+
+history.append(entry)
+# Keep last 50 entries
+history = history[-50:]
+
+with open(history_file, 'w') as f:
+    json.dump(history, f, indent=2)
+" 2>/dev/null || true
+}
+
+# ─── Watch Daemon ────────────────────────────────────────────────────────────
+
+cmd_watch() {
+    echo -e "${BOLD}24HG Crash Recovery Watcher${NC} v${VERSION}"
+    echo ""
+
+    detect_session
+    ensure_cache_dir
+
+    # Check if already running
+    if [[ -f "$WATCH_PID_FILE" ]]; then
+        local existing_pid
+        existing_pid=$(cat "$WATCH_PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+            log_warn "Watch daemon already running (PID $existing_pid)"
+            echo "  Use 'kill $existing_pid' to stop it, then try again."
+            return 1
+        fi
+        rm -f "$WATCH_PID_FILE"
+    fi
+
+    # Write our PID
+    echo $$ > "$WATCH_PID_FILE"
+    log_ok "Watch daemon started (PID $$)"
+    log_info "Monitoring for game crashes..."
+    log_info "Log: $WATCH_LOG"
+    echo ""
+
+    # Set up cleanup trap
+    trap 'rm -f "$WATCH_PID_FILE"; log_info "Watch daemon stopped."; exit 0' EXIT INT TERM
+
+    # Track known game PIDs
+    declare -A tracked_pids=()
+
+    while true; do
+        # Read tracked games list (maintained by smart-launch daemon)
+        if [[ -f "$TRACKED_GAMES_FILE" ]]; then
+            while IFS='|' read -r pid name appid; do
+                [[ -z "$pid" || "$pid" == "#"* ]] && continue
+                if [[ -d "/proc/$pid" ]] && [[ -z "${tracked_pids[$pid]:-}" ]]; then
+                    tracked_pids["$pid"]="$name|$appid"
+                    echo "[$(date '+%H:%M:%S')] Tracking: $name (PID $pid)" >> "$WATCH_LOG"
+                fi
+            done < "$TRACKED_GAMES_FILE"
+        fi
+
+        # Also auto-detect game processes
+        for proc_dir in /proc/[0-9]*; do
+            local pid="${proc_dir##*/}"
+            [[ -n "${tracked_pids[$pid]:-}" ]] && continue
+
+            local cmdline=""
+            cmdline=$(tr '\0' ' ' < "$proc_dir/cmdline" 2>/dev/null || echo "")
+
+            # Match common game process patterns
+            if echo "$cmdline" | grep -qiE "steam_app_|SteamApps/common|\.exe.*wine|proton waitforexitandrun"; then
+                local name
+                name=$(echo "$cmdline" | grep -oP 'SteamApps/common/\K[^/]+' || echo "unknown")
+                [[ "$name" == "unknown" ]] && name=$(echo "$cmdline" | grep -oP 'steam_app_\K\d+' || echo "game")
+                tracked_pids["$pid"]="$name|0"
+                echo "[$(date '+%H:%M:%S')] Auto-tracked: $name (PID $pid)" >> "$WATCH_LOG"
+            fi
+        done
+
+        # Check tracked PIDs for exits
+        for pid in "${!tracked_pids[@]}"; do
+            if [[ ! -d "/proc/$pid" ]]; then
+                local info="${tracked_pids[$pid]}"
+                local name="${info%%|*}"
+                unset "tracked_pids[$pid]"
+
+                echo "[$(date '+%H:%M:%S')] Process exited: $name (PID $pid)" >> "$WATCH_LOG"
+
+                # Determine exit type — check if it was abnormal
+                local abnormal=false
+
+                # Check dmesg for recent OOM/GPU hang related to this process
+                local dmesg_issues
+                dmesg_issues=$(dmesg --time-format iso 2>/dev/null | tail -20 | grep -ciE "oom.*kill|gpu.*hang|gpu.*reset|segfault" || echo "0")
+                if [[ "$dmesg_issues" -gt 0 ]]; then
+                    abnormal=true
+                    echo "[$(date '+%H:%M:%S')] Abnormal exit detected (dmesg): $name" >> "$WATCH_LOG"
+                fi
+
+                # Check if any crash-related processes are still lingering
+                local orphans
+                orphans=$(pgrep -cf "wine|wineserver|proton|pressure-vessel" 2>/dev/null || echo "0")
+                if [[ "$orphans" -gt 2 ]]; then
+                    abnormal=true
+                fi
+
+                # Check coredump for recent crashes
+                if command -v coredumpctl &>/dev/null; then
+                    local recent_crashes
+                    recent_crashes=$(coredumpctl list --since "30 seconds ago" 2>/dev/null | grep -c "." || echo "0")
+                    if [[ "$recent_crashes" -gt 0 ]]; then
+                        abnormal=true
+                        echo "[$(date '+%H:%M:%S')] Coredump detected for $name" >> "$WATCH_LOG"
+                    fi
+                fi
+
+                if $abnormal; then
+                    echo "[$(date '+%H:%M:%S')] Running FULL recovery for crash: $name" >> "$WATCH_LOG"
+                    sleep 2  # Wait for process tree cleanup
+                    MINIMAL=false
+                    STEPS_OK=()
+                    STEPS_SKIPPED=()
+                    STEPS_FAILED=()
+                    run_recovery 2>&1 | tee -a "$WATCH_LOG"
+                    notify "Game Crashed: $name" "Desktop recovered. Click to run crash diagnosis." "dialog-error"
+                else
+                    echo "[$(date '+%H:%M:%S')] Running minimal recovery for clean exit: $name" >> "$WATCH_LOG"
+                    MINIMAL=true
+                    STEPS_OK=()
+                    STEPS_SKIPPED=()
+                    STEPS_FAILED=()
+                    run_recovery 2>&1 | tee -a "$WATCH_LOG"
+
+                    # Trigger session summary for clean exit
+                    if command -v 24hg-session-summary &>/dev/null || [[ -x /usr/bin/24hg-session-summary ]]; then
+                        /usr/bin/24hg-session-summary 2>/dev/null || 24hg-session-summary 2>/dev/null || true
+                    fi
+                fi
+            fi
+        done
+
+        # Monitor dmesg for GPU hangs (independent of tracked games)
+        check_gpu_hang || true
+
+        sleep 1
+    done
+}
+
+# Last GPU hang timestamp to avoid duplicate responses
+_last_gpu_hang_check=0
+
+check_gpu_hang() {
+    local now
+    now=$(date +%s)
+
+    # Only check every 5 seconds to reduce overhead
+    if (( now - _last_gpu_hang_check < 5 )); then
+        return 0
+    fi
+    _last_gpu_hang_check=$now
+
+    # Look for GPU hang signatures in the last 10 seconds of dmesg
+    local gpu_issue
+    gpu_issue=$(dmesg --time-format iso 2>/dev/null | tail -30 | grep -iE "gpu.*hang|gpu.*reset|amdgpu.*reset|i915.*reset|nouveau.*error" | tail -1 || echo "")
+
+    if [[ -n "$gpu_issue" ]]; then
+        # Check if we already handled this (same message within last 30 seconds)
+        local marker_file="${CACHE_DIR}/.gpu-hang-marker"
+        local marker_age=999
+        if [[ -f "$marker_file" ]]; then
+            marker_age=$(( now - $(stat -c %Y "$marker_file" 2>/dev/null || echo "0") ))
+        fi
+
+        if [[ "$marker_age" -gt 30 ]]; then
+            touch "$marker_file"
+            echo "[$(date '+%H:%M:%S')] GPU hang detected! Waiting 5s then recovering..." >> "$WATCH_LOG"
+            log_warn "GPU hang detected — initiating recovery in 5 seconds"
+            sleep 5
+            MINIMAL=false
+            STEPS_OK=()
+            STEPS_SKIPPED=()
+            STEPS_FAILED=()
+            run_recovery 2>&1 | tee -a "$WATCH_LOG"
+            notify "GPU Hang Recovered" "Desktop restored after GPU reset. Run 24hg-crash-fix for details." "dialog-warning"
+        fi
+    fi
+}
+
+# ─── Status Command ──────────────────────────────────────────────────────────
+
+cmd_status() {
+    echo -e "${BOLD}24HG Crash Recovery Status${NC} v${VERSION}"
+    echo ""
+
+    detect_session
+
+    # Pre-game state
+    echo -e "${BOLD}Pre-Game State:${NC}"
+    if has_state; then
+        local ts res refresh sink profile
+        ts=$(read_state_field "timestamp")
+        res=$(read_state_field "display.resolution")
+        refresh=$(read_state_field "display.refresh")
+        sink=$(read_state_field "audio.default_sink")
+        profile=$(read_state_field "performance_profile")
+        log_ok "Saved at $ts"
+        echo -e "    Display: ${CYAN}${res} @ ${refresh}Hz${NC}"
+        echo -e "    Audio:   ${CYAN}${sink}${NC}"
+        echo -e "    Profile: ${CYAN}${profile}${NC}"
+    else
+        log_warn "No pre-game state saved"
+    fi
+    echo ""
+
+    # Watch daemon
+    echo -e "${BOLD}Watch Daemon:${NC}"
+    if [[ -f "$WATCH_PID_FILE" ]]; then
+        local wpid
+        wpid=$(cat "$WATCH_PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$wpid" ]] && kill -0 "$wpid" 2>/dev/null; then
+            log_ok "Running (PID $wpid)"
+        else
+            log_warn "PID file exists but daemon not running"
+        fi
+    else
+        log_info "Not running"
+    fi
+
+    # Tracked games
+    if [[ -f "$TRACKED_GAMES_FILE" ]] && [[ -s "$TRACKED_GAMES_FILE" ]]; then
+        local active_count=0
+        while IFS='|' read -r pid name appid; do
+            [[ -z "$pid" || "$pid" == "#"* ]] && continue
+            if [[ -d "/proc/$pid" ]]; then
+                echo -e "    Game: ${CYAN}$name${NC} (PID $pid)"
+                active_count=$((active_count + 1))
+            fi
+        done < "$TRACKED_GAMES_FILE"
+        [[ "$active_count" -eq 0 ]] && echo -e "    ${DIM}No active games${NC}"
+    else
+        echo -e "    ${DIM}No tracked games${NC}"
+    fi
+    echo ""
+
+    # Last recovery
+    echo -e "${BOLD}Last Recovery:${NC}"
+    if [[ -f "$RECOVERY_HISTORY" ]]; then
+        local last_entry
+        last_entry=$(python3 -c "
+import json
+with open('$RECOVERY_HISTORY') as f:
+    history = json.load(f)
+if history:
+    e = history[-1]
+    restored = ', '.join(e.get('restored', [])) or 'none'
+    failed = ', '.join(e.get('failed', [])) or 'none'
+    print(f\"  Time: {e['timestamp']}\")
+    print(f\"  Duration: {e['elapsed_ms']}ms\")
+    print(f\"  Restored: {restored}\")
+    if e.get('failed'):
+        print(f\"  Failed: {failed}\")
+else:
+    print('  No recovery history')
+" 2>/dev/null || echo "  Unable to read history")
+        echo -e "$last_entry"
+    else
+        echo -e "    ${DIM}No recovery history${NC}"
+    fi
+    echo ""
+
+    # Desktop health check
+    echo -e "${BOLD}Desktop Health:${NC}"
+
+    # Compositor
+    if command -v qdbus &>/dev/null; then
+        local comp_active
+        comp_active=$(qdbus org.kde.KWin /Compositor active 2>/dev/null || echo "unknown")
+        if [[ "$comp_active" == "true" ]]; then
+            log_ok "Compositor: active"
+        elif [[ "$comp_active" == "false" ]]; then
+            log_warn "Compositor: suspended"
+        else
+            log_warn "Compositor: unknown state"
+        fi
+    else
+        log_info "Compositor: qdbus not available"
+    fi
+
+    # Resolution
+    local current_res
+    current_res=$(get_current_resolution)
+    if [[ -n "$current_res" ]]; then
+        log_ok "Resolution: $current_res"
+    else
+        log_warn "Resolution: unable to detect"
+    fi
+
+    # Audio
+    if pgrep -x pipewire &>/dev/null; then
+        local sink
+        sink=$(get_default_sink)
+        log_ok "Audio: PipeWire running (sink: $sink)"
+    else
+        log_err "Audio: PipeWire not running!"
+    fi
+
+    # Performance profile
+    local profile
+    profile=$(get_performance_profile)
+    if [[ "$profile" == "balanced" || "$profile" == "power-saver" ]]; then
+        log_ok "Performance: $profile"
+    else
+        log_warn "Performance: $profile (gaming mode still active?)"
+    fi
+
+    # Session type
+    log_info "Session: $SESSION_TYPE"
+    echo ""
+}
+
+# ─── Test Command ────────────────────────────────────────────────────────────
+
+cmd_test() {
+    echo -e "${BOLD}24HG Crash Recovery — Test Mode${NC}"
+    echo ""
+    echo "This will simulate a crash and test recovery."
+    echo "Your desktop may flicker briefly."
+    echo ""
+
+    detect_session
+    ensure_cache_dir
+
+    # Step 1: Save current state
+    log_step "Saving current state..."
+    cmd_save_state
+    echo ""
+
+    # Step 2: Simulate crash effects
+    log_step "Simulating crash effects..."
+    echo ""
+
+    local simulated=()
+
+    # Suspend compositor
+    if command -v qdbus &>/dev/null; then
+        local was_active
+        was_active=$(qdbus org.kde.KWin /Compositor active 2>/dev/null || echo "true")
+        if [[ "$was_active" == "true" ]]; then
+            qdbus org.kde.KWin /Compositor suspend 2>/dev/null || true
+            simulated+=("compositor_suspended")
+            log_info "Compositor suspended"
+        fi
+    fi
+
+    # Change PipeWire quantum to gaming value
+    local old_quantum
+    old_quantum=$(get_pipewire_quantum)
+    pw-metadata -n settings 0 clock.force-quantum 256 2>/dev/null || true
+    simulated+=("audio_quantum_changed")
+    log_info "PipeWire quantum changed to 256 (gaming)"
+
+    # Switch performance profile
+    local old_profile
+    old_profile=$(get_performance_profile)
+    if command -v powerprofilesctl &>/dev/null; then
+        powerprofilesctl set performance 2>/dev/null || true
+        simulated+=("performance_gaming")
+        log_info "Performance profile set to performance"
+    fi
+
+    echo ""
+    log_info "Simulated ${#simulated[@]} crash effects. Waiting 3 seconds..."
+    sleep 3
+
+    # Step 3: Run full recovery
+    echo ""
+    MINIMAL=false
+    STEPS_OK=()
+    STEPS_SKIPPED=()
+    STEPS_FAILED=()
+    run_recovery
+
+    # Step 4: Verify
+    echo ""
+    echo -e "${BOLD}─── Test Verification ───${NC}"
+
+    local pass=0 fail=0
+
+    # Check compositor
+    if command -v qdbus &>/dev/null; then
+        local comp
+        comp=$(qdbus org.kde.KWin /Compositor active 2>/dev/null || echo "false")
+        if [[ "$comp" == "true" ]]; then
+            log_ok "Compositor: restored"
+            pass=$((pass + 1))
+        else
+            log_err "Compositor: NOT restored"
+            fail=$((fail + 1))
+        fi
+    fi
+
+    # Check audio quantum
+    local curr_quantum
+    curr_quantum=$(get_pipewire_quantum)
+    if [[ -z "$curr_quantum" || "$curr_quantum" == "1024" || "$curr_quantum" == "" ]]; then
+        log_ok "Audio quantum: restored to desktop defaults"
+        pass=$((pass + 1))
+    else
+        log_err "Audio quantum: still at $curr_quantum"
+        fail=$((fail + 1))
+    fi
+
+    # Check performance profile
+    local curr_profile
+    curr_profile=$(get_performance_profile)
+    if [[ "$curr_profile" == "$old_profile" || "$curr_profile" == "balanced" ]]; then
+        log_ok "Performance profile: restored ($curr_profile)"
+        pass=$((pass + 1))
+    else
+        log_err "Performance profile: still $curr_profile (expected $old_profile)"
+        fail=$((fail + 1))
+    fi
+
+    echo ""
+    if [[ "$fail" -eq 0 ]]; then
+        echo -e "  ${GREEN}${BOLD}All $pass tests passed!${NC} Recovery is working correctly."
+    else
+        echo -e "  ${YELLOW}${BOLD}$pass passed, $fail failed.${NC} Some recovery steps need attention."
+    fi
+    echo ""
+}
+
+# ─── Argument Parsing ────────────────────────────────────────────────────────
+
+main() {
+    local command="${1:-}"
+    shift 2>/dev/null || true
+
+    # Parse global options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --minimal)   MINIMAL=true ;;
+            --no-notify) NO_NOTIFY=true ;;
+            --verbose)   VERBOSE=true ;;
+            --no-color)  NO_COLOR=true; disable_colors ;;
+            -h|--help)   show_help; return 0 ;;
+            *)           log_warn "Unknown option: $1" ;;
+        esac
+        shift
+    done
+
+    # Handle help flags in command position
+    case "$command" in
+        -h|--help) show_help; return 0 ;;
+    esac
+
+    case "$command" in
+        recover)
+            run_recovery
+            ;;
+        watch)
+            cmd_watch
+            ;;
+        status)
+            cmd_status
+            ;;
+        test)
+            cmd_test
+            ;;
+        save-state)
+            detect_session
+            ensure_cache_dir
+            cmd_save_state
+            ;;
+        "")
+            show_help
+            return 1
+            ;;
+        *)
+            log_err "Unknown command: $command"
+            echo "Run '$PROG_NAME --help' for usage."
+            return 1
+            ;;
+    esac
+}
+
+main "$@"

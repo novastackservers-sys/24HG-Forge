@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Save Game Clip
+Comment=Capture the last 30 seconds of gameplay
+Exec=24hg-clip capture
+Icon=24hg-logo
+Terminal=false
+Type=Application
+Categories=Game;

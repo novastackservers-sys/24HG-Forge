@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Game Server
-Comment=One-click game server hosting
-Exec=/usr/bin/forge-one-click-server
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=Game;Network;
-Keywords=server;host;multiplayer;dedicated;game;

@@ -1,12 +1,11 @@
 
 \e[1;36m  ╔═══════════════════════════════════════════╗
-  ║       24HG Forge — Gaming Linux           ║
+  ║         24HG — Gaming Linux               ║
   ╚═══════════════════════════════════════════╝\e[0m
 
-  \e[0;90mWelcome to Forge, the gaming-first Linux distro by 24 Hour Gaming.
-  Built on Fedora Atomic with Bazzite optimizations.\e[0m
+  \e[0;90mWelcome to 24HG, the gaming-first Linux distro by 24 Hour Gaming.\e[0m
 
-  \e[1;36m>\e[0m Type \e[1;37mforge help\e[0m to see all Forge commands
+  \e[1;36m>\e[0m Type \e[1;37m24hg help\e[0m to see all 24HG commands
   \e[1;36m>\e[0m Website:  \e[0;90m24hgaming.com\e[0m
   \e[1;36m>\e[0m Discord:  \e[0;90mdiscord.gg/ymfEjH6EJN\e[0m
 

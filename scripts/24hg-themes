@@ -1,0 +1,1520 @@
+#!/bin/bash
+#
+# 24hg-themes — Theme marketplace client for 24HG
+# Part of 24HG (24 Hour Gaming)
+#
+# Browse, install, and manage community themes from the 24HG Hub marketplace.
+# Themes can include KDE colors, wallpapers, sounds, cursors, MangoHud presets,
+# Conky schemes, Plymouth animations, and Konsole profiles.
+#
+# Usage: 24hg-themes [command] [args...]
+#
+#   list              Browse available themes from the Hub
+#   search <query>    Search themes by name or tag
+#   install <id>      Download and install a theme
+#   remove <id>       Remove an installed theme
+#   apply <id>        Apply an installed theme
+#   create            Package current customizations as a theme
+#   share <id>        Upload a theme to the Hub marketplace
+#   current           Show currently active theme
+#   reset             Reset to default 24HG theme
+#   preview <id>      Show theme details and preview colors
+#
+
+set -euo pipefail
+
+# ── Configuration ────────────────────────────────────────────────────────────
+
+HG24_THEMES_VERSION="1.0.0"
+HUB_URL="${HG24_HUB_URL:-https://hub.24hgaming.com}"
+HUB_API="${HUB_URL}/api/24hg/themes"
+AUTH_TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/24hg/hub-token"
+
+THEMES_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/24hg/themes"
+THEMES_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/24hg/themes"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/24hg"
+STATE_FILE="${CONFIG_DIR}/theme-state.json"
+LOG_FILE="${THEMES_CACHE}/themes.log"
+
+# Where components get installed on the system
+KDE_COLORS_DIR="${HOME}/.local/share/color-schemes"
+WALLPAPER_DIR="${HOME}/.local/share/wallpapers"
+SOUNDS_DIR="${HOME}/.local/share/sounds"
+KONSOLE_DIR="${HOME}/.local/share/konsole"
+CURSOR_DIR="${HOME}/.local/share/icons"
+MANGOHUD_CONF="${HOME}/.config/MangoHud/MangoHud.conf"
+CONKY_DIR="${HOME}/.config/conky"
+PLYMOUTH_DIR="${HOME}/.local/share/plymouth/themes"
+
+# Theme components that can be packaged
+VALID_COMPONENTS=("kde-colors" "wallpaper" "sounds" "cursor" "mangohud" "conky" "plymouth" "konsole")
+
+# Default 24HG color palette (used for reset)
+DEFAULT_ACCENT="#7c3aed"       # 24HG purple
+DEFAULT_BG="#1a1a2e"           # Deep navy
+DEFAULT_FG="#e2e8f0"           # Light slate
+DEFAULT_HIGHLIGHT="#6d28d9"    # Darker purple
+
+# ── Setup ────────────────────────────────────────────────────────────────────
+
+mkdir -p "$THEMES_DIR" "$THEMES_CACHE" "$CONFIG_DIR" \
+         "$KDE_COLORS_DIR" "$SOUNDS_DIR" "$KONSOLE_DIR"
+
+# ── Logging & Output ────────────────────────────────────────────────────────
+
+log() {
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "[$ts] $*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+msg()  { echo -e "\033[1;35m>\033[0m $*"; }
+info() { echo -e "\033[1;34m[INFO]\033[0m  $*"; }
+ok()   { echo -e "\033[1;32m[OK]\033[0m    $*"; }
+warn() { echo -e "\033[1;33m[WARN]\033[0m  $*" >&2; }
+err()  { echo -e "\033[1;31m[ERR]\033[0m   $*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# Color output helpers
+c_bold()   { echo -e "\033[1m${1}\033[0m"; }
+c_dim()    { echo -e "\033[2m${1}\033[0m"; }
+c_purple() { echo -e "\033[1;35m${1}\033[0m"; }
+c_cyan()   { echo -e "\033[1;36m${1}\033[0m"; }
+c_green()  { echo -e "\033[1;32m${1}\033[0m"; }
+c_yellow() { echo -e "\033[1;33m${1}\033[0m"; }
+
+# ── Dependency Checks ───────────────────────────────────────────────────────
+
+check_dep() {
+    local cmd="$1" pkg="${2:-$1}"
+    if ! command -v "$cmd" &>/dev/null; then
+        die "Required command '$cmd' not found. Install '$pkg' to continue."
+    fi
+}
+
+check_deps() {
+    check_dep curl
+    check_dep jq
+    check_dep tar
+}
+
+check_optional_dep() {
+    command -v "$1" &>/dev/null
+}
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+
+get_auth_header() {
+    if [[ -f "$AUTH_TOKEN_FILE" ]]; then
+        local token
+        token="$(< "$AUTH_TOKEN_FILE")"
+        echo "Authorization: Bearer ${token}"
+    else
+        echo ""
+    fi
+}
+
+require_auth() {
+    if [[ ! -f "$AUTH_TOKEN_FILE" ]]; then
+        die "Not logged in to 24HG Hub. Run '24hg-hub login' first."
+    fi
+}
+
+# ── Hub API ──────────────────────────────────────────────────────────────────
+
+hub_get() {
+    local endpoint="$1"
+    local auth
+    auth="$(get_auth_header)"
+
+    local -a curl_args=(
+        -sS --fail-with-body
+        --connect-timeout 10
+        --max-time 30
+        -H "Accept: application/json"
+        -H "User-Agent: 24hg-themes/${HG24_THEMES_VERSION}"
+    )
+    [[ -n "$auth" ]] && curl_args+=(-H "$auth")
+
+    local response http_code
+    response="$(curl "${curl_args[@]}" -w "\n%{http_code}" "${HUB_API}${endpoint}" 2>&1)" || {
+        local code="${response##*$'\n'}"
+        local body="${response%$'\n'*}"
+        log "API GET ${endpoint} failed: HTTP ${code}"
+        if [[ "$code" == "000" ]]; then
+            die "Cannot connect to 24HG Hub at ${HUB_URL}. Check your network."
+        fi
+        die "Hub API error (HTTP ${code}): $(echo "$body" | jq -r '.message // .error // "Unknown error"' 2>/dev/null || echo "$body")"
+    }
+
+    http_code="${response##*$'\n'}"
+    local body="${response%$'\n'*}"
+
+    if [[ "$http_code" -ge 400 ]]; then
+        die "Hub API error (HTTP ${http_code}): $(echo "$body" | jq -r '.message // .error // "Unknown error"' 2>/dev/null || echo "$body")"
+    fi
+
+    echo "$body"
+}
+
+hub_download() {
+    local endpoint="$1" output="$2"
+    local auth
+    auth="$(get_auth_header)"
+
+    local -a curl_args=(
+        -sS --fail-with-body
+        --connect-timeout 10
+        --max-time 120
+        -o "$output"
+        -H "User-Agent: 24hg-themes/${HG24_THEMES_VERSION}"
+    )
+    [[ -n "$auth" ]] && curl_args+=(-H "$auth")
+
+    curl "${curl_args[@]}" "${HUB_API}${endpoint}" 2>&1 || {
+        rm -f "$output"
+        die "Failed to download from Hub."
+    }
+}
+
+hub_upload() {
+    local file="$1"
+    require_auth
+    local auth
+    auth="$(get_auth_header)"
+
+    local response
+    response="$(curl -sS --fail-with-body \
+        --connect-timeout 10 \
+        --max-time 300 \
+        -X POST \
+        -H "$auth" \
+        -H "User-Agent: 24hg-themes/${HG24_THEMES_VERSION}" \
+        -F "theme=@${file}" \
+        "${HUB_API}" 2>&1)" || {
+        die "Failed to upload theme to Hub: $response"
+    }
+
+    echo "$response"
+}
+
+# ── State Management ────────────────────────────────────────────────────────
+
+read_state() {
+    if [[ -f "$STATE_FILE" ]]; then
+        cat "$STATE_FILE"
+    else
+        echo '{"active_theme":null,"installed":[],"history":[]}'
+    fi
+}
+
+write_state() {
+    local state="$1"
+    echo "$state" | jq '.' > "$STATE_FILE"
+}
+
+get_active_theme() {
+    read_state | jq -r '.active_theme // empty'
+}
+
+set_active_theme() {
+    local theme_id="$1"
+    local state
+    state="$(read_state)"
+    state="$(echo "$state" | jq --arg id "$theme_id" --arg ts "$(date -Iseconds)" \
+        '.active_theme = $id | .history = ([{id: $id, applied_at: $ts}] + .history)[:50]')"
+    write_state "$state"
+}
+
+add_installed() {
+    local theme_id="$1"
+    local state
+    state="$(read_state)"
+    state="$(echo "$state" | jq --arg id "$theme_id" \
+        'if (.installed | index($id)) then . else .installed += [$id] end')"
+    write_state "$state"
+}
+
+remove_installed() {
+    local theme_id="$1"
+    local state
+    state="$(read_state)"
+    state="$(echo "$state" | jq --arg id "$theme_id" \
+        '.installed -= [$id] | if .active_theme == $id then .active_theme = null else . end')"
+    write_state "$state"
+}
+
+is_installed() {
+    local theme_id="$1"
+    read_state | jq -e --arg id "$theme_id" '.installed | index($id) != null' &>/dev/null
+}
+
+# ── Theme File Handling ─────────────────────────────────────────────────────
+
+theme_dir() {
+    echo "${THEMES_DIR}/${1}"
+}
+
+theme_metadata() {
+    local theme_id="$1"
+    local dir
+    dir="$(theme_dir "$theme_id")"
+    if [[ -f "${dir}/metadata.json" ]]; then
+        cat "${dir}/metadata.json"
+    else
+        die "Theme '${theme_id}' metadata not found. Is it installed?"
+    fi
+}
+
+validate_theme_archive() {
+    local archive="$1"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    trap "rm -rf '$tmp_dir'" RETURN
+
+    tar -xzf "$archive" -C "$tmp_dir" 2>/dev/null || die "Invalid theme archive: not a valid tar.gz"
+
+    if [[ ! -f "${tmp_dir}/metadata.json" ]]; then
+        die "Invalid theme: missing metadata.json"
+    fi
+
+    local meta
+    meta="$(cat "${tmp_dir}/metadata.json")"
+
+    for field in id name version; do
+        local val
+        val="$(echo "$meta" | jq -r ".${field} // empty")"
+        if [[ -z "$val" ]]; then
+            die "Invalid theme metadata: missing '${field}' field."
+        fi
+    done
+
+    echo "$meta" | jq -r '.id'
+}
+
+pack_theme() {
+    local source_dir="$1" output="$2"
+    (cd "$source_dir" && tar -czf "$output" .)
+}
+
+# ── Component Apply/Remove Logic ────────────────────────────────────────────
+
+apply_kde_colors() {
+    local theme_dir="$1"
+    local colors_file
+    colors_file="$(find "${theme_dir}/kde-colors" -name '*.colors' -print -quit 2>/dev/null || true)"
+    [[ -z "$colors_file" ]] && return 0
+
+    local scheme_name
+    scheme_name="$(basename "$colors_file" .colors)"
+
+    cp -f "$colors_file" "${KDE_COLORS_DIR}/${scheme_name}.colors"
+    log "Installed KDE color scheme: ${scheme_name}"
+
+    if check_optional_dep plasma-apply-colorscheme; then
+        plasma-apply-colorscheme "$scheme_name" 2>/dev/null && \
+            ok "Applied KDE color scheme: ${scheme_name}" || \
+            warn "Installed color scheme but could not auto-apply (restart Plasma to use)"
+    else
+        info "Color scheme installed. Apply manually via System Settings > Colors."
+    fi
+}
+
+remove_kde_colors() {
+    local theme_dir="$1"
+    local colors_file
+    colors_file="$(find "${theme_dir}/kde-colors" -name '*.colors' -print -quit 2>/dev/null || true)"
+    [[ -z "$colors_file" ]] && return 0
+
+    local scheme_name
+    scheme_name="$(basename "$colors_file" .colors)"
+    rm -f "${KDE_COLORS_DIR}/${scheme_name}.colors"
+    log "Removed KDE color scheme: ${scheme_name}"
+}
+
+apply_wallpaper() {
+    local theme_dir="$1"
+    local wp_dir="${theme_dir}/wallpaper"
+    [[ -d "$wp_dir" ]] || return 0
+
+    # Check for live wallpaper config
+    if [[ -f "${wp_dir}/live-wallpaper.json" ]]; then
+        local live_conf
+        live_conf="$(cat "${wp_dir}/live-wallpaper.json")"
+        local plugin_id
+        plugin_id="$(echo "$live_conf" | jq -r '.plugin // empty')"
+        if [[ -n "$plugin_id" ]]; then
+            info "Live wallpaper configured (plugin: ${plugin_id}). Apply via settings."
+            return 0
+        fi
+    fi
+
+    # Find first image file
+    local img
+    img="$(find "$wp_dir" -maxdepth 1 \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' -o -name '*.webp' \) -print -quit 2>/dev/null || true)"
+    [[ -z "$img" ]] && return 0
+
+    local dest_dir="${WALLPAPER_DIR}/24hg-theme"
+    mkdir -p "${dest_dir}/contents/images"
+    cp -f "$img" "${dest_dir}/contents/images/"
+
+    # Create metadata for KDE wallpaper package
+    local img_name
+    img_name="$(basename "$img")"
+    cat > "${dest_dir}/metadata.json" <<-WPEOF
+{
+    "KPlugin": {
+        "Id": "24hg-theme-wallpaper",
+        "Name": "24HG Theme Wallpaper"
+    }
+}
+WPEOF
+
+    if check_optional_dep plasma-apply-wallpaperimage; then
+        plasma-apply-wallpaperimage "${dest_dir}" 2>/dev/null && \
+            ok "Applied wallpaper: ${img_name}" || \
+            warn "Wallpaper installed but could not auto-apply"
+    else
+        info "Wallpaper installed at ${dest_dir}. Apply via desktop settings."
+    fi
+}
+
+remove_wallpaper() {
+    rm -rf "${WALLPAPER_DIR}/24hg-theme"
+    log "Removed 24hg theme wallpaper"
+}
+
+apply_sounds() {
+    local theme_dir="$1"
+    local snd_dir="${theme_dir}/sounds"
+    [[ -d "$snd_dir" ]] || return 0
+
+    local dest="${SOUNDS_DIR}/24hg-theme/stereo"
+    mkdir -p "$dest"
+
+    # Copy sound files
+    local count=0
+    for snd in "${snd_dir}"/*.{ogg,wav,mp3} ; do
+        [[ -f "$snd" ]] || continue
+        cp -f "$snd" "${dest}/"
+        ((count++))
+    done
+
+    # Create index.theme if not present
+    if [[ ! -f "${SOUNDS_DIR}/24hg-theme/index.theme" ]]; then
+        cat > "${SOUNDS_DIR}/24hg-theme/index.theme" <<-SNDEOF
+[Sound Theme]
+Name=24HG Theme Sounds
+Comment=Sound pack from 24HG theme
+Inherits=freedesktop
+Directories=stereo
+
+[stereo]
+OutputProfile=stereo
+SNDEOF
+    fi
+
+    # Attempt to set as active sound theme
+    if check_optional_dep kwriteconfig6; then
+        kwriteconfig6 --file kdeglobals --group Sounds --key Theme "24hg-theme" 2>/dev/null || true
+    elif check_optional_dep kwriteconfig5; then
+        kwriteconfig5 --file kdeglobals --group Sounds --key Theme "24hg-theme" 2>/dev/null || true
+    fi
+
+    ok "Installed ${count} sound(s) to 24hg-theme pack"
+}
+
+remove_sounds() {
+    rm -rf "${SOUNDS_DIR}/24hg-theme"
+    log "Removed 24hg theme sounds"
+}
+
+apply_cursor() {
+    local theme_dir="$1"
+    local cursor_dir="${theme_dir}/cursor"
+    [[ -d "$cursor_dir" ]] || return 0
+
+    # Look for cursor theme name in component config
+    local cursor_name
+    if [[ -f "${cursor_dir}/cursor.conf" ]]; then
+        cursor_name="$(grep -oP '^name=\K.*' "${cursor_dir}/cursor.conf" 2>/dev/null || true)"
+    fi
+
+    # Or look for a cursor theme directory to install
+    local theme_src
+    theme_src="$(find "$cursor_dir" -maxdepth 1 -mindepth 1 -type d -print -quit 2>/dev/null || true)"
+    if [[ -n "$theme_src" ]]; then
+        cursor_name="$(basename "$theme_src")"
+        cp -rf "$theme_src" "${CURSOR_DIR}/"
+        log "Installed cursor theme directory: ${cursor_name}"
+    fi
+
+    [[ -z "${cursor_name:-}" ]] && return 0
+
+    if check_optional_dep plasma-apply-cursortheme; then
+        plasma-apply-cursortheme "$cursor_name" 2>/dev/null && \
+            ok "Applied cursor theme: ${cursor_name}" || \
+            warn "Cursor theme set but could not auto-apply"
+    else
+        # Fallback: write to kdeglobals
+        if check_optional_dep kwriteconfig6; then
+            kwriteconfig6 --file kdeglobals --group Mouse --key cursorTheme "$cursor_name" 2>/dev/null || true
+        fi
+        info "Cursor theme set to '${cursor_name}'. May need re-login to take effect."
+    fi
+}
+
+remove_cursor() {
+    local theme_dir="$1"
+    local cursor_dir="${theme_dir}/cursor"
+    [[ -d "$cursor_dir" ]] || return 0
+
+    local cursor_name
+    if [[ -f "${cursor_dir}/cursor.conf" ]]; then
+        cursor_name="$(grep -oP '^name=\K.*' "${cursor_dir}/cursor.conf" 2>/dev/null || true)"
+    fi
+    local theme_src
+    theme_src="$(find "$cursor_dir" -maxdepth 1 -mindepth 1 -type d -print -quit 2>/dev/null || true)"
+    if [[ -n "$theme_src" ]]; then
+        cursor_name="$(basename "$theme_src")"
+        rm -rf "${CURSOR_DIR}/${cursor_name}"
+    fi
+}
+
+apply_mangohud() {
+    local theme_dir="$1"
+    local mh_file="${theme_dir}/mangohud/MangoHud.conf"
+    [[ -f "$mh_file" ]] || return 0
+
+    local mh_dir
+    mh_dir="$(dirname "$MANGOHUD_CONF")"
+    mkdir -p "$mh_dir"
+
+    # Back up existing config
+    if [[ -f "$MANGOHUD_CONF" ]]; then
+        cp -f "$MANGOHUD_CONF" "${MANGOHUD_CONF}.bak"
+        log "Backed up MangoHud config to ${MANGOHUD_CONF}.bak"
+    fi
+
+    # Merge color-related keys only, preserve non-color settings
+    if [[ -f "$MANGOHUD_CONF" ]]; then
+        local tmp_conf
+        tmp_conf="$(mktemp)"
+        # Copy existing non-color lines
+        grep -vE '^(gpu_color|cpu_color|vram_color|ram_color|engine_color|io_color|frametime_color|background_color|text_color|media_player_color|wine_color|battery_color|frame_timing|alpha)=' \
+            "$MANGOHUD_CONF" > "$tmp_conf" 2>/dev/null || true
+        # Append color lines from theme
+        grep -E '^(gpu_color|cpu_color|vram_color|ram_color|engine_color|io_color|frametime_color|background_color|text_color|media_player_color|wine_color|battery_color|frame_timing|alpha)=' \
+            "$mh_file" >> "$tmp_conf" 2>/dev/null || true
+        mv -f "$tmp_conf" "$MANGOHUD_CONF"
+    else
+        cp -f "$mh_file" "$MANGOHUD_CONF"
+    fi
+
+    ok "Applied MangoHud color preset"
+}
+
+remove_mangohud() {
+    if [[ -f "${MANGOHUD_CONF}.bak" ]]; then
+        mv -f "${MANGOHUD_CONF}.bak" "$MANGOHUD_CONF"
+        info "Restored previous MangoHud config"
+    fi
+}
+
+apply_conky() {
+    local theme_dir="$1"
+    local conky_file="${theme_dir}/conky/conky.conf"
+    [[ -f "$conky_file" ]] || return 0
+
+    mkdir -p "$CONKY_DIR"
+
+    if [[ -f "${CONKY_DIR}/conky.conf" ]]; then
+        cp -f "${CONKY_DIR}/conky.conf" "${CONKY_DIR}/conky.conf.bak"
+        log "Backed up Conky config"
+    fi
+
+    cp -f "$conky_file" "${CONKY_DIR}/conky.conf"
+
+    # Also copy any extra Conky assets (lua scripts, images)
+    for extra in "${theme_dir}/conky/"*; do
+        [[ "$(basename "$extra")" == "conky.conf" ]] && continue
+        [[ -e "$extra" ]] && cp -rf "$extra" "${CONKY_DIR}/"
+    done
+
+    # Restart Conky if running
+    if pgrep -x conky &>/dev/null; then
+        killall conky 2>/dev/null || true
+        sleep 0.5
+        conky -d 2>/dev/null &
+        disown
+        ok "Applied Conky theme and restarted Conky"
+    else
+        ok "Applied Conky theme"
+    fi
+}
+
+remove_conky() {
+    if [[ -f "${CONKY_DIR}/conky.conf.bak" ]]; then
+        mv -f "${CONKY_DIR}/conky.conf.bak" "${CONKY_DIR}/conky.conf"
+        info "Restored previous Conky config"
+    fi
+}
+
+apply_plymouth() {
+    local theme_dir="$1"
+    local ply_dir="${theme_dir}/plymouth"
+    [[ -d "$ply_dir" ]] || return 0
+
+    # Plymouth typically needs root, so just install to user dir and inform
+    local theme_name
+    theme_name="$(find "$ply_dir" -maxdepth 1 -mindepth 1 -type d -print -quit 2>/dev/null || true)"
+    if [[ -z "$theme_name" ]]; then
+        warn "Plymouth component present but no theme directory found"
+        return 0
+    fi
+
+    local name
+    name="$(basename "$theme_name")"
+    mkdir -p "$PLYMOUTH_DIR"
+    cp -rf "$theme_name" "${PLYMOUTH_DIR}/"
+
+    info "Plymouth theme '${name}' installed to user directory."
+    info "To activate: sudo plymouth-set-default-theme ${name} && sudo dracut -f"
+    warn "Plymouth changes require root and a reboot to take effect."
+}
+
+remove_plymouth() {
+    local theme_dir="$1"
+    local ply_dir="${theme_dir}/plymouth"
+    [[ -d "$ply_dir" ]] || return 0
+
+    local theme_name
+    theme_name="$(find "$ply_dir" -maxdepth 1 -mindepth 1 -type d -print -quit 2>/dev/null || true)"
+    [[ -z "$theme_name" ]] && return 0
+    local name
+    name="$(basename "$theme_name")"
+    rm -rf "${PLYMOUTH_DIR}/${name}"
+}
+
+apply_konsole() {
+    local theme_dir="$1"
+    local konsole_dir="${theme_dir}/konsole"
+    [[ -d "$konsole_dir" ]] || return 0
+
+    local count=0
+    for profile in "${konsole_dir}"/*.profile "${konsole_dir}"/*.colorscheme; do
+        [[ -f "$profile" ]] || continue
+        cp -f "$profile" "${KONSOLE_DIR}/"
+        ((count++))
+    done
+
+    if ((count > 0)); then
+        ok "Installed ${count} Konsole profile(s)/colorscheme(s)"
+    fi
+}
+
+remove_konsole() {
+    local theme_dir="$1"
+    local konsole_dir="${theme_dir}/konsole"
+    [[ -d "$konsole_dir" ]] || return 0
+
+    for profile in "${konsole_dir}"/*.profile "${konsole_dir}"/*.colorscheme; do
+        [[ -f "$profile" ]] || continue
+        local name
+        name="$(basename "$profile")"
+        rm -f "${KONSOLE_DIR}/${name}"
+    done
+}
+
+# Component dispatch tables
+apply_component() {
+    local component="$1" theme_dir="$2"
+    case "$component" in
+        kde-colors) apply_kde_colors "$theme_dir" ;;
+        wallpaper)  apply_wallpaper "$theme_dir" ;;
+        sounds)     apply_sounds "$theme_dir" ;;
+        cursor)     apply_cursor "$theme_dir" ;;
+        mangohud)   apply_mangohud "$theme_dir" ;;
+        conky)      apply_conky "$theme_dir" ;;
+        plymouth)   apply_plymouth "$theme_dir" ;;
+        konsole)    apply_konsole "$theme_dir" ;;
+        *) warn "Unknown component: ${component}" ;;
+    esac
+}
+
+remove_component() {
+    local component="$1" theme_dir="$2"
+    case "$component" in
+        kde-colors) remove_kde_colors "$theme_dir" ;;
+        wallpaper)  remove_wallpaper ;;
+        sounds)     remove_sounds ;;
+        cursor)     remove_cursor "$theme_dir" ;;
+        mangohud)   remove_mangohud ;;
+        conky)      remove_conky ;;
+        plymouth)   remove_plymouth "$theme_dir" ;;
+        konsole)    remove_konsole "$theme_dir" ;;
+        *) warn "Unknown component: ${component}" ;;
+    esac
+}
+
+# ── Display Helpers ─────────────────────────────────────────────────────────
+
+# Print a color swatch from a hex color code
+print_swatch() {
+    local hex="$1" label="${2:-}"
+    # Convert #RRGGBB to ANSI 24-bit color
+    local r g b
+    hex="${hex#\#}"
+    r="$((16#${hex:0:2}))"
+    g="$((16#${hex:2:2}))"
+    b="$((16#${hex:4:2}))"
+    printf "\033[48;2;%d;%d;%dm    \033[0m %s  " "$r" "$g" "$b" "${label:-$hex}"
+}
+
+# Display a theme listing row
+print_theme_row() {
+    local id="$1" name="$2" author="$3" version="$4" tags="$5" installed="$6"
+    local marker=""
+    if [[ "$installed" == "true" ]]; then
+        marker="\033[1;32m*\033[0m "
+    fi
+
+    printf "  ${marker}\033[1;36m%-20s\033[0m \033[1m%-30s\033[0m \033[2mv%-8s\033[0m by \033[33m%s\033[0m\n" \
+        "$id" "$name" "$version" "$author"
+    if [[ -n "$tags" && "$tags" != "null" ]]; then
+        printf "  %23s\033[2m%s\033[0m\n" "" "$tags"
+    fi
+}
+
+format_components_list() {
+    local meta="$1"
+    echo "$meta" | jq -r '.components // [] | .[]' 2>/dev/null | while read -r comp; do
+        case "$comp" in
+            kde-colors) echo -n " Colors" ;;
+            wallpaper)  echo -n " Wallpaper" ;;
+            sounds)     echo -n " Sounds" ;;
+            cursor)     echo -n " Cursor" ;;
+            mangohud)   echo -n " MangoHud" ;;
+            conky)      echo -n " Conky" ;;
+            plymouth)   echo -n " Plymouth" ;;
+            konsole)    echo -n " Konsole" ;;
+            *)          echo -n " ${comp}" ;;
+        esac
+    done
+}
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    info "Fetching themes from 24HG Hub..."
+    local response
+    response="$(hub_get "")"
+
+    local count
+    count="$(echo "$response" | jq '.data | length' 2>/dev/null || echo 0)"
+
+    if [[ "$count" -eq 0 ]]; then
+        msg "No themes available yet. Be the first -- use '24hg-themes create'!"
+        return 0
+    fi
+
+    echo ""
+    c_bold "  24HG Theme Marketplace"
+    c_dim "  ${count} theme(s) available"
+    echo ""
+
+    echo "$response" | jq -c '.data[]' 2>/dev/null | while read -r theme; do
+        local id name author version tags
+        id="$(echo "$theme" | jq -r '.id')"
+        name="$(echo "$theme" | jq -r '.name')"
+        author="$(echo "$theme" | jq -r '.author // "unknown"')"
+        version="$(echo "$theme" | jq -r '.version // "1.0"')"
+        tags="$(echo "$theme" | jq -r '.tags // [] | join(", ")')"
+        local inst="false"
+        is_installed "$id" && inst="true"
+
+        print_theme_row "$id" "$name" "$author" "$version" "$tags" "$inst"
+    done
+
+    echo ""
+    c_dim "  * = installed  |  Use '24hg-themes preview <id>' for details"
+    echo ""
+}
+
+cmd_search() {
+    local query="${1:-}"
+    [[ -z "$query" ]] && die "Usage: 24hg-themes search <query>"
+
+    info "Searching for '${query}'..."
+    local encoded_query
+    encoded_query="$(python3 -c "import urllib.parse; print(urllib.parse.quote('$query'))" 2>/dev/null || echo "$query")"
+
+    local response
+    response="$(hub_get "?q=${encoded_query}")"
+
+    local count
+    count="$(echo "$response" | jq '.data | length' 2>/dev/null || echo 0)"
+
+    if [[ "$count" -eq 0 ]]; then
+        msg "No themes found for '${query}'."
+        return 0
+    fi
+
+    echo ""
+    c_bold "  Search results for '${query}'"
+    c_dim "  ${count} theme(s) found"
+    echo ""
+
+    echo "$response" | jq -c '.data[]' 2>/dev/null | while read -r theme; do
+        local id name author version tags
+        id="$(echo "$theme" | jq -r '.id')"
+        name="$(echo "$theme" | jq -r '.name')"
+        author="$(echo "$theme" | jq -r '.author // "unknown"')"
+        version="$(echo "$theme" | jq -r '.version // "1.0"')"
+        tags="$(echo "$theme" | jq -r '.tags // [] | join(", ")')"
+        local inst="false"
+        is_installed "$id" && inst="true"
+
+        print_theme_row "$id" "$name" "$author" "$version" "$tags" "$inst"
+    done
+    echo ""
+}
+
+cmd_install() {
+    local theme_id="${1:-}"
+    [[ -z "$theme_id" ]] && die "Usage: 24hg-themes install <theme-id>"
+
+    if is_installed "$theme_id"; then
+        warn "Theme '${theme_id}' is already installed."
+        read -rp "Reinstall? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || return 0
+        rm -rf "$(theme_dir "$theme_id")"
+    fi
+
+    info "Fetching theme info for '${theme_id}'..."
+    local meta
+    meta="$(hub_get "/${theme_id}")"
+
+    local name version size_hint
+    name="$(echo "$meta" | jq -r '.name // "Unknown"')"
+    version="$(echo "$meta" | jq -r '.version // "1.0"')"
+    size_hint="$(echo "$meta" | jq -r '.size_bytes // 0')"
+
+    msg "Installing: ${name} v${version}"
+
+    # Download
+    local archive="${THEMES_CACHE}/${theme_id}.24hg-theme"
+    info "Downloading..."
+    hub_download "/${theme_id}/download" "$archive"
+
+    # Validate
+    info "Validating archive..."
+    local validated_id
+    validated_id="$(validate_theme_archive "$archive")"
+    if [[ "$validated_id" != "$theme_id" ]]; then
+        warn "Theme ID mismatch: expected '${theme_id}', archive contains '${validated_id}'"
+    fi
+
+    # Extract
+    local dest
+    dest="$(theme_dir "$theme_id")"
+    mkdir -p "$dest"
+    tar -xzf "$archive" -C "$dest"
+    rm -f "$archive"
+
+    add_installed "$theme_id"
+    log "Installed theme: ${theme_id} v${version}"
+
+    ok "Theme '${name}' installed successfully!"
+    msg "Run '24hg-themes apply ${theme_id}' to activate it."
+}
+
+cmd_remove() {
+    local theme_id="${1:-}"
+    [[ -z "$theme_id" ]] && die "Usage: 24hg-themes remove <theme-id>"
+
+    if ! is_installed "$theme_id"; then
+        die "Theme '${theme_id}' is not installed."
+    fi
+
+    local dir
+    dir="$(theme_dir "$theme_id")"
+    local name="unknown"
+    if [[ -f "${dir}/metadata.json" ]]; then
+        name="$(jq -r '.name // "Unknown"' "${dir}/metadata.json")"
+    fi
+
+    # If this is the active theme, unapply it first
+    local active
+    active="$(get_active_theme)"
+    if [[ "$active" == "$theme_id" ]]; then
+        info "Removing active theme -- reverting components..."
+        local meta
+        meta="$(cat "${dir}/metadata.json")"
+        local components
+        components="$(echo "$meta" | jq -r '.components // [] | .[]')"
+        while read -r comp; do
+            [[ -z "$comp" ]] && continue
+            remove_component "$comp" "$dir"
+        done <<< "$components"
+    fi
+
+    rm -rf "$dir"
+    remove_installed "$theme_id"
+    log "Removed theme: ${theme_id}"
+
+    ok "Theme '${name}' removed."
+}
+
+cmd_apply() {
+    local theme_id="${1:-}"
+    [[ -z "$theme_id" ]] && die "Usage: 24hg-themes apply <theme-id>"
+
+    if ! is_installed "$theme_id"; then
+        die "Theme '${theme_id}' is not installed. Run '24hg-themes install ${theme_id}' first."
+    fi
+
+    local dir
+    dir="$(theme_dir "$theme_id")"
+    local meta
+    meta="$(theme_metadata "$theme_id")"
+    local name
+    name="$(echo "$meta" | jq -r '.name // "Unknown"')"
+
+    msg "Applying theme: ${name}"
+    echo ""
+
+    # Unapply current theme if different
+    local current
+    current="$(get_active_theme)"
+    if [[ -n "$current" && "$current" != "$theme_id" ]]; then
+        local current_dir
+        current_dir="$(theme_dir "$current")"
+        if [[ -f "${current_dir}/metadata.json" ]]; then
+            info "Reverting previous theme '${current}'..."
+            local old_components
+            old_components="$(jq -r '.components // [] | .[]' "${current_dir}/metadata.json")"
+            while read -r comp; do
+                [[ -z "$comp" ]] && continue
+                remove_component "$comp" "$current_dir"
+            done <<< "$old_components"
+        fi
+    fi
+
+    # Apply each component
+    local components
+    components="$(echo "$meta" | jq -r '.components // [] | .[]')"
+    local applied=0
+    while read -r comp; do
+        [[ -z "$comp" ]] && continue
+        info "Applying component: ${comp}"
+        apply_component "$comp" "$dir"
+        ((applied++))
+    done <<< "$components"
+
+    if ((applied == 0)); then
+        warn "Theme has no components to apply."
+        return 0
+    fi
+
+    set_active_theme "$theme_id"
+    log "Applied theme: ${theme_id} (${applied} components)"
+
+    echo ""
+    ok "Theme '${name}' applied! (${applied} component(s))"
+}
+
+cmd_create() {
+    msg "Create a new theme from your current customizations"
+    echo ""
+
+    # Gather info interactively
+    local theme_id theme_name theme_desc theme_version theme_tags
+    read -rp "  Theme ID (short, lowercase, no spaces): " theme_id
+    [[ -z "$theme_id" ]] && die "Theme ID is required."
+    theme_id="$(echo "$theme_id" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-_')"
+
+    read -rp "  Theme name: " theme_name
+    [[ -z "$theme_name" ]] && theme_name="$theme_id"
+
+    read -rp "  Description: " theme_desc
+    read -rp "  Version [1.0.0]: " theme_version
+    theme_version="${theme_version:-1.0.0}"
+    read -rp "  Tags (comma-separated): " theme_tags
+
+    local author
+    author="$(whoami)"
+    if check_optional_dep git; then
+        author="$(git config --global user.name 2>/dev/null || echo "$author")"
+    fi
+
+    local staging_dir="${THEMES_CACHE}/staging-${theme_id}"
+    rm -rf "$staging_dir"
+    mkdir -p "$staging_dir"
+
+    echo ""
+    msg "Select components to include:"
+    echo ""
+
+    local selected_components=()
+
+    # KDE Colors
+    local current_scheme=""
+    if check_optional_dep kreadconfig6; then
+        current_scheme="$(kreadconfig6 --file kdeglobals --group General --key ColorScheme 2>/dev/null || true)"
+    elif check_optional_dep kreadconfig5; then
+        current_scheme="$(kreadconfig5 --file kdeglobals --group General --key ColorScheme 2>/dev/null || true)"
+    fi
+    if [[ -n "$current_scheme" ]]; then
+        read -rp "  Include KDE color scheme '${current_scheme}'? [Y/n] " yn
+        if [[ ! "$yn" =~ ^[Nn]$ ]]; then
+            mkdir -p "${staging_dir}/kde-colors"
+            local scheme_file="${KDE_COLORS_DIR}/${current_scheme}.colors"
+            if [[ -f "$scheme_file" ]]; then
+                cp -f "$scheme_file" "${staging_dir}/kde-colors/"
+                selected_components+=("kde-colors")
+                ok "Added KDE color scheme"
+            else
+                # Try system dir
+                scheme_file="/usr/share/color-schemes/${current_scheme}.colors"
+                if [[ -f "$scheme_file" ]]; then
+                    cp -f "$scheme_file" "${staging_dir}/kde-colors/"
+                    selected_components+=("kde-colors")
+                    ok "Added KDE color scheme (system)"
+                else
+                    warn "Color scheme file not found, skipping"
+                fi
+            fi
+        fi
+    fi
+
+    # Wallpaper
+    read -rp "  Include a wallpaper? [y/N] " yn
+    if [[ "$yn" =~ ^[Yy]$ ]]; then
+        read -rp "  Path to wallpaper image: " wp_path
+        if [[ -f "$wp_path" ]]; then
+            mkdir -p "${staging_dir}/wallpaper"
+            cp -f "$wp_path" "${staging_dir}/wallpaper/"
+            selected_components+=("wallpaper")
+            ok "Added wallpaper"
+        else
+            warn "File not found: ${wp_path}"
+        fi
+    fi
+
+    # Sounds
+    if [[ -d "${SOUNDS_DIR}/24hg/stereo" ]] || [[ -d "${SOUNDS_DIR}/24hg-theme/stereo" ]]; then
+        read -rp "  Include current sound pack? [y/N] " yn
+        if [[ "$yn" =~ ^[Yy]$ ]]; then
+            mkdir -p "${staging_dir}/sounds"
+            local snd_source="${SOUNDS_DIR}/24hg-theme/stereo"
+            [[ -d "$snd_source" ]] || snd_source="${SOUNDS_DIR}/24hg/stereo"
+            for snd in "${snd_source}"/*.{ogg,wav,mp3}; do
+                [[ -f "$snd" ]] && cp -f "$snd" "${staging_dir}/sounds/"
+            done
+            selected_components+=("sounds")
+            ok "Added sound pack"
+        fi
+    fi
+
+    # MangoHud
+    if [[ -f "$MANGOHUD_CONF" ]]; then
+        read -rp "  Include MangoHud color preset? [y/N] " yn
+        if [[ "$yn" =~ ^[Yy]$ ]]; then
+            mkdir -p "${staging_dir}/mangohud"
+            # Extract only color-related keys
+            grep -E '^(gpu_color|cpu_color|vram_color|ram_color|engine_color|io_color|frametime_color|background_color|text_color|media_player_color|wine_color|battery_color|frame_timing|alpha)=' \
+                "$MANGOHUD_CONF" > "${staging_dir}/mangohud/MangoHud.conf" 2>/dev/null || true
+            if [[ -s "${staging_dir}/mangohud/MangoHud.conf" ]]; then
+                selected_components+=("mangohud")
+                ok "Added MangoHud colors"
+            else
+                rm -rf "${staging_dir}/mangohud"
+                warn "No MangoHud color settings found, skipping"
+            fi
+        fi
+    fi
+
+    # Conky
+    if [[ -f "${CONKY_DIR}/conky.conf" ]]; then
+        read -rp "  Include Conky config? [y/N] " yn
+        if [[ "$yn" =~ ^[Yy]$ ]]; then
+            mkdir -p "${staging_dir}/conky"
+            cp -f "${CONKY_DIR}/conky.conf" "${staging_dir}/conky/"
+            selected_components+=("conky")
+            ok "Added Conky config"
+        fi
+    fi
+
+    # Konsole
+    local konsole_profiles
+    konsole_profiles="$(find "$KONSOLE_DIR" -maxdepth 1 \( -name '*.profile' -o -name '*.colorscheme' \) 2>/dev/null | head -20)"
+    if [[ -n "$konsole_profiles" ]]; then
+        read -rp "  Include Konsole profile/colorscheme? [y/N] " yn
+        if [[ "$yn" =~ ^[Yy]$ ]]; then
+            mkdir -p "${staging_dir}/konsole"
+            while read -r kfile; do
+                [[ -f "$kfile" ]] && cp -f "$kfile" "${staging_dir}/konsole/"
+            done <<< "$konsole_profiles"
+            selected_components+=("konsole")
+            ok "Added Konsole profiles"
+        fi
+    fi
+
+    # Cursor
+    local current_cursor=""
+    if check_optional_dep kreadconfig6; then
+        current_cursor="$(kreadconfig6 --file kdeglobals --group Mouse --key cursorTheme 2>/dev/null || true)"
+    fi
+    if [[ -n "$current_cursor" ]]; then
+        read -rp "  Include cursor theme preference '${current_cursor}'? [y/N] " yn
+        if [[ "$yn" =~ ^[Yy]$ ]]; then
+            mkdir -p "${staging_dir}/cursor"
+            echo "name=${current_cursor}" > "${staging_dir}/cursor/cursor.conf"
+            selected_components+=("cursor")
+            ok "Added cursor preference"
+        fi
+    fi
+
+    if [[ ${#selected_components[@]} -eq 0 ]]; then
+        rm -rf "$staging_dir"
+        die "No components selected. Theme creation cancelled."
+    fi
+
+    # Build tags array
+    local tags_json="[]"
+    if [[ -n "$theme_tags" ]]; then
+        tags_json="$(echo "$theme_tags" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | jq -R . | jq -s .)"
+    fi
+
+    # Create metadata.json
+    jq -n \
+        --arg id "$theme_id" \
+        --arg name "$theme_name" \
+        --arg author "$author" \
+        --arg version "$theme_version" \
+        --arg desc "$theme_desc" \
+        --argjson tags "$tags_json" \
+        --argjson components "$(printf '%s\n' "${selected_components[@]}" | jq -R . | jq -s .)" \
+        '{
+            id: $id,
+            name: $name,
+            author: $author,
+            version: $version,
+            description: $desc,
+            tags: $tags,
+            components: $components,
+            preview_url: null,
+            created_at: (now | todate)
+        }' > "${staging_dir}/metadata.json"
+
+    # Package
+    local output="${THEMES_DIR}/${theme_id}.24hg-theme"
+    pack_theme "$staging_dir" "$output"
+    rm -rf "$staging_dir"
+
+    # Also install locally
+    local dest
+    dest="$(theme_dir "$theme_id")"
+    mkdir -p "$dest"
+    tar -xzf "$output" -C "$dest"
+    add_installed "$theme_id"
+
+    echo ""
+    ok "Theme '${theme_name}' created and installed!"
+    msg "Archive: ${output}"
+    msg "Use '24hg-themes share ${theme_id}' to publish to the Hub."
+}
+
+cmd_share() {
+    local theme_id="${1:-}"
+    [[ -z "$theme_id" ]] && die "Usage: 24hg-themes share <theme-id>"
+
+    if ! is_installed "$theme_id"; then
+        die "Theme '${theme_id}' is not installed locally."
+    fi
+
+    require_auth
+
+    local dir
+    dir="$(theme_dir "$theme_id")"
+    local meta
+    meta="$(theme_metadata "$theme_id")"
+    local name
+    name="$(echo "$meta" | jq -r '.name')"
+
+    msg "Preparing to share '${name}' to the 24HG Hub marketplace..."
+
+    # Pack fresh archive
+    local archive="${THEMES_CACHE}/${theme_id}.24hg-theme"
+    pack_theme "$dir" "$archive"
+
+    info "Uploading..."
+    local response
+    response="$(hub_upload "$archive")"
+    rm -f "$archive"
+
+    local url
+    url="$(echo "$response" | jq -r '.url // .data.url // empty' 2>/dev/null || true)"
+
+    echo ""
+    ok "Theme '${name}' published to 24HG Hub!"
+    if [[ -n "$url" ]]; then
+        msg "View at: ${url}"
+    fi
+    msg "Other 24HG users can now install it with: 24hg-themes install ${theme_id}"
+}
+
+cmd_current() {
+    local active
+    active="$(get_active_theme)"
+
+    if [[ -z "$active" ]]; then
+        msg "No theme currently active. Using default 24HG appearance."
+        return 0
+    fi
+
+    local dir
+    dir="$(theme_dir "$active")"
+
+    if [[ ! -f "${dir}/metadata.json" ]]; then
+        warn "Active theme '${active}' metadata missing. State may be stale."
+        return 1
+    fi
+
+    local meta
+    meta="$(cat "${dir}/metadata.json")"
+
+    echo ""
+    c_bold "  Currently active theme"
+    echo ""
+
+    local name version author desc
+    name="$(echo "$meta" | jq -r '.name')"
+    version="$(echo "$meta" | jq -r '.version // "?"')"
+    author="$(echo "$meta" | jq -r '.author // "?"')"
+    desc="$(echo "$meta" | jq -r '.description // ""')"
+
+    printf "  \033[1;36mID:\033[0m       %s\n" "$active"
+    printf "  \033[1;36mName:\033[0m     %s\n" "$name"
+    printf "  \033[1;36mVersion:\033[0m  %s\n" "$version"
+    printf "  \033[1;36mAuthor:\033[0m   %s\n" "$author"
+    [[ -n "$desc" ]] && printf "  \033[1;36mAbout:\033[0m    %s\n" "$desc"
+
+    local comp_list
+    comp_list="$(format_components_list "$meta")"
+    [[ -n "$comp_list" ]] && printf "  \033[1;36mActive:\033[0m  %s\n" "$comp_list"
+
+    echo ""
+
+    # Show last applied time
+    local applied_at
+    applied_at="$(read_state | jq -r --arg id "$active" '.history[] | select(.id == $id) | .applied_at' | head -1)"
+    if [[ -n "$applied_at" ]]; then
+        c_dim "  Applied: ${applied_at}"
+    fi
+    echo ""
+}
+
+cmd_reset() {
+    msg "Resetting to default 24HG theme..."
+    echo ""
+
+    # Unapply current theme
+    local active
+    active="$(get_active_theme)"
+    if [[ -n "$active" ]]; then
+        local dir
+        dir="$(theme_dir "$active")"
+        if [[ -f "${dir}/metadata.json" ]]; then
+            local components
+            components="$(jq -r '.components // [] | .[]' "${dir}/metadata.json")"
+            while read -r comp; do
+                [[ -z "$comp" ]] && continue
+                info "Reverting: ${comp}"
+                remove_component "$comp" "$dir"
+            done <<< "$components"
+        fi
+    fi
+
+    # Apply default KDE color scheme
+    if check_optional_dep plasma-apply-colorscheme; then
+        plasma-apply-colorscheme "BreezeDark" 2>/dev/null || true
+        info "Reset KDE colors to Breeze Dark"
+    fi
+
+    # Reset wallpaper
+    remove_wallpaper
+    if check_optional_dep plasma-apply-wallpaperimage; then
+        local default_wp="/usr/share/24hg/wallpapers/default.png"
+        if [[ -f "$default_wp" ]]; then
+            local dest="${HOME}/.local/share/wallpapers/24hg-default"
+            mkdir -p "${dest}/contents/images"
+            cp -f "$default_wp" "${dest}/contents/images/"
+            cat > "${dest}/metadata.json" <<-DEFWP
+{
+    "KPlugin": {
+        "Id": "24hg-default-wallpaper",
+        "Name": "24HG Default"
+    }
+}
+DEFWP
+            plasma-apply-wallpaperimage "$dest" 2>/dev/null || true
+        fi
+    fi
+
+    # Clear active theme in state
+    local state
+    state="$(read_state)"
+    state="$(echo "$state" | jq '.active_theme = null')"
+    write_state "$state"
+
+    echo ""
+    ok "Reset to default 24HG appearance."
+}
+
+cmd_preview() {
+    local theme_id="${1:-}"
+    [[ -z "$theme_id" ]] && die "Usage: 24hg-themes preview <theme-id>"
+
+    local meta
+    local is_local=false
+
+    # Try local first, then Hub
+    if is_installed "$theme_id"; then
+        meta="$(theme_metadata "$theme_id")"
+        is_local=true
+    else
+        info "Fetching theme details from Hub..."
+        meta="$(hub_get "/${theme_id}")"
+    fi
+
+    local name version author desc tags components preview_url
+    name="$(echo "$meta" | jq -r '.name // "Unknown"')"
+    version="$(echo "$meta" | jq -r '.version // "?"')"
+    author="$(echo "$meta" | jq -r '.author // "?"')"
+    desc="$(echo "$meta" | jq -r '.description // ""')"
+    tags="$(echo "$meta" | jq -r '.tags // [] | join(", ")')"
+    preview_url="$(echo "$meta" | jq -r '.preview_url // empty')"
+
+    local active
+    active="$(get_active_theme)"
+
+    echo ""
+    echo "  =============================================="
+    c_bold "  $(c_purple "$name")"
+    echo "  =============================================="
+    echo ""
+    printf "  \033[1;36mID:\033[0m          %s\n" "$theme_id"
+    printf "  \033[1;36mVersion:\033[0m     %s\n" "$version"
+    printf "  \033[1;36mAuthor:\033[0m      %s\n" "$author"
+    [[ -n "$desc" ]] && printf "  \033[1;36mDescription:\033[0m %s\n" "$desc"
+    [[ -n "$tags" && "$tags" != "null" ]] && printf "  \033[1;36mTags:\033[0m        %s\n" "$tags"
+
+    # Status
+    local status_str=""
+    if [[ "$active" == "$theme_id" ]]; then
+        status_str="\033[1;32mActive\033[0m"
+    elif [[ "$is_local" == "true" ]]; then
+        status_str="\033[1;33mInstalled\033[0m"
+    else
+        status_str="\033[2mNot installed\033[0m"
+    fi
+    printf "  \033[1;36mStatus:\033[0m      ${status_str}\n"
+    echo ""
+
+    # Components
+    local comp_list
+    comp_list="$(echo "$meta" | jq -r '.components // [] | .[]' 2>/dev/null)"
+    if [[ -n "$comp_list" ]]; then
+        c_bold "  Components:"
+        while read -r comp; do
+            local icon
+            case "$comp" in
+                kde-colors) icon="[palette]" ;;
+                wallpaper)  icon="[image]  " ;;
+                sounds)     icon="[audio]  " ;;
+                cursor)     icon="[pointer]" ;;
+                mangohud)   icon="[hud]    " ;;
+                conky)      icon="[widget] " ;;
+                plymouth)   icon="[boot]   " ;;
+                konsole)    icon="[term]   " ;;
+                *)          icon="[?]      " ;;
+            esac
+            printf "    \033[2m%s\033[0m %s\n" "$icon" "$comp"
+        done <<< "$comp_list"
+        echo ""
+    fi
+
+    # Try to show color preview if locally installed and has KDE colors
+    if [[ "$is_local" == "true" ]]; then
+        local dir
+        dir="$(theme_dir "$theme_id")"
+        local colors_file
+        colors_file="$(find "${dir}/kde-colors" -name '*.colors' -print -quit 2>/dev/null || true)"
+        if [[ -n "$colors_file" && -f "$colors_file" ]]; then
+            c_bold "  Color Preview:"
+            echo ""
+
+            # Extract key colors from the KDE color scheme file
+            local bg fg accent highlight
+            bg="$(grep -m1 '^BackgroundNormal=' "$colors_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+            fg="$(grep -m1 '^ForegroundNormal=' "$colors_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+            accent="$(grep -m1 '^DecorationFocus=' "$colors_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+            highlight="$(grep -m1 '^BackgroundAlternate=' "$colors_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+
+            # KDE colors are in R,G,B format -- convert to hex
+            rgb_to_hex() {
+                local rgb="$1"
+                local r g b
+                IFS=',' read -r r g b <<< "$rgb"
+                printf "#%02x%02x%02x" "${r:-0}" "${g:-0}" "${b:-0}"
+            }
+
+            if [[ -n "$bg" ]]; then
+                local hex_bg hex_fg hex_accent hex_highlight
+                hex_bg="$(rgb_to_hex "$bg")"
+                hex_fg="$(rgb_to_hex "${fg:-255,255,255}")"
+                hex_accent="$(rgb_to_hex "${accent:-127,127,255}")"
+                hex_highlight="$(rgb_to_hex "${highlight:-50,50,80}")"
+
+                printf "    "
+                print_swatch "$hex_bg" "Background"
+                echo ""
+                printf "    "
+                print_swatch "$hex_fg" "Foreground"
+                echo ""
+                printf "    "
+                print_swatch "$hex_accent" "Accent"
+                echo ""
+                printf "    "
+                print_swatch "$hex_highlight" "Highlight"
+                echo ""
+            fi
+            echo ""
+        fi
+
+        # Show MangoHud colors if present
+        local mh_file="${dir}/mangohud/MangoHud.conf"
+        if [[ -f "$mh_file" ]]; then
+            c_bold "  MangoHud Colors:"
+            echo ""
+            while IFS='=' read -r key val; do
+                [[ -z "$key" || "$key" =~ ^# ]] && continue
+                local label="${key//_/ }"
+                label="${label^}"
+                printf "    "
+                print_swatch "${val}" "${label}"
+                echo ""
+            done < "$mh_file"
+            echo ""
+        fi
+    fi
+
+    # Preview URL
+    if [[ -n "$preview_url" ]]; then
+        c_dim "  Preview: ${preview_url}"
+        echo ""
+    fi
+
+    # Action hints
+    if [[ "$active" == "$theme_id" ]]; then
+        c_dim "  This theme is currently active."
+    elif [[ "$is_local" == "true" ]]; then
+        msg "Apply with: 24hg-themes apply ${theme_id}"
+    else
+        msg "Install with: 24hg-themes install ${theme_id}"
+    fi
+    echo ""
+}
+
+# ── Usage ────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<'USAGE'
+
+  24HG Theme Marketplace
+
+  Usage: 24hg-themes <command> [args...]
+
+  Commands:
+    list              Browse available themes from the Hub
+    search <query>    Search themes by name or tag
+    install <id>      Download and install a theme
+    remove <id>       Remove an installed theme
+    apply <id>        Apply an installed theme
+    create            Package current customizations as a theme
+    share <id>        Upload a theme to the Hub marketplace
+    current           Show currently active theme
+    reset             Reset to default 24HG theme
+    preview <id>      Show theme details and preview colors
+
+  Theme files (.24hg-theme) are stored in:
+    ~/.local/share/24hg/themes/
+
+  Environment:
+    HG24_HUB_URL     Override the Hub API URL (default: https://hub.24hgaming.com)
+
+  A theme can include any combination of:
+    - KDE color scheme          - Wallpaper (static or live)
+    - Sound pack                - Cursor theme
+    - MangoHud color preset     - Conky color scheme
+    - Plymouth boot animation   - Konsole terminal profile
+
+USAGE
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+main() {
+    check_deps
+
+    local command="${1:-list}"
+    shift 2>/dev/null || true
+
+    case "$command" in
+        list|ls|browse)
+            cmd_list
+            ;;
+        search|find|query)
+            cmd_search "$@"
+            ;;
+        install|get|add)
+            cmd_install "$@"
+            ;;
+        remove|rm|uninstall|delete)
+            cmd_remove "$@"
+            ;;
+        apply|activate|use|set)
+            cmd_apply "$@"
+            ;;
+        create|new|package|pack)
+            cmd_create
+            ;;
+        share|upload|publish)
+            cmd_share "$@"
+            ;;
+        current|active|status)
+            cmd_current
+            ;;
+        reset|default|restore)
+            cmd_reset
+            ;;
+        preview|info|show|details)
+            cmd_preview "$@"
+            ;;
+        help|-h|--help)
+            usage
+            ;;
+        version|--version|-v)
+            echo "24hg-themes ${HG24_THEMES_VERSION}"
+            ;;
+        *)
+            err "Unknown command: ${command}"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

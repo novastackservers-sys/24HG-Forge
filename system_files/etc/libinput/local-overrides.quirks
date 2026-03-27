@@ -1,7 +1,7 @@
-# 24HG Forge libinput quirks for gaming mice
+# 24HG libinput quirks for gaming mice
 # Ensures high-DPI gaming mice work correctly without being clamped
 
-[24HG Forge Gaming Mouse Defaults]
+[24HG Gaming Mouse Defaults]
 MatchUdevType=mouse
 AttrEventCode=REL_X;REL_Y
 ModelBouncingKeys=0

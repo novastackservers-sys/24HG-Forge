@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Game Server
+Comment=One-click game server hosting
+Exec=/usr/bin/24hg-one-click-server
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=Game;Network;
+Keywords=server;host;multiplayer;dedicated;game;

@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Performance Profiles
-Comment=Per-game performance tuning
-Exec=/usr/bin/forge-perf-profiles
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=Game;System;
-Keywords=performance;profile;tuning;fps;optimization;

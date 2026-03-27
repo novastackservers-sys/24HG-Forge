@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Common problems and their solutions. For each issue, the relevant 24HG Forge tool is listed.
+Common problems and their solutions. For each issue, the relevant 24HG tool is listed.
 
 ## Game Won't Launch
 
@@ -10,31 +10,31 @@ Common problems and their solutions. For each issue, the relevant 24HG Forge too
 
 ```bash
 # Check the game's compatibility and logs
-forge-proton-fix <appid>
+24hg-proton-fix <appid>
 
 # Check crash logs
-forge-crash-fix diagnose <appid>
+24hg-crash-fix diagnose <appid>
 
 # Check if the game has anti-cheat that blocks Linux
-forge-anticheat-tracker check <appid>
+24hg-anticheat-tracker check <appid>
 ```
 
 **Common fixes:**
 
 ```bash
 # Auto-fix Proton issues
-forge-proton-fix <appid> --fix
+24hg-proton-fix <appid> --fix
 
 # Try a different Proton version
-forge-proton-updater update   # Install latest Proton-GE
+24hg-proton-updater update   # Install latest Proton-GE
 # Then in Steam: Game → Properties → Compatibility → Force GE-Proton
 
 # Reset the Wine prefix (nuclear option -- backs up saves first)
-forge-prefix reset <appid>
+24hg-prefix reset <appid>
 
 # Install missing dependencies
-forge-prefix install-deps <appid> vcredist
-forge-prefix install-deps <appid> dotnet48
+24hg-prefix install-deps <appid> vcredist
+24hg-prefix install-deps <appid> dotnet48
 ```
 
 ## Black Screen on Boot
@@ -53,15 +53,15 @@ This is almost always an NVIDIA driver issue.
 4. Once booted, run:
 
 ```bash
-forge-nvidia-wayland fix       # Auto-detect and fix all NVIDIA+Wayland issues
-forge-nvidia-wayland diagnose  # Show detailed diagnostics
+24hg-nvidia-wayland fix       # Auto-detect and fix all NVIDIA+Wayland issues
+24hg-nvidia-wayland diagnose  # Show detailed diagnostics
 ```
 
 If you are not using NVIDIA:
 
 ```bash
-forge-crash-recovery            # General crash recovery tool
-forge-diag --paste              # Generate diagnostic report
+24hg-crash-recovery            # General crash recovery tool
+24hg-diag --paste              # Generate diagnostic report
 ```
 
 ## Screen Flickering (NVIDIA)
@@ -69,8 +69,8 @@ forge-diag --paste              # Generate diagnostic report
 **Symptoms:** Screen flickers, especially on Wayland with NVIDIA GPU.
 
 ```bash
-forge-nvidia-wayland flicker-fix   # Apply all known flicker fixes
-forge-nvidia-wayland status        # Check current NVIDIA Wayland state
+24hg-nvidia-wayland flicker-fix   # Apply all known flicker fixes
+24hg-nvidia-wayland status        # Check current NVIDIA Wayland state
 ```
 
 This tool applies:
@@ -85,19 +85,19 @@ This tool applies:
 
 ```bash
 # Check audio status
-forge-audio status
+24hg-audio status
 
 # List all audio devices
-forge-audio devices
+24hg-audio devices
 
 # Switch output device
-forge-audio switch "Your Device Name"
+24hg-audio switch "Your Device Name"
 
 # Reset to low-latency gaming config
-forge-audio gaming
+24hg-audio gaming
 
 # Reset to desktop defaults
-forge-audio desktop
+24hg-audio desktop
 ```
 
 If audio devices are not detected at all:
@@ -116,25 +116,25 @@ systemctl --user restart pipewire pipewire-pulse wireplumber
 
 ```bash
 # List detected controllers
-forge-controller list
+24hg-controller list
 
 # Test controller input
-forge-controller test
+24hg-controller test
 
 # Fix common issues (udev rules, permissions)
-forge-controller fix
+24hg-controller fix
 
 # Calibrate a controller
-forge-controller calibrate
+24hg-controller calibrate
 ```
 
 **Specific controllers:**
 
 - **Xbox controllers:** Work out of the box (USB and Bluetooth).
-- **PlayStation (DualSense/DualShock):** Work out of the box. If not, try `forge-controller fix`.
-- **Nintendo Switch Pro:** Works via Bluetooth. May need `forge-controller fix` for Steam detection.
+- **PlayStation (DualSense/DualShock):** Work out of the box. If not, try `24hg-controller fix`.
+- **Nintendo Switch Pro:** Works via Bluetooth. May need `24hg-controller fix` for Steam detection.
 - **8BitDo:** Set to XInput mode (hold Start+X while turning on) for best compatibility.
-- **Generic USB gamepads:** Usually work, but may need `forge-controller calibrate` for correct mappings.
+- **Generic USB gamepads:** Usually work, but may need `24hg-controller calibrate` for correct mappings.
 
 ## Discord Screen Share Broken
 
@@ -142,30 +142,30 @@ forge-controller calibrate
 
 ```bash
 # Apply the fix (configures XDG portal and PipeWire for Discord)
-forge-discord-screen
+24hg-discord-screen
 
 # Verify Discord integration
-forge-discord-fix
+24hg-discord-fix
 ```
 
-The fix works because Discord Flatpak needs PipeWire screen capture portal access. 24HG Forge configures this automatically, but if Discord was installed after 24HG Forge first boot, you may need to run the fix manually.
+The fix works because Discord Flatpak needs PipeWire screen capture portal access. 24HG configures this automatically, but if Discord was installed after 24HG first boot, you may need to run the fix manually.
 
 **For Wayland specifically:**
 
-Discord on Wayland requires the XDG Desktop Portal. 24HG Forge configures this, but if screen share still shows black:
+Discord on Wayland requires the XDG Desktop Portal. 24HG configures this, but if screen share still shows black:
 
 1. Make sure you are sharing a specific window (not "Your Screen").
-2. Or use `forge-discord-screen` which sets up window/screen capture properly.
+2. Or use `24hg-discord-screen` which sets up window/screen capture properly.
 
 ## Flatpak Apps Can't See Drives
 
 **Symptoms:** Steam, Lutris, or other Flatpak apps cannot access your game drives or external storage.
 
 ```bash
-forge-flatpak-fix
+24hg-flatpak-fix
 ```
 
-This reconfigures Flatpak filesystem permissions. 24HG Forge ships with overrides for Steam and Lutris in `~/.config/flatpak-overrides/`, but if you added new drives after installation, run the fix again.
+This reconfigures Flatpak filesystem permissions. 24HG ships with overrides for Steam and Lutris in `~/.config/flatpak-overrides/`, but if you added new drives after installation, run the fix again.
 
 **Manual override for a specific app:**
 
@@ -175,29 +175,29 @@ flatpak override --user --filesystem=/path/to/your/drive com.valvesoftware.Steam
 
 ## NVIDIA Wayland Issues (General)
 
-NVIDIA + Wayland is the most common source of issues on Linux in 2025-2026. 24HG Forge has a dedicated tool:
+NVIDIA + Wayland is the most common source of issues on Linux in 2025-2026. 24HG has a dedicated tool:
 
 ```bash
 # Run the full diagnostic and auto-fix suite
-forge-nvidia-wayland fix
+24hg-nvidia-wayland fix
 
 # Check current status (driver version, Wayland state, environment)
-forge-nvidia-wayland status
+24hg-nvidia-wayland status
 
 # Detailed diagnosis
-forge-nvidia-wayland diagnose
+24hg-nvidia-wayland diagnose
 
 # Optimize for gaming
-forge-nvidia-wayland optimize
+24hg-nvidia-wayland optimize
 
 # Check environment variables
-forge-nvidia-wayland env
+24hg-nvidia-wayland env
 
 # Fix frame sync issues
-forge-nvidia-wayland sync
+24hg-nvidia-wayland sync
 
 # Check driver version and compatibility
-forge-nvidia-wayland driver-check
+24hg-nvidia-wayland driver-check
 ```
 
 ## Update Broke Gaming
@@ -206,7 +206,7 @@ forge-nvidia-wayland driver-check
 
 ```bash
 # Roll back to the previous system image
-forge-update-guard rollback
+24hg-update-guard rollback
 
 # Or use rpm-ostree directly
 rpm-ostree rollback
@@ -217,8 +217,8 @@ To prevent this in the future:
 
 ```bash
 # Enable update safety checks
-forge-update-guard check   # Shows what changed and any known issues
-forge-update-guard apply   # Only applies if safe
+24hg-update-guard check   # Shows what changed and any known issues
+24hg-update-guard apply   # Only applies if safe
 ```
 
 The update guard checks for:
@@ -236,24 +236,24 @@ The most common cause. First-launch stuttering is caused by shader compilation.
 
 ```bash
 # Check shader cache status
-forge-shader-cache status
+24hg-shader-cache status
 
 # Pre-build shaders for a game (reduces first-launch stutter)
-forge-shader-cache prebuild <appid>
+24hg-shader-cache prebuild <appid>
 
 # Clean and rebuild corrupted caches
-forge-shader-cache clean
-forge-shader-cache optimize
+24hg-shader-cache clean
+24hg-shader-cache optimize
 ```
 
 ### Performance Profile
 
 ```bash
 # Switch to gaming mode (max CPU/GPU performance)
-forge-performance gaming
+24hg-performance gaming
 
 # Check current profile
-forge-performance status
+24hg-performance status
 ```
 
 ### Smart Launch
@@ -261,8 +261,8 @@ forge-performance status
 Verify that the smart launch daemon is applying per-game optimizations:
 
 ```bash
-forge-smart-launch status
-forge-smart-launch rules   # List built-in game rules
+24hg-smart-launch status
+24hg-smart-launch rules   # List built-in game rules
 ```
 
 ## HDR Not Working
@@ -271,17 +271,17 @@ forge-smart-launch rules   # List built-in game rules
 
 ```bash
 # Run HDR setup wizard
-forge-hdr setup
+24hg-hdr setup
 
 # Check HDR hardware support
-forge-hdr status
+24hg-hdr status
 
 # Apply per-game HDR profile
-forge-hdr game <appid>
+24hg-hdr game <appid>
 ```
 
 Requirements for HDR:
-- KDE Plasma 6+ (included in 24HG Forge)
+- KDE Plasma 6+ (included in 24HG)
 - HDR-capable monitor
 - AMD GPU (best support), NVIDIA (improving), Intel (experimental)
 - Wayland session (HDR does not work on X11)
@@ -292,16 +292,16 @@ Requirements for HDR:
 
 ```bash
 # Find save locations for a game
-forge-save-manager find <appid or name>
+24hg-save-manager find <appid or name>
 
 # List all detected save locations
-forge-save-manager list
+24hg-save-manager list
 
 # Backup saves for a specific game
-forge-save-manager backup <appid>
+24hg-save-manager backup <appid>
 
 # Restore saves
-forge-save-manager restore <appid>
+24hg-save-manager restore <appid>
 ```
 
 Save locations vary by game:
@@ -315,18 +315,18 @@ Save locations vary by game:
 
 ```bash
 # Open the mod manager for a game
-forge-mod-manager <appid>
+24hg-mod-manager <appid>
 
 # Install a mod from Nexus Mods (nxm:// link handler)
-# Just click "Mod Manager Download" on Nexus Mods -- 24HG Forge handles the rest
+# Just click "Mod Manager Download" on Nexus Mods -- 24HG handles the rest
 ```
 
-24HG Forge registers as an NXM protocol handler, so clicking "Download with Mod Manager" on Nexus Mods will route to `forge-mod-manager`.
+24HG registers as an NXM protocol handler, so clicking "Download with Mod Manager" on Nexus Mods will route to `24hg-mod-manager`.
 
 For Proton/Wine games, mods go into the Wine prefix:
 ```bash
 # Find the prefix for a game
-forge-prefix info <appid>
+24hg-prefix info <appid>
 ```
 
 ## System Overheating
@@ -335,10 +335,10 @@ forge-prefix info <appid>
 
 ```bash
 # Check thermal status
-forge-thermal
+24hg-thermal
 
 # Switch to balanced profile (less aggressive GPU/CPU)
-forge-performance balanced
+24hg-performance balanced
 ```
 
 ## Generating a Support Report
@@ -347,10 +347,10 @@ If none of the above fixes your issue, generate a diagnostic report:
 
 ```bash
 # Full system diagnostic
-forge-diag
+24hg-diag
 
 # Upload to termbin for sharing (redacts sensitive info)
-forge-diag --paste
+24hg-diag --paste
 ```
 
 Share the resulting URL in the [24HG Discord](https://discord.gg/ymfEjH6EJN) support channel.

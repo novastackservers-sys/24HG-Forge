@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=24HG
+Description=24 Hour Gaming boot splash
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/24hg
+ScriptFile=/usr/share/plymouth/themes/24hg/24hg.script

@@ -27,12 +27,12 @@ const ISO_DIR = process.env.ISO_DIR || "/srv/landing-page/iso";
 const LANDING_DIR = process.env.LANDING_DIR || "/srv/landing-page";
 const GITEA_URL = process.env.GITEA_URL || "https://git.raggi.is";
 const GITEA_TOKEN = process.env.GITEA_TOKEN || "";
-const GITEA_REPO = process.env.GITEA_REPO || "24hg/forge";
+const GITEA_REPO = process.env.GITEA_REPO || "24hg/24hg-os";
 
 // ── Helpers ──
 
 function hashIP(ip: string): string {
-  return createHash("sha256").update(ip + "forge-salt-2026").digest("hex").slice(0, 16);
+  return createHash("sha256").update(ip + "24hg-salt-2026").digest("hex").slice(0, 16);
 }
 
 function getClientIP(c: any): string {
@@ -46,8 +46,8 @@ function getClientIP(c: any): string {
 app.get("/api/download/:variant", (c) => {
   const variant = c.req.param("variant");
   const validVariants: Record<string, string> = {
-    desktop: "forge-desktop-latest.iso",
-    nvidia: "forge-nvidia-latest.iso",
+    desktop: "24hg-desktop-latest.iso",
+    nvidia: "24hg-nvidia-latest.iso",
   };
 
   const filename = validVariants[variant];
@@ -393,8 +393,8 @@ ${itemsHTML}
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>24HG Forge Roadmap — What's Coming Next</title>
-    <meta name="description" content="24HG Forge development roadmap. See what features are coming to the ultimate Linux gaming OS.">
+    <title>24HG Roadmap — What's Coming Next</title>
+    <meta name="description" content="24HG development roadmap. See what features are coming to the ultimate Linux gaming OS.">
     <meta property="og:image" content="https://os.24hgaming.com/og-image.png">
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <link rel="stylesheet" href="style.css">
@@ -403,7 +403,7 @@ ${itemsHTML}
 <body>
 
 <nav class="nav">
-    <a href="index.html" class="nav-logo">24HG Forge</a>
+    <a href="index.html" class="nav-logo">24HG</a>
     <div class="nav-links">
         <a href="download.html">Download</a>
         <a href="features.html">Features</a>
@@ -417,18 +417,18 @@ ${itemsHTML}
 
 <main class="page">
     <h1>Roadmap</h1>
-    <p class="subtitle">Where 24HG Forge is going. Built in public, driven by the community.</p>
+    <p class="subtitle">Where 24HG is going. Built in public, driven by the community.</p>
 
     <div class="roadmap-current">
         <h2>Current Release: ${escapeHTML(currentVersion)}</h2>
         <p>150+ tools · 89 servers · 20 development waves · Built on Bazzite (Fedora Atomic)</p>
-        <a href="download.html" class="btn btn-primary">Download 24HG Forge ${escapeHTML(currentVersion)}</a>
+        <a href="download.html" class="btn btn-primary">Download 24HG ${escapeHTML(currentVersion)}</a>
     </div>
 
 ${sections}
 
     <div class="roadmap-cta">
-        <h2>Help shape 24HG Forge</h2>
+        <h2>Help shape 24HG</h2>
         <p>Have ideas? Found bugs? Want to contribute?</p>
         <div class="cta-group">
             <a href="https://discord.gg/ymfEjH6EJN" class="btn btn-primary">Join Discord</a>
@@ -440,7 +440,7 @@ ${sections}
 <footer>
     <div class="footer-grid">
         <div class="footer-col">
-            <h4>24HG Forge</h4>
+            <h4>24HG</h4>
             <a href="download.html">Download</a>
             <a href="install.html">Install Guide</a>
             <a href="roadmap.html">Roadmap</a>
@@ -584,7 +584,7 @@ app.post("/api/roadmap/seed", authMiddleware(true), async (c) => {
       { text: "Gamescope session (console mode) + KDE desktop mode", done: true },
       { text: "First-boot setup wizard with GPU detection", done: true },
       { text: "Atomic auto-updates (gaming session aware)", done: true },
-      { text: "Diagnostics tool + system info (forge-diag, forge-neofetch)", done: true },
+      { text: "Diagnostics tool + system info (24hg-diag, 24hg-neofetch)", done: true },
       { text: "Live bootable ISO — try before installing", done: true },
       { text: "OBS streaming pre-configured with 24HG scenes", done: true },
     ]},
@@ -644,7 +644,7 @@ app.post("/api/roadmap/seed", authMiddleware(true), async (c) => {
     { version: "v1.7", title: "Adoption & Onboarding", status: "done", target_date: "March 2026", items: [
       { text: "Windows migration assistant — import game configs, keybinds, sensitivity from Windows", done: true },
       { text: "Benchmark comparison tool — FPS vs Windows with shareable result cards", done: true },
-      { text: "24HG Forge Perks — 30-day VIP trial, [24HG Forge] badge, referral system, activity rewards", done: true },
+      { text: "24HG Perks — 30-day VIP trial, [24HG] badge, referral system, activity rewards", done: true },
       { text: "Game compatibility page — honest anti-cheat status for 50+ popular games", done: true },
       { text: "Content creator kit — OBS scenes, overlays, intros, clip tools, all 24HG branded", done: true },
       { text: "Polished live demo mode — guided 5-minute tour from bootable USB", done: true },
@@ -677,7 +677,7 @@ app.post("/api/roadmap/seed", authMiddleware(true), async (c) => {
     ]},
     { version: "v2.1", title: "Community Features", status: "planned", target_date: "Q3 2026", items: [
       { text: "Tournament notifications — desktop alerts when tournaments start", done: false },
-      { text: "Cloud save sync via 24HG account (already in forge-save-manager)", done: false },
+      { text: "Cloud save sync via 24HG account (already in 24hg-save-manager)", done: false },
       { text: "Download scheduler with community-set gaming hours", done: false },
       { text: "KDE Plasma widget — live server status on desktop (already built as Conky)", done: false },
       { text: "Plasma native widget rewrite (replace Conky)", done: false },
@@ -685,9 +685,9 @@ app.post("/api/roadmap/seed", authMiddleware(true), async (c) => {
     ]},
     { version: "v3.0", title: "The Complete Gaming Platform", status: "vision", target_date: "2027", items: [
       { text: "AI-powered game optimization (auto-detect and configure per game)", done: false },
-      { text: "P2P game server hosting (community members host servers via 24HG Forge)", done: false },
-      { text: "Game streaming from your 24HG Forge PC to mobile/TV", done: false },
-      { text: "24HG Forge Companion mobile app (server status, clan chat, remote control)", done: false },
+      { text: "P2P game server hosting (community members host servers via 24HG)", done: false },
+      { text: "Game streaming from your 24HG PC to mobile/TV", done: false },
+      { text: "24HG Companion mobile app (server status, clan chat, remote control)", done: false },
       { text: "Hardware compatibility database (community-verified)", done: false },
       { text: "Automatic anti-cheat compatibility layer", done: false },
       { text: "VR gaming support and setup wizard", done: false },
@@ -705,7 +705,7 @@ app.post("/api/roadmap/seed", authMiddleware(true), async (c) => {
 
 // ── Start ──
 
-console.log(`24HG Forge Control Room API running on port ${PORT}`);
+console.log(`24HG Control Room API running on port ${PORT}`);
 export default {
   port: PORT,
   fetch: app.fetch,

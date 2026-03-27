@@ -1,0 +1,1215 @@
+#!/usr/bin/env bash
+# 24HG Live Demo Mode
+# Interactive guided tour for the bootable USB live experience.
+# Shows off the OS features and encourages installation.
+#
+# Usage: 24hg-demo [start|tour|benchmark|servers|install]
+
+set -euo pipefail
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+VERSION="1.0.0"
+ACTION="${1:-start}"
+DATA_DIR="/usr/share/24hg"
+WALLPAPER_DIR="$DATA_DIR/wallpapers"
+CONFIG_DIR="$HOME/.config/24hg"
+CACHE_DIR="$HOME/.cache/24hg"
+DEMO_FLAG="/tmp/24hg-demo-shown"
+TOUR_STEP_FILE="/tmp/24hg-demo-step"
+LOG_FILE="/tmp/24hg-demo.log"
+
+MANGOHUD_CONF="$HOME/.config/MangoHud/MangoHud.conf"
+
+HUB_URL="https://hub.24hgaming.com"
+BRAND="24 Hour Gaming"
+BRAND_SHORT="24HG"
+OS_NAME="24HG"
+
+TOUR_STEPS=5
+BENCHMARK_DURATION=15
+
+# ── Colors ───────────────────────────────────────────────────────────────────
+
+BOLD='\033[1m'
+DIM='\033[2m'
+UNDERLINE='\033[4m'
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+BLUE='\033[34m'
+MAGENTA='\033[35m'
+CYAN='\033[36m'
+WHITE='\033[97m'
+RESET='\033[0m'
+
+# ── Initialization ───────────────────────────────────────────────────────────
+
+mkdir -p "$CONFIG_DIR" "$CACHE_DIR"
+
+# Logging
+log() {
+    echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
+}
+
+log "24hg-demo $ACTION started (v$VERSION)"
+
+# ── UI Abstraction ───────────────────────────────────────────────────────────
+# Prefer kdialog (KDE native) → zenity fallback → terminal fallback
+
+UI_MODE="terminal"
+if command -v kdialog &>/dev/null && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    UI_MODE="kdialog"
+elif command -v zenity &>/dev/null && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    UI_MODE="zenity"
+fi
+
+log "UI mode: $UI_MODE"
+
+# Show an informational dialog (title, message)
+ui_info() {
+    local title="$1" msg="$2"
+    case "$UI_MODE" in
+        kdialog)
+            kdialog --title "$title" --msgbox "$msg" 2>/dev/null || true
+            ;;
+        zenity)
+            zenity --info --title="$title" --text="$msg" \
+                --width=500 --height=300 2>/dev/null || true
+            ;;
+        terminal)
+            echo ""
+            echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${RESET}"
+            echo -e "${BOLD}${CYAN}║  ${WHITE}$title${CYAN}${RESET}"
+            echo -e "${BOLD}${CYAN}╠══════════════════════════════════════════════╣${RESET}"
+            echo -e "${CYAN}║${RESET}  $msg"
+            echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════╝${RESET}"
+            echo ""
+            read -rp "  Press Enter to continue..."
+            ;;
+    esac
+}
+
+# Show a question dialog with Yes/No (title, message) → returns 0 for yes
+ui_yesno() {
+    local title="$1" msg="$2"
+    case "$UI_MODE" in
+        kdialog)
+            kdialog --title "$title" --yesno "$msg" 2>/dev/null
+            ;;
+        zenity)
+            zenity --question --title="$title" --text="$msg" \
+                --width=450 --height=200 2>/dev/null
+            ;;
+        terminal)
+            echo ""
+            echo -e "${BOLD}${WHITE}  $title${RESET}"
+            echo -e "  $msg"
+            echo ""
+            read -rp "  (y/n) > " answer
+            [[ "$answer" =~ ^[Yy] ]]
+            ;;
+    esac
+}
+
+# Show a progress bar (title, percentage, text)
+ui_progress_start() {
+    local title="$1"
+    case "$UI_MODE" in
+        kdialog)
+            local ref
+            ref=$(kdialog --title "$title" --progressbar "$title" 100 2>/dev/null) || true
+            echo "$ref"
+            ;;
+        zenity)
+            # Return a pipe fd for zenity progress
+            local pipe="/tmp/24hg-demo-progress-$$"
+            mkfifo "$pipe" 2>/dev/null || true
+            zenity --progress --title="$title" --text="$title" \
+                --percentage=0 --auto-close --width=400 < "$pipe" 2>/dev/null &
+            echo "$pipe"
+            ;;
+        terminal)
+            echo "terminal"
+            ;;
+    esac
+}
+
+ui_progress_update() {
+    local ref="$1" pct="$2" text="$3"
+    case "$UI_MODE" in
+        kdialog)
+            if [[ -n "$ref" && "$ref" != "terminal" ]]; then
+                qdbus $ref Set "" value "$pct" 2>/dev/null || true
+                qdbus $ref setLabelText "$text" 2>/dev/null || true
+            fi
+            ;;
+        zenity)
+            if [[ -n "$ref" && -p "$ref" ]]; then
+                echo "$pct" > "$ref" 2>/dev/null || true
+                echo "# $text" > "$ref" 2>/dev/null || true
+            fi
+            ;;
+        terminal)
+            local bar_len=40
+            local filled=$(( pct * bar_len / 100 ))
+            local empty=$(( bar_len - filled ))
+            printf "\r  ${CYAN}[${GREEN}%s${DIM}%s${RESET}${CYAN}]${RESET} %3d%% %s" \
+                "$(printf '█%.0s' $(seq 1 "$filled" 2>/dev/null) 2>/dev/null)" \
+                "$(printf '░%.0s' $(seq 1 "$empty" 2>/dev/null) 2>/dev/null)" \
+                "$pct" "$text"
+            ;;
+    esac
+}
+
+ui_progress_close() {
+    local ref="$1"
+    case "$UI_MODE" in
+        kdialog)
+            [[ -n "$ref" && "$ref" != "terminal" ]] && qdbus $ref close 2>/dev/null || true
+            ;;
+        zenity)
+            if [[ -n "$ref" && -p "$ref" ]]; then
+                echo "100" > "$ref" 2>/dev/null || true
+                rm -f "$ref" 2>/dev/null || true
+            fi
+            ;;
+        terminal)
+            echo ""
+            ;;
+    esac
+}
+
+# Show a multi-choice dialog. Returns chosen option text.
+# Usage: ui_choose "title" "message" "Option 1" "Option 2" "Option 3"
+ui_choose() {
+    local title="$1" msg="$2"
+    shift 2
+    local options=("$@")
+
+    case "$UI_MODE" in
+        kdialog)
+            # kdialog radiolist: tag label selected
+            local args=()
+            for i in "${!options[@]}"; do
+                local sel="off"
+                [[ $i -eq 0 ]] && sel="on"
+                args+=("$i" "${options[$i]}" "$sel")
+            done
+            local choice
+            choice=$(kdialog --title "$title" --radiolist "$msg" "${args[@]}" 2>/dev/null) || echo "0"
+            echo "${options[$choice]:-${options[0]}}"
+            ;;
+        zenity)
+            local args=()
+            for i in "${!options[@]}"; do
+                local sel="FALSE"
+                [[ $i -eq 0 ]] && sel="TRUE"
+                args+=("$sel" "${options[$i]}")
+            done
+            local choice
+            choice=$(zenity --list --title="$title" --text="$msg" \
+                --radiolist --column="" --column="Choice" "${args[@]}" \
+                --width=500 --height=400 2>/dev/null) || echo "${options[0]}"
+            echo "$choice"
+            ;;
+        terminal)
+            echo ""
+            echo -e "${BOLD}${WHITE}  $title${RESET}"
+            echo -e "  $msg"
+            echo ""
+            for i in "${!options[@]}"; do
+                echo -e "  ${CYAN}$((i+1)))${RESET} ${options[$i]}"
+            done
+            echo ""
+            read -rp "  Choose [1-${#options[@]}]: " num
+            num=${num:-1}
+            if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#options[@]} )); then
+                echo "${options[$((num-1))]}"
+            else
+                echo "${options[0]}"
+            fi
+            ;;
+    esac
+}
+
+# Desktop notification
+notify() {
+    local title="$1" msg="$2" icon="${3:-24hg-logo}"
+    if command -v notify-send &>/dev/null; then
+        notify-send -i "$icon" "$title" "$msg" 2>/dev/null || true
+    fi
+    log "NOTIFY: $title — $msg"
+}
+
+# ── Environment Detection ────────────────────────────────────────────────────
+
+is_live_environment() {
+    # Check common live boot indicators
+    [[ -d /run/initramfs/live ]] && return 0
+    [[ -d /run/live ]] && return 0
+    [[ -d /cdrom ]] && return 0
+    [[ -d /run/casper ]] && return 0
+
+    # Check if root is tmpfs or overlay
+    local root_fs
+    root_fs=$(findmnt -n -o FSTYPE / 2>/dev/null || echo "unknown")
+    [[ "$root_fs" == "overlay" || "$root_fs" == "tmpfs" || "$root_fs" == "squashfs" ]] && return 0
+
+    # Check for ostree live marker
+    [[ -f /run/ostree-live ]] && return 0
+
+    # Check for Fedora Atomic live indicator
+    [[ -f /etc/anaconda/interactive-defaults.ks ]] && return 0
+
+    return 1
+}
+
+is_demo_disabled() {
+    # Check boot parameter
+    if [[ -f /proc/cmdline ]]; then
+        grep -q '24hg\.nodemo' /proc/cmdline 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+already_shown() {
+    [[ -f "$DEMO_FLAG" ]]
+}
+
+mark_shown() {
+    touch "$DEMO_FLAG"
+}
+
+# ── Hardware Detection ───────────────────────────────────────────────────────
+
+detect_gpu() {
+    local gpu="Unknown GPU"
+    if command -v lspci &>/dev/null; then
+        gpu=$(lspci | grep -iE 'vga|3d|display' | head -1 | sed 's/.*: //' | cut -c1-60)
+    fi
+    echo "$gpu"
+}
+
+detect_gpu_driver() {
+    local driver="Unknown"
+    if command -v nvidia-smi &>/dev/null; then
+        local ver
+        ver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+        [[ -n "$ver" ]] && driver="NVIDIA $ver"
+    elif lsmod 2>/dev/null | grep -q amdgpu; then
+        driver="AMDGPU (Mesa)"
+    elif lsmod 2>/dev/null | grep -q i915; then
+        driver="Intel i915 (Mesa)"
+    fi
+    echo "$driver"
+}
+
+detect_cpu() {
+    local cpu="Unknown CPU"
+    if [[ -f /proc/cpuinfo ]]; then
+        cpu=$(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)
+    fi
+    echo "$cpu"
+}
+
+detect_ram() {
+    local ram="Unknown"
+    if [[ -f /proc/meminfo ]]; then
+        local kb
+        kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        ram="$(( kb / 1024 / 1024 + 1 )) GB"
+    fi
+    echo "$ram"
+}
+
+detect_storage() {
+    local disks=""
+    if command -v lsblk &>/dev/null; then
+        disks=$(lsblk -d -o NAME,SIZE,TYPE 2>/dev/null | grep disk | awk '{print $1 ": " $2}' | paste -sd', ')
+    fi
+    [[ -z "$disks" ]] && disks="Unknown"
+    echo "$disks"
+}
+
+detect_vulkan() {
+    if command -v vulkaninfo &>/dev/null; then
+        local vk
+        vk=$(vulkaninfo --summary 2>/dev/null | grep "apiVersion" | head -1 | awk '{print $NF}')
+        [[ -n "$vk" ]] && echo "Vulkan $vk" && return
+    fi
+    echo "Not detected"
+}
+
+# ── Wallpaper ────────────────────────────────────────────────────────────────
+
+set_demo_wallpaper() {
+    log "Setting demo wallpaper"
+    local wp=""
+
+    # Find best wallpaper
+    for candidate in \
+        "$WALLPAPER_DIR/24hg-hero.png" \
+        "$WALLPAPER_DIR/24hg-demo.png" \
+        "$WALLPAPER_DIR/24hg-default.png" \
+        "$WALLPAPER_DIR"/*.png; do
+        if [[ -f "$candidate" ]]; then
+            wp="$candidate"
+            break
+        fi
+    done
+
+    [[ -z "$wp" ]] && { log "No wallpaper found"; return 0; }
+
+    # KDE Plasma
+    if command -v qdbus &>/dev/null; then
+        qdbus org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "
+            var allDesktops = desktops();
+            for (var i = 0; i < allDesktops.length; i++) {
+                allDesktops[i].wallpaperPlugin = 'org.kde.image';
+                allDesktops[i].currentConfigGroup = ['Wallpaper','org.kde.image','General'];
+                allDesktops[i].writeConfig('Image','file://$wp');
+            }
+        " 2>/dev/null || true
+    fi
+
+    # GNOME fallback
+    if command -v gsettings &>/dev/null; then
+        gsettings set org.gnome.desktop.background picture-uri "file://$wp" 2>/dev/null || true
+        gsettings set org.gnome.desktop.background picture-uri-dark "file://$wp" 2>/dev/null || true
+    fi
+
+    log "Wallpaper set to $wp"
+}
+
+# ── MangoHud ─────────────────────────────────────────────────────────────────
+
+configure_mangohud_demo() {
+    log "Configuring MangoHud for demo"
+    mkdir -p "$(dirname "$MANGOHUD_CONF")"
+
+    if [[ ! -f "$MANGOHUD_CONF" ]]; then
+        cat > "$MANGOHUD_CONF" <<'MHEOF'
+### 24HG Demo MangoHud Config
+legacy_layout=false
+gpu_stats
+gpu_temp
+gpu_core_clock
+cpu_stats
+cpu_temp
+ram
+vram
+fps
+frametime=0
+frame_timing
+font_size=20
+position=top-left
+background_alpha=0.4
+round_corners=8
+toggle_hud=Shift_R+F12
+toggle_fps_limit=Shift_L+F1
+MHEOF
+        log "MangoHud config written"
+    fi
+}
+
+toggle_mangohud_overlay() {
+    # Toggle MangoHud visibility via environment
+    if [[ "${MANGOHUD:-0}" == "1" ]]; then
+        export MANGOHUD=0
+        notify "$OS_NAME" "MangoHud overlay hidden"
+    else
+        export MANGOHUD=1
+        notify "$OS_NAME" "MangoHud overlay visible"
+    fi
+}
+
+# ── Quick Benchmark ──────────────────────────────────────────────────────────
+
+run_quick_benchmark() {
+    local score=0
+    local gpu_score=0
+    local cpu_score=0
+
+    echo -e "\n${BOLD}${CYAN}━━━ $OS_NAME Quick Benchmark ━━━${RESET}\n"
+
+    # CPU benchmark (single-thread SHA256 hashing)
+    echo -e "  ${WHITE}CPU Test...${RESET}"
+    local st_start st_end st_ms
+    st_start=$(date +%s%N)
+    for i in $(seq 1 300); do
+        echo "$i" | sha256sum > /dev/null
+    done
+    st_end=$(date +%s%N)
+    st_ms=$(( (st_end - st_start) / 1000000 ))
+
+    # Score: <500ms = 100, scale down from there
+    if (( st_ms <= 500 )); then
+        cpu_score=100
+    elif (( st_ms <= 1500 )); then
+        cpu_score=$(( 100 - (st_ms - 500) / 10 ))
+    else
+        cpu_score=20
+    fi
+    (( cpu_score < 10 )) && cpu_score=10
+    echo -e "  ${GREEN}CPU Score: $cpu_score/100${RESET} (${st_ms}ms)"
+
+    # GPU benchmark (vkcube or glxgears)
+    echo -e "  ${WHITE}GPU Test...${RESET}"
+    if command -v vkcube &>/dev/null; then
+        local vk_output
+        vk_output=$(timeout "${BENCHMARK_DURATION}s" vkcube --c "$BENCHMARK_DURATION" 2>&1 || true)
+        local vk_fps
+        vk_fps=$(echo "$vk_output" | grep -oP '\d+\.\d+ fps' | tail -1 | grep -oP '[\d.]+' || echo "0")
+        if [[ -n "$vk_fps" && "$vk_fps" != "0" ]]; then
+            local vk_int=${vk_fps%%.*}
+            if (( vk_int >= 500 )); then
+                gpu_score=100
+            elif (( vk_int >= 200 )); then
+                gpu_score=$(( 60 + (vk_int - 200) * 40 / 300 ))
+            else
+                gpu_score=$(( vk_int * 60 / 200 ))
+            fi
+            echo -e "  ${GREEN}GPU Score: $gpu_score/100${RESET} (Vulkan: ${vk_fps} fps)"
+        else
+            gpu_score=50
+            echo -e "  ${YELLOW}GPU Score: $gpu_score/100${RESET} (vkcube ran, no FPS parsed)"
+        fi
+    elif command -v glxgears &>/dev/null; then
+        local glx_output
+        glx_output=$(timeout "${BENCHMARK_DURATION}s" glxgears -info 2>&1 || true)
+        local glx_fps
+        glx_fps=$(echo "$glx_output" | grep -oP '[\d.]+ frames in' | tail -1 | grep -oP '[\d.]+' || echo "0")
+        if [[ -n "$glx_fps" && "$glx_fps" != "0" ]]; then
+            gpu_score=60
+            echo -e "  ${YELLOW}GPU Score: $gpu_score/100${RESET} (OpenGL only — Vulkan not found)"
+        else
+            gpu_score=40
+            echo -e "  ${YELLOW}GPU Score: $gpu_score/100${RESET} (glxgears ran, limited data)"
+        fi
+    else
+        gpu_score=30
+        echo -e "  ${YELLOW}GPU Score: $gpu_score/100${RESET} (No GPU benchmark available)"
+    fi
+
+    # Combined score (weighted: 40% CPU, 60% GPU)
+    score=$(( (cpu_score * 40 + gpu_score * 60) / 100 ))
+
+    echo ""
+    echo -e "  ${BOLD}${WHITE}╔═══════════════════════════════════════╗${RESET}"
+    echo -e "  ${BOLD}${WHITE}║   $OS_NAME Gaming Score: ${CYAN}$score / 100${WHITE}       ║${RESET}"
+    echo -e "  ${BOLD}${WHITE}╚═══════════════════════════════════════╝${RESET}"
+
+    if (( score >= 80 )); then
+        echo -e "\n  ${GREEN}${BOLD}Excellent!${RESET} Your hardware is perfect for Linux gaming."
+    elif (( score >= 60 )); then
+        echo -e "\n  ${GREEN}Good!${RESET} Your hardware handles Linux gaming well."
+    elif (( score >= 40 )); then
+        echo -e "\n  ${YELLOW}Decent.${RESET} Most games will run fine. GPU drivers may improve scores."
+    else
+        echo -e "\n  ${YELLOW}Basic hardware.${RESET} Lighter games will work. $OS_NAME optimizes what it can."
+    fi
+
+    echo ""
+    echo "$score"
+}
+
+# ── Tour Steps ───────────────────────────────────────────────────────────────
+
+tour_step_hardware() {
+    echo -e "\n${BOLD}${MAGENTA}── Step 1 of $TOUR_STEPS: Your Hardware ──${RESET}\n"
+
+    local gpu cpu ram storage driver vulkan
+    gpu=$(detect_gpu)
+    driver=$(detect_gpu_driver)
+    cpu=$(detect_cpu)
+    ram=$(detect_ram)
+    storage=$(detect_storage)
+    vulkan=$(detect_vulkan)
+
+    local hw_text=""
+    hw_text+="GPU:     $gpu\n"
+    hw_text+="Driver:  $driver\n"
+    hw_text+="Vulkan:  $vulkan\n"
+    hw_text+="CPU:     $cpu\n"
+    hw_text+="RAM:     $ram\n"
+    hw_text+="Storage: $storage"
+
+    case "$UI_MODE" in
+        kdialog)
+            kdialog --title "Step 1: Your Hardware" --msgbox \
+                "$(echo -e "$hw_text")\n\nRunning quick benchmark..." 2>/dev/null || true
+            ;;
+        zenity)
+            zenity --info --title="Step 1: Your Hardware" \
+                --text="$(echo -e "$hw_text")\n\nRunning quick benchmark..." \
+                --width=500 --height=350 2>/dev/null || true
+            ;;
+        terminal)
+            echo -e "  ${CYAN}GPU:${RESET}     $gpu"
+            echo -e "  ${CYAN}Driver:${RESET}  $driver"
+            echo -e "  ${CYAN}Vulkan:${RESET}  $vulkan"
+            echo -e "  ${CYAN}CPU:${RESET}     $cpu"
+            echo -e "  ${CYAN}RAM:${RESET}     $ram"
+            echo -e "  ${CYAN}Storage:${RESET} $storage"
+            echo ""
+            ;;
+    esac
+
+    # Quick benchmark
+    echo -e "  ${WHITE}Running quick benchmark ($BENCHMARK_DURATION seconds)...${RESET}"
+    local score_output
+    score_output=$(run_quick_benchmark)
+    local score
+    score=$(echo "$score_output" | tail -1)
+
+    # Show result
+    local verdict="Your hardware is ready for Linux gaming!"
+    if (( score < 40 )); then
+        verdict="Your hardware works with Linux. $OS_NAME will optimize it."
+    fi
+
+    if [[ "$UI_MODE" != "terminal" ]]; then
+        ui_info "Hardware Ready" "$verdict\n\n$OS_NAME Gaming Score: $score / 100"
+    else
+        echo -e "\n  ${BOLD}${GREEN}$verdict${RESET}\n"
+    fi
+
+    notify "$OS_NAME Demo" "Hardware scan complete — Score: $score/100"
+}
+
+tour_step_hub() {
+    echo -e "\n${BOLD}${MAGENTA}── Step 2 of $TOUR_STEPS: The $BRAND_SHORT Hub ──${RESET}\n"
+
+    local hub_text="88+ game servers. Voice chat. Tournaments. All built in.\n\n"
+    hub_text+="The $BRAND_SHORT Hub is your command center for:\n"
+    hub_text+="• Browse and join all $BRAND_SHORT servers\n"
+    hub_text+="• See live player counts\n"
+    hub_text+="• Voice chat with your team\n"
+    hub_text+="• Track achievements and stats\n\n"
+    hub_text+="All of this comes pre-configured when you install $OS_NAME."
+
+    # Try to open browser
+    local browser_opened=false
+    if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+        for browser in chromium chromium-browser google-chrome firefox; do
+            if command -v "$browser" &>/dev/null; then
+                log "Opening $browser to $HUB_URL"
+                "$browser" --app="$HUB_URL" --window-size=1200,800 &>/dev/null &
+                browser_opened=true
+                sleep 2
+                break
+            fi
+        done
+
+        # Try xdg-open as fallback
+        if [[ "$browser_opened" == "false" ]] && command -v xdg-open &>/dev/null; then
+            xdg-open "$HUB_URL" &>/dev/null &
+            browser_opened=true
+            sleep 2
+        fi
+    fi
+
+    case "$UI_MODE" in
+        kdialog|zenity)
+            ui_info "The $BRAND_SHORT Hub" "$hub_text"
+            ;;
+        terminal)
+            echo -e "  ${CYAN}88+ game servers.${RESET} Voice chat. Tournaments. All built in."
+            echo ""
+            echo -e "  The $BRAND_SHORT Hub is your command center for:"
+            echo -e "  ${WHITE}•${RESET} Browse and join all $BRAND_SHORT servers"
+            echo -e "  ${WHITE}•${RESET} See live player counts"
+            echo -e "  ${WHITE}•${RESET} Voice chat with your team"
+            echo -e "  ${WHITE}•${RESET} Track achievements and stats"
+            echo ""
+            if [[ "$browser_opened" == "true" ]]; then
+                echo -e "  ${DIM}(Hub opened in browser)${RESET}"
+            else
+                echo -e "  ${DIM}Visit: $HUB_URL${RESET}"
+            fi
+            echo ""
+            echo -e "  ${GREEN}All of this comes pre-configured when you install $OS_NAME.${RESET}"
+            echo ""
+            read -rp "  Press Enter to continue..."
+            ;;
+    esac
+
+    notify "$OS_NAME Demo" "Explore the $BRAND_SHORT Hub — 88+ servers"
+}
+
+tour_step_performance() {
+    echo -e "\n${BOLD}${MAGENTA}── Step 3 of $TOUR_STEPS: Performance Tools ──${RESET}\n"
+
+    # Show MangoHud config
+    local mangohud_status="Not installed"
+    if command -v mangohud &>/dev/null; then
+        mangohud_status="Installed"
+        configure_mangohud_demo
+    fi
+
+    # GameMode status
+    local gamemode_status="Not installed"
+    if command -v gamemoded &>/dev/null; then
+        if gamemoded -s 2>/dev/null | grep -q "active"; then
+            gamemode_status="Active"
+        else
+            gamemode_status="Installed (idle)"
+        fi
+    fi
+
+    # Performance profile
+    local profile="Unknown"
+    if command -v powerprofilesctl &>/dev/null; then
+        profile=$(powerprofilesctl get 2>/dev/null || echo "Unknown")
+    fi
+
+    local perf_text=""
+    perf_text+="MangoHud:     $mangohud_status\n"
+    perf_text+="GameMode:     $gamemode_status\n"
+    perf_text+="Power Profile: $profile\n\n"
+    perf_text+="Every game launches with these optimizations automatically.\n"
+    perf_text+="MangoHud shows FPS, GPU/CPU temps, and frame timing.\n"
+    perf_text+="GameMode tunes your system for peak gaming performance.\n\n"
+    perf_text+="Performance profiles: gaming / balanced / powersave\n"
+    perf_text+="Switch anytime with: 24hg-performance gaming"
+
+    case "$UI_MODE" in
+        kdialog|zenity)
+            ui_info "Performance Tools" "$perf_text"
+            ;;
+        terminal)
+            echo -e "  ${CYAN}MangoHud:${RESET}      $mangohud_status"
+            echo -e "  ${CYAN}GameMode:${RESET}      $gamemode_status"
+            echo -e "  ${CYAN}Power Profile:${RESET} $profile"
+            echo ""
+            echo -e "  Every game launches with these optimizations automatically."
+            echo -e "  ${WHITE}MangoHud${RESET} shows FPS, GPU/CPU temps, and frame timing."
+            echo -e "  ${WHITE}GameMode${RESET} tunes your system for peak gaming performance."
+            echo ""
+            echo -e "  Performance profiles: ${GREEN}gaming${RESET} / ${YELLOW}balanced${RESET} / ${BLUE}powersave${RESET}"
+            echo -e "  Switch anytime with: ${DIM}24hg-performance gaming${RESET}"
+            echo ""
+
+            # Quick demo of MangoHud toggle
+            if command -v mangohud &>/dev/null; then
+                echo -e "  ${DIM}Toggling MangoHud overlay...${RESET}"
+                toggle_mangohud_overlay
+                sleep 1
+            fi
+
+            read -rp "  Press Enter to continue..."
+            ;;
+    esac
+
+    notify "$OS_NAME Demo" "Performance tools always running"
+}
+
+tour_step_tools() {
+    echo -e "\n${BOLD}${MAGENTA}── Step 4 of $TOUR_STEPS: One-Click Everything ──${RESET}\n"
+
+    # Count available 24hg tools
+    local tool_count=0
+    for tool in /usr/bin/24hg-*; do
+        [[ -x "$tool" ]] && (( tool_count++ )) || true
+    done
+    (( tool_count < 10 )) && tool_count=40  # Fallback for live demo
+
+    local tools_list=(
+        "Quick connect to any server"
+        "Instant replay (last 30 seconds)"
+        "One-click streaming to Twitch/YouTube"
+        "Crash diagnosis and auto-fix"
+        "GPU driver management"
+        "Performance profiling"
+        "Controller configuration"
+        "Desktop recording and screenshots"
+        "Game compatibility checker"
+        "Shader cache management"
+        "Network optimization"
+        "Audio profile switching"
+    )
+
+    case "$UI_MODE" in
+        kdialog|zenity)
+            local tools_text="${tool_count}+ gaming tools, all pre-installed.\n\n"
+            tools_text+="System tray gives you one-click access to:\n"
+            for t in "${tools_list[@]}"; do
+                tools_text+="• $t\n"
+            done
+            tools_text+="\nNo configuration needed. Everything works out of the box."
+            ui_info "One-Click Everything" "$tools_text"
+            ;;
+        terminal)
+            echo -e "  ${BOLD}${WHITE}${tool_count}+ gaming tools, all pre-installed.${RESET}"
+            echo ""
+            echo -e "  System tray gives you one-click access to:"
+            echo ""
+
+            # Animated flash-through
+            for t in "${tools_list[@]}"; do
+                echo -ne "  ${CYAN}►${RESET} $t"
+                sleep 0.3
+                echo ""
+            done
+
+            echo ""
+            echo -e "  ${GREEN}No configuration needed. Everything works out of the box.${RESET}"
+            echo ""
+            read -rp "  Press Enter to continue..."
+            ;;
+    esac
+
+    notify "$OS_NAME Demo" "${tool_count}+ tools at your fingertips"
+}
+
+tour_step_install() {
+    echo -e "\n${BOLD}${MAGENTA}── Step 5 of $TOUR_STEPS: Ready to Install? ──${RESET}\n"
+
+    local compare_text=""
+    compare_text+="╔═══════════════════╦═══════════════════════╗\n"
+    compare_text+="║   Live USB        ║   Installed           ║\n"
+    compare_text+="╠═══════════════════╬═══════════════════════╣\n"
+    compare_text+="║ Limited storage   ║ Full disk access      ║\n"
+    compare_text+="║ No saved settings ║ Persistent config     ║\n"
+    compare_text+="║ No Steam library  ║ All your games        ║\n"
+    compare_text+="║ Demo performance  ║ Full performance      ║\n"
+    compare_text+="║ No updates        ║ Auto-updates (atomic) ║\n"
+    compare_text+="║                   ║ 7-day VIP trial       ║\n"
+    compare_text+="╚═══════════════════╩═══════════════════════╝"
+
+    case "$UI_MODE" in
+        kdialog|zenity)
+            local install_text="Live USB vs Installed\n\n"
+            install_text+="Live USB:\n"
+            install_text+="• Limited storage, no saved settings\n"
+            install_text+="• No Steam library, demo performance\n\n"
+            install_text+="Installed:\n"
+            install_text+="• Full performance, all your games\n"
+            install_text+="• Auto-updates (atomic), persistent config\n"
+            install_text+="• 7-day VIP trial included\n\n"
+            install_text+="Install takes about 10 minutes."
+
+            if ui_yesno "Ready to Install?" "$install_text"; then
+                launch_installer
+            else
+                ui_info "$OS_NAME" "No problem! You can install later.\n\nTake the USB home — it works on any PC.\n\nVisit: 24hgaming.com/24hg"
+            fi
+            ;;
+        terminal)
+            echo -e "$compare_text"
+            echo ""
+            echo -e "  ${BOLD}Install takes about 10 minutes.${RESET}"
+            echo ""
+
+            if ui_yesno "Ready to Install?" "Launch the $OS_NAME installer now?"; then
+                launch_installer
+            else
+                echo ""
+                echo -e "  ${GREEN}No problem!${RESET} You can install later."
+                echo -e "  Take the USB home — it works on any PC."
+                echo -e "  Visit: ${UNDERLINE}24hgaming.com/24hg${RESET}"
+                echo ""
+            fi
+            ;;
+    esac
+}
+
+# ── Installer ────────────────────────────────────────────────────────────────
+
+launch_installer() {
+    echo -e "\n${BOLD}${GREEN}Launching $OS_NAME Installer...${RESET}\n"
+
+    # Summary of what you get
+    local summary=(
+        "$OS_NAME — Gaming Linux by $BRAND"
+        ""
+        "What you will get:"
+        "• Fedora Atomic base (rock-solid, auto-updates)"
+        "• Pre-configured GPU drivers"
+        "• Steam, Lutris, Heroic pre-installed"
+        "• 40+ gaming tools and optimizations"
+        "• $BRAND_SHORT Hub integration"
+        "• 7-day VIP trial on all $BRAND_SHORT servers"
+    )
+
+    for line in "${summary[@]}"; do
+        echo -e "  ${WHITE}$line${RESET}"
+    done
+    echo ""
+
+    # Launch Calamares (Bazzite/Fedora Atomic installer)
+    if command -v calamares &>/dev/null; then
+        log "Launching Calamares"
+        notify "$OS_NAME" "Installer launching..."
+        pkexec calamares &>/dev/null &
+    elif command -v liveinst &>/dev/null; then
+        log "Launching Anaconda (liveinst)"
+        notify "$OS_NAME" "Installer launching..."
+        liveinst &>/dev/null &
+    elif [[ -f /usr/bin/install-24hg ]]; then
+        log "Launching install-24hg"
+        /usr/bin/install-24hg &
+    else
+        echo -e "  ${YELLOW}Installer not found in live environment.${RESET}"
+        echo -e "  ${DIM}Download: 24hgaming.com/24hg${RESET}"
+        log "No installer found"
+        return 0
+    fi
+
+    # While you wait
+    echo -e "\n  ${CYAN}While the installer runs:${RESET}"
+    echo ""
+    echo -e "  ${WHITE}Tips:${RESET}"
+    echo -e "  • Installation takes ~10 minutes"
+    echo -e "  • Choose your disk carefully (dual-boot supported)"
+    echo -e "  • Your username becomes your $BRAND_SHORT identity"
+    echo -e "  • First boot will download latest GPU drivers"
+    echo ""
+
+    # Offer something to do while waiting
+    if command -v 24hg-tips &>/dev/null; then
+        echo -e "  ${DIM}Showing tips while you wait...${RESET}\n"
+        24hg-tips 2>/dev/null || true
+    fi
+}
+
+# ── Welcome Screen ───────────────────────────────────────────────────────────
+
+show_welcome() {
+    local welcome_title="Welcome to $OS_NAME"
+    local welcome_msg="The Gaming Linux by $BRAND\n\n"
+    welcome_msg+="You're running live from USB. Nothing is installed yet.\n"
+    welcome_msg+="Everything you see is running entirely from the USB drive."
+
+    local choice
+    choice=$(ui_choose "$welcome_title" "$welcome_msg" \
+        "Quick Tour (5 min)" \
+        "Jump to Hub" \
+        "Install Now")
+
+    case "$choice" in
+        "Quick Tour (5 min)")
+            run_tour
+            ;;
+        "Jump to Hub")
+            # Open hub in browser
+            for browser in chromium chromium-browser google-chrome firefox; do
+                if command -v "$browser" &>/dev/null; then
+                    "$browser" --app="$HUB_URL" &>/dev/null &
+                    break
+                fi
+            done
+            if command -v xdg-open &>/dev/null; then
+                xdg-open "$HUB_URL" &>/dev/null &
+            fi
+            notify "$OS_NAME" "Opening $BRAND_SHORT Hub..."
+            ;;
+        "Install Now")
+            launch_installer
+            ;;
+    esac
+}
+
+# ── Tour Runner ──────────────────────────────────────────────────────────────
+
+run_tour() {
+    echo ""
+    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${CYAN}║                                                              ║${RESET}"
+    echo -e "${BOLD}${CYAN}║    ${WHITE}$OS_NAME Guided Tour${CYAN}                                       ║${RESET}"
+    echo -e "${BOLD}${CYAN}║    ${DIM}5 minutes to see what gaming on Linux really looks like${CYAN}    ║${RESET}"
+    echo -e "${BOLD}${CYAN}║                                                              ║${RESET}"
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+
+    notify "$OS_NAME Demo" "Starting guided tour..."
+
+    local ref
+    ref=$(ui_progress_start "$OS_NAME Tour")
+
+    # Step 1: Hardware
+    echo "1" > "$TOUR_STEP_FILE"
+    ui_progress_update "$ref" 0 "Step 1/5: Detecting hardware..."
+    tour_step_hardware
+    ui_progress_update "$ref" 20 "Step 1 complete"
+
+    # Step 2: Hub
+    echo "2" > "$TOUR_STEP_FILE"
+    ui_progress_update "$ref" 20 "Step 2/5: The $BRAND_SHORT Hub..."
+    tour_step_hub
+    ui_progress_update "$ref" 40 "Step 2 complete"
+
+    # Step 3: Performance
+    echo "3" > "$TOUR_STEP_FILE"
+    ui_progress_update "$ref" 40 "Step 3/5: Performance tools..."
+    tour_step_performance
+    ui_progress_update "$ref" 60 "Step 3 complete"
+
+    # Step 4: Tools
+    echo "4" > "$TOUR_STEP_FILE"
+    ui_progress_update "$ref" 60 "Step 4/5: One-click everything..."
+    tour_step_tools
+    ui_progress_update "$ref" 80 "Step 4 complete"
+
+    # Step 5: Install
+    echo "5" > "$TOUR_STEP_FILE"
+    ui_progress_update "$ref" 80 "Step 5/5: Ready to install..."
+    tour_step_install
+    ui_progress_update "$ref" 100 "Tour complete!"
+
+    ui_progress_close "$ref"
+    rm -f "$TOUR_STEP_FILE"
+
+    echo ""
+    echo -e "${BOLD}${GREEN}Tour complete!${RESET} Thanks for checking out $OS_NAME."
+    echo -e "${DIM}Visit 24hgaming.com/24hg for more info.${RESET}"
+    echo ""
+
+    notify "$OS_NAME Demo" "Tour complete! Thanks for trying $OS_NAME."
+}
+
+# ── Server Status ────────────────────────────────────────────────────────────
+
+show_servers() {
+    echo ""
+    echo -e "${BOLD}${CYAN}━━━ $BRAND_SHORT Server Status ━━━${RESET}\n"
+
+    if command -v 24hg-server-status &>/dev/null; then
+        24hg-server-status --once 2>/dev/null || {
+            echo -e "  ${YELLOW}Server status tool not available in live mode.${RESET}"
+            echo -e "  ${DIM}Install $OS_NAME for live server monitoring.${RESET}"
+        }
+    elif [[ -f /usr/share/24hg/servers.json ]]; then
+        # Parse servers.json manually
+        if command -v python3 &>/dev/null; then
+            python3 -c "
+import json
+with open('/usr/share/24hg/servers.json') as f:
+    servers = json.load(f)
+print(f'  {len(servers)} servers configured:')
+print()
+games = {}
+for s in servers:
+    g = s.get('game', 'Unknown')
+    games[g] = games.get(g, 0) + 1
+for game, count in sorted(games.items()):
+    print(f'  {game}: {count} servers')
+" 2>/dev/null || echo -e "  ${DIM}Could not parse server list.${RESET}"
+        else
+            echo -e "  ${DIM}Server data available at /usr/share/24hg/servers.json${RESET}"
+        fi
+    else
+        echo -e "  ${WHITE}$BRAND_SHORT runs 88+ game servers including:${RESET}"
+        echo ""
+        echo -e "  ${CYAN}•${RESET} Counter-Strike 2         (8 servers)"
+        echo -e "  ${CYAN}•${RESET} Team Fortress 2          (15 servers)"
+        echo -e "  ${CYAN}•${RESET} Counter-Strike 1.6       (16 servers)"
+        echo -e "  ${CYAN}•${RESET} Counter-Strike: Source    (3 servers)"
+        echo -e "  ${CYAN}•${RESET} Counter-Strike: CZ       (5 servers)"
+        echo -e "  ${CYAN}•${RESET} Rust                     (2 servers)"
+        echo -e "  ${CYAN}•${RESET} FiveM (GTA V)            (1 server)"
+        echo -e "  ${CYAN}•${RESET} And more..."
+    fi
+
+    echo ""
+    echo -e "  ${GREEN}These servers are one click away after install.${RESET}"
+    echo ""
+}
+
+# ── Auto-Launch Logic ────────────────────────────────────────────────────────
+
+auto_launch_check() {
+    # Only auto-launch if:
+    # 1. Running from live environment
+    # 2. Demo not disabled via boot param
+    # 3. Not already shown this session
+    # 4. Display server is available
+
+    if ! is_live_environment; then
+        log "Not a live environment, skipping auto-launch"
+        return 1
+    fi
+
+    if is_demo_disabled; then
+        log "Demo disabled via boot parameter"
+        return 1
+    fi
+
+    if already_shown; then
+        log "Demo already shown this session"
+        return 1
+    fi
+
+    if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+        log "No display server, skipping auto-launch"
+        return 1
+    fi
+
+    return 0
+}
+
+auto_launch() {
+    if ! auto_launch_check; then
+        return 0
+    fi
+
+    log "Auto-launch: waiting 10 seconds..."
+
+    # Show a countdown notification
+    notify "$OS_NAME" "Demo tour starting in 10 seconds...\nClick to dismiss, or wait to begin."
+
+    # Countdown with cancel option
+    local cancelled=false
+
+    if [[ "$UI_MODE" == "kdialog" ]]; then
+        # kdialog timer with cancel
+        if ! kdialog --title "$OS_NAME" --yesno \
+            "Welcome to $OS_NAME!\n\nThe demo tour will start in 10 seconds.\n\nClick 'Yes' to start now, or 'No' to skip." \
+            2>/dev/null; then
+            cancelled=true
+        fi
+    elif [[ "$UI_MODE" == "zenity" ]]; then
+        # zenity with timeout
+        (
+            for i in $(seq 10 -1 1); do
+                echo "$(( (10 - i) * 10 ))"
+                echo "# Demo starting in ${i}s... Close this to cancel."
+                sleep 1
+            done
+            echo "100"
+        ) | zenity --progress --title="$OS_NAME Demo" \
+            --text="Demo tour starting..." \
+            --percentage=0 --auto-close --width=350 2>/dev/null || cancelled=true
+    else
+        echo -e "\n${BOLD}${CYAN}$OS_NAME Demo Tour starting in 10 seconds...${RESET}"
+        echo -e "${DIM}Press Ctrl+C to cancel.${RESET}\n"
+        for i in $(seq 10 -1 1); do
+            printf "\r  Starting in %2d..." "$i"
+            sleep 1
+        done
+        echo ""
+    fi
+
+    if [[ "$cancelled" == "true" ]]; then
+        log "Auto-launch cancelled by user"
+        mark_shown
+        return 0
+    fi
+
+    mark_shown
+    show_welcome
+}
+
+# ── Start Command ────────────────────────────────────────────────────────────
+
+cmd_start() {
+    echo -e "\n${BOLD}${WHITE}$OS_NAME Live Demo${RESET} ${DIM}v$VERSION${RESET}\n"
+
+    # Set up the demo environment
+    set_demo_wallpaper
+    configure_mangohud_demo
+
+    # Start server status daemon in background
+    if command -v 24hg-server-status &>/dev/null; then
+        if ! pgrep -f "24hg-server-status" &>/dev/null; then
+            log "Starting server status daemon"
+            24hg-server-status &>/dev/null &
+            disown 2>/dev/null || true
+        fi
+    fi
+
+    # Launch system tray if available
+    if command -v 24hg-desktop-setup &>/dev/null; then
+        if ! pgrep -f "24hg-desktop-setup" &>/dev/null; then
+            log "Starting desktop setup / system tray"
+            24hg-desktop-setup tray &>/dev/null &
+            disown 2>/dev/null || true
+        fi
+    fi
+
+    # Show welcome
+    show_welcome
+}
+
+# ── Help ─────────────────────────────────────────────────────────────────────
+
+show_help() {
+    echo -e "${BOLD}${WHITE}$OS_NAME Live Demo Mode${RESET} ${DIM}v$VERSION${RESET}"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET} 24hg-demo [command]"
+    echo ""
+    echo -e "${BOLD}Commands:${RESET}"
+    echo -e "  ${CYAN}start${RESET}       Launch the full demo experience (default)"
+    echo -e "  ${CYAN}tour${RESET}        Run the guided 5-step tour"
+    echo -e "  ${CYAN}benchmark${RESET}   Quick system benchmark"
+    echo -e "  ${CYAN}servers${RESET}     Show live server status"
+    echo -e "  ${CYAN}install${RESET}     Launch the installer"
+    echo -e "  ${CYAN}auto${RESET}        Auto-launch check (for live boot)"
+    echo -e "  ${CYAN}help${RESET}        Show this help"
+    echo ""
+    echo -e "${BOLD}Live Boot:${RESET}"
+    echo -e "  Auto-launches 10s after desktop loads on live USB."
+    echo -e "  Disable with boot parameter: ${DIM}24hg.nodemo${RESET}"
+    echo ""
+    echo -e "${DIM}$BRAND — 24hgaming.com/24hg${RESET}"
+}
+
+# ── Benchmark Command ────────────────────────────────────────────────────────
+
+cmd_benchmark() {
+    echo -e "\n${BOLD}${WHITE}$OS_NAME Quick Benchmark${RESET}\n"
+
+    # If 24hg-benchmark exists, delegate to it
+    if command -v 24hg-benchmark &>/dev/null; then
+        24hg-benchmark quick 2>/dev/null || {
+            echo -e "  ${YELLOW}Full benchmark unavailable, running built-in test...${RESET}"
+            run_quick_benchmark
+        }
+    else
+        run_quick_benchmark
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}How does this compare to Windows?${RESET}"
+    echo -e "  Most users see ${GREEN}5-15% better${RESET} FPS in Vulkan/DXVK games."
+    echo -e "  AMD GPUs often see ${GREEN}20%+ improvement${RESET} with Mesa drivers."
+    echo ""
+    echo -e "  ${WHITE}Install $OS_NAME to benchmark your actual games.${RESET}"
+    echo ""
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+case "$ACTION" in
+    start)
+        cmd_start
+        ;;
+    tour)
+        run_tour
+        ;;
+    benchmark)
+        cmd_benchmark
+        ;;
+    servers)
+        show_servers
+        ;;
+    install)
+        launch_installer
+        ;;
+    auto)
+        auto_launch
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        echo -e "${RED}Unknown command: $ACTION${RESET}"
+        echo ""
+        show_help
+        exit 1
+        ;;
+esac
+
+log "24hg-demo $ACTION finished"
+exit 0

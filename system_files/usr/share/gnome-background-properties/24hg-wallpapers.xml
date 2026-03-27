@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE wallpapers SYSTEM "gnome-wp-list.dtd">
+<wallpapers>
+  <wallpaper deleted="false">
+    <name>24HG Dark</name>
+    <filename>/usr/share/24hg/wallpapers/24hg-dark.png</filename>
+    <options>zoom</options>
+    <shade_type>solid</shade_type>
+    <pcolor>#040910</pcolor>
+  </wallpaper>
+  <wallpaper deleted="false">
+    <name>24HG Neon</name>
+    <filename>/usr/share/24hg/wallpapers/24hg-neon.png</filename>
+    <options>zoom</options>
+    <shade_type>solid</shade_type>
+    <pcolor>#040910</pcolor>
+  </wallpaper>
+  <wallpaper deleted="false">
+    <name>24HG Minimal</name>
+    <filename>/usr/share/24hg/wallpapers/24hg-minimal.png</filename>
+    <options>zoom</options>
+    <shade_type>solid</shade_type>
+    <pcolor>#040910</pcolor>
+  </wallpaper>
+  <wallpaper deleted="false">
+    <name>24HG Circuit</name>
+    <filename>/usr/share/24hg/wallpapers/24hg-circuit.png</filename>
+    <options>zoom</options>
+    <shade_type>solid</shade_type>
+    <pcolor>#040910</pcolor>
+  </wallpaper>
+</wallpapers>

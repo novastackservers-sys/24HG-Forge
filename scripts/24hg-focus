@@ -1,0 +1,1074 @@
+#!/bin/bash
+# 24HG Focus Mode — Do Not Disturb for Gaming
+# Suppresses notifications, phone alerts, compositor effects,
+# screen blanking, updates, and background noise so you can game
+# without interruption.
+#
+# Usage: 24hg-focus [on|off|toggle|status|config|auto on|off|daemon|keybind [key]]
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Paths & constants
+# ---------------------------------------------------------------------------
+
+STATE_FILE="/tmp/24hg-focus-state"
+SAVED_STATE_DIR="/tmp/24hg-focus-saved"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/24hg"
+CONFIG_FILE="$CONFIG_DIR/focus.conf"
+LOCK_FILE="/tmp/24hg-focus.lock"
+PID_FILE="/tmp/24hg-focus-daemon.pid"
+LOG_FILE="/tmp/24hg-focus.log"
+GRACE_PERIOD=10   # seconds before auto-disabling after game exit
+
+# ---------------------------------------------------------------------------
+# Default configuration
+# ---------------------------------------------------------------------------
+
+generate_default_config() {
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_FILE" << 'CONF'
+# 24HG Focus Mode Configuration
+# Edit with: 24hg-focus config
+
+# Feature toggles — set to 0 to disable
+FOCUS_NOTIFICATIONS=1
+FOCUS_PHONE=1
+FOCUS_COMPOSITOR=1
+FOCUS_POWER=1
+FOCUS_UPDATES=1
+FOCUS_BACKGROUND=1
+FOCUS_AUDIO_DUCK=1
+FOCUS_NETWORK_QOS=0
+FOCUS_ALT_TAB=0
+FOCUS_MOUSE_CAPTURE=0
+
+# Auto-detection mode
+AUTO_DETECT=0
+AUTO_FULLSCREEN_ONLY=1
+
+# Audio ducking level (percentage to reduce non-game audio)
+DUCK_LEVEL=25
+
+# Grace period in seconds before auto-disable after game exits
+GRACE_SECONDS=10
+
+# Notification whitelist — app names that can still notify in focus mode
+# Comma-separated, case-insensitive
+NOTIFY_WHITELIST="discord,steam"
+
+# Processes to suspend in focus mode (space-separated)
+SUSPEND_PROCESSES="baloo_file tracker-miner-fs zeitgeist-daemon"
+
+# Keybind for global toggle (KDE global shortcut)
+FOCUS_KEYBIND="Meta+F1"
+
+# Game process patterns for auto-detection (extended regex)
+GAME_PATTERNS="(steam|gamescope|wine|proton|lutris|heroic|bottles|mangohud)"
+
+# Network QoS settings (requires root)
+QOS_INTERFACE="auto"
+QOS_GAME_PRIORITY="high"
+CONF
+}
+
+# ---------------------------------------------------------------------------
+# Load configuration
+# ---------------------------------------------------------------------------
+
+load_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        generate_default_config
+    fi
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+log() {
+    local msg="[$(date '+%H:%M:%S')] $*"
+    echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+info() {
+    echo "$*"
+    log "INFO: $*"
+}
+
+warn() {
+    echo "Warning: $*" >&2
+    log "WARN: $*"
+}
+
+# ---------------------------------------------------------------------------
+# Lock helpers — prevent concurrent focus toggles
+# ---------------------------------------------------------------------------
+
+acquire_lock() {
+    local retries=0
+    while ! mkdir "$LOCK_FILE" 2>/dev/null; do
+        retries=$((retries + 1))
+        if [[ $retries -gt 20 ]]; then
+            warn "Could not acquire lock after 2 seconds"
+            return 1
+        fi
+        sleep 0.1
+    done
+    trap 'rmdir "$LOCK_FILE" 2>/dev/null' EXIT
+}
+
+release_lock() {
+    rmdir "$LOCK_FILE" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# State management — save pre-focus state for perfect restore
+# ---------------------------------------------------------------------------
+
+save_state() {
+    mkdir -p "$SAVED_STATE_DIR"
+
+    # KDE DND state
+    local dnd_state
+    dnd_state=$(qdbus org.freedesktop.Notifications /org/freedesktop/Notifications \
+        org.kde.NotificationManager.Server.inhibited 2>/dev/null || echo "unknown")
+    echo "$dnd_state" > "$SAVED_STATE_DIR/dnd"
+
+    # Compositor state
+    local comp_active
+    comp_active=$(qdbus org.kde.KWin /Compositor org.kde.kwin.Compositing.active 2>/dev/null || echo "unknown")
+    echo "$comp_active" > "$SAVED_STATE_DIR/compositor"
+
+    # Audio volumes of non-game sinks (for ducking restore)
+    if command -v pactl &>/dev/null; then
+        pactl list sink-inputs 2>/dev/null | \
+            awk '/Sink Input #/{id=$3} /application.name/{print id, $0}' \
+            > "$SAVED_STATE_DIR/audio_levels" 2>/dev/null || true
+        # Save overall sink volumes
+        pactl list sinks short 2>/dev/null | while read -r idx name _rest; do
+            vol=$(pactl get-sink-volume "$name" 2>/dev/null | grep -oP '\d+%' | head -1 || echo "100%")
+            echo "$name $vol"
+        done > "$SAVED_STATE_DIR/sink_volumes" 2>/dev/null || true
+    fi
+
+    # KDE Connect phone state
+    local phone_id
+    phone_id=$(get_kdeconnect_device)
+    if [[ -n "$phone_id" ]]; then
+        echo "$phone_id" > "$SAVED_STATE_DIR/phone_device"
+    fi
+
+    # Baloo / indexer running state
+    if command -v balooctl &>/dev/null; then
+        local baloo_status
+        baloo_status=$(balooctl status 2>/dev/null | head -1 || echo "unknown")
+        echo "$baloo_status" > "$SAVED_STATE_DIR/baloo"
+    fi
+
+    # Screen saver state
+    local screensaver_active
+    screensaver_active=$(qdbus org.freedesktop.ScreenSaver /ScreenSaver \
+        org.freedesktop.ScreenSaver.GetActive 2>/dev/null || echo "unknown")
+    echo "$screensaver_active" > "$SAVED_STATE_DIR/screensaver"
+
+    # Timestamp
+    date +%s > "$SAVED_STATE_DIR/timestamp"
+    log "State saved to $SAVED_STATE_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# Focus mode features — enable
+# ---------------------------------------------------------------------------
+
+suppress_notifications() {
+    [[ "${FOCUS_NOTIFICATIONS:-1}" != "1" ]] && return 0
+    info "  Suppressing desktop notifications..."
+
+    # KDE Plasma DND via notificationmanager
+    qdbus org.freedesktop.Notifications /org/freedesktop/Notifications \
+        org.kde.NotificationManager.Server.setInhibited true 2>/dev/null || true
+
+    # Also inhibit via the Plasma DND toggle if available
+    qdbus org.kde.plasmashell /org/kde/osdService org.kde.osdService.showText \
+        "" "Focus Mode — Notifications Off" 2>/dev/null || true
+
+    log "Notifications suppressed"
+}
+
+restore_notifications() {
+    local saved
+    saved=$(cat "$SAVED_STATE_DIR/dnd" 2>/dev/null || echo "false")
+
+    if [[ "$saved" == "false" || "$saved" == "unknown" ]]; then
+        qdbus org.freedesktop.Notifications /org/freedesktop/Notifications \
+            org.kde.NotificationManager.Server.setInhibited false 2>/dev/null || true
+    fi
+    log "Notifications restored"
+}
+
+setup_notify_whitelist() {
+    # If whitelist is set, we allow certain apps through
+    # This works by installing a temporary notification filter
+    local whitelist="${NOTIFY_WHITELIST:-}"
+    if [[ -z "$whitelist" ]]; then
+        return 0
+    fi
+
+    # Save whitelist for the D-Bus filter to reference
+    echo "$whitelist" > "$SAVED_STATE_DIR/notify_whitelist"
+    log "Notification whitelist set: $whitelist"
+}
+
+silence_phone() {
+    [[ "${FOCUS_PHONE:-1}" != "1" ]] && return 0
+    local device_id
+    device_id=$(get_kdeconnect_device)
+    [[ -z "$device_id" ]] && return 0
+
+    info "  Silencing phone via KDE Connect..."
+
+    # Send findMyPhone ping to confirm connection, then set DND
+    kdeconnect-cli -d "$device_id" --ping-msg "Focus Mode ON — Gaming" 2>/dev/null || true
+
+    # Send a custom command to enable DND (requires KDE Connect Commands plugin)
+    # The phone-side script should toggle DND
+    kdeconnect-cli -d "$device_id" --share-text "HG24_FOCUS:ON" 2>/dev/null || true
+
+    # Pause any media playing on phone
+    kdeconnect-cli -d "$device_id" --pause 2>/dev/null || true
+
+    log "Phone silenced: $device_id"
+}
+
+restore_phone() {
+    local device_id
+    device_id=$(cat "$SAVED_STATE_DIR/phone_device" 2>/dev/null || echo "")
+    [[ -z "$device_id" ]] && return 0
+
+    kdeconnect-cli -d "$device_id" --ping-msg "Focus Mode OFF — Welcome back" 2>/dev/null || true
+    kdeconnect-cli -d "$device_id" --share-text "HG24_FOCUS:OFF" 2>/dev/null || true
+    log "Phone restored: $device_id"
+}
+
+get_kdeconnect_device() {
+    # Return the first paired and reachable device ID
+    kdeconnect-cli --list-available 2>/dev/null | \
+        grep -oP '(?<=- )\w{8}(-\w{4}){3}-\w{12}' | head -1 || \
+    kdeconnect-cli --list-devices 2>/dev/null | \
+        grep -oP '(?<=: )\w+' | head -1 || echo ""
+}
+
+disable_compositor_effects() {
+    [[ "${FOCUS_COMPOSITOR:-1}" != "1" ]] && return 0
+    info "  Disabling compositor effects for max FPS..."
+
+    local comp_active
+    comp_active=$(qdbus org.kde.KWin /Compositor org.kde.kwin.Compositing.active 2>/dev/null || echo "unknown")
+
+    if [[ "$comp_active" == "true" ]]; then
+        # Suspend compositing entirely for fullscreen games
+        qdbus org.kde.KWin /Compositor org.kde.kwin.Compositing.suspend 2>/dev/null || true
+        log "Compositor suspended"
+    else
+        log "Compositor already inactive, skipping"
+    fi
+}
+
+restore_compositor() {
+    local saved
+    saved=$(cat "$SAVED_STATE_DIR/compositor" 2>/dev/null || echo "true")
+
+    if [[ "$saved" == "true" ]]; then
+        qdbus org.kde.KWin /Compositor org.kde.kwin.Compositing.resume 2>/dev/null || true
+        log "Compositor resumed"
+    fi
+}
+
+inhibit_power() {
+    [[ "${FOCUS_POWER:-1}" != "1" ]] && return 0
+    info "  Preventing sleep and screen blanking..."
+
+    # Use systemd-inhibit in background
+    systemd-inhibit --what=idle:sleep:handle-lid-switch \
+        --who="24HG Focus" \
+        --why="Gaming focus mode active" \
+        --mode=block \
+        sleep infinity &
+    echo $! > "$SAVED_STATE_DIR/inhibit_pid"
+
+    # Also tell KDE to not blank the screen
+    qdbus org.freedesktop.ScreenSaver /ScreenSaver \
+        org.freedesktop.ScreenSaver.Inhibit "24hg-focus" "Gaming focus mode" \
+        2>/dev/null > "$SAVED_STATE_DIR/screensaver_cookie" || true
+
+    # Disable DPMS
+    xset -dpms 2>/dev/null || true
+    xset s off 2>/dev/null || true
+
+    log "Power management inhibited"
+}
+
+restore_power() {
+    # Kill the systemd-inhibit process
+    local pid
+    pid=$(cat "$SAVED_STATE_DIR/inhibit_pid" 2>/dev/null || echo "")
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+    fi
+
+    # Uninhibit screen saver
+    local cookie
+    cookie=$(cat "$SAVED_STATE_DIR/screensaver_cookie" 2>/dev/null || echo "")
+    if [[ -n "$cookie" ]]; then
+        qdbus org.freedesktop.ScreenSaver /ScreenSaver \
+            org.freedesktop.ScreenSaver.UnInhibit "$cookie" 2>/dev/null || true
+    fi
+
+    # Re-enable DPMS
+    xset +dpms 2>/dev/null || true
+    xset s on 2>/dev/null || true
+
+    log "Power management restored"
+}
+
+pause_updates() {
+    [[ "${FOCUS_UPDATES:-1}" != "1" ]] && return 0
+    info "  Pausing automatic updates..."
+
+    touch /tmp/24hg-no-update
+
+    # Pause rpm-ostreed if running
+    if systemctl is-active --quiet rpm-ostreed 2>/dev/null; then
+        systemctl stop rpm-ostreed 2>/dev/null || true
+        echo "rpm-ostreed" > "$SAVED_STATE_DIR/stopped_updates"
+    fi
+
+    # Pause flatpak update timer if active
+    if systemctl --user is-active --quiet flatpak-update.timer 2>/dev/null; then
+        systemctl --user stop flatpak-update.timer 2>/dev/null || true
+        echo "flatpak" >> "$SAVED_STATE_DIR/stopped_updates"
+    fi
+
+    log "Updates paused"
+}
+
+restore_updates() {
+    rm -f /tmp/24hg-no-update
+
+    if [[ -f "$SAVED_STATE_DIR/stopped_updates" ]]; then
+        while read -r svc; do
+            case "$svc" in
+                rpm-ostreed)
+                    systemctl start rpm-ostreed 2>/dev/null || true ;;
+                flatpak)
+                    systemctl --user start flatpak-update.timer 2>/dev/null || true ;;
+            esac
+        done < "$SAVED_STATE_DIR/stopped_updates"
+    fi
+
+    log "Updates resumed"
+}
+
+suspend_background() {
+    [[ "${FOCUS_BACKGROUND:-1}" != "1" ]] && return 0
+    info "  Suspending background indexers..."
+
+    local procs="${SUSPEND_PROCESSES:-baloo_file tracker-miner-fs zeitgeist-daemon}"
+    local suspended=""
+
+    for proc in $procs; do
+        local pids
+        pids=$(pgrep -x "$proc" 2>/dev/null || true)
+        if [[ -n "$pids" ]]; then
+            for p in $pids; do
+                kill -STOP "$p" 2>/dev/null || true
+                suspended+="$proc:$p "
+            done
+        fi
+    done
+
+    # Also suspend baloo via its own interface
+    if command -v balooctl &>/dev/null; then
+        balooctl suspend 2>/dev/null || true
+    fi
+
+    echo "$suspended" > "$SAVED_STATE_DIR/suspended_procs"
+    log "Background processes suspended: $suspended"
+}
+
+restore_background() {
+    local suspended
+    suspended=$(cat "$SAVED_STATE_DIR/suspended_procs" 2>/dev/null || echo "")
+
+    for entry in $suspended; do
+        local pid="${entry##*:}"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill -CONT "$pid" 2>/dev/null || true
+        fi
+    done
+
+    if command -v balooctl &>/dev/null; then
+        balooctl resume 2>/dev/null || true
+    fi
+
+    log "Background processes resumed"
+}
+
+duck_audio() {
+    [[ "${FOCUS_AUDIO_DUCK:-1}" != "1" ]] && return 0
+    info "  Ducking non-game audio to ${DUCK_LEVEL:-25}%..."
+
+    local level="${DUCK_LEVEL:-25}"
+
+    if ! command -v pactl &>/dev/null; then
+        warn "pactl not found, skipping audio ducking"
+        return 0
+    fi
+
+    # Reduce all non-game sink-input volumes
+    pactl list sink-inputs 2>/dev/null | \
+        awk -v lvl="$level" '
+        /Sink Input #/{id=substr($3,2)}
+        /application.process.binary/{
+            binary=$NF
+            # Skip known game-related binaries
+            if (binary !~ /(steam|wine|proton|gamescope|game)/) {
+                print id
+            }
+        }' | while read -r input_id; do
+            pactl set-sink-input-volume "$input_id" "${level}%" 2>/dev/null || true
+        done
+
+    # Lower system notification sounds
+    pactl set-sink-volume @DEFAULT_SINK@ 80% 2>/dev/null || true
+
+    log "Audio ducked to ${level}%"
+}
+
+restore_audio() {
+    if [[ ! -f "$SAVED_STATE_DIR/sink_volumes" ]]; then
+        return 0
+    fi
+
+    while read -r name vol; do
+        pactl set-sink-volume "$name" "$vol" 2>/dev/null || true
+    done < "$SAVED_STATE_DIR/sink_volumes"
+
+    # Restore all sink-input volumes to 100%
+    pactl list sink-inputs short 2>/dev/null | while read -r idx _rest; do
+        pactl set-sink-input-volume "$idx" 100% 2>/dev/null || true
+    done
+
+    log "Audio levels restored"
+}
+
+enable_network_qos() {
+    [[ "${FOCUS_NETWORK_QOS:-0}" != "1" ]] && return 0
+
+    if [[ $EUID -ne 0 ]]; then
+        warn "Network QoS requires root — skipping"
+        return 0
+    fi
+
+    info "  Enabling gaming network QoS..."
+
+    local iface="${QOS_INTERFACE:-auto}"
+    if [[ "$iface" == "auto" ]]; then
+        iface=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+    fi
+
+    if [[ -z "$iface" ]]; then
+        warn "No network interface found for QoS"
+        return 0
+    fi
+
+    echo "$iface" > "$SAVED_STATE_DIR/qos_interface"
+
+    # Save existing qdisc
+    tc qdisc show dev "$iface" 2>/dev/null > "$SAVED_STATE_DIR/qos_original" || true
+
+    # Apply priority queueing — prioritize gaming traffic
+    tc qdisc replace dev "$iface" root handle 1: prio bands 3 2>/dev/null || true
+
+    # Band 0 (highest): gaming ports (common: 27015-27050 Steam, 3478 STUN)
+    tc filter add dev "$iface" parent 1:0 protocol ip u32 \
+        match ip dport 27015 0xfff0 flowid 1:1 2>/dev/null || true
+    tc filter add dev "$iface" parent 1:0 protocol ip u32 \
+        match ip sport 27015 0xfff0 flowid 1:1 2>/dev/null || true
+
+    log "Network QoS enabled on $iface"
+}
+
+restore_network_qos() {
+    local iface
+    iface=$(cat "$SAVED_STATE_DIR/qos_interface" 2>/dev/null || echo "")
+    [[ -z "$iface" ]] && return 0
+
+    # Remove our qdisc, system will fall back to default
+    tc qdisc del dev "$iface" root 2>/dev/null || true
+
+    log "Network QoS removed from $iface"
+}
+
+disable_alt_tab() {
+    [[ "${FOCUS_ALT_TAB:-0}" != "1" ]] && return 0
+    info "  Disabling Alt+Tab shortcut..."
+
+    # Save current KWin shortcut for Walk Through Windows
+    local current
+    current=$(kwriteconfig5 --file kglobalshortcutsrc --group kwin --key "Walk Through Windows" 2>/dev/null || echo "")
+    echo "$current" > "$SAVED_STATE_DIR/alt_tab_shortcut"
+
+    # Disable the shortcut
+    kwriteconfig5 --file kglobalshortcutsrc --group kwin --key "Walk Through Windows" "none,none,Walk Through Windows" 2>/dev/null || true
+
+    # Reload KWin shortcuts
+    qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
+
+    log "Alt+Tab disabled"
+}
+
+restore_alt_tab() {
+    local saved
+    saved=$(cat "$SAVED_STATE_DIR/alt_tab_shortcut" 2>/dev/null || echo "")
+
+    if [[ -n "$saved" && "$saved" != "none,none,Walk Through Windows" ]]; then
+        kwriteconfig5 --file kglobalshortcutsrc --group kwin --key "Walk Through Windows" "$saved" 2>/dev/null || true
+        qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
+    else
+        # Restore default
+        kwriteconfig5 --file kglobalshortcutsrc --group kwin --key "Walk Through Windows" \
+            "Alt+Tab,Alt+Tab,Walk Through Windows" 2>/dev/null || true
+        qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
+    fi
+
+    log "Alt+Tab restored"
+}
+
+capture_mouse() {
+    [[ "${FOCUS_MOUSE_CAPTURE:-0}" != "1" ]] && return 0
+    info "  Enabling mouse capture (multi-monitor barrier)..."
+
+    # Use KWin's edge barrier setting to prevent cursor escape
+    local current_barrier
+    current_barrier=$(kreadconfig5 --file kwinrc --group EdgeBarrier --key CornerBarrier 2>/dev/null || echo "")
+    echo "$current_barrier" > "$SAVED_STATE_DIR/mouse_barrier"
+
+    # Set a high barrier so cursor sticks to current screen
+    kwriteconfig5 --file kwinrc --group EdgeBarrier --key CornerBarrier true 2>/dev/null || true
+    kwriteconfig5 --file kwinrc --group EdgeBarrier --key EdgeBarrier 100 2>/dev/null || true
+
+    qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
+
+    log "Mouse capture enabled"
+}
+
+restore_mouse() {
+    local saved
+    saved=$(cat "$SAVED_STATE_DIR/mouse_barrier" 2>/dev/null || echo "")
+
+    if [[ -n "$saved" ]]; then
+        kwriteconfig5 --file kwinrc --group EdgeBarrier --key CornerBarrier "$saved" 2>/dev/null || true
+    else
+        kwriteconfig5 --file kwinrc --group EdgeBarrier --key CornerBarrier false 2>/dev/null || true
+    fi
+    kwriteconfig5 --file kwinrc --group EdgeBarrier --key EdgeBarrier 0 2>/dev/null || true
+    qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
+
+    log "Mouse capture disabled"
+}
+
+# ---------------------------------------------------------------------------
+# Focus mode: enable / disable
+# ---------------------------------------------------------------------------
+
+is_focus_active() {
+    [[ -f "$STATE_FILE" ]] && return 0 || return 1
+}
+
+focus_on() {
+    if is_focus_active; then
+        info "Focus mode is already active."
+        return 0
+    fi
+
+    acquire_lock || return 1
+
+    info "Enabling 24HG Focus Mode..."
+    info ""
+
+    # Save pre-focus state for perfect restore
+    save_state
+
+    # Apply all enabled features
+    suppress_notifications
+    setup_notify_whitelist
+    silence_phone
+    disable_compositor_effects
+    inhibit_power
+    pause_updates
+    suspend_background
+    duck_audio
+    enable_network_qos
+    disable_alt_tab
+    capture_mouse
+
+    # Mark focus as active
+    cat > "$STATE_FILE" << EOF
+ACTIVE=1
+TIMESTAMP=$(date +%s)
+PID=$$
+USER=$USER
+EOF
+
+    release_lock
+
+    info ""
+    info "Focus mode ACTIVE. Game on!"
+    notify_osd "Focus Mode ON" "All distractions suppressed"
+}
+
+focus_off() {
+    if ! is_focus_active; then
+        info "Focus mode is not active."
+        return 0
+    fi
+
+    acquire_lock || return 1
+
+    info "Disabling 24HG Focus Mode..."
+    info ""
+
+    # Restore everything in reverse order
+    restore_mouse
+    restore_alt_tab
+    restore_network_qos
+    restore_audio
+    restore_background
+    restore_updates
+    restore_power
+    restore_compositor
+    restore_phone
+    restore_notifications
+
+    # Clean up state
+    rm -f "$STATE_FILE"
+    rm -rf "$SAVED_STATE_DIR"
+
+    release_lock
+
+    info ""
+    info "Focus mode OFF. Welcome back!"
+    notify_osd "Focus Mode OFF" "Notifications and services restored"
+}
+
+focus_toggle() {
+    if is_focus_active; then
+        focus_off
+    else
+        focus_on
+    fi
+}
+
+notify_osd() {
+    # Brief OSD notification (bypasses DND since we control it)
+    local title="$1"
+    local body="${2:-}"
+    qdbus org.kde.plasmashell /org/kde/osdService org.kde.osdService.showText \
+        "preferences-desktop-notification-bell" "$title" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Status display
+# ---------------------------------------------------------------------------
+
+show_status() {
+    echo "=== 24HG Focus Mode ==="
+    echo ""
+
+    if is_focus_active; then
+        local ts
+        ts=$(grep "^TIMESTAMP=" "$STATE_FILE" 2>/dev/null | cut -d= -f2)
+        local elapsed=""
+        if [[ -n "$ts" ]]; then
+            local now
+            now=$(date +%s)
+            local diff=$((now - ts))
+            local hrs=$((diff / 3600))
+            local mins=$(( (diff % 3600) / 60 ))
+            elapsed=" (${hrs}h ${mins}m)"
+        fi
+        echo "  Status: ACTIVE${elapsed}"
+    else
+        echo "  Status: inactive"
+    fi
+
+    echo ""
+    echo "  Features:"
+    load_config
+    local features=(
+        "FOCUS_NOTIFICATIONS:Notifications:Suppress desktop notifications"
+        "FOCUS_PHONE:Phone silence:Mute phone via KDE Connect"
+        "FOCUS_COMPOSITOR:Compositor:Disable desktop effects"
+        "FOCUS_POWER:Power:Prevent sleep/screen blank"
+        "FOCUS_UPDATES:Updates:Pause automatic updates"
+        "FOCUS_BACKGROUND:Background:Suspend indexers/backups"
+        "FOCUS_AUDIO_DUCK:Audio duck:Reduce non-game audio"
+        "FOCUS_NETWORK_QOS:Network QoS:Gaming traffic priority"
+        "FOCUS_ALT_TAB:Alt-Tab lock:Disable Alt+Tab"
+        "FOCUS_MOUSE_CAPTURE:Mouse capture:Lock cursor to game monitor"
+    )
+
+    for entry in "${features[@]}"; do
+        local var="${entry%%:*}"
+        local rest="${entry#*:}"
+        local label="${rest%%:*}"
+        local desc="${rest#*:}"
+        local val="${!var:-0}"
+        local state="OFF"
+        [[ "$val" == "1" ]] && state=" ON"
+        printf "    %-18s [%3s]  %s\n" "$label" "$state" "$desc"
+    done
+
+    echo ""
+
+    # Auto-detection status
+    echo "  Auto-detect: $([ "${AUTO_DETECT:-0}" == "1" ] && echo "enabled" || echo "disabled")"
+
+    # Daemon status
+    if [[ -f "$PID_FILE" ]]; then
+        local dpid
+        dpid=$(cat "$PID_FILE")
+        if kill -0 "$dpid" 2>/dev/null; then
+            echo "  Daemon: running (PID $dpid)"
+        else
+            echo "  Daemon: stale PID file (not running)"
+        fi
+    else
+        echo "  Daemon: not running"
+    fi
+
+    # KDE Connect phone
+    local phone
+    phone=$(get_kdeconnect_device)
+    if [[ -n "$phone" ]]; then
+        local phone_name
+        phone_name=$(kdeconnect-cli --list-available 2>/dev/null | head -1 | sed 's/ -.*//' || echo "$phone")
+        echo "  Phone: $phone_name (connected)"
+    else
+        echo "  Phone: no device found"
+    fi
+
+    # Keybind
+    echo "  Keybind: ${FOCUS_KEYBIND:-Meta+F1}"
+    echo ""
+
+    # Crash recovery check
+    if [[ -d "$SAVED_STATE_DIR" ]] && ! is_focus_active; then
+        echo "  WARNING: Saved state found without active focus."
+        echo "  This may indicate a crash. Run '24hg-focus off' to clean up."
+        echo ""
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Config editor
+# ---------------------------------------------------------------------------
+
+edit_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        generate_default_config
+        info "Generated default config at $CONFIG_FILE"
+    fi
+
+    local editor="${VISUAL:-${EDITOR:-nano}}"
+    info "Opening focus config with $editor..."
+    "$editor" "$CONFIG_FILE"
+
+    info "Config saved. Changes take effect on next focus toggle."
+}
+
+# ---------------------------------------------------------------------------
+# Auto-detection mode
+# ---------------------------------------------------------------------------
+
+set_auto() {
+    local mode="${1:-}"
+    case "$mode" in
+        on)
+            load_config
+            sed -i 's/^AUTO_DETECT=.*/AUTO_DETECT=1/' "$CONFIG_FILE" 2>/dev/null || \
+                echo "AUTO_DETECT=1" >> "$CONFIG_FILE"
+            info "Auto-detection enabled."
+            info "Run '24hg-focus daemon' to start monitoring, or add to autostart."
+            ;;
+        off)
+            load_config
+            sed -i 's/^AUTO_DETECT=.*/AUTO_DETECT=0/' "$CONFIG_FILE" 2>/dev/null || true
+            info "Auto-detection disabled."
+            # Stop daemon if running
+            if [[ -f "$PID_FILE" ]]; then
+                local dpid
+                dpid=$(cat "$PID_FILE")
+                if kill -0 "$dpid" 2>/dev/null; then
+                    kill "$dpid" 2>/dev/null || true
+                    info "Stopped focus daemon (PID $dpid)."
+                fi
+                rm -f "$PID_FILE"
+            fi
+            ;;
+        *)
+            echo "Usage: 24hg-focus auto on|off"
+            exit 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Daemon mode — auto-detect game launch/exit
+# ---------------------------------------------------------------------------
+
+is_game_running() {
+    local patterns="${GAME_PATTERNS:-(steam|gamescope|wine|proton|lutris|heroic|bottles|mangohud)}"
+    pgrep -f "$patterns" &>/dev/null
+}
+
+is_game_fullscreen() {
+    [[ "${AUTO_FULLSCREEN_ONLY:-1}" != "1" ]] && return 0
+
+    # Check if any window is fullscreen via KWin
+    local active_window
+    active_window=$(qdbus org.kde.KWin /KWin org.kde.KWin.activeWindow 2>/dev/null || echo "")
+
+    if [[ -n "$active_window" ]]; then
+        # Check window geometry vs screen geometry
+        local screen_w screen_h
+        screen_w=$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2}' | cut -dx -f1 || echo "0")
+        screen_h=$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2}' | cut -dx -f2 || echo "0")
+
+        local win_geom
+        win_geom=$(xdotool getactivewindow getwindowgeometry 2>/dev/null | grep "Geometry:" | awk '{print $2}' || echo "0x0")
+        local win_w="${win_geom%%x*}"
+        local win_h="${win_geom##*x}"
+
+        if [[ "$win_w" -ge "$screen_w" && "$win_h" -ge "$screen_h" ]] 2>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+
+    # If we can't determine, assume fullscreen
+    return 0
+}
+
+run_daemon() {
+    load_config
+
+    # Check if daemon is already running
+    if [[ -f "$PID_FILE" ]]; then
+        local existing_pid
+        existing_pid=$(cat "$PID_FILE")
+        if kill -0 "$existing_pid" 2>/dev/null; then
+            info "Daemon already running (PID $existing_pid). Stop it first."
+            exit 1
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    echo $$ > "$PID_FILE"
+    log "Daemon started (PID $$)"
+    info "Focus daemon started. Monitoring for game processes..."
+    info "Press Ctrl+C to stop."
+
+    local game_was_running=false
+    local grace_countdown=0
+
+    # Handle clean shutdown
+    trap 'daemon_cleanup' INT TERM
+
+    while true; do
+        if is_game_running; then
+            grace_countdown=0
+
+            if ! $game_was_running; then
+                log "Game process detected"
+                # Check fullscreen if configured
+                sleep 2  # brief delay for window to initialize
+                if is_game_fullscreen; then
+                    if ! is_focus_active; then
+                        log "Enabling focus mode (game detected)"
+                        focus_on
+                    fi
+                    game_was_running=true
+                else
+                    log "Game detected but not fullscreen, skipping"
+                fi
+            fi
+        else
+            if $game_was_running; then
+                # Game stopped — start grace period
+                if [[ $grace_countdown -eq 0 ]]; then
+                    grace_countdown=${GRACE_SECONDS:-$GRACE_PERIOD}
+                    log "Game exited, grace period: ${grace_countdown}s"
+                fi
+
+                grace_countdown=$((grace_countdown - 2))
+
+                if [[ $grace_countdown -le 0 ]]; then
+                    log "Grace period expired, disabling focus"
+                    if is_focus_active; then
+                        focus_off
+                    fi
+                    game_was_running=false
+                    grace_countdown=0
+                fi
+            fi
+        fi
+
+        sleep 2
+    done
+}
+
+daemon_cleanup() {
+    log "Daemon shutting down"
+    rm -f "$PID_FILE"
+
+    # Restore focus if it was auto-enabled
+    if is_focus_active; then
+        focus_off
+    fi
+
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Keybind management
+# ---------------------------------------------------------------------------
+
+set_keybind() {
+    local key="${1:-Meta+F1}"
+    load_config
+
+    info "Setting focus toggle keybind to: $key"
+
+    # Register global shortcut with KDE
+    local shortcut_file="${XDG_CONFIG_HOME:-$HOME/.config}/kglobalshortcutsrc"
+
+    # Add or update the 24hg-focus shortcut
+    kwriteconfig5 --file "$shortcut_file" --group "24hg-focus.desktop" \
+        --key "_k_friendly_name" "24HG Focus" 2>/dev/null || true
+    kwriteconfig5 --file "$shortcut_file" --group "24hg-focus.desktop" \
+        --key "toggle" "${key},${key},Toggle Focus Mode" 2>/dev/null || true
+
+    # Create a .desktop file for the shortcut action
+    local desktop_dir="${XDG_DATA_HOME:-$HOME/.local/share}/kglobalaccel"
+    mkdir -p "$desktop_dir"
+    cat > "$desktop_dir/24hg-focus.desktop" << EOF
+[Desktop Entry]
+Type=Application
+Name=24HG Focus
+Exec=24hg-focus toggle
+Icon=preferences-desktop-notification-bell
+X-KDE-GlobalAccel-CommandShortcut=true
+
+[Desktop Action toggle]
+Name=Toggle Focus Mode
+Exec=24hg-focus toggle
+EOF
+
+    # Also create in applications for KDE to find it
+    local app_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    mkdir -p "$app_dir"
+    cp "$desktop_dir/24hg-focus.desktop" "$app_dir/24hg-focus.desktop"
+
+    # Reload shortcuts
+    qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null || true
+    kquitapp5 kglobalaccel 2>/dev/null || true
+    sleep 0.5
+    kglobalaccel5 2>/dev/null &
+
+    # Save to config
+    sed -i "s/^FOCUS_KEYBIND=.*/FOCUS_KEYBIND=\"$key\"/" "$CONFIG_FILE" 2>/dev/null || \
+        echo "FOCUS_KEYBIND=\"$key\"" >> "$CONFIG_FILE"
+
+    info "Keybind set. Press $key to toggle focus mode."
+}
+
+# ---------------------------------------------------------------------------
+# Crash recovery — restore state if previous session didn't clean up
+# ---------------------------------------------------------------------------
+
+crash_recovery() {
+    if [[ -d "$SAVED_STATE_DIR" ]] && ! is_focus_active; then
+        warn "Stale focus state detected — recovering..."
+        # Force-create state file so focus_off will run the restore path
+        echo "ACTIVE=1" > "$STATE_FILE"
+        echo "TIMESTAMP=$(cat "$SAVED_STATE_DIR/timestamp" 2>/dev/null || date +%s)" >> "$STATE_FILE"
+        focus_off
+        info "Crash recovery complete."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+load_config
+
+# Handle crash recovery on any invocation
+if [[ -d "$SAVED_STATE_DIR" ]] && ! is_focus_active && [[ "${1:-}" != "off" ]]; then
+    crash_recovery
+fi
+
+ACTION="${1:-on}"
+shift 2>/dev/null || true
+
+case "$ACTION" in
+    on)
+        focus_on
+        ;;
+    off)
+        focus_off
+        ;;
+    toggle)
+        focus_toggle
+        ;;
+    status)
+        show_status
+        ;;
+    config)
+        edit_config
+        ;;
+    auto)
+        set_auto "${1:-}"
+        ;;
+    daemon)
+        run_daemon
+        ;;
+    keybind)
+        set_keybind "${1:-Meta+F1}"
+        ;;
+    -h|--help|help)
+        echo "Usage: 24hg-focus [on|off|toggle|status|config|auto on|off|daemon|keybind [key]]"
+        echo ""
+        echo "Commands:"
+        echo "  on        Enable focus mode (default)"
+        echo "  off       Disable focus mode and restore state"
+        echo "  toggle    Toggle focus mode on/off"
+        echo "  status    Show current focus state and features"
+        echo "  config    Edit focus mode settings"
+        echo "  auto      Enable/disable auto-detection (auto on|off)"
+        echo "  daemon    Run as daemon with game auto-detection"
+        echo "  keybind   Set global hotkey (default: Meta+F1)"
+        echo ""
+        echo "Config: $CONFIG_FILE"
+        ;;
+    *)
+        echo "Unknown command: $ACTION"
+        echo "Run '24hg-focus --help' for usage."
+        exit 1
+        ;;
+esac

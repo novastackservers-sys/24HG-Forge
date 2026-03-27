@@ -1,7 +1,7 @@
 services:
   control-room:
     build: ./control-room
-    container_name: hubos-control-room
+    container_name: 24hg-control-room
     restart: unless-stopped
     volumes:
       - ./landing-page:/srv/landing-page
@@ -17,7 +17,7 @@ services:
 
   site:
     image: nginx:alpine
-    container_name: hubos-site
+    container_name: 24hg-site
     restart: unless-stopped
     volumes:
       - ./landing-page:/usr/share/nginx/html:ro

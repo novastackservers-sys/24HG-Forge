@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Sandbox
-Comment=Sandboxed game launcher
-Exec=/usr/bin/forge-sandbox
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=Game;Security;
-Keywords=sandbox;isolate;secure;launch;game;

@@ -1,0 +1,8 @@
+[Unit]
+Description=24HG Automatic Update Check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/24hg/auto-update.sh

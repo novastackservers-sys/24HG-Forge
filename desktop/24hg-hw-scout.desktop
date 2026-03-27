@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Hardware Scout
+Comment=Hardware health monitoring
+Exec=/usr/bin/24hg-hw-scout
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=System;Monitor;
+Keywords=hardware;health;monitor;temperature;sensor;

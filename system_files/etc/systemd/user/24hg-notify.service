@@ -1,0 +1,17 @@
+[Unit]
+Description=24HG Notification Center — Rich KDE notifications for all 24HG tools
+Documentation=https://os.24hgaming.com
+After=graphical-session.target dbus.socket
+Requires=dbus.socket
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/mkdir -p /tmp/24hg-notifications
+ExecStart=/usr/bin/24hg-notify daemon
+ExecStop=/usr/bin/24hg-notify stop
+Restart=on-failure
+RestartSec=10
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=graphical-session.target

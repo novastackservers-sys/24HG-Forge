@@ -1,0 +1,8 @@
+[Unit]
+Description=24HG Heartbeat — Report system info to Control Room
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/24hg/heartbeat.sh

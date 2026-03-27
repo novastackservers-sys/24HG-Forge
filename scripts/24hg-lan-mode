@@ -1,0 +1,547 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG LAN Mode — Turn your machine into a LAN party hub
+# One toggle to announce, discover, share, chat, and coordinate with nearby 24HG users.
+
+HG24_VERSION="1.0"
+APP_NAME="24hg-lan-mode"
+SERVICE_TYPE="_24hg-lan._tcp"
+CHAT_PORT=24250
+HTTP_PORT=24251
+DISCOVERY_PORT=24252
+BROADCAST_ADDR="255.255.255.255"
+
+STATE_DIR="${HOME}/.config/24hg/lan-mode"
+PEERS_FILE="${STATE_DIR}/peers.json"
+VOTES_FILE="${STATE_DIR}/votes.json"
+CHAT_LOG="${STATE_DIR}/chat.log"
+SHARES_DIR="${STATE_DIR}/shares"
+SERVERS_FILE="${STATE_DIR}/servers.json"
+PID_DIR="${STATE_DIR}/pids"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# --- Helpers ---
+
+log() { logger -t "$APP_NAME" "$*"; }
+
+die() {
+    echo -e "${RED}Error:${RESET} $*" >&2
+    log "ERROR: $*"
+    exit 1
+}
+
+info() { echo -e "${CYAN}[i]${RESET} $*"; }
+ok()   { echo -e "${GREEN}[+]${RESET} $*"; }
+warn() { echo -e "${YELLOW}[!]${RESET} $*"; }
+
+require_cmd() {
+    for cmd in "$@"; do
+        command -v "$cmd" &>/dev/null || die "'$cmd' is required but not found. Install it first."
+    done
+}
+
+init_state() {
+    mkdir -p "$STATE_DIR" "$SHARES_DIR" "$PID_DIR"
+    [[ -f "$PEERS_FILE" ]]   || echo '{}' > "$PEERS_FILE"
+    [[ -f "$VOTES_FILE" ]]   || echo '{}' > "$VOTES_FILE"
+    [[ -f "$SERVERS_FILE" ]] || echo '{}' > "$SERVERS_FILE"
+    touch "$CHAT_LOG"
+}
+
+get_hostname() { hostname -s 2>/dev/null || echo "24hg-user"; }
+
+get_lan_ip() {
+    ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}' || echo "unknown"
+}
+
+get_gateway() {
+    ip -4 route show default 2>/dev/null | awk '{print $3; exit}' || echo "unknown"
+}
+
+get_username() {
+    echo "${HG24_USERNAME:-$(whoami)}"
+}
+
+is_running() {
+    local pidfile="$PID_DIR/$1.pid"
+    [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+}
+
+save_pid() {
+    echo "$2" > "$PID_DIR/$1.pid"
+}
+
+kill_service() {
+    local pidfile="$PID_DIR/$1.pid"
+    if [[ -f "$pidfile" ]]; then
+        local pid
+        pid=$(cat "$pidfile")
+        kill "$pid" 2>/dev/null && wait "$pid" 2>/dev/null || true
+        rm -f "$pidfile"
+    fi
+}
+
+timestamp() { date '+%H:%M:%S'; }
+
+# --- Discovery (Avahi/mDNS) ---
+
+start_avahi_announce() {
+    require_cmd avahi-publish-service
+    local host ip user
+    host=$(get_hostname)
+    ip=$(get_lan_ip)
+    user=$(get_username)
+
+    avahi-publish-service \
+        "24HG-${host}" "$SERVICE_TYPE" "$DISCOVERY_PORT" \
+        "version=$HG24_VERSION" "user=$user" "ip=$ip" \
+        "status=online" "hostname=$host" &>/dev/null &
+    save_pid "avahi" $!
+    ok "Announcing on LAN as ${BOLD}${user}@${host}${RESET} (${ip})"
+}
+
+stop_avahi_announce() {
+    kill_service "avahi"
+}
+
+discover_peers() {
+    require_cmd avahi-browse
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    timeout 3 avahi-browse -tpr "$SERVICE_TYPE" 2>/dev/null | \
+        awk -F';' '/^=/ {print $4, $8, $9}' > "$tmpfile" || true
+
+    local peers="{}"
+    while read -r name addr port; do
+        [[ -z "$name" ]] && continue
+        peers=$(echo "$peers" | jq --arg n "$name" --arg a "$addr" --arg p "$port" \
+            '. + {($n): {"ip": $a, "port": ($p // "24252"), "seen": now | todate}}')
+    done < "$tmpfile"
+    rm -f "$tmpfile"
+
+    echo "$peers" > "$PEERS_FILE"
+    echo "$peers"
+}
+
+# --- Chat (UDP broadcast) ---
+
+start_chat_listener() {
+    (
+        while true; do
+            msg=$(socat -T2 UDP-RECV:${CHAT_PORT},reuseaddr,broadcast - 2>/dev/null) || continue
+            [[ -z "$msg" ]] && continue
+            echo "[$(timestamp)] $msg" >> "$CHAT_LOG"
+            echo -e "${MAGENTA}[chat]${RESET} $msg"
+        done
+    ) &
+    save_pid "chat_listener" $!
+}
+
+send_chat() {
+    local user msg
+    user=$(get_username)
+    msg="$*"
+    [[ -z "$msg" ]] && die "Usage: $APP_NAME chat <message>"
+
+    local payload="${user}: ${msg}"
+    echo -n "$payload" | socat - UDP-DATAGRAM:${BROADCAST_ADDR}:${CHAT_PORT},broadcast 2>/dev/null \
+        || warn "Failed to send chat message (is socat installed?)"
+    echo "[$(timestamp)] $payload" >> "$CHAT_LOG"
+}
+
+# --- File Sharing (HTTP) ---
+
+start_file_server() {
+    require_cmd python3
+    (
+        cd "$SHARES_DIR"
+        python3 -m http.server "$HTTP_PORT" --bind 0.0.0.0 &>/dev/null
+    ) &
+    save_pid "http_server" $!
+    ok "File sharing server on port ${HTTP_PORT}"
+}
+
+share_file() {
+    local file="$1"
+    [[ -z "$file" ]] && die "Usage: $APP_NAME share <file>"
+    [[ -f "$file" ]] || die "File not found: $file"
+
+    cp "$file" "$SHARES_DIR/"
+    local fname ip
+    fname=$(basename "$file")
+    ip=$(get_lan_ip)
+    ok "Shared: ${BOLD}${fname}${RESET}"
+    info "Peers can download: http://${ip}:${HTTP_PORT}/${fname}"
+
+    # Broadcast file availability
+    local user
+    user=$(get_username)
+    echo -n "[file] ${user} shared: ${fname} -> http://${ip}:${HTTP_PORT}/${fname}" | \
+        socat - UDP-DATAGRAM:${BROADCAST_ADDR}:${CHAT_PORT},broadcast 2>/dev/null || true
+}
+
+# --- Game Server Sharing ---
+
+detect_local_servers() {
+    local servers="[]"
+    # Common game server ports to check
+    local -a ports=(27015 27016 27017 25565 7777 7778 30120 28015 28016)
+    local -a names=("Source/CS2" "Source Alt" "Source Alt2" "Minecraft" "Unreal/ARK" "Unreal Alt" "FiveM" "Rust" "Rust RCON")
+
+    for i in "${!ports[@]}"; do
+        if ss -tlnp 2>/dev/null | grep -q ":${ports[$i]} "; then
+            servers=$(echo "$servers" | jq --arg g "${names[$i]}" --arg p "${ports[$i]}" \
+                '. + [{"game": $g, "port": ($p | tonumber)}]')
+        fi
+    done
+    echo "$servers"
+}
+
+announce_server() {
+    local port="$1"
+    [[ -z "$port" ]] && die "Usage: $APP_NAME serve <port>"
+    [[ "$port" =~ ^[0-9]+$ ]] || die "Port must be a number"
+
+    local ip user
+    ip=$(get_lan_ip)
+    user=$(get_username)
+
+    # Store in servers file
+    local entry
+    entry=$(jq -n --arg u "$user" --arg i "$ip" --arg p "$port" \
+        '{"user": $u, "ip": $i, "port": ($p | tonumber), "announced": now | todate}')
+    jq --argjson e "$entry" '. + {($e.port | tostring): $e}' "$SERVERS_FILE" > "${SERVERS_FILE}.tmp" \
+        && mv "${SERVERS_FILE}.tmp" "$SERVERS_FILE"
+
+    # Broadcast
+    echo -n "[server] ${user} hosting game server at ${ip}:${port}" | \
+        socat - UDP-DATAGRAM:${BROADCAST_ADDR}:${CHAT_PORT},broadcast 2>/dev/null || true
+
+    ok "Announced game server on port ${BOLD}${port}${RESET} (${ip}:${port})"
+}
+
+# --- Voting ---
+
+cast_vote() {
+    local game="$1"
+    [[ -z "$game" ]] && die "Usage: $APP_NAME vote <game>"
+
+    local user
+    user=$(get_username)
+
+    # Update local votes
+    jq --arg g "$game" --arg u "$user" \
+        '.[$g] = ((.[$g] // []) + [$u] | unique)' "$VOTES_FILE" > "${VOTES_FILE}.tmp" \
+        && mv "${VOTES_FILE}.tmp" "$VOTES_FILE"
+
+    # Broadcast vote
+    echo -n "[vote] ${user} voted for: ${game}" | \
+        socat - UDP-DATAGRAM:${BROADCAST_ADDR}:${CHAT_PORT},broadcast 2>/dev/null || true
+
+    ok "Voted for ${BOLD}${game}${RESET}"
+    show_votes
+}
+
+show_votes() {
+    echo -e "\n${BOLD}${WHITE}--- Game Votes ---${RESET}"
+    if [[ ! -s "$VOTES_FILE" ]] || [[ "$(cat "$VOTES_FILE")" == "{}" ]]; then
+        echo -e "  ${DIM}No votes yet. Use: $APP_NAME vote <game>${RESET}"
+        return
+    fi
+    jq -r 'to_entries | sort_by(.value | length) | reverse[] |
+        "\(.value | length) vote(s): \(.key) — [\(.value | join(", "))]"' "$VOTES_FILE" | \
+        while read -r line; do
+            echo -e "  ${GREEN}${line}${RESET}"
+        done
+    echo ""
+}
+
+# --- Sync Check ---
+
+sync_check() {
+    echo -e "\n${BOLD}${WHITE}--- Sync Check ---${RESET}"
+    info "Checking local game installations..."
+
+    local checks=0 found=0
+
+    # Steam games
+    if command -v steam &>/dev/null; then
+        local steam_apps="${HOME}/.steam/steam/steamapps"
+        if [[ -d "$steam_apps" ]]; then
+            local count
+            count=$(find "$steam_apps" -maxdepth 1 -name "appmanifest_*.acf" 2>/dev/null | wc -l)
+            ok "Steam: ${count} games installed"
+            ((found += count))
+        fi
+    fi
+    ((checks++))
+
+    # Flatpak games
+    if command -v flatpak &>/dev/null; then
+        local fp_count
+        fp_count=$(flatpak list --app --columns=application 2>/dev/null | wc -l)
+        ok "Flatpak: ${fp_count} apps installed"
+        ((found += fp_count))
+    fi
+    ((checks++))
+
+    # Lutris
+    if command -v lutris &>/dev/null; then
+        ok "Lutris: installed"
+    fi
+    ((checks++))
+
+    # Heroic
+    if flatpak list 2>/dev/null | grep -qi heroic; then
+        ok "Heroic Launcher: installed"
+    fi
+    ((checks++))
+
+    # Proton/Wine
+    local proton_dir="${HOME}/.steam/steam/compatibilitytools.d"
+    if [[ -d "$proton_dir" ]]; then
+        local pcount
+        pcount=$(find "$proton_dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
+        ok "Custom Proton versions: ${pcount}"
+    fi
+    ((checks++))
+
+    echo ""
+    info "Broadcast your sync info to peers so they can compare."
+    local user ip
+    user=$(get_username)
+    ip=$(get_lan_ip)
+    echo -n "[sync] ${user}@${ip}: ${found} games, checks=${checks}" | \
+        socat - UDP-DATAGRAM:${BROADCAST_ADDR}:${CHAT_PORT},broadcast 2>/dev/null || true
+}
+
+# --- Dashboard ---
+
+show_dashboard() {
+    local ip gateway user
+    ip=$(get_lan_ip)
+    gateway=$(get_gateway)
+    user=$(get_username)
+
+    echo ""
+    echo -e "${BOLD}${CYAN}========================================${RESET}"
+    echo -e "${BOLD}${WHITE}    24HG — LAN Party Mode${RESET}"
+    echo -e "${BOLD}${CYAN}========================================${RESET}"
+    echo ""
+
+    # Network info
+    echo -e "${BOLD}${WHITE}Network${RESET}"
+    echo -e "  User:      ${GREEN}${user}${RESET}"
+    echo -e "  LAN IP:    ${GREEN}${ip}${RESET}"
+    echo -e "  Gateway:   ${DIM}${gateway}${RESET}"
+    echo -e "  Chat port: ${DIM}${CHAT_PORT}/udp${RESET}"
+    echo -e "  HTTP port: ${DIM}${HTTP_PORT}/tcp${RESET}"
+    echo ""
+
+    # Service status
+    echo -e "${BOLD}${WHITE}Services${RESET}"
+    for svc in avahi chat_listener http_server; do
+        local label
+        case "$svc" in
+            avahi)         label="Discovery (Avahi)" ;;
+            chat_listener) label="Chat listener" ;;
+            http_server)   label="File sharing" ;;
+        esac
+        if is_running "$svc"; then
+            echo -e "  ${GREEN}[running]${RESET} ${label}"
+        else
+            echo -e "  ${RED}[stopped]${RESET} ${label}"
+        fi
+    done
+    echo ""
+
+    # Peers
+    echo -e "${BOLD}${WHITE}Peers${RESET}"
+    if [[ -f "$PEERS_FILE" ]] && [[ "$(cat "$PEERS_FILE")" != "{}" ]]; then
+        jq -r 'to_entries[] | "  \(.key) — \(.value.ip // "?"):\(.value.port // "?")"' "$PEERS_FILE"
+    else
+        echo -e "  ${DIM}No peers discovered yet.${RESET}"
+    fi
+    echo ""
+
+    # Local game servers
+    echo -e "${BOLD}${WHITE}Local Game Servers${RESET}"
+    local detected
+    detected=$(detect_local_servers)
+    if [[ "$detected" != "[]" ]]; then
+        echo "$detected" | jq -r '.[] | "  \(.game) on port \(.port)"'
+    else
+        echo -e "  ${DIM}No game servers detected.${RESET}"
+    fi
+    echo ""
+
+    # Shared files
+    echo -e "${BOLD}${WHITE}Shared Files${RESET}"
+    local shared_count
+    shared_count=$(find "$SHARES_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l)
+    if [[ "$shared_count" -gt 0 ]]; then
+        find "$SHARES_DIR" -maxdepth 1 -type f -printf "  %f (%s bytes)\n" 2>/dev/null
+        info "Download at: http://${ip}:${HTTP_PORT}/"
+    else
+        echo -e "  ${DIM}No files shared. Use: $APP_NAME share <file>${RESET}"
+    fi
+    echo ""
+
+    # Votes
+    show_votes
+
+    # Recent chat
+    echo -e "${BOLD}${WHITE}Recent Chat${RESET}"
+    if [[ -s "$CHAT_LOG" ]]; then
+        tail -5 "$CHAT_LOG" | while read -r line; do
+            echo -e "  ${DIM}${line}${RESET}"
+        done
+    else
+        echo -e "  ${DIM}No messages yet. Use: $APP_NAME chat <message>${RESET}"
+    fi
+    echo ""
+    echo -e "${BOLD}${CYAN}========================================${RESET}"
+}
+
+# --- Start / Stop ---
+
+do_start() {
+    init_state
+
+    if is_running "avahi"; then
+        warn "LAN party mode is already running."
+        show_dashboard
+        return 0
+    fi
+
+    echo -e "\n${BOLD}${CYAN}Starting LAN Party Mode...${RESET}\n"
+
+    # Start discovery announcement
+    start_avahi_announce
+
+    # Start chat listener
+    start_chat_listener
+    ok "Chat listener active on port ${CHAT_PORT}/udp"
+
+    # Start file sharing HTTP server
+    start_file_server
+
+    # Run initial peer discovery
+    info "Scanning for other 24HG machines..."
+    discover_peers > /dev/null 2>&1 || true
+
+    # Open firewall ports if firewalld is available
+    if command -v firewall-cmd &>/dev/null; then
+        for p in "${CHAT_PORT}/udp" "${HTTP_PORT}/tcp" "${DISCOVERY_PORT}/tcp"; do
+            firewall-cmd --add-port="$p" --timeout=12h 2>/dev/null || true
+        done
+        ok "Firewall ports opened (12h timeout)"
+    fi
+
+    log "LAN party mode started by $(get_username)"
+    ok "LAN Party Mode is ${GREEN}ACTIVE${RESET}"
+    show_dashboard
+}
+
+do_stop() {
+    echo -e "\n${BOLD}${CYAN}Stopping LAN Party Mode...${RESET}\n"
+
+    kill_service "avahi"
+    kill_service "chat_listener"
+    kill_service "http_server"
+
+    # Close firewall ports
+    if command -v firewall-cmd &>/dev/null; then
+        for p in "${CHAT_PORT}/udp" "${HTTP_PORT}/tcp" "${DISCOVERY_PORT}/tcp"; do
+            firewall-cmd --remove-port="$p" 2>/dev/null || true
+        done
+    fi
+
+    log "LAN party mode stopped"
+    ok "LAN Party Mode ${RED}stopped${RESET}. See you next time!"
+}
+
+do_status() {
+    init_state
+    if is_running "avahi"; then
+        ok "LAN Party Mode is ${GREEN}ACTIVE${RESET}"
+    else
+        warn "LAN Party Mode is ${RED}INACTIVE${RESET}"
+    fi
+    show_dashboard
+}
+
+do_peers() {
+    init_state
+    echo -e "\n${BOLD}${WHITE}Discovering 24HG peers...${RESET}\n"
+    local result
+    result=$(discover_peers 2>/dev/null)
+    if [[ "$result" == "{}" ]]; then
+        warn "No peers found. Make sure other 24HG machines have LAN mode on."
+    else
+        echo "$result" | jq -r 'to_entries[] | "\(.key) — \(.value.ip) (seen: \(.value.seen))"' | \
+            while read -r line; do
+                echo -e "  ${GREEN}${line}${RESET}"
+            done
+    fi
+    echo ""
+}
+
+# --- Usage ---
+
+usage() {
+    echo -e "${BOLD}${WHITE}24HG LAN Mode${RESET} v${HG24_VERSION}"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET} $APP_NAME <command> [args]"
+    echo ""
+    echo -e "${BOLD}Commands:${RESET}"
+    echo -e "  ${GREEN}start${RESET}            Enable LAN party mode (announce + dashboard)"
+    echo -e "  ${GREEN}stop${RESET}             Disable LAN party mode"
+    echo -e "  ${GREEN}status${RESET}           Show LAN party status and connected peers"
+    echo -e "  ${GREEN}peers${RESET}            List discovered 24HG machines"
+    echo -e "  ${GREEN}share${RESET} <file>     Share a file with the party"
+    echo -e "  ${GREEN}chat${RESET} <message>   Send a chat message"
+    echo -e "  ${GREEN}vote${RESET} <game>      Vote for a game to play next"
+    echo -e "  ${GREEN}serve${RESET} <port>     Announce a game server"
+    echo -e "  ${GREEN}sync${RESET}             Check game/mod sync across peers"
+    echo -e "  ${GREEN}dashboard${RESET}        Show the full party dashboard"
+    echo ""
+    echo -e "${DIM}State stored in: ${STATE_DIR}${RESET}"
+}
+
+# --- Main ---
+
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        start)     do_start ;;
+        stop)      do_stop ;;
+        status)    do_status ;;
+        peers)     do_peers ;;
+        share)     init_state; share_file "${1:-}" ;;
+        chat)      init_state; send_chat "$@" ;;
+        vote)      init_state; cast_vote "${1:-}" ;;
+        serve)     init_state; announce_server "${1:-}" ;;
+        sync)      init_state; sync_check ;;
+        dashboard) init_state; show_dashboard ;;
+        help|-h|--help) usage ;;
+        "")        usage ;;
+        *)         die "Unknown command: $cmd (try '$APP_NAME help')" ;;
+    esac
+}
+
+main "$@"

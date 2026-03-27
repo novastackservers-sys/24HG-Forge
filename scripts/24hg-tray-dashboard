@@ -1,0 +1,479 @@
+#!/usr/bin/env bash
+# 24hg-tray-dashboard — System tray dashboard widget for 24HG Linux
+# Rich system tray showing FPS, temps, network, downloads, friend activity.
+# Usage: 24hg-tray-dashboard [once|json|widget|fps|temps|net]
+set -euo pipefail
+
+CONFIG_DIR="${HOME}/.config/24hg/tray-dashboard"
+CONFIG_FILE="${CONFIG_DIR}/config.conf"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/24hg/tray-dashboard"
+MANGOHUD_LOG_DIR="${HOME}/.local/share/MangoHud"
+HUB_API="https://hub.24hgaming.com/api"
+REFRESH_INTERVAL=2
+WIDGET_INTERVAL=5
+
+# --- Colors ---
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; MAGENTA='\033[0;35m'
+BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
+
+# --- Init ---
+init_config() {
+    mkdir -p "$CONFIG_DIR" "$CACHE_DIR"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        cat > "$CONFIG_FILE" <<'CONF'
+# 24hg-tray-dashboard configuration
+hub_api_key=""
+hub_username=""
+refresh_interval=2
+widget_interval=5
+# Servers to monitor (name:ip:port)
+servers="nomalands:91.99.37.118:27015 actioncity:91.99.37.118:27025"
+# Performance mode governor
+perf_governor="performance"
+normal_governor="powersave"
+# Thresholds (celsius)
+temp_warn=75
+temp_crit=90
+CONF
+    fi
+    # shellcheck disable=SC1090
+    [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE" 2>/dev/null
+    REFRESH_INTERVAL="${refresh_interval:-$REFRESH_INTERVAL}"
+    WIDGET_INTERVAL="${widget_interval:-$WIDGET_INTERVAL}"
+}
+
+# --- CPU Info ---
+get_cpu_temp() {
+    local temp=""
+    if [[ -f /sys/class/thermal/thermal_zone0/temp ]]; then
+        temp=$(awk '{printf "%.0f", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+    elif command -v sensors &>/dev/null; then
+        temp=$(sensors 2>/dev/null | awk '/Package id 0:|Tctl:/{gsub(/[^0-9.]/, "", $NF); printf "%.0f", $NF; exit}')
+    fi
+    echo "${temp:-N/A}"
+}
+
+get_cpu_usage() {
+    awk '/^cpu /{u=$2+$4; t=$2+$3+$4+$5+$6+$7+$8; printf "%.0f", (u/t)*100}' /proc/stat 2>/dev/null || echo "N/A"
+}
+
+# --- GPU Info ---
+get_gpu_temp() {
+    local temp=""
+    if command -v nvidia-smi &>/dev/null; then
+        temp=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)
+    elif [[ -f /sys/class/drm/card0/device/hwmon/hwmon*/temp1_input ]]; then
+        temp=$(awk '{printf "%.0f", $1/1000}' /sys/class/drm/card0/device/hwmon/hwmon*/temp1_input 2>/dev/null | head -1)
+    elif [[ -f /sys/class/drm/card1/device/hwmon/hwmon*/temp1_input ]]; then
+        temp=$(awk '{printf "%.0f", $1/1000}' /sys/class/drm/card1/device/hwmon/hwmon*/temp1_input 2>/dev/null | head -1)
+    fi
+    echo "${temp:-N/A}"
+}
+
+get_gpu_usage() {
+    local usage=""
+    if command -v nvidia-smi &>/dev/null; then
+        usage=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)
+    elif [[ -f /sys/class/drm/card0/device/gpu_busy_percent ]]; then
+        usage=$(cat /sys/class/drm/card0/device/gpu_busy_percent 2>/dev/null)
+    fi
+    echo "${usage:-N/A}"
+}
+
+# --- Memory & Disk ---
+get_ram_info() {
+    awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{u=t-a; printf "%.1f/%.1f", u/1048576, t/1048576}' /proc/meminfo 2>/dev/null || echo "N/A"
+}
+
+get_disk_info() {
+    df -h / 2>/dev/null | awk 'NR==2{printf "%s/%s (%s)", $3, $2, $5}' || echo "N/A"
+}
+
+# --- FPS / Gaming ---
+get_fps_info() {
+    local fps="N/A" game="None"
+    # Find most recent MangoHUD log
+    local log_file=""
+    if [[ -d "$MANGOHUD_LOG_DIR" ]]; then
+        log_file=$(find "$MANGOHUD_LOG_DIR" -name "*.csv" -newer "$CACHE_DIR/.fps_check" 2>/dev/null | head -1)
+        [[ -z "$log_file" ]] && log_file=$(ls -t "$MANGOHUD_LOG_DIR"/*.csv 2>/dev/null | head -1)
+    fi
+    if [[ -n "$log_file" && -f "$log_file" ]]; then
+        fps=$(tail -1 "$log_file" 2>/dev/null | awk -F',' '{print $1}' | grep -oE '[0-9]+' | head -1)
+        game=$(basename "$log_file" .csv | sed 's/_[0-9]*$//')
+    fi
+    # Fallback: check for running game via gamescope/steam
+    if [[ "$game" == "None" ]]; then
+        local pid
+        pid=$(pgrep -f "gamescope|gamemode" 2>/dev/null | head -1)
+        if [[ -n "$pid" ]]; then
+            game=$(ps -p "$pid" -o comm= 2>/dev/null || echo "Unknown")
+        fi
+    fi
+    touch "$CACHE_DIR/.fps_check" 2>/dev/null
+    echo "${fps:-N/A}|${game:-None}"
+}
+
+# --- Network ---
+get_net_speed() {
+    local iface rx1 tx1 rx2 tx2
+    iface=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+    [[ -z "$iface" ]] && { echo "N/A|N/A"; return; }
+    rx1=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
+    tx1=$(cat "/sys/class/net/$iface/statistics/tx_bytes" 2>/dev/null || echo 0)
+    sleep 1
+    rx2=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
+    tx2=$(cat "/sys/class/net/$iface/statistics/tx_bytes" 2>/dev/null || echo 0)
+    local down up
+    down=$(( (rx2 - rx1) / 1024 ))
+    up=$(( (tx2 - tx1) / 1024 ))
+    if (( down > 1024 )); then
+        printf "%.1f MB/s" "$(echo "scale=1; $down/1024" | bc 2>/dev/null || echo 0)"
+    else
+        printf "%d KB/s" "$down"
+    fi
+    printf "|"
+    if (( up > 1024 )); then
+        printf "%.1f MB/s" "$(echo "scale=1; $up/1024" | bc 2>/dev/null || echo 0)"
+    else
+        printf "%d KB/s" "$up"
+    fi
+    echo
+}
+
+get_ping() {
+    local target="${1:-91.99.37.118}"
+    ping -c 1 -W 2 "$target" 2>/dev/null | awk -F'/' '/rtt/{printf "%.0f", $5}' || echo "N/A"
+}
+
+# --- Downloads ---
+get_steam_downloads() {
+    local status="Idle"
+    if pgrep -f "steamwebhelper" &>/dev/null; then
+        local dl_file="${HOME}/.steam/steam/logs/content_log.txt"
+        if [[ -f "$dl_file" ]]; then
+            local last_dl
+            last_dl=$(grep -oP 'Update state.*?(\d+)%' "$dl_file" 2>/dev/null | tail -1)
+            [[ -n "$last_dl" ]] && status="$last_dl"
+        fi
+    fi
+    echo "$status"
+}
+
+get_flatpak_downloads() {
+    if pgrep -f "flatpak.*install\|flatpak.*update" &>/dev/null; then
+        echo "Active"
+    else
+        echo "Idle"
+    fi
+}
+
+# --- Hub API (friends, servers) ---
+get_friend_count() {
+    local key="${hub_api_key:-}"
+    [[ -z "$key" ]] && { echo "N/A"; return; }
+    local cached="$CACHE_DIR/friends.cache"
+    # Cache for 60 seconds
+    if [[ -f "$cached" ]] && (( $(date +%s) - $(stat -c %Y "$cached" 2>/dev/null || echo 0) < 60 )); then
+        cat "$cached"
+        return
+    fi
+    local count
+    count=$(curl -sf -m 5 -H "Authorization: Bearer $key" "$HUB_API/friends/online" 2>/dev/null | grep -oP '"count":\s*\K\d+' || echo "N/A")
+    echo "$count" > "$cached"
+    echo "$count"
+}
+
+get_server_status() {
+    local svrs="${servers:-}"
+    [[ -z "$svrs" ]] && { echo "N/A"; return; }
+    local cached="$CACHE_DIR/servers.cache"
+    if [[ -f "$cached" ]] && (( $(date +%s) - $(stat -c %Y "$cached" 2>/dev/null || echo 0) < 30 )); then
+        cat "$cached"
+        return
+    fi
+    local result=""
+    for entry in $svrs; do
+        IFS=':' read -r name ip port <<< "$entry"
+        local players
+        players=$(timeout 3 bash -c "echo -e '\xFF\xFF\xFF\xFF\x54Source Engine Query\x00' | nc -u -w2 $ip $port 2>/dev/null" | strings | grep -oP '\d+/\d+' | head -1)
+        result+="${name}:${players:-?/?} "
+    done
+    echo "${result% }" > "$cached"
+    echo "${result% }"
+}
+
+# --- Quick Actions ---
+toggle_performance_mode() {
+    local gov="${perf_governor:-performance}"
+    local norm="${normal_governor:-powersave}"
+    local current
+    current=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
+    if [[ "$current" == "$gov" ]]; then
+        echo "$norm" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor &>/dev/null
+        echo "Switched to $norm mode"
+    else
+        echo "$gov" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor &>/dev/null
+        echo "Switched to $gov mode"
+    fi
+}
+
+take_screenshot() {
+    local dir="${HOME}/Pictures/Screenshots"
+    mkdir -p "$dir"
+    local file="$dir/hg24_$(date +%Y%m%d_%H%M%S).png"
+    if command -v spectacle &>/dev/null; then
+        spectacle -b -n -o "$file" 2>/dev/null
+    elif command -v grim &>/dev/null; then
+        grim "$file" 2>/dev/null
+    elif command -v scrot &>/dev/null; then
+        scrot "$file" 2>/dev/null
+    else
+        echo "No screenshot tool found"; return 1
+    fi
+    echo "Saved: $file"
+}
+
+start_recording() {
+    if pgrep -f "gpu-screen-recorder|wf-recorder|ffmpeg.*x11grab" &>/dev/null; then
+        pkill -f "gpu-screen-recorder|wf-recorder" 2>/dev/null
+        echo "Recording stopped"
+    else
+        local dir="${HOME}/Videos/Recordings"
+        mkdir -p "$dir"
+        local file="$dir/hg24_$(date +%Y%m%d_%H%M%S).mp4"
+        if command -v gpu-screen-recorder &>/dev/null; then
+            gpu-screen-recorder -w screen -f 60 -o "$file" &>/dev/null &
+        elif command -v wf-recorder &>/dev/null; then
+            wf-recorder -f "$file" &>/dev/null &
+        else
+            echo "No recorder found"; return 1
+        fi
+        echo "Recording to: $file"
+    fi
+}
+
+# --- Temperature color helper ---
+temp_color() {
+    local t="$1" warn="${temp_warn:-75}" crit="${temp_crit:-90}"
+    [[ "$t" == "N/A" ]] && { printf "%b" "$DIM"; return; }
+    if (( t >= crit )); then printf "%b" "$RED"
+    elif (( t >= warn )); then printf "%b" "$YELLOW"
+    else printf "%b" "$GREEN"; fi
+}
+
+# --- Collect all stats ---
+collect_stats() {
+    local cpu_temp cpu_use gpu_temp gpu_use ram disk
+    local fps_raw fps game net_raw net_down net_up ping_ms
+    local steam_dl flatpak_dl friends srv_status governor
+
+    cpu_temp=$(get_cpu_temp)
+    cpu_use=$(get_cpu_usage)
+    gpu_temp=$(get_gpu_temp)
+    gpu_use=$(get_gpu_usage)
+    ram=$(get_ram_info)
+    disk=$(get_disk_info)
+
+    fps_raw=$(get_fps_info)
+    fps="${fps_raw%%|*}"
+    game="${fps_raw##*|}"
+
+    net_raw=$(get_net_speed)
+    net_down="${net_raw%%|*}"
+    net_up="${net_raw##*|}"
+    ping_ms=$(get_ping)
+
+    steam_dl=$(get_steam_downloads)
+    flatpak_dl=$(get_flatpak_downloads)
+    friends=$(get_friend_count)
+    srv_status=$(get_server_status)
+    governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "N/A")
+
+    # Export for rendering
+    STATS_CPU_TEMP="$cpu_temp"
+    STATS_CPU_USE="$cpu_use"
+    STATS_GPU_TEMP="$gpu_temp"
+    STATS_GPU_USE="$gpu_use"
+    STATS_RAM="$ram"
+    STATS_DISK="$disk"
+    STATS_FPS="$fps"
+    STATS_GAME="$game"
+    STATS_NET_DOWN="$net_down"
+    STATS_NET_UP="$net_up"
+    STATS_PING="$ping_ms"
+    STATS_STEAM_DL="$steam_dl"
+    STATS_FLATPAK_DL="$flatpak_dl"
+    STATS_FRIENDS="$friends"
+    STATS_SERVERS="$srv_status"
+    STATS_GOVERNOR="$governor"
+}
+
+# --- Terminal Dashboard ---
+render_terminal() {
+    local w=52
+    local border; border=$(printf '%.0s─' $(seq 1 $w))
+
+    printf "\033[2J\033[H"
+    printf "${BOLD}${CYAN}╭%s╮${RESET}\n" "$border"
+    printf "${BOLD}${CYAN}│${RESET}  ${BOLD}24HG Dashboard${RESET}%*s${BOLD}${CYAN}│${RESET}\n" $(( w - 22 )) ""
+    printf "${BOLD}${CYAN}├%s┤${RESET}\n" "$border"
+
+    # System
+    printf "${CYAN}│${RESET} ${BOLD}SYSTEM${RESET}%*s${CYAN}│${RESET}\n" $(( w - 7 )) ""
+    printf "${CYAN}│${RESET}  CPU: $(temp_color "$STATS_CPU_TEMP")%s°C${RESET} (%s%%)  GPU: $(temp_color "$STATS_GPU_TEMP")%s°C${RESET} (%s%%)" \
+        "$STATS_CPU_TEMP" "$STATS_CPU_USE" "$STATS_GPU_TEMP" "$STATS_GPU_USE"
+    printf "%*s${CYAN}│${RESET}\n" 2 ""
+    printf "${CYAN}│${RESET}  RAM: ${YELLOW}%s GB${RESET}  Disk: %s" "$STATS_RAM" "$STATS_DISK"
+    printf "%*s${CYAN}│${RESET}\n" 2 ""
+    printf "${CYAN}│${RESET}  Governor: ${MAGENTA}%s${RESET}%*s${CYAN}│${RESET}\n" "$STATS_GOVERNOR" $(( w - 13 - ${#STATS_GOVERNOR} )) ""
+
+    # Gaming
+    printf "${CYAN}├%s┤${RESET}\n" "$border"
+    printf "${CYAN}│${RESET} ${BOLD}GAMING${RESET}%*s${CYAN}│${RESET}\n" $(( w - 7 )) ""
+    local fps_c="$GREEN"; [[ "$STATS_FPS" == "N/A" ]] && fps_c="$DIM"
+    (( STATS_FPS < 30 )) 2>/dev/null && fps_c="$RED"
+    (( STATS_FPS >= 30 && STATS_FPS < 60 )) 2>/dev/null && fps_c="$YELLOW"
+    printf "${CYAN}│${RESET}  FPS: ${fps_c}%s${RESET}  Game: ${BOLD}%s${RESET}" "$STATS_FPS" "$STATS_GAME"
+    printf "%*s${CYAN}│${RESET}\n" 2 ""
+
+    # Network
+    printf "${CYAN}├%s┤${RESET}\n" "$border"
+    printf "${CYAN}│${RESET} ${BOLD}NETWORK${RESET}%*s${CYAN}│${RESET}\n" $(( w - 8 )) ""
+    printf "${CYAN}│${RESET}  Down: ${GREEN}%s${RESET}  Up: ${BLUE}%s${RESET}" "$STATS_NET_DOWN" "$STATS_NET_UP"
+    printf "%*s${CYAN}│${RESET}\n" 2 ""
+    local ping_c="$GREEN"
+    (( STATS_PING > 100 )) 2>/dev/null && ping_c="$YELLOW"
+    (( STATS_PING > 200 )) 2>/dev/null && ping_c="$RED"
+    printf "${CYAN}│${RESET}  Ping (24HG): ${ping_c}%s ms${RESET}" "$STATS_PING"
+    printf "%*s${CYAN}│${RESET}\n" $(( w - 17 - ${#STATS_PING} )) ""
+
+    # Downloads
+    printf "${CYAN}├%s┤${RESET}\n" "$border"
+    printf "${CYAN}│${RESET} ${BOLD}DOWNLOADS${RESET}%*s${CYAN}│${RESET}\n" $(( w - 10 )) ""
+    printf "${CYAN}│${RESET}  Steam: %s  Flatpak: %s" "$STATS_STEAM_DL" "$STATS_FLATPAK_DL"
+    printf "%*s${CYAN}│${RESET}\n" 2 ""
+
+    # Social
+    printf "${CYAN}├%s┤${RESET}\n" "$border"
+    printf "${CYAN}│${RESET} ${BOLD}SOCIAL${RESET}%*s${CYAN}│${RESET}\n" $(( w - 7 )) ""
+    printf "${CYAN}│${RESET}  Friends online: ${GREEN}%s${RESET}" "$STATS_FRIENDS"
+    printf "%*s${CYAN}│${RESET}\n" $(( w - 20 - ${#STATS_FRIENDS} )) ""
+    if [[ -n "$STATS_SERVERS" && "$STATS_SERVERS" != "N/A" ]]; then
+        printf "${CYAN}│${RESET}  Servers:"
+        for entry in $STATS_SERVERS; do
+            local name="${entry%%:*}" players="${entry#*:}"
+            printf " %s(${GREEN}%s${RESET})" "$name" "$players"
+        done
+        printf "%*s${CYAN}│${RESET}\n" 2 ""
+    fi
+
+    # Quick Actions
+    printf "${CYAN}├%s┤${RESET}\n" "$border"
+    printf "${CYAN}│${RESET} ${DIM}[P]erf mode  [S]creenshot  [R]ecord${RESET}%*s${CYAN}│${RESET}\n" $(( w - 37 )) ""
+    printf "${CYAN}╰%s╯${RESET}\n" "$border"
+    printf "${DIM}Refresh: %ss | q=quit${RESET}\n" "$REFRESH_INTERVAL"
+}
+
+# --- JSON Output ---
+render_json() {
+    cat <<ENDJSON
+{
+  "timestamp": "$(date -Iseconds)",
+  "system": {
+    "cpu_temp": "$STATS_CPU_TEMP",
+    "cpu_usage": "$STATS_CPU_USE",
+    "gpu_temp": "$STATS_GPU_TEMP",
+    "gpu_usage": "$STATS_GPU_USE",
+    "ram": "$STATS_RAM",
+    "disk": "$STATS_DISK",
+    "governor": "$STATS_GOVERNOR"
+  },
+  "gaming": {
+    "fps": "$STATS_FPS",
+    "game": "$STATS_GAME"
+  },
+  "network": {
+    "download": "$STATS_NET_DOWN",
+    "upload": "$STATS_NET_UP",
+    "ping_ms": "$STATS_PING"
+  },
+  "downloads": {
+    "steam": "$STATS_STEAM_DL",
+    "flatpak": "$STATS_FLATPAK_DL"
+  },
+  "social": {
+    "friends_online": "$STATS_FRIENDS",
+    "servers": "$STATS_SERVERS"
+  }
+}
+ENDJSON
+}
+
+# --- Subcommand renderers ---
+render_fps() {
+    local fps_raw game
+    fps_raw=$(get_fps_info)
+    printf "FPS: %s | Game: %s\n" "${fps_raw%%|*}" "${fps_raw##*|}"
+}
+
+render_temps() {
+    printf "CPU: %s°C | GPU: %s°C\n" "$(get_cpu_temp)" "$(get_gpu_temp)"
+}
+
+render_net() {
+    local net_raw
+    net_raw=$(get_net_speed)
+    printf "Down: %s | Up: %s | Ping: %sms\n" "${net_raw%%|*}" "${net_raw##*|}" "$(get_ping)"
+}
+
+# --- Main ---
+main() {
+    init_config
+    local mode="${1:-dashboard}"
+
+    case "$mode" in
+        once)
+            collect_stats
+            render_terminal
+            ;;
+        json)
+            collect_stats
+            render_json
+            ;;
+        widget)
+            while true; do
+                collect_stats
+                render_json
+                echo "---"
+                sleep "$WIDGET_INTERVAL"
+            done
+            ;;
+        fps)    render_fps ;;
+        temps)  render_temps ;;
+        net)    render_net ;;
+        perf)   toggle_performance_mode ;;
+        screenshot) take_screenshot ;;
+        record) start_recording ;;
+        dashboard|*)
+            trap 'printf "\033[?25h"; exit 0' INT TERM
+            printf "\033[?25l"  # Hide cursor
+            while true; do
+                collect_stats
+                render_terminal
+                # Non-blocking key read
+                if read -rsn1 -t "$REFRESH_INTERVAL" key 2>/dev/null; then
+                    case "$key" in
+                        q|Q) printf "\033[?25h"; exit 0 ;;
+                        p|P) toggle_performance_mode ;;
+                        s|S) take_screenshot ;;
+                        r|R) start_recording ;;
+                    esac
+                fi
+            done
+            ;;
+    esac
+}
+
+main "$@"

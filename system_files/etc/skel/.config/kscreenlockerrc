@@ -3,8 +3,8 @@ Theme=
 WallpaperPlugin=org.kde.image
 
 [Greeter][Wallpaper][org.kde.image][General]
-Image=/usr/share/forge/wallpapers/forge-dark.png
-PreviewImage=/usr/share/forge/wallpapers/forge-dark.png
+Image=/usr/share/24hg/wallpapers/24hg-dark.png
+PreviewImage=/usr/share/24hg/wallpapers/24hg-dark.png
 
 [Daemon]
 Autolock=true

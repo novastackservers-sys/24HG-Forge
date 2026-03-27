@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Peripherals
-Comment=Mouse, RGB & macro management
-Exec=/usr/bin/forge-peripherals
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=HardwareSettings;Game;
-Keywords=mouse;rgb;macro;keyboard;peripheral;

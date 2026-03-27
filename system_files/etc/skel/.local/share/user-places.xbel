@@ -68,7 +68,7 @@
    </metadata>
   </info>
  </bookmark>
- <bookmark href="file://$HOME/Videos/24HG Forge-Replays">
+ <bookmark href="file://$HOME/Videos/24HG-Replays">
   <title>Replay Clips</title>
   <info>
    <metadata owner="http://freedesktop.org">
@@ -81,7 +81,7 @@
    </metadata>
   </info>
  </bookmark>
- <bookmark href="file://$HOME/.forge/mods">
+ <bookmark href="file://$HOME/.24hg/mods">
   <title>Mods</title>
   <info>
    <metadata owner="http://freedesktop.org">
@@ -94,7 +94,7 @@
    </metadata>
   </info>
  </bookmark>
- <bookmark href="file://$HOME/.forge/saves">
+ <bookmark href="file://$HOME/.24hg/saves">
   <title>Game Saves</title>
   <info>
    <metadata owner="http://freedesktop.org">
@@ -111,7 +111,7 @@
   <title>24HG Hub</title>
   <info>
    <metadata owner="http://freedesktop.org">
-    <bookmark:icon name="forge-logo"/>
+    <bookmark:icon name="24hg-logo"/>
    </metadata>
    <metadata owner="http://www.kde.org">
     <ID>1710000009</ID>

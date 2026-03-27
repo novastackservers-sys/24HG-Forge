@@ -1,0 +1,12 @@
+[Unit]
+Description=24HG Power Plan — Auto-switch power modes on AC/battery
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/24hg-power-plan daemon
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

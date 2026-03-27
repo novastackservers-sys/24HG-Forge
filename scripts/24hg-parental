@@ -1,0 +1,1327 @@
+#!/usr/bin/env python3
+"""
+24HG Parental Controls — Manage gaming time, bedtimes, and content for child accounts.
+
+Provides a comprehensive parental control system for the 24HG Linux distro,
+enforcing time limits, bedtime hours, age-rating restrictions, and per-game allow/block
+lists. All configuration is root-owned and tamper-resistant.
+
+Commands:
+  setup                      Initial setup (set parent password, configure child account)
+  status                     Show current rules and time remaining today
+  rules                      Show/edit all rules
+  time-limit <hrs> [scope]   Set gaming time limit (daily|weekly, default: daily)
+  bedtime <start> <end>      Set bedtime hours (e.g., 22:00 07:00)
+  allow <game>               Allow a specific game
+  block <game>               Block a specific game
+  age-rating <max>           Set maximum age rating (ESRB or PEGI)
+  report [period]            Generate activity report (daily|weekly|monthly)
+  unlock <minutes>           Temporarily extend time (requires password)
+  disable                    Disable parental controls (requires password)
+  daemon                     Run the enforcement daemon (called by systemd)
+
+Config:   /etc/24hg/parental.conf (root:root 600)
+Rules:    /etc/24hg/parental-rules.json (root:root 600)
+Tracking: /var/lib/24hg/parental/<user>/
+"""
+
+import crypt
+import fcntl
+import getpass
+import hashlib
+import json
+import os
+import pwd
+import re
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, date
+from pathlib import Path
+
+# ── Paths ──
+
+CONF_FILE = "/etc/24hg/parental.conf"
+RULES_FILE = "/etc/24hg/parental-rules.json"
+TRACKING_DIR = "/var/lib/24hg/parental"
+LOG_FILE = "/var/log/24hg/parental.log"
+PID_FILE = "/run/24hg-parental.pid"
+STEAM_APPINFO = os.path.expanduser("~/.steam/steam/appcache/appinfo.vdf")
+
+# ── Age Rating Maps ──
+
+ESRB_ORDER = {"E": 0, "E10": 1, "T": 2, "M": 3, "AO": 4}
+PEGI_ORDER = {"3": 0, "7": 1, "12": 2, "16": 3, "18": 4}
+
+ESRB_LABELS = {0: "E (Everyone)", 1: "E10+ (Everyone 10+)", 2: "T (Teen)",
+               3: "M (Mature 17+)", 4: "AO (Adults Only)"}
+PEGI_LABELS = {0: "PEGI 3", 1: "PEGI 7", 2: "PEGI 12", 3: "PEGI 16", 4: "PEGI 18"}
+
+# ── ANSI Colors ──
+
+RED = "\033[91m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+BLUE = "\033[94m"
+CYAN = "\033[96m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+# ── Daemon state ──
+
+daemon_running = True
+WARNING_SHOWN = {}
+
+
+def handle_signal(sig, frame):
+    global daemon_running
+    daemon_running = False
+
+
+signal.signal(signal.SIGINT, handle_signal)
+signal.signal(signal.SIGTERM, handle_signal)
+
+
+# ── Utility Functions ──
+
+def log_event(message, level="INFO"):
+    """Append to the parental control log file."""
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(f"[{ts}] [{level}] {message}\n")
+    except PermissionError:
+        pass
+
+
+def require_root(action="this action"):
+    """Exit if not running as root."""
+    if os.geteuid() != 0:
+        print(f"{RED}Error:{RESET} {action} requires root privileges.")
+        print(f"  Run: {CYAN}sudo 24hg-parental ...{RESET}")
+        sys.exit(1)
+
+
+def hash_password(password):
+    """Create a bcrypt-style hash using crypt with SHA-512 as fallback."""
+    try:
+        import bcrypt
+        return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    except ImportError:
+        salt = crypt.mksalt(crypt.METHOD_SHA512)
+        return crypt.crypt(password, salt)
+
+
+def verify_password(password, hashed):
+    """Verify a password against its hash."""
+    try:
+        import bcrypt
+        if hashed.startswith("$2"):
+            return bcrypt.checkpw(password.encode(), hashed.encode())
+    except ImportError:
+        pass
+    return crypt.crypt(password, hashed) == hashed
+
+
+def prompt_password(prompt_text="Parent password: "):
+    """Prompt for password without echo."""
+    try:
+        return getpass.getpass(prompt_text)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(1)
+
+
+def authenticate():
+    """Require parent password authentication."""
+    conf = load_conf()
+    if not conf.get("password_hash"):
+        print(f"{RED}Error:{RESET} Parental controls not set up. Run: sudo 24hg-parental setup")
+        sys.exit(1)
+    pw = prompt_password()
+    if not verify_password(pw, conf["password_hash"]):
+        print(f"{RED}Authentication failed.{RESET}")
+        log_event("Failed authentication attempt", "WARN")
+        sys.exit(1)
+    return True
+
+
+def load_conf():
+    """Load the parental.conf file."""
+    if not os.path.exists(CONF_FILE):
+        return {}
+    try:
+        with open(CONF_FILE, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, PermissionError):
+        return {}
+
+
+def save_conf(conf):
+    """Save the parental.conf file with restricted permissions."""
+    os.makedirs(os.path.dirname(CONF_FILE), exist_ok=True)
+    with open(CONF_FILE, "w") as f:
+        json.dump(conf, f, indent=2)
+    os.chmod(CONF_FILE, 0o600)
+    os.chown(CONF_FILE, 0, 0)
+
+
+def load_rules():
+    """Load the parental-rules.json file."""
+    if not os.path.exists(RULES_FILE):
+        return default_rules()
+    try:
+        with open(RULES_FILE, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, PermissionError):
+        return default_rules()
+
+
+def save_rules(rules):
+    """Save the parental-rules.json file with restricted permissions."""
+    os.makedirs(os.path.dirname(RULES_FILE), exist_ok=True)
+    with open(RULES_FILE, "w") as f:
+        json.dump(rules, f, indent=2)
+    os.chmod(RULES_FILE, 0o600)
+    os.chown(RULES_FILE, 0, 0)
+
+
+def default_rules():
+    """Return default rules structure."""
+    return {
+        "enabled": True,
+        "child_users": [],
+        "time_limits": {
+            "daily_hours": 2.0,
+            "weekly_hours": 14.0
+        },
+        "bedtime": {
+            "enabled": False,
+            "start": "22:00",
+            "end": "07:00"
+        },
+        "age_rating": {
+            "system": "ESRB",
+            "max_rating": "M"
+        },
+        "allowed_games": [],
+        "blocked_games": [],
+        "unlock_extensions": []
+    }
+
+
+def get_tracking_dir(user):
+    """Get (and create) the tracking directory for a user."""
+    d = os.path.join(TRACKING_DIR, user)
+    os.makedirs(d, exist_ok=True)
+    os.chmod(d, 0o700)
+    os.chown(d, 0, 0)
+    return d
+
+
+def load_tracking(user, day=None):
+    """Load today's tracking data for a user."""
+    if day is None:
+        day = date.today().isoformat()
+    d = get_tracking_dir(user)
+    f = os.path.join(d, f"{day}.json")
+    if not os.path.exists(f):
+        return {"date": day, "sessions": [], "total_seconds": 0,
+                "blocked_attempts": [], "warnings_sent": 0}
+    try:
+        with open(f, "r") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, PermissionError):
+        return {"date": day, "sessions": [], "total_seconds": 0,
+                "blocked_attempts": [], "warnings_sent": 0}
+
+
+def save_tracking(user, data, day=None):
+    """Save tracking data for a user."""
+    if day is None:
+        day = date.today().isoformat()
+    d = get_tracking_dir(user)
+    f = os.path.join(d, f"{day}.json")
+    with open(f, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.chmod(f, 0o600)
+    os.chown(f, 0, 0)
+
+
+def get_weekly_total(user):
+    """Sum up playtime for the current week (Mon-Sun)."""
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    total = 0.0
+    for i in range(7):
+        day = (monday + timedelta(days=i)).isoformat()
+        data = load_tracking(user, day)
+        total += data.get("total_seconds", 0)
+    return total
+
+
+def format_duration(seconds):
+    """Format seconds into human-readable string."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def send_notification(user, title, body, urgency="normal"):
+    """Send a desktop notification to the specified user."""
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+        env = {
+            "DISPLAY": ":0",
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{uid}/bus",
+            "XDG_RUNTIME_DIR": f"/run/user/{uid}"
+        }
+        subprocess.run(
+            ["sudo", "-u", user, "notify-send",
+             f"--urgency={urgency}", "--app-name=24HG Parental Controls",
+             "--icon=preferences-system-parental-controls", title, body],
+            env={**os.environ, **env}, timeout=5,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        pass
+
+
+def get_game_processes():
+    """Scan /proc for running game processes. Returns {pid: (user, cmdline, exe_name)}."""
+    game_indicators = [
+        "steam", "proton", "wine", "wine64", "gamescope",
+        "lutris", "heroic", "legendary", "mangohud",
+        ".x86_64", ".x86", "UE4", "UnrealEngine", "Unity",
+        "dosbox", "retroarch", "dolphin-emu", "cemu", "yuzu",
+        "rpcs3", "pcsx2", "desmume", "mgba", "ppsspp"
+    ]
+    game_dirs = [
+        "/steamapps/", "/Games/", "/.wine/", "/lutris/",
+        "/heroic/", "/.local/share/Steam/"
+    ]
+    result = {}
+    try:
+        for pid_str in os.listdir("/proc"):
+            if not pid_str.isdigit():
+                continue
+            pid = int(pid_str)
+            try:
+                stat_path = f"/proc/{pid}/stat"
+                with open(stat_path, "r") as f:
+                    stat_data = f.read()
+                uid = os.stat(f"/proc/{pid}").st_uid
+                try:
+                    user = pwd.getpwuid(uid).pw_name
+                except KeyError:
+                    continue
+                cmdline_path = f"/proc/{pid}/cmdline"
+                with open(cmdline_path, "rb") as f:
+                    cmdline = f.read().decode("utf-8", errors="replace").replace("\x00", " ").strip()
+                if not cmdline:
+                    continue
+                exe_path = f"/proc/{pid}/exe"
+                try:
+                    exe_target = os.readlink(exe_path)
+                except (OSError, PermissionError):
+                    exe_target = ""
+                exe_name = os.path.basename(exe_target) if exe_target else cmdline.split()[0]
+                is_game = False
+                lower_cmd = cmdline.lower()
+                lower_exe = exe_target.lower()
+                for indicator in game_indicators:
+                    if indicator in lower_cmd or indicator in lower_exe:
+                        is_game = True
+                        break
+                if not is_game:
+                    for gd in game_dirs:
+                        if gd in exe_target or gd in cmdline:
+                            is_game = True
+                            break
+                if is_game:
+                    # Filter out launcher/helper processes
+                    skip = ["steam", "steamwebhelper", "steamcmd", "lutris",
+                            "heroic", "gamemoded", "mangohud", "gamescope",
+                            "wineserver", "winedevice.exe", "services.exe",
+                            "plugplay.exe", "svchost.exe", "explorer.exe",
+                            "rpcss.exe", "tabtip.exe", "conhost.exe"]
+                    base = os.path.basename(exe_name).lower().replace(".exe", "")
+                    if base not in skip:
+                        result[pid] = (user, cmdline, exe_name)
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+    except (FileNotFoundError, PermissionError):
+        pass
+    return result
+
+
+def extract_game_name(cmdline, exe_name):
+    """Try to extract a human-friendly game name from process info."""
+    name = os.path.basename(exe_name).replace(".exe", "").replace(".x86_64", "")
+    name = re.sub(r'[_\-]+', ' ', name).strip()
+    if name and len(name) > 2:
+        return name.title()
+    parts = cmdline.split()
+    if parts:
+        return os.path.basename(parts[0]).replace(".exe", "").title()
+    return "Unknown Game"
+
+
+def is_game_blocked(game_name, rules):
+    """Check if a game is blocked by name or pattern."""
+    lower = game_name.lower()
+    for blocked in rules.get("blocked_games", []):
+        if blocked.lower() in lower or lower in blocked.lower():
+            return True
+    allowed = rules.get("allowed_games", [])
+    if allowed:
+        for a in allowed:
+            if a.lower() in lower or lower in a.lower():
+                return False
+        # If allow-list is non-empty but game not in it, it's implicitly allowed
+        # (allow-list is additive, not exclusive — only block-list blocks)
+    return False
+
+
+def kill_game_process(pid, graceful_wait=30):
+    """Gracefully terminate a game process (SIGTERM then SIGKILL)."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+        log_event(f"Sent SIGTERM to PID {pid}")
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        log_event(f"Cannot kill PID {pid}: permission denied", "ERROR")
+        return
+    for _ in range(graceful_wait):
+        try:
+            os.kill(pid, 0)  # Check if alive
+            time.sleep(1)
+        except ProcessLookupError:
+            log_event(f"PID {pid} terminated gracefully")
+            return
+    try:
+        os.kill(pid, signal.SIGKILL)
+        log_event(f"Sent SIGKILL to PID {pid}")
+    except ProcessLookupError:
+        pass
+
+
+def is_bedtime(rules):
+    """Check if current time is within bedtime hours."""
+    bt = rules.get("bedtime", {})
+    if not bt.get("enabled", False):
+        return False
+    try:
+        now = datetime.now()
+        start_parts = bt["start"].split(":")
+        end_parts = bt["end"].split(":")
+        start_h, start_m = int(start_parts[0]), int(start_parts[1])
+        end_h, end_m = int(end_parts[0]), int(end_parts[1])
+        current_minutes = now.hour * 60 + now.minute
+        start_minutes = start_h * 60 + start_m
+        end_minutes = end_h * 60 + end_m
+        if start_minutes > end_minutes:
+            # Spans midnight (e.g., 22:00 - 07:00)
+            return current_minutes >= start_minutes or current_minutes < end_minutes
+        else:
+            return start_minutes <= current_minutes < end_minutes
+    except (ValueError, KeyError):
+        return False
+
+
+def check_time_extensions(rules):
+    """Return total extension minutes still valid for today."""
+    today = date.today().isoformat()
+    total = 0
+    for ext in rules.get("unlock_extensions", []):
+        if ext.get("date") == today:
+            expires = ext.get("expires")
+            if expires:
+                exp_dt = datetime.fromisoformat(expires)
+                if datetime.now() < exp_dt:
+                    total += ext.get("minutes", 0)
+            else:
+                total += ext.get("minutes", 0)
+    return total
+
+
+def get_remaining_time(user, rules):
+    """Calculate remaining gaming time in seconds for today."""
+    tracking = load_tracking(user)
+    used = tracking.get("total_seconds", 0)
+    daily_limit = rules.get("time_limits", {}).get("daily_hours", 2.0) * 3600
+    extensions = check_time_extensions(rules) * 60
+    remaining = (daily_limit + extensions) - used
+    return max(0, remaining)
+
+
+def get_steam_game_rating(app_id):
+    """Try to get age rating from Steam appinfo cache. Returns (system, rating) or None."""
+    # Simplified — full VDF binary parsing is complex; we check local metadata
+    metadata_paths = [
+        os.path.expanduser(f"~/.steam/steam/steamapps/common/*/steam_appid.txt"),
+        f"/var/lib/24hg/parental/steam_ratings.json"
+    ]
+    ratings_file = "/var/lib/24hg/parental/steam_ratings.json"
+    if os.path.exists(ratings_file):
+        try:
+            with open(ratings_file, "r") as f:
+                ratings = json.load(f)
+            if str(app_id) in ratings:
+                r = ratings[str(app_id)]
+                return (r.get("system", "ESRB"), r.get("rating", "M"))
+        except (json.JSONDecodeError, PermissionError):
+            pass
+    return None
+
+
+def check_age_rating_violation(game_name, rules):
+    """Check if a game violates the age rating restriction."""
+    rating_conf = rules.get("age_rating", {})
+    if not rating_conf.get("max_rating"):
+        return False
+    system = rating_conf.get("system", "ESRB").upper()
+    max_rating = rating_conf["max_rating"].upper()
+    if system == "ESRB":
+        order = ESRB_ORDER
+    elif system == "PEGI":
+        order = PEGI_ORDER
+    else:
+        return False
+    max_level = order.get(max_rating)
+    if max_level is None:
+        return False
+    # Check the steam ratings cache
+    ratings_file = os.path.join(TRACKING_DIR, "steam_ratings.json")
+    if os.path.exists(ratings_file):
+        try:
+            with open(ratings_file, "r") as f:
+                ratings = json.load(f)
+            for app_id, info in ratings.items():
+                if game_name.lower() in info.get("name", "").lower():
+                    game_system = info.get("system", system)
+                    game_rating = info.get("rating", "")
+                    if game_system.upper() == system:
+                        game_level = order.get(game_rating.upper())
+                        if game_level is not None and game_level > max_level:
+                            return True
+        except (json.JSONDecodeError, PermissionError):
+            pass
+    return False
+
+
+# ── Command Handlers ──
+
+def cmd_setup():
+    """Initial setup: set parent password and configure child account."""
+    require_root("Setup")
+    print(f"\n{BOLD}{CYAN}24HG Parental Controls — Setup{RESET}\n")
+
+    conf = load_conf()
+    if conf.get("password_hash"):
+        print(f"{YELLOW}Parental controls already configured.{RESET}")
+        print("Re-running setup will overwrite existing password.\n")
+        answer = input("Continue? [y/N] ").strip().lower()
+        if answer != "y":
+            print("Aborted.")
+            return
+
+    # Set parent password
+    print(f"{BOLD}Step 1:{RESET} Set a parent password")
+    print("  This password is required to change rules or disable controls.\n")
+    while True:
+        pw1 = prompt_password("  New parent password: ")
+        if len(pw1) < 6:
+            print(f"  {RED}Password must be at least 6 characters.{RESET}")
+            continue
+        pw2 = prompt_password("  Confirm password: ")
+        if pw1 != pw2:
+            print(f"  {RED}Passwords do not match.{RESET}")
+            continue
+        break
+
+    conf["password_hash"] = hash_password(pw1)
+    conf["setup_date"] = datetime.now().isoformat()
+
+    # Configure child account
+    print(f"\n{BOLD}Step 2:{RESET} Configure child account(s)")
+    print("  Enter the Linux username(s) to apply parental controls to.")
+    print("  (Comma-separated for multiple users)\n")
+
+    users_input = input("  Child username(s): ").strip()
+    if not users_input:
+        print(f"  {RED}No users specified. Aborting.{RESET}")
+        return
+
+    child_users = [u.strip() for u in users_input.split(",") if u.strip()]
+    valid_users = []
+    for u in child_users:
+        try:
+            pwd.getpwnam(u)
+            valid_users.append(u)
+        except KeyError:
+            print(f"  {YELLOW}Warning: User '{u}' does not exist, skipping.{RESET}")
+
+    if not valid_users:
+        print(f"  {RED}No valid users found. Aborting.{RESET}")
+        return
+
+    conf["child_users"] = valid_users
+    save_conf(conf)
+
+    # Initialize rules with defaults
+    rules = load_rules()
+    rules["child_users"] = valid_users
+    rules["enabled"] = True
+    save_rules(rules)
+
+    # Create tracking directories
+    for u in valid_users:
+        get_tracking_dir(u)
+
+    # Create log directory
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+    log_event(f"Parental controls set up for users: {', '.join(valid_users)}")
+
+    print(f"\n{GREEN}Parental controls configured!{RESET}")
+    print(f"  Users: {', '.join(valid_users)}")
+    print(f"  Default daily limit: 2 hours")
+    print(f"  Bedtime: disabled (set with: sudo 24hg-parental bedtime 22:00 07:00)")
+    print(f"  Age rating: ESRB M (Mature)")
+    print(f"\n  Enable the daemon: {CYAN}sudo systemctl enable --now 24hg-parental{RESET}")
+    print()
+
+
+def cmd_status():
+    """Show current rules and time remaining for today."""
+    rules = load_rules()
+    conf = load_conf()
+
+    if not rules.get("enabled"):
+        print(f"{DIM}Parental controls are disabled.{RESET}")
+        return
+
+    print(f"\n{BOLD}{CYAN}24HG Parental Controls — Status{RESET}\n")
+
+    # Determine which user to show status for
+    current_user = os.environ.get("SUDO_USER", os.environ.get("USER", ""))
+    child_users = rules.get("child_users", conf.get("child_users", []))
+
+    if current_user in child_users:
+        users_to_show = [current_user]
+    else:
+        users_to_show = child_users
+
+    # Show rules summary
+    tl = rules.get("time_limits", {})
+    print(f"  {BOLD}Time Limits:{RESET}")
+    print(f"    Daily:  {tl.get('daily_hours', 2.0)} hours")
+    print(f"    Weekly: {tl.get('weekly_hours', 14.0)} hours")
+
+    bt = rules.get("bedtime", {})
+    if bt.get("enabled"):
+        status = f"{bt['start']} - {bt['end']}"
+        if is_bedtime(rules):
+            status += f"  {RED}[ACTIVE]{RESET}"
+        print(f"  {BOLD}Bedtime:{RESET} {status}")
+    else:
+        print(f"  {BOLD}Bedtime:{RESET} {DIM}not set{RESET}")
+
+    ar = rules.get("age_rating", {})
+    sys_name = ar.get("system", "ESRB")
+    max_r = ar.get("max_rating", "M")
+    if sys_name == "ESRB":
+        label = ESRB_LABELS.get(ESRB_ORDER.get(max_r, 3), max_r)
+    else:
+        label = PEGI_LABELS.get(PEGI_ORDER.get(max_r, 3), max_r)
+    print(f"  {BOLD}Age Rating:{RESET} {sys_name} max {label}")
+
+    blocked = rules.get("blocked_games", [])
+    if blocked:
+        print(f"  {BOLD}Blocked Games:{RESET} {', '.join(blocked)}")
+
+    allowed = rules.get("allowed_games", [])
+    if allowed:
+        print(f"  {BOLD}Allowed Games:{RESET} {', '.join(allowed)}")
+
+    # Per-user status
+    for user in users_to_show:
+        print(f"\n  {BOLD}User: {CYAN}{user}{RESET}")
+        tracking = load_tracking(user)
+        used = tracking.get("total_seconds", 0)
+        daily_limit = tl.get("daily_hours", 2.0) * 3600
+        extensions = check_time_extensions(rules) * 60
+        remaining = max(0, (daily_limit + extensions) - used)
+        weekly_used = get_weekly_total(user)
+        weekly_limit = tl.get("weekly_hours", 14.0) * 3600
+
+        print(f"    Today:  {format_duration(used)} used / {format_duration(daily_limit)} limit", end="")
+        if extensions > 0:
+            print(f" (+{int(extensions/60)}m extension)", end="")
+        print()
+
+        if remaining > 0:
+            color = GREEN if remaining > 1800 else YELLOW if remaining > 600 else RED
+            print(f"    Remaining: {color}{format_duration(remaining)}{RESET}")
+        else:
+            print(f"    Remaining: {RED}0 (limit reached){RESET}")
+
+        print(f"    Week:   {format_duration(weekly_used)} / {format_duration(weekly_limit)}")
+
+        sessions = tracking.get("sessions", [])
+        if sessions:
+            active = [s for s in sessions if s.get("active")]
+            if active:
+                print(f"    {GREEN}Currently playing:{RESET}", end="")
+                for s in active:
+                    print(f" {s.get('game', 'Unknown')}", end="")
+                print()
+
+    print()
+
+
+def cmd_rules():
+    """Show or interactively edit all rules."""
+    rules = load_rules()
+
+    print(f"\n{BOLD}{CYAN}24HG Parental Controls — Rules{RESET}\n")
+    print(f"  {BOLD}Status:{RESET} {'Enabled' if rules.get('enabled') else 'Disabled'}")
+    print(f"  {BOLD}Child Users:{RESET} {', '.join(rules.get('child_users', []))}")
+    print()
+
+    tl = rules.get("time_limits", {})
+    print(f"  {BOLD}Time Limits:{RESET}")
+    print(f"    daily_hours:  {tl.get('daily_hours', 2.0)}")
+    print(f"    weekly_hours: {tl.get('weekly_hours', 14.0)}")
+    print()
+
+    bt = rules.get("bedtime", {})
+    print(f"  {BOLD}Bedtime:{RESET}")
+    print(f"    enabled: {bt.get('enabled', False)}")
+    print(f"    start:   {bt.get('start', 'not set')}")
+    print(f"    end:     {bt.get('end', 'not set')}")
+    print()
+
+    ar = rules.get("age_rating", {})
+    print(f"  {BOLD}Age Rating:{RESET}")
+    print(f"    system:     {ar.get('system', 'ESRB')}")
+    print(f"    max_rating: {ar.get('max_rating', 'M')}")
+    print()
+
+    print(f"  {BOLD}Blocked Games:{RESET} {rules.get('blocked_games', [])}")
+    print(f"  {BOLD}Allowed Games:{RESET} {rules.get('allowed_games', [])}")
+    print()
+    print(f"  {DIM}Config file: {RULES_FILE}{RESET}")
+    print()
+
+
+def cmd_time_limit(args):
+    """Set gaming time limit."""
+    require_root("Changing time limits")
+    authenticate()
+
+    if not args:
+        print(f"{RED}Usage:{RESET} 24hg-parental time-limit <hours> [daily|weekly]")
+        sys.exit(1)
+
+    try:
+        hours = float(args[0])
+    except ValueError:
+        print(f"{RED}Error:{RESET} Invalid number of hours: {args[0]}")
+        sys.exit(1)
+
+    if hours <= 0 or hours > 24:
+        print(f"{RED}Error:{RESET} Hours must be between 0.1 and 24.")
+        sys.exit(1)
+
+    scope = args[1].lower() if len(args) > 1 else "daily"
+    if scope not in ("daily", "weekly"):
+        print(f"{RED}Error:{RESET} Scope must be 'daily' or 'weekly'.")
+        sys.exit(1)
+
+    rules = load_rules()
+    if scope == "daily":
+        rules["time_limits"]["daily_hours"] = hours
+        print(f"{GREEN}Daily time limit set to {hours} hours.{RESET}")
+    else:
+        rules["time_limits"]["weekly_hours"] = hours
+        print(f"{GREEN}Weekly time limit set to {hours} hours.{RESET}")
+
+    save_rules(rules)
+    log_event(f"Time limit changed: {scope}={hours}h")
+
+
+def cmd_bedtime(args):
+    """Set bedtime hours."""
+    require_root("Changing bedtime")
+    authenticate()
+
+    if len(args) < 2:
+        print(f"{RED}Usage:{RESET} 24hg-parental bedtime <start> <end>")
+        print(f"  Example: 24hg-parental bedtime 22:00 07:00")
+        sys.exit(1)
+
+    time_re = re.compile(r'^([01]?\d|2[0-3]):[0-5]\d$')
+    if not time_re.match(args[0]) or not time_re.match(args[1]):
+        print(f"{RED}Error:{RESET} Invalid time format. Use HH:MM (24-hour).")
+        sys.exit(1)
+
+    rules = load_rules()
+    rules["bedtime"] = {
+        "enabled": True,
+        "start": args[0],
+        "end": args[1]
+    }
+    save_rules(rules)
+    log_event(f"Bedtime set: {args[0]} - {args[1]}")
+    print(f"{GREEN}Bedtime set: {args[0]} to {args[1]}{RESET}")
+    print(f"  Games will be blocked during these hours.")
+
+
+def cmd_allow(args):
+    """Allow a specific game."""
+    require_root("Modifying game lists")
+    authenticate()
+
+    if not args:
+        print(f"{RED}Usage:{RESET} 24hg-parental allow <game name>")
+        sys.exit(1)
+
+    game = " ".join(args)
+    rules = load_rules()
+
+    # Remove from blocked list if present
+    rules["blocked_games"] = [g for g in rules.get("blocked_games", [])
+                              if g.lower() != game.lower()]
+
+    # Add to allowed list if not already there
+    if game.lower() not in [g.lower() for g in rules.get("allowed_games", [])]:
+        rules.setdefault("allowed_games", []).append(game)
+
+    save_rules(rules)
+    log_event(f"Game allowed: {game}")
+    print(f"{GREEN}'{game}' is now allowed.{RESET}")
+
+
+def cmd_block(args):
+    """Block a specific game."""
+    require_root("Modifying game lists")
+    authenticate()
+
+    if not args:
+        print(f"{RED}Usage:{RESET} 24hg-parental block <game name>")
+        sys.exit(1)
+
+    game = " ".join(args)
+    rules = load_rules()
+
+    # Remove from allowed list if present
+    rules["allowed_games"] = [g for g in rules.get("allowed_games", [])
+                              if g.lower() != game.lower()]
+
+    # Add to blocked list if not already there
+    if game.lower() not in [g.lower() for g in rules.get("blocked_games", [])]:
+        rules.setdefault("blocked_games", []).append(game)
+
+    save_rules(rules)
+    log_event(f"Game blocked: {game}")
+    print(f"{RED}'{game}' is now blocked.{RESET}")
+
+
+def cmd_age_rating(args):
+    """Set maximum age rating."""
+    require_root("Changing age rating")
+    authenticate()
+
+    if not args:
+        print(f"{RED}Usage:{RESET} 24hg-parental age-rating <max>")
+        print(f"  ESRB: E, E10, T, M, AO")
+        print(f"  PEGI: 3, 7, 12, 16, 18")
+        sys.exit(1)
+
+    rating = args[0].upper()
+
+    if rating in ESRB_ORDER:
+        system = "ESRB"
+        label = ESRB_LABELS[ESRB_ORDER[rating]]
+    elif rating in PEGI_ORDER:
+        system = "PEGI"
+        label = PEGI_LABELS[PEGI_ORDER[rating]]
+    else:
+        print(f"{RED}Error:{RESET} Unknown rating '{args[0]}'.")
+        print(f"  ESRB: E, E10, T, M, AO")
+        print(f"  PEGI: 3, 7, 12, 16, 18")
+        sys.exit(1)
+
+    rules = load_rules()
+    rules["age_rating"] = {"system": system, "max_rating": rating}
+    save_rules(rules)
+    log_event(f"Age rating changed: {system} {rating}")
+    print(f"{GREEN}Max age rating set to {label} ({system}).{RESET}")
+
+
+def cmd_unlock(args):
+    """Temporarily extend gaming time."""
+    require_root("Unlocking extra time")
+    authenticate()
+
+    if not args:
+        print(f"{RED}Usage:{RESET} 24hg-parental unlock <minutes>")
+        sys.exit(1)
+
+    try:
+        minutes = int(args[0])
+    except ValueError:
+        print(f"{RED}Error:{RESET} Invalid number of minutes: {args[0]}")
+        sys.exit(1)
+
+    if minutes <= 0 or minutes > 480:
+        print(f"{RED}Error:{RESET} Minutes must be between 1 and 480.")
+        sys.exit(1)
+
+    rules = load_rules()
+    extension = {
+        "date": date.today().isoformat(),
+        "minutes": minutes,
+        "granted_at": datetime.now().isoformat(),
+        "expires": (datetime.now() + timedelta(minutes=minutes + 60)).isoformat()
+    }
+    rules.setdefault("unlock_extensions", []).append(extension)
+
+    # Clean up old extensions (not today)
+    today = date.today().isoformat()
+    rules["unlock_extensions"] = [e for e in rules["unlock_extensions"]
+                                  if e.get("date") == today]
+
+    save_rules(rules)
+    log_event(f"Time extension granted: {minutes} minutes")
+    print(f"{GREEN}Granted {minutes} minutes of extra gaming time for today.{RESET}")
+
+
+def cmd_disable():
+    """Disable parental controls (requires password)."""
+    require_root("Disabling parental controls")
+    authenticate()
+
+    rules = load_rules()
+    rules["enabled"] = False
+    save_rules(rules)
+    log_event("Parental controls DISABLED")
+    print(f"{YELLOW}Parental controls disabled.{RESET}")
+    print(f"  To re-enable: edit {RULES_FILE} and set enabled=true,")
+    print(f"  or run setup again.")
+
+
+def cmd_report(args):
+    """Generate an activity report."""
+    rules = load_rules()
+    conf = load_conf()
+    period = args[0].lower() if args else "daily"
+
+    if period not in ("daily", "weekly", "monthly"):
+        print(f"{RED}Usage:{RESET} 24hg-parental report [daily|weekly|monthly]")
+        sys.exit(1)
+
+    child_users = rules.get("child_users", conf.get("child_users", []))
+    if not child_users:
+        print(f"{YELLOW}No child users configured.{RESET}")
+        return
+
+    today = date.today()
+    if period == "daily":
+        days = [today]
+        title = f"Daily Report — {today.isoformat()}"
+    elif period == "weekly":
+        monday = today - timedelta(days=today.weekday())
+        days = [monday + timedelta(days=i) for i in range(7)]
+        title = f"Weekly Report — {monday.isoformat()} to {(monday + timedelta(days=6)).isoformat()}"
+    else:
+        first = today.replace(day=1)
+        days = []
+        d = first
+        while d.month == today.month:
+            days.append(d)
+            d += timedelta(days=1)
+        title = f"Monthly Report — {today.strftime('%B %Y')}"
+
+    print(f"\n{BOLD}{CYAN}{title}{RESET}\n")
+
+    for user in child_users:
+        print(f"  {BOLD}User: {CYAN}{user}{RESET}\n")
+
+        # Collect data for all days
+        all_sessions = []
+        all_blocked = []
+        daily_totals = {}
+        total_seconds = 0
+
+        for d in days:
+            day_str = d.isoformat()
+            tracking = load_tracking(user, day_str)
+            secs = tracking.get("total_seconds", 0)
+            daily_totals[day_str] = secs
+            total_seconds += secs
+            all_sessions.extend(tracking.get("sessions", []))
+            all_blocked.extend(tracking.get("blocked_attempts", []))
+
+        # Playtime bar chart
+        print(f"  {BOLD}Playtime:{RESET}")
+        daily_limit = rules.get("time_limits", {}).get("daily_hours", 2.0)
+        max_bar = 40
+        max_secs = daily_limit * 3600
+
+        for d in days:
+            day_str = d.isoformat()
+            secs = daily_totals.get(day_str, 0)
+            bar_len = int((secs / max_secs) * max_bar) if max_secs > 0 else 0
+            bar_len = min(bar_len, max_bar)
+            bar = "#" * bar_len
+            day_label = d.strftime("%a %m/%d")
+            dur = format_duration(secs) if secs > 0 else "--"
+
+            if secs > max_secs:
+                color = RED
+            elif secs > max_secs * 0.8:
+                color = YELLOW
+            else:
+                color = GREEN
+
+            print(f"    {day_label:>10}  {color}{bar:<{max_bar}}{RESET}  {dur}")
+
+        print(f"\n    {'Total':>10}  {format_duration(total_seconds)}")
+        print()
+
+        # Games played
+        game_times = {}
+        for session in all_sessions:
+            game = session.get("game", "Unknown")
+            dur = session.get("duration", 0)
+            game_times[game] = game_times.get(game, 0) + dur
+
+        if game_times:
+            print(f"  {BOLD}Games Played:{RESET}")
+            sorted_games = sorted(game_times.items(), key=lambda x: x[1], reverse=True)
+            for game, secs in sorted_games:
+                print(f"    {game:<30} {format_duration(secs)}")
+            print()
+
+        # Blocked attempts
+        if all_blocked:
+            print(f"  {BOLD}Blocked Attempts:{RESET} ({len(all_blocked)} total)")
+            for attempt in all_blocked[-10:]:  # Show last 10
+                ts = attempt.get("time", "unknown")
+                game = attempt.get("game", "unknown")
+                reason = attempt.get("reason", "blocked")
+                print(f"    {ts}  {RED}{game}{RESET} — {reason}")
+            if len(all_blocked) > 10:
+                print(f"    {DIM}... and {len(all_blocked) - 10} more{RESET}")
+            print()
+        else:
+            print(f"  {BOLD}Blocked Attempts:{RESET} {DIM}none{RESET}")
+            print()
+
+        # Time limit usage
+        tl = rules.get("time_limits", {})
+        daily_hrs = tl.get("daily_hours", 2.0)
+        weekly_hrs = tl.get("weekly_hours", 14.0)
+        weekly_total = sum(daily_totals.values())
+
+        print(f"  {BOLD}Time Limit Usage:{RESET}")
+        if period == "daily":
+            pct = (total_seconds / (daily_hrs * 3600)) * 100 if daily_hrs > 0 else 0
+            print(f"    Used: {format_duration(total_seconds)} / {daily_hrs}h ({pct:.0f}%)")
+        else:
+            pct = (weekly_total / (weekly_hrs * 3600)) * 100 if weekly_hrs > 0 else 0
+            print(f"    Used: {format_duration(weekly_total)} / {weekly_hrs}h ({pct:.0f}%)")
+
+        # Bedtime violations
+        violations = [b for b in all_blocked if b.get("reason") == "bedtime"]
+        if violations:
+            print(f"\n  {BOLD}Bedtime Violations:{RESET} {RED}{len(violations)}{RESET}")
+            for v in violations[-5:]:
+                print(f"    {v.get('time', 'unknown')} — {v.get('game', 'unknown')}")
+        else:
+            print(f"\n  {BOLD}Bedtime Violations:{RESET} {DIM}none{RESET}")
+
+        print()
+
+
+# ── Daemon ──
+
+def cmd_daemon():
+    """Run the enforcement daemon. Intended to be called by systemd."""
+    require_root("Running daemon")
+
+    # Write PID file
+    os.makedirs(os.path.dirname(PID_FILE), exist_ok=True)
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+    log_event("Parental controls daemon started")
+    print(f"24HG parental controls daemon started (PID {os.getpid()})")
+
+    active_sessions = {}  # pid -> {user, game, start_time}
+    poll_interval = 15  # seconds
+
+    try:
+        while daemon_running:
+            rules = load_rules()
+
+            if not rules.get("enabled"):
+                time.sleep(poll_interval)
+                continue
+
+            child_users = rules.get("child_users", [])
+            if not child_users:
+                time.sleep(poll_interval)
+                continue
+
+            # Scan for game processes
+            game_procs = get_game_processes()
+            current_pids = set()
+
+            for pid, (user, cmdline, exe_name) in game_procs.items():
+                if user not in child_users:
+                    continue
+
+                current_pids.add(pid)
+                game_name = extract_game_name(cmdline, exe_name)
+
+                # Track new sessions
+                if pid not in active_sessions:
+                    active_sessions[pid] = {
+                        "user": user,
+                        "game": game_name,
+                        "start_time": time.time(),
+                        "exe": exe_name
+                    }
+                    log_event(f"Game session started: {game_name} (PID {pid}, user {user})")
+
+                # --- Enforcement checks ---
+
+                # 1. Is this game blocked?
+                if is_game_blocked(game_name, rules):
+                    log_event(f"Blocked game detected: {game_name} (PID {pid}, user {user})")
+                    send_notification(user, "Game Blocked",
+                                      f"'{game_name}' is not allowed by parental controls.",
+                                      urgency="critical")
+                    record_blocked_attempt(user, game_name, "blocked game")
+                    kill_game_process(pid, graceful_wait=5)
+                    active_sessions.pop(pid, None)
+                    continue
+
+                # 2. Age rating violation?
+                if check_age_rating_violation(game_name, rules):
+                    log_event(f"Age rating violation: {game_name} (PID {pid}, user {user})")
+                    ar = rules.get("age_rating", {})
+                    send_notification(user, "Age Rating Restriction",
+                                      f"'{game_name}' exceeds the {ar['system']} {ar['max_rating']} age limit.",
+                                      urgency="critical")
+                    record_blocked_attempt(user, game_name, "age rating")
+                    kill_game_process(pid, graceful_wait=5)
+                    active_sessions.pop(pid, None)
+                    continue
+
+                # 3. Is it bedtime?
+                if is_bedtime(rules):
+                    bt = rules.get("bedtime", {})
+                    log_event(f"Bedtime enforcement: {game_name} (PID {pid}, user {user})")
+                    send_notification(user, "Bedtime!",
+                                      f"It's bedtime ({bt['start']} - {bt['end']}). Games are closing.",
+                                      urgency="critical")
+                    record_blocked_attempt(user, game_name, "bedtime")
+                    kill_game_process(pid, graceful_wait=10)
+                    active_sessions.pop(pid, None)
+                    continue
+
+                # 4. Time limit reached?
+                remaining = get_remaining_time(user, rules)
+                if remaining <= 0:
+                    log_event(f"Time limit reached: {game_name} (PID {pid}, user {user})")
+                    send_notification(user, "Time's Up!",
+                                      "Your gaming time for today has ended. Games are closing.",
+                                      urgency="critical")
+                    record_blocked_attempt(user, game_name, "time limit reached")
+                    kill_game_process(pid, graceful_wait=30)
+                    active_sessions.pop(pid, None)
+                    continue
+
+                # 5. Time warning (5 minutes left)
+                warning_key = f"{user}:{date.today().isoformat()}"
+                if remaining <= 300 and warning_key not in WARNING_SHOWN:
+                    WARNING_SHOWN[warning_key] = True
+                    send_notification(user, "5 Minutes Remaining",
+                                      f"You have {format_duration(remaining)} of gaming time left today.",
+                                      urgency="normal")
+                    log_event(f"5-minute warning sent to {user}")
+
+                # 6. Weekly limit check
+                weekly_used = get_weekly_total(user)
+                weekly_limit = rules.get("time_limits", {}).get("weekly_hours", 14.0) * 3600
+                if weekly_used >= weekly_limit:
+                    log_event(f"Weekly limit reached for {user}: {game_name} (PID {pid})")
+                    send_notification(user, "Weekly Limit Reached",
+                                      "Your weekly gaming time has been used up.",
+                                      urgency="critical")
+                    record_blocked_attempt(user, game_name, "weekly limit reached")
+                    kill_game_process(pid, graceful_wait=30)
+                    active_sessions.pop(pid, None)
+                    continue
+
+            # Update tracking for active sessions
+            for pid, session in list(active_sessions.items()):
+                if pid not in current_pids:
+                    # Session ended
+                    duration = time.time() - session["start_time"]
+                    record_session_end(session["user"], session["game"], duration)
+                    log_event(f"Game session ended: {session['game']} "
+                              f"(user {session['user']}, {format_duration(duration)})")
+                    del active_sessions[pid]
+                else:
+                    # Session still active — update total_seconds
+                    elapsed = time.time() - session["start_time"]
+                    update_active_tracking(session["user"], elapsed, poll_interval)
+
+            time.sleep(poll_interval)
+
+    except Exception as e:
+        log_event(f"Daemon error: {e}", "ERROR")
+        raise
+    finally:
+        # Record remaining active sessions
+        for pid, session in active_sessions.items():
+            duration = time.time() - session["start_time"]
+            record_session_end(session["user"], session["game"], duration)
+
+        # Cleanup PID file
+        try:
+            os.unlink(PID_FILE)
+        except FileNotFoundError:
+            pass
+        log_event("Parental controls daemon stopped")
+
+
+def record_blocked_attempt(user, game, reason):
+    """Record a blocked game attempt in today's tracking."""
+    tracking = load_tracking(user)
+    tracking.setdefault("blocked_attempts", []).append({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "game": game,
+        "reason": reason
+    })
+    save_tracking(user, tracking)
+
+
+def record_session_end(user, game, duration):
+    """Record a completed game session."""
+    tracking = load_tracking(user)
+    tracking.setdefault("sessions", []).append({
+        "game": game,
+        "start": (datetime.now() - timedelta(seconds=duration)).strftime("%H:%M:%S"),
+        "end": datetime.now().strftime("%H:%M:%S"),
+        "duration": int(duration),
+        "active": False
+    })
+    tracking["total_seconds"] = tracking.get("total_seconds", 0) + int(duration)
+    save_tracking(user, tracking)
+
+
+def update_active_tracking(user, total_elapsed, interval):
+    """Increment the total_seconds counter by the poll interval."""
+    tracking = load_tracking(user)
+    tracking["total_seconds"] = tracking.get("total_seconds", 0) + interval
+    save_tracking(user, tracking)
+
+
+# ── Help ──
+
+def show_help():
+    """Print usage information."""
+    print(f"""
+{BOLD}{CYAN}24HG Parental Controls{RESET}
+{DIM}Gaming time management, bedtime enforcement, and content filtering.{RESET}
+
+{BOLD}Usage:{RESET}
+  24hg-parental <command> [arguments]
+
+{BOLD}Commands:{RESET}
+  {GREEN}setup{RESET}                          Initial setup (set password, configure child account)
+  {GREEN}status{RESET}                         Show current rules and time remaining today
+  {GREEN}rules{RESET}                          Show all rules in detail
+  {GREEN}time-limit{RESET} <hours> [daily|weekly]  Set gaming time limit
+  {GREEN}bedtime{RESET} <start> <end>          Set bedtime hours (e.g., 22:00 07:00)
+  {GREEN}allow{RESET} <game>                   Allow a specific game
+  {GREEN}block{RESET} <game>                   Block a specific game
+  {GREEN}age-rating{RESET} <max>               Set max age rating (ESRB: E/E10/T/M/AO, PEGI: 3/7/12/16/18)
+  {GREEN}report{RESET} [daily|weekly|monthly]  Generate activity report
+  {GREEN}unlock{RESET} <minutes>               Temporarily extend time (requires password)
+  {GREEN}disable{RESET}                        Disable parental controls (requires password)
+  {GREEN}daemon{RESET}                         Run the enforcement daemon (used by systemd)
+
+{BOLD}Files:{RESET}
+  {DIM}/etc/24hg/parental.conf{RESET}          Password hash and account config
+  {DIM}/etc/24hg/parental-rules.json{RESET}    All rules (time, bedtime, games, ratings)
+  {DIM}/var/lib/24hg/parental/<user>/{RESET}   Per-user daily tracking data
+  {DIM}/var/log/24hg/parental.log{RESET}       Audit log
+
+{BOLD}Examples:{RESET}
+  sudo 24hg-parental setup
+  sudo 24hg-parental time-limit 1.5 daily
+  sudo 24hg-parental bedtime 21:00 07:00
+  sudo 24hg-parental block "Grand Theft Auto V"
+  sudo 24hg-parental age-rating T
+  sudo 24hg-parental unlock 30
+  24hg-parental status
+  24hg-parental report weekly
+
+{BOLD}Systemd:{RESET}
+  sudo systemctl enable --now 24hg-parental
+""")
+
+
+# ── Main ──
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("help", "--help", "-h"):
+        show_help()
+        sys.exit(0)
+
+    command = sys.argv[1].lower().replace("-", "_")
+    args = sys.argv[2:]
+
+    commands = {
+        "setup": lambda: cmd_setup(),
+        "status": lambda: cmd_status(),
+        "rules": lambda: cmd_rules(),
+        "time_limit": lambda: cmd_time_limit(args),
+        "bedtime": lambda: cmd_bedtime(args),
+        "allow": lambda: cmd_allow(args),
+        "block": lambda: cmd_block(args),
+        "age_rating": lambda: cmd_age_rating(args),
+        "report": lambda: cmd_report(args),
+        "unlock": lambda: cmd_unlock(args),
+        "disable": lambda: cmd_disable(),
+        "daemon": lambda: cmd_daemon(),
+    }
+
+    handler = commands.get(command)
+    if handler is None:
+        print(f"{RED}Unknown command:{RESET} {sys.argv[1]}")
+        print(f"Run {CYAN}24hg-parental help{RESET} for usage.")
+        sys.exit(1)
+
+    handler()
+
+
+if __name__ == "__main__":
+    main()

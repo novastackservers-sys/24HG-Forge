@@ -3,7 +3,7 @@
         "Id": "com.24hg.hubwidget",
         "Name": "24HG Hub",
         "Description": "24 Hour Gaming community dashboard widget",
-        "Icon": "forge-logo",
+        "Icon": "24hg-logo",
         "Authors": [{"Name": "24 Hour Gaming"}],
         "Category": "Online Services",
         "License": "MIT",

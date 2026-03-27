@@ -1,0 +1,14 @@
+[Unit]
+Description=24HG Hub Bridge — 24HG notifications, DMs, friend status
+Documentation=https://os.24hgaming.com
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/24hg-hub-bridge daemon
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

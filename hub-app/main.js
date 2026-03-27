@@ -155,9 +155,9 @@ function createMainWindow() {
 
   mainWindow = new BrowserWindow(windowOpts);
 
-  // Custom user agent to identify 24HG Forge app
+  // Custom user agent to identify 24HG app
   const defaultUA = mainWindow.webContents.getUserAgent();
-  mainWindow.webContents.setUserAgent(`${defaultUA} 24HG Forge/1.0`);
+  mainWindow.webContents.setUserAgent(`${defaultUA} 24HG/1.0`);
 
   // Load hub
   mainWindow.loadURL(HUB_URL);
@@ -179,12 +179,12 @@ function createMainWindow() {
     return { action: "allow" };
   });
 
-  // Inject custom CSS for 24HG Forge branding
+  // Inject custom CSS for 24HG branding
   mainWindow.webContents.on("did-finish-load", () => {
     mainWindow.webContents.insertCSS(`
       :root {
-        --forge-accent: #58a6ff;
-        --forge-bg: #0a0a14;
+        --hg-accent: #58a6ff;
+        --hg-bg: #0a0a14;
       }
       /* Custom scrollbar */
       ::-webkit-scrollbar { width: 8px; }

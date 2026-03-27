@@ -1,6 +1,6 @@
-# Building 24HG Forge from Source
+# Building 24HG from Source
 
-24HG Forge is built as an OCI container image layered on top of Bazzite. The ISO is generated from that image. This guide covers building both locally and via CI/CD.
+24HG is built as an OCI container image layered on top of Bazzite. The ISO is generated from that image. This guide covers building both locally and via CI/CD.
 
 ## Prerequisites
 
@@ -31,31 +31,31 @@ sudo apt install podman git qemu-kvm virt-manager
 ## Clone the Repository
 
 ```bash
-git clone https://git.raggi.is/24hg/forge.git
-cd forge
+git clone https://git.raggi.is/24hg/24hg.git
+cd 24hg
 ```
 
 ## Project Structure
 
 ```
-forge/
+24hg-os/
 ├── Containerfile          # The main build file (like Dockerfile)
 ├── build-iso.sh           # ISO generation script
-├── scripts/               # All 53 forge-* tools + lib scripts
-│   ├── forge-neofetch
-│   ├── forge-diag
-│   ├── forge-performance
-│   ├── forge-smart-launch
+├── scripts/               # All 53 24hg-* tools + lib scripts
+│   ├── 24hg-neofetch
+│   ├── 24hg-diag
+│   ├── 24hg-performance
+│   ├── 24hg-smart-launch
 │   ├── ... (50 more tools)
-│   ├── forge-first-boot-setup.sh
-│   ├── forge-auto-update.sh
+│   ├── 24hg-first-boot-setup.sh
+│   ├── 24hg-auto-update.sh
 │   ├── gamemode-start.sh
 │   ├── gamemode-end.sh
 │   └── build-local.sh     # Local build helper
 ├── hub-app/               # Hub application and tray icon
-│   ├── forge-hub           # Main Hub app (Chromium kiosk launcher)
-│   ├── forge-tray           # System tray integration
-│   ├── forge-gamescope-session  # 24HG Mode session
+│   ├── 24hg-hub           # Main Hub app (Chromium kiosk launcher)
+│   ├── 24hg-tray           # System tray integration
+│   ├── 24hg-gamescope-session  # 24HG Mode session
 │   └── *.desktop            # Desktop entries
 ├── branding/              # Visual assets
 │   ├── wallpapers/         # Desktop wallpapers
@@ -75,7 +75,7 @@ forge/
 │   │   └── firewalld/      # Firewall rules for gaming
 │   └── usr/
 │       └── share/
-│           ├── forge/       # Server list, offline page
+│           ├── 24hg/       # Server list, offline page
 │           ├── plymouth/    # Boot splash
 │           ├── sddm/       # Login theme
 │           ├── plasma/      # KDE splash screen
@@ -110,14 +110,14 @@ The simplest way:
 podman build \
   --build-arg BASE_IMAGE=ghcr.io/ublue-os/bazzite \
   --build-arg BASE_TAG=stable \
-  -t forge:latest \
+  -t 24hg:latest \
   .
 
 # NVIDIA variant
 podman build \
   --build-arg BASE_IMAGE=ghcr.io/ublue-os/bazzite-nvidia \
   --build-arg BASE_TAG=stable \
-  -t forge-nvidia:latest \
+  -t 24hg-nvidia:latest \
   .
 ```
 
@@ -129,8 +129,8 @@ The Containerfile (single-stage build):
 2. **Copies all files** into a temporary build directory
 3. **Installs packages** via rpm-ostree: chromium, zenity, gamemode, conky, papirus icons, vulkan tools, etc.
 4. **Deploys system files**: sysctl tweaks, systemd services, Plymouth/GRUB/SDDM themes, wallpapers, icons
-5. **Installs all 53 tools** to `/usr/bin/forge-*`
-6. **Installs lib scripts** to `/usr/lib/forge/`
+5. **Installs all 53 tools** to `/usr/bin/24hg-*`
+6. **Installs lib scripts** to `/usr/lib/24hg/`
 7. **Configures user defaults** via `/etc/skel/` (KDE settings, MangoHud, autostart, Flatpak overrides)
 8. **Sets OS identity** in `/usr/lib/os-release`
 9. **Commits the ostree layer**
@@ -157,7 +157,7 @@ podman pull ghcr.io/jasonn3/build-container-installer:latest
 podman run --rm --privileged \
   -v ./iso-output:/build-container-installer/build \
   -e IMAGE_REPO=localhost \
-  -e IMAGE_NAME=forge \
+  -e IMAGE_NAME=24hg \
   -e IMAGE_TAG=latest \
   -e VARIANT=Kinoite \
   ghcr.io/jasonn3/build-container-installer:latest
@@ -172,8 +172,8 @@ qemu-system-x86_64 \
   -enable-kvm \
   -m 4096 \
   -smp 4 \
-  -cdrom iso-output/forge-desktop-latest.iso \
-  -drive file=forge-test.qcow2,format=qcow2,if=virtio \
+  -cdrom iso-output/24hg-desktop-latest.iso \
+  -drive file=24hg-test.qcow2,format=qcow2,if=virtio \
   -boot d \
   -vga qxl \
   -display gtk
@@ -182,14 +182,14 @@ qemu-system-x86_64 \
 Create the test disk first:
 
 ```bash
-qemu-img create -f qcow2 forge-test.qcow2 50G
+qemu-img create -f qcow2 24hg-test.qcow2 50G
 ```
 
 ### virt-manager (GUI)
 
 1. Open virt-manager.
 2. Create a new VM.
-3. Choose "Local install media" and select the 24HG Forge ISO.
+3. Choose "Local install media" and select the 24HG ISO.
 4. Set OS to "Fedora 40" (or newest available).
 5. Assign at least 4 GB RAM and 4 CPUs.
 6. Create a 50 GB disk.
@@ -203,10 +203,10 @@ qemu-img create -f qcow2 forge-test.qcow2 50G
 
 ## CI/CD with GitHub Actions
 
-24HG Forge uses GitHub Actions for automated builds. The workflow:
+24HG uses GitHub Actions for automated builds. The workflow:
 
 1. Push to `main` triggers a build.
-2. The OCI image is built and pushed to `git.raggi.is/24hg/forge`.
+2. The OCI image is built and pushed to `git.raggi.is/24hg/24hg`.
 3. The ISO is built from the pushed image.
 4. The ISO is attached to a GitHub Release.
 
@@ -224,21 +224,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build OCI image
-        run: podman build -t git.raggi.is/24hg/forge:latest .
+        run: podman build -t git.raggi.is/24hg/24hg:latest .
       - name: Push to GHCR
-        run: podman push git.raggi.is/24hg/forge:latest
+        run: podman push git.raggi.is/24hg/24hg:latest
       - name: Build ISO
         run: ./build-iso.sh
       - name: Upload ISO
         uses: actions/upload-artifact@v4
         with:
-          name: forge-iso
+          name: 24hg-iso
           path: iso-output/*.iso
 ```
 
 ## Creating a Custom Variant
 
-You can fork 24HG Forge and create your own variant:
+You can fork 24HG and create your own variant:
 
 ### 1. Fork the Repository
 
@@ -262,9 +262,9 @@ COPY my-custom-tool /usr/bin/my-custom-tool
 - Wallpapers: `branding/wallpapers/`
 - Icons: `branding/icons/`
 - GRUB theme: `branding/grub/`
-- Plymouth splash: `system_files/usr/share/plymouth/themes/forge/`
-- SDDM login: `system_files/usr/share/sddm/themes/forge/`
-- Sound theme: `system_files/usr/share/sounds/forge/`
+- Plymouth splash: `system_files/usr/share/plymouth/themes/24hg/`
+- SDDM login: `system_files/usr/share/sddm/themes/24hg/`
+- Sound theme: `system_files/usr/share/sounds/24hg/`
 
 ### 4. Edit OS Identity
 
@@ -288,7 +288,7 @@ sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="YourOS (Your Community)"/' /usr/lib/os-re
 Push to your own container registry:
 
 ```bash
-podman tag forge:latest ghcr.io/yourusername/youros:latest
+podman tag 24hg:latest ghcr.io/yourusername/youros:latest
 podman push ghcr.io/yourusername/youros:latest
 ```
 

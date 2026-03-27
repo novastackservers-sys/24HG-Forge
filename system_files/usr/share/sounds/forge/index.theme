@@ -1,9 +1,0 @@
-[Sound Theme]
-Name=24HG Forge
-Comment=24 Hour Gaming — custom login, logout, and notification sounds
-Inherits=freedesktop
-Directories=stereo
-Hidden=false
-
-[stereo]
-OutputProfile=stereo

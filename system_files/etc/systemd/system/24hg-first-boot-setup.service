@@ -1,0 +1,15 @@
+[Unit]
+Description=24HG First Boot Setup
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/24hg/.first-boot-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/24hg/first-boot-setup.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

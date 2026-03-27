@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# 24HG Forge — Mirror Health Checker (cron: 0 */6 * * *)
+# 24HG — Mirror Health Checker (cron: 0 */6 * * *)
 #
 # Checks all registered mirrors for:
 #   - HTTP availability
@@ -12,10 +12,10 @@ set -euo pipefail
 # Configuration
 ###############################################################################
 readonly API_BASE="https://os.24hgaming.com/api"
-readonly API_KEY="${FORGE_API_KEY:-}"
+readonly API_KEY="${HG24_API_KEY:-}"
 readonly CONNECT_TIMEOUT=10
 readonly MAX_TIMEOUT=30
-readonly LOG_FILE="/var/log/forge-mirror-check.log"
+readonly LOG_FILE="/var/log/24hg-mirror-check.log"
 readonly TMP_DIR=$(mktemp -d)
 
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -227,7 +227,7 @@ print_summary() {
 ###############################################################################
 
 main() {
-    log_info "=== 24HG Forge Mirror Health Check ==="
+    log_info "=== 24HG Mirror Health Check ==="
     log_info "Started at $(timestamp)"
 
     touch "${TMP_DIR}/results.txt"

@@ -1,0 +1,6 @@
+[Unit]
+Description=24HG Cleaner — Clean gaming junk files
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/24hg-cleaner clean

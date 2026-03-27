@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Network Optimizer
-Comment=Gaming network optimization
-Exec=/usr/bin/forge-net-optimizer
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=Network;Game;
-Keywords=network;latency;ping;optimize;gaming;

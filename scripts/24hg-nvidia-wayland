@@ -1,0 +1,1691 @@
+#!/usr/bin/env bash
+# 24HG NVIDIA Wayland Fix — Auto-detect and fix all NVIDIA+Wayland gaming issues
+# Part of 24HG (24 Hour Gaming OS) — https://24hgaming.com
+#
+# NVIDIA + Wayland is the most common source of gaming issues in 2025-2026.
+# This script auto-detects and fixes all known problems.
+#
+# Usage: 24hg-nvidia-wayland <command> [options]
+# Commands: fix, status, diagnose, optimize, env, flicker-fix, sync, driver-check
+set -euo pipefail
+
+# ── Color & formatting ───────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# ── Config paths ─────────────────────────────────────────────────────────────
+
+ENV_CONF_DIR="${HOME}/.config/environment.d"
+ENV_CONF="${ENV_CONF_DIR}/nvidia-gaming.conf"
+MODPROBE_CONF="/etc/modprobe.d/nvidia-24hg.conf"
+KWINRC="${HOME}/.config/kwinrc"
+SHADER_CACHE_DIR="${HOME}/.cache/nvidia/shaders"
+LOG_DIR="${HOME}/.local/share/24hg/logs"
+LOG_FILE="${LOG_DIR}/nvidia-wayland-$(date +%Y%m%d-%H%M%S).log"
+
+# ── Globals ──────────────────────────────────────────────────────────────────
+
+DRY_RUN=false
+VERBOSE=false
+ISSUES_FOUND=0
+FIXES_APPLIED=0
+SCORE=10
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+info()    { echo -e "${BLUE}[INFO]${RESET} $*"; }
+ok()      { echo -e "${GREEN}[  OK]${RESET} $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET} $*"; }
+err()     { echo -e "${RED}[ ERR]${RESET} $*"; }
+header()  { echo -e "\n${BOLD}${CYAN}═══ $* ═══${RESET}"; }
+subhead() { echo -e "${BOLD}  ▸ $*${RESET}"; }
+detail()  { echo -e "    ${DIM}$*${RESET}"; }
+score_deduct() { ((SCORE -= $1)) || true; ((ISSUES_FOUND++)) || true; }
+
+log() {
+    mkdir -p "$LOG_DIR"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+dry_run_guard() {
+    if $DRY_RUN; then
+        info "${DIM}[dry-run]${RESET} Would run: $*"
+        return 1
+    fi
+    return 0
+}
+
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        warn "This operation requires root. Attempting with sudo..."
+        return 0
+    fi
+    return 0
+}
+
+command_exists() { command -v "$1" &>/dev/null; }
+
+# ── Detection helpers ────────────────────────────────────────────────────────
+
+get_driver_version() {
+    local ver=""
+    if command_exists nvidia-smi; then
+        ver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d '[:space:]')
+    fi
+    if [[ -z "$ver" ]] && [[ -f /sys/module/nvidia/version ]]; then
+        ver=$(cat /sys/module/nvidia/version 2>/dev/null | tr -d '[:space:]')
+    fi
+    if [[ -z "$ver" ]] && command_exists modinfo; then
+        ver=$(modinfo nvidia 2>/dev/null | awk '/^version:/{print $2}' | head -1)
+    fi
+    echo "${ver:-unknown}"
+}
+
+get_driver_major() {
+    local ver
+    ver=$(get_driver_version)
+    echo "${ver%%.*}"
+}
+
+get_gpu_name() {
+    if command_exists nvidia-smi; then
+        nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | sed 's/^[[:space:]]*//'
+    elif command_exists lspci; then
+        lspci | grep -i 'vga.*nvidia\|3d.*nvidia' | head -1 | sed 's/.*: //'
+    else
+        echo "Unknown NVIDIA GPU"
+    fi
+}
+
+get_kernel_version() {
+    uname -r
+}
+
+get_kernel_major_minor() {
+    uname -r | grep -oP '^\d+\.\d+'
+}
+
+is_wayland() {
+    [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]
+}
+
+is_kde() {
+    [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]] || [[ "${DESKTOP_SESSION:-}" == *"plasma"* ]]
+}
+
+is_optimus() {
+    # Detect hybrid / Optimus laptop (has both integrated and NVIDIA)
+    if command_exists lspci; then
+        local gpu_count
+        gpu_count=$(lspci | grep -ci 'vga\|3d controller' 2>/dev/null || echo 0)
+        [[ "$gpu_count" -ge 2 ]]
+    else
+        return 1
+    fi
+}
+
+is_nvidia_loaded() {
+    lsmod 2>/dev/null | grep -q '^nvidia ' 2>/dev/null
+}
+
+version_ge() {
+    # version_ge "550" "545" => true
+    [[ "$(printf '%s\n%s' "$1" "$2" | sort -V | head -1)" == "$2" ]]
+}
+
+kernel_version_ge() {
+    local current major_minor="$1"
+    current=$(get_kernel_major_minor)
+    version_ge "$current" "$major_minor"
+}
+
+# ── Environment variable management ─────────────────────────────────────────
+
+env_var_is_set() {
+    # Check if var is set in current session or in the conf file
+    local var="$1"
+    [[ -n "${!var:-}" ]] || (grep -q "^${var}=" "$ENV_CONF" 2>/dev/null)
+}
+
+write_env_var() {
+    local var="$1" val="$2"
+    mkdir -p "$ENV_CONF_DIR"
+    if [[ -f "$ENV_CONF" ]] && grep -q "^${var}=" "$ENV_CONF" 2>/dev/null; then
+        sed -i "s|^${var}=.*|${var}=${val}|" "$ENV_CONF"
+    else
+        echo "${var}=${val}" >> "$ENV_CONF"
+    fi
+    export "${var}=${val}"
+    log "Set env: ${var}=${val}"
+}
+
+remove_env_var() {
+    local var="$1"
+    if [[ -f "$ENV_CONF" ]]; then
+        sed -i "/^${var}=/d" "$ENV_CONF"
+    fi
+    unset "$var" 2>/dev/null || true
+}
+
+# ── Kernel module param helpers ──────────────────────────────────────────────
+
+get_modeset_status() {
+    cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null || echo "N"
+}
+
+get_fbdev_status() {
+    cat /sys/module/nvidia_drm/parameters/fbdev 2>/dev/null || echo "N"
+}
+
+write_modprobe_conf() {
+    local content="$1"
+    if dry_run_guard "write $MODPROBE_CONF"; then
+        if [[ $EUID -eq 0 ]]; then
+            echo "$content" > "$MODPROBE_CONF"
+        else
+            echo "$content" | sudo tee "$MODPROBE_CONF" > /dev/null
+        fi
+        log "Wrote modprobe config: $MODPROBE_CONF"
+    fi
+}
+
+# ── Fix functions ────────────────────────────────────────────────────────────
+
+fix_kernel_modules() {
+    header "Kernel Module Parameters"
+
+    local modeset fbdev needs_fix=false
+    modeset=$(get_modeset_status)
+    fbdev=$(get_fbdev_status)
+
+    if [[ "$modeset" == "Y" ]] || [[ "$modeset" == "1" ]]; then
+        ok "nvidia-drm.modeset=1 (enabled)"
+    else
+        err "nvidia-drm.modeset is NOT enabled (current: ${modeset})"
+        score_deduct 2
+        needs_fix=true
+    fi
+
+    if [[ "$fbdev" == "Y" ]] || [[ "$fbdev" == "1" ]]; then
+        ok "nvidia_drm.fbdev=1 (enabled)"
+    else
+        warn "nvidia_drm.fbdev is not enabled (current: ${fbdev})"
+        score_deduct 1
+        needs_fix=true
+    fi
+
+    if $needs_fix; then
+        info "Fixing kernel module parameters..."
+        local conf_content
+        conf_content="# 24HG NVIDIA Wayland — kernel module parameters
+# Generated by 24hg-nvidia-wayland on $(date '+%Y-%m-%d')
+options nvidia-drm modeset=1 fbdev=1
+options nvidia NVreg_UsePageAttributeTable=1
+options nvidia NVreg_PreserveVideoMemoryAllocations=1"
+
+        if dry_run_guard "write modprobe config and update initramfs"; then
+            write_modprobe_conf "$conf_content"
+            ok "Wrote $MODPROBE_CONF"
+
+            # On Fedora Atomic / Bazzite, we need to update the initramfs
+            if command_exists rpm-ostree; then
+                info "Fedora Atomic detected — run 'rpm-ostree initramfs --enable' and reboot for module params to take effect"
+            elif command_exists dracut; then
+                info "Rebuilding initramfs with dracut..."
+                if [[ $EUID -eq 0 ]]; then
+                    dracut --force 2>/dev/null && ok "Initramfs rebuilt" || warn "dracut failed — rebuild manually"
+                else
+                    sudo dracut --force 2>/dev/null && ok "Initramfs rebuilt" || warn "dracut failed — rebuild manually"
+                fi
+            fi
+
+            # Also try setting via kernel cmdline for Bazzite/uBlue
+            if command_exists rpm-ostree && [[ -f /etc/default/grub ]]; then
+                local grub_file="/etc/default/grub"
+                if ! grep -q "nvidia-drm.modeset=1" "$grub_file" 2>/dev/null; then
+                    info "Adding nvidia-drm.modeset=1 to GRUB cmdline..."
+                    if [[ $EUID -eq 0 ]]; then
+                        sed -i 's/GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 nvidia-drm.modeset=1 nvidia_drm.fbdev=1"/' "$grub_file" 2>/dev/null || true
+                    else
+                        sudo sed -i 's/GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 nvidia-drm.modeset=1 nvidia_drm.fbdev=1"/' "$grub_file" 2>/dev/null || true
+                    fi
+                fi
+            fi
+
+            ((FIXES_APPLIED++)) || true
+            warn "Reboot required for kernel module changes to take effect"
+        fi
+    fi
+}
+
+fix_explicit_sync() {
+    header "Explicit Sync (Proton/Wine)"
+
+    local driver_major kernel_ver
+    driver_major=$(get_driver_major)
+    kernel_ver=$(get_kernel_major_minor)
+
+    # Check prerequisites
+    local sync_ready=true
+    if [[ "$driver_major" != "unknown" ]] && ! version_ge "$driver_major" "545"; then
+        err "Driver $driver_major is too old for explicit sync (need 545+)"
+        score_deduct 2
+        sync_ready=false
+    else
+        ok "Driver version ${driver_major}+ supports explicit sync"
+    fi
+
+    if ! kernel_version_ge "6.8"; then
+        err "Kernel $(get_kernel_version) too old for explicit sync (need 6.8+)"
+        score_deduct 1
+        sync_ready=false
+    else
+        ok "Kernel $(get_kernel_version) supports explicit sync"
+    fi
+
+    if $sync_ready; then
+        # Set GSync / VRR env vars
+        if dry_run_guard "set explicit sync env vars"; then
+            write_env_var "__GL_GSYNC_ALLOWED" "1"
+            write_env_var "__GL_VRR_ALLOWED" "1"
+            ok "Set __GL_GSYNC_ALLOWED=1 and __GL_VRR_ALLOWED=1"
+            ((FIXES_APPLIED++)) || true
+        fi
+
+        # KDE KWin explicit sync
+        if is_kde; then
+            if command_exists kwriteconfig6; then
+                if dry_run_guard "enable KWin explicit sync"; then
+                    # Plasma 6.1+ has built-in explicit sync support
+                    kwriteconfig6 --file kwinrc --group Compositing --key ExplicitSync true 2>/dev/null || true
+                    ok "Enabled KWin explicit sync (Plasma 6.1+)"
+                    ((FIXES_APPLIED++)) || true
+                fi
+            elif command_exists kwriteconfig5; then
+                info "KDE Plasma 5 detected — explicit sync requires Plasma 6.1+"
+            fi
+        fi
+    else
+        warn "Explicit sync prerequisites not met — skipping env var setup"
+        info "Upgrade your driver to 545+ and kernel to 6.8+ for explicit sync"
+    fi
+}
+
+fix_xwayland_flickering() {
+    header "XWayland Flickering Fix"
+
+    local driver_major
+    driver_major=$(get_driver_major)
+
+    # Detect if XWayland is in use
+    if ! command_exists xwayland && ! pgrep -x Xwayland &>/dev/null; then
+        info "XWayland not detected — skipping flicker fix"
+        return 0
+    fi
+
+    local xwayland_ver=""
+    if command_exists Xwayland; then
+        xwayland_ver=$(Xwayland -version 2>&1 | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "")
+    fi
+
+    if [[ -n "$xwayland_ver" ]]; then
+        detail "XWayland version: $xwayland_ver"
+    fi
+
+    # The fix depends on driver version and KDE version
+    if dry_run_guard "apply XWayland flicker fixes"; then
+        # For older setups: disable async multiplane submission
+        if [[ "$driver_major" != "unknown" ]] && ! version_ge "$driver_major" "555"; then
+            write_env_var "KWIN_DRM_NO_AMS" "1"
+            ok "Set KWIN_DRM_NO_AMS=1 (disable async multiplane — pre-555 driver)"
+        else
+            # For 555+ with explicit sync, AMS should be fine
+            if env_var_is_set "KWIN_DRM_NO_AMS"; then
+                info "Driver 555+ detected — KWIN_DRM_NO_AMS may no longer be needed"
+            fi
+        fi
+
+        # Frame pacing fix — helps with black frames in XWayland OpenGL games
+        write_env_var "__GL_MaxFramesAllowed" "1"
+        ok "Set __GL_MaxFramesAllowed=1 (fix frame pacing)"
+
+        ((FIXES_APPLIED++)) || true
+    fi
+
+    # KDE Plasma 6.1+ XWayland explicit sync
+    if is_kde && command_exists kwriteconfig6; then
+        if dry_run_guard "enable KWin XWayland explicit sync"; then
+            kwriteconfig6 --file kwinrc --group Xwayland --key ExplicitSync true 2>/dev/null || true
+            ok "Enabled KWin XWayland explicit sync"
+        fi
+    fi
+}
+
+fix_power_management() {
+    header "Power Management"
+
+    # Reduce CPU spin-waiting
+    if dry_run_guard "set power management env vars"; then
+        write_env_var "__GL_YIELD" "USLEEP"
+        ok "Set __GL_YIELD=USLEEP (reduce CPU spin-waiting)"
+        ((FIXES_APPLIED++)) || true
+    fi
+
+    # nvidia-powerd (dynamic power management daemon)
+    if command_exists nvidia-powerd; then
+        if systemctl is-active --quiet nvidia-powerd 2>/dev/null; then
+            ok "nvidia-powerd is running"
+        else
+            if dry_run_guard "enable nvidia-powerd"; then
+                if [[ $EUID -eq 0 ]]; then
+                    systemctl enable --now nvidia-powerd 2>/dev/null || true
+                else
+                    sudo systemctl enable --now nvidia-powerd 2>/dev/null || true
+                fi
+                ok "Enabled nvidia-powerd"
+                ((FIXES_APPLIED++)) || true
+            fi
+        fi
+    else
+        detail "nvidia-powerd not installed (optional — for dynamic power management)"
+    fi
+
+    # PCI runtime PM for Optimus laptops
+    if is_optimus; then
+        info "Optimus laptop detected — configuring runtime PM"
+        local nvidia_pci
+        nvidia_pci=$(lspci -D | grep -i 'nvidia' | head -1 | awk '{print $1}')
+        if [[ -n "$nvidia_pci" ]] && [[ -f "/sys/bus/pci/devices/${nvidia_pci}/power/control" ]]; then
+            detail "NVIDIA PCI device: $nvidia_pci"
+            local current_pm
+            current_pm=$(cat "/sys/bus/pci/devices/${nvidia_pci}/power/control" 2>/dev/null || echo "unknown")
+            detail "Current PCI runtime PM: $current_pm"
+        fi
+    fi
+}
+
+fix_shader_cache() {
+    header "Shader Cache Configuration"
+
+    local current_size="${__GL_SHADER_DISK_CACHE_SIZE:-not set}"
+    local current_skip="${__GL_SHADER_DISK_CACHE_SKIP_CLEANUP:-not set}"
+    local current_path="${__GL_SHADER_DISK_CACHE_PATH:-not set}"
+
+    if [[ "$current_size" == "4294967296" ]] && [[ "$current_skip" == "1" ]]; then
+        ok "Shader cache already optimized (4GB, no cleanup)"
+    else
+        if [[ "$current_size" != "4294967296" ]]; then
+            warn "Shader cache size: ${current_size} (default is 128MB — too small)"
+            score_deduct 1
+        fi
+
+        if dry_run_guard "set shader cache env vars"; then
+            write_env_var "__GL_SHADER_DISK_CACHE_SIZE" "4294967296"
+            write_env_var "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP" "1"
+            write_env_var "__GL_SHADER_DISK_CACHE_PATH" "$SHADER_CACHE_DIR"
+            mkdir -p "$SHADER_CACHE_DIR"
+            ok "Shader cache: 4GB limit, no pruning, path: $SHADER_CACHE_DIR"
+            ((FIXES_APPLIED++)) || true
+        fi
+    fi
+}
+
+fix_gbm_backend() {
+    header "GBM Backend"
+
+    # Ensure GBM is used instead of EGLStreams (legacy)
+    if dry_run_guard "set GBM backend env vars"; then
+        write_env_var "GBM_BACKEND" "nvidia-drm"
+        ok "Set GBM_BACKEND=nvidia-drm"
+        ((FIXES_APPLIED++)) || true
+    fi
+
+    # Optimus laptop specific
+    if is_optimus; then
+        if dry_run_guard "set Optimus env vars"; then
+            write_env_var "__NV_PRIME_RENDER_OFFLOAD" "1"
+            write_env_var "__GLX_VENDOR_LIBRARY_NAME" "nvidia"
+            ok "Set PRIME render offload vars (Optimus laptop)"
+            ((FIXES_APPLIED++)) || true
+        fi
+    else
+        detail "Desktop GPU — PRIME offload not needed"
+    fi
+}
+
+fix_vulkan_icd() {
+    header "Vulkan ICD Configuration"
+
+    local nvidia_icd="/usr/share/vulkan/icd.d/nvidia_icd.json"
+    local nvidia_icd_alt="/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json"
+    local icd_file=""
+
+    if [[ -f "$nvidia_icd" ]]; then
+        icd_file="$nvidia_icd"
+    elif [[ -f "$nvidia_icd_alt" ]]; then
+        icd_file="$nvidia_icd_alt"
+    fi
+
+    if [[ -n "$icd_file" ]]; then
+        ok "NVIDIA Vulkan ICD found: $icd_file"
+    else
+        err "NVIDIA Vulkan ICD not found!"
+        score_deduct 2
+        info "Expected at: $nvidia_icd or $nvidia_icd_alt"
+        info "Reinstall NVIDIA drivers to restore Vulkan ICD"
+        return 0
+    fi
+
+    # Check if vulkaninfo works
+    if command_exists vulkaninfo; then
+        local vk_driver
+        vk_driver=$(vulkaninfo --summary 2>/dev/null | grep -i 'driverName' | head -1 || echo "")
+        if [[ -n "$vk_driver" ]]; then
+            if echo "$vk_driver" | grep -qi 'nvidia'; then
+                ok "Vulkan driver: $(echo "$vk_driver" | sed 's/.*= //')"
+            else
+                warn "Vulkan driver is not NVIDIA: $vk_driver"
+                score_deduct 1
+                if dry_run_guard "set VK_DRIVER_FILES"; then
+                    write_env_var "VK_DRIVER_FILES" "$icd_file"
+                    ok "Set VK_DRIVER_FILES=$icd_file"
+                    ((FIXES_APPLIED++)) || true
+                fi
+            fi
+        fi
+    else
+        warn "vulkaninfo not found — install vulkan-tools to verify"
+    fi
+}
+
+fix_cuda_nvenc() {
+    header "CUDA / NVENC"
+
+    # Check nvidia-smi
+    if command_exists nvidia-smi; then
+        if nvidia-smi &>/dev/null; then
+            ok "nvidia-smi works"
+        else
+            err "nvidia-smi failed — NVIDIA driver not properly loaded"
+            score_deduct 2
+        fi
+    else
+        warn "nvidia-smi not found — CUDA utilities not installed"
+        score_deduct 1
+    fi
+
+    # Check device nodes
+    local dev_count=0
+    for dev in /dev/nvidia*; do
+        [[ -e "$dev" ]] && ((dev_count++)) || true
+    done
+
+    if [[ $dev_count -gt 0 ]]; then
+        ok "Found $dev_count NVIDIA device node(s) in /dev/"
+    else
+        err "No /dev/nvidia* devices found!"
+        score_deduct 2
+        info "Try: sudo modprobe nvidia nvidia_uvm nvidia_modeset nvidia_drm"
+    fi
+
+    # Check NVENC specifically
+    if [[ -e /dev/nvidia0 ]]; then
+        detail "NVENC encoding should be available (for OBS, FFmpeg, etc.)"
+    fi
+}
+
+fix_wayland_session_vars() {
+    header "Wayland Session Variables"
+
+    if dry_run_guard "set Wayland session env vars"; then
+        # Firefox native Wayland
+        write_env_var "MOZ_ENABLE_WAYLAND" "1"
+        ok "Set MOZ_ENABLE_WAYLAND=1 (Firefox native Wayland)"
+
+        # Qt apps
+        write_env_var "QT_QPA_PLATFORM" "wayland"
+        ok "Set QT_QPA_PLATFORM=wayland"
+
+        # Electron apps (Discord, VSCode, etc.)
+        write_env_var "ELECTRON_OZONE_PLATFORM_HINT" "wayland"
+        ok "Set ELECTRON_OZONE_PLATFORM_HINT=wayland (Electron apps)"
+
+        ((FIXES_APPLIED++)) || true
+    fi
+}
+
+# ── Command: fix ─────────────────────────────────────────────────────────────
+
+cmd_fix() {
+    echo -e "${BOLD}${MAGENTA}"
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║   24HG NVIDIA Wayland — Auto Fix All   ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo -e "${RESET}"
+
+    # Preflight
+    if ! is_nvidia_loaded; then
+        err "NVIDIA kernel module is not loaded!"
+        err "Are you running on NVIDIA hardware?"
+        info "Try: sudo modprobe nvidia"
+        exit 1
+    fi
+
+    local driver_ver gpu_name
+    driver_ver=$(get_driver_version)
+    gpu_name=$(get_gpu_name)
+
+    info "GPU: ${BOLD}${gpu_name}${RESET}"
+    info "Driver: ${BOLD}${driver_ver}${RESET}"
+    info "Kernel: ${BOLD}$(get_kernel_version)${RESET}"
+    info "Session: ${BOLD}${XDG_SESSION_TYPE:-unknown}${RESET}"
+    info "Desktop: ${BOLD}${XDG_CURRENT_DESKTOP:-unknown}${RESET}"
+    if is_optimus; then
+        info "Type: ${BOLD}Optimus / Hybrid GPU${RESET}"
+    fi
+    echo ""
+
+    if ! is_wayland; then
+        warn "Not running under Wayland session — some fixes may not apply"
+    fi
+
+    $DRY_RUN && info "${YELLOW}Dry-run mode — no changes will be made${RESET}" && echo ""
+
+    # Run all fixes
+    fix_kernel_modules
+    fix_explicit_sync
+    fix_xwayland_flickering
+    fix_power_management
+    fix_shader_cache
+    fix_gbm_backend
+    fix_vulkan_icd
+    fix_cuda_nvenc
+    fix_wayland_session_vars
+
+    # Summary
+    echo ""
+    header "Summary"
+    if [[ $ISSUES_FOUND -eq 0 ]]; then
+        echo -e "  ${GREEN}${BOLD}All checks passed — no issues found!${RESET}"
+    else
+        echo -e "  ${YELLOW}Issues found: ${ISSUES_FOUND}${RESET}"
+        echo -e "  ${GREEN}Fixes applied: ${FIXES_APPLIED}${RESET}"
+    fi
+
+    local final_score=$((SCORE < 0 ? 0 : SCORE))
+    local score_color="$GREEN"
+    [[ $final_score -le 7 ]] && score_color="$YELLOW"
+    [[ $final_score -le 4 ]] && score_color="$RED"
+    echo -e "  ${score_color}${BOLD}NVIDIA Wayland Health: ${final_score}/10${RESET}"
+
+    if [[ $FIXES_APPLIED -gt 0 ]]; then
+        echo ""
+        info "Environment variables saved to: ${ENV_CONF}"
+        info "Log in/out or reboot for all changes to take effect"
+    fi
+
+    log "fix completed: issues=$ISSUES_FOUND fixes=$FIXES_APPLIED score=$final_score"
+}
+
+# ── Command: status ──────────────────────────────────────────────────────────
+
+cmd_status() {
+    echo -e "${BOLD}${CYAN}"
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║   24HG NVIDIA Wayland — Status Report  ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo -e "${RESET}"
+
+    if ! is_nvidia_loaded; then
+        err "NVIDIA kernel module not loaded — nothing to report"
+        exit 1
+    fi
+
+    local driver_ver gpu_name driver_major
+    driver_ver=$(get_driver_version)
+    gpu_name=$(get_gpu_name)
+    driver_major=$(get_driver_major)
+
+    header "Hardware & Driver"
+    echo -e "  GPU:            ${BOLD}${gpu_name}${RESET}"
+    echo -e "  Driver:         ${BOLD}${driver_ver}${RESET}"
+    echo -e "  Kernel:         ${BOLD}$(get_kernel_version)${RESET}"
+    if is_optimus; then
+        echo -e "  Type:           ${BOLD}Optimus / Hybrid${RESET}"
+    else
+        echo -e "  Type:           ${BOLD}Desktop / Dedicated${RESET}"
+    fi
+
+    # Driver sufficiency
+    if [[ "$driver_major" != "unknown" ]] && version_ge "$driver_major" "545"; then
+        echo -e "  Explicit Sync:  ${GREEN}Driver supports it (${driver_major} >= 545)${RESET}"
+    elif [[ "$driver_major" != "unknown" ]]; then
+        echo -e "  Explicit Sync:  ${RED}Driver too old (${driver_major} < 545)${RESET}"
+        score_deduct 2
+    fi
+
+    header "Kernel Module Parameters"
+    local modeset fbdev
+    modeset=$(get_modeset_status)
+    fbdev=$(get_fbdev_status)
+    if [[ "$modeset" == "Y" ]] || [[ "$modeset" == "1" ]]; then
+        echo -e "  modeset:        ${GREEN}enabled${RESET}"
+    else
+        echo -e "  modeset:        ${RED}DISABLED${RESET}"
+        score_deduct 2
+    fi
+    if [[ "$fbdev" == "Y" ]] || [[ "$fbdev" == "1" ]]; then
+        echo -e "  fbdev:          ${GREEN}enabled${RESET}"
+    else
+        echo -e "  fbdev:          ${YELLOW}disabled${RESET}"
+        score_deduct 1
+    fi
+
+    header "Session"
+    if is_wayland; then
+        echo -e "  Session type:   ${GREEN}Wayland${RESET}"
+    else
+        echo -e "  Session type:   ${YELLOW}${XDG_SESSION_TYPE:-unknown} (not Wayland)${RESET}"
+    fi
+    echo -e "  Desktop:        ${BOLD}${XDG_CURRENT_DESKTOP:-unknown}${RESET}"
+    echo -e "  Display:        ${BOLD}${WAYLAND_DISPLAY:-${DISPLAY:-none}}${RESET}"
+
+    # XWayland
+    header "XWayland"
+    if pgrep -x Xwayland &>/dev/null; then
+        echo -e "  Status:         ${GREEN}Running${RESET}"
+        if command_exists Xwayland; then
+            local xwl_ver
+            xwl_ver=$(Xwayland -version 2>&1 | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
+            echo -e "  Version:        ${BOLD}${xwl_ver}${RESET}"
+        fi
+    else
+        echo -e "  Status:         ${DIM}Not running${RESET}"
+    fi
+    local flicker_var="${__GL_MaxFramesAllowed:-not set}"
+    echo -e "  MaxFramesAllowed: ${BOLD}${flicker_var}${RESET}"
+    local ams_var="${KWIN_DRM_NO_AMS:-not set}"
+    echo -e "  KWIN_DRM_NO_AMS:  ${BOLD}${ams_var}${RESET}"
+
+    header "Shader Cache"
+    local sc_size="${__GL_SHADER_DISK_CACHE_SIZE:-not set}"
+    local sc_skip="${__GL_SHADER_DISK_CACHE_SKIP_CLEANUP:-not set}"
+    local sc_path="${__GL_SHADER_DISK_CACHE_PATH:-not set}"
+    if [[ "$sc_size" == "4294967296" ]]; then
+        echo -e "  Cache size:     ${GREEN}4GB (optimized)${RESET}"
+    elif [[ "$sc_size" == "not set" ]]; then
+        echo -e "  Cache size:     ${YELLOW}Default (128MB — too small)${RESET}"
+        score_deduct 1
+    else
+        echo -e "  Cache size:     ${BOLD}${sc_size}${RESET}"
+    fi
+    echo -e "  Skip cleanup:   ${BOLD}${sc_skip}${RESET}"
+    echo -e "  Cache path:     ${BOLD}${sc_path}${RESET}"
+
+    header "VRR / GSync"
+    local gsync="${__GL_GSYNC_ALLOWED:-not set}"
+    local vrr="${__GL_VRR_ALLOWED:-not set}"
+    echo -e "  GSync allowed:  ${BOLD}${gsync}${RESET}"
+    echo -e "  VRR allowed:    ${BOLD}${vrr}${RESET}"
+
+    header "Vulkan"
+    if command_exists vulkaninfo; then
+        local vk_driver vk_api
+        vk_driver=$(vulkaninfo --summary 2>/dev/null | grep -i 'driverName' | head -1 | sed 's/.*= //' || echo "unknown")
+        vk_api=$(vulkaninfo --summary 2>/dev/null | grep -i 'apiVersion' | head -1 | sed 's/.*= //' || echo "unknown")
+        echo -e "  Driver:         ${BOLD}${vk_driver}${RESET}"
+        echo -e "  API version:    ${BOLD}${vk_api}${RESET}"
+    else
+        echo -e "  ${DIM}vulkaninfo not available — install vulkan-tools${RESET}"
+    fi
+    local vk_files="${VK_DRIVER_FILES:-system default}"
+    echo -e "  VK_DRIVER_FILES: ${BOLD}${vk_files}${RESET}"
+
+    header "Power Management"
+    local yield="${__GL_YIELD:-not set}"
+    echo -e "  __GL_YIELD:     ${BOLD}${yield}${RESET}"
+    if command_exists nvidia-powerd; then
+        if systemctl is-active --quiet nvidia-powerd 2>/dev/null; then
+            echo -e "  nvidia-powerd:  ${GREEN}active${RESET}"
+        else
+            echo -e "  nvidia-powerd:  ${YELLOW}installed but not running${RESET}"
+        fi
+    else
+        echo -e "  nvidia-powerd:  ${DIM}not installed${RESET}"
+    fi
+
+    header "NVENC / CUDA"
+    if command_exists nvidia-smi; then
+        if nvidia-smi &>/dev/null; then
+            echo -e "  nvidia-smi:     ${GREEN}working${RESET}"
+            local cuda_ver
+            cuda_ver=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[\d.]+' || echo "unknown")
+            echo -e "  CUDA version:   ${BOLD}${cuda_ver}${RESET}"
+        else
+            echo -e "  nvidia-smi:     ${RED}FAILED${RESET}"
+            score_deduct 2
+        fi
+    else
+        echo -e "  nvidia-smi:     ${YELLOW}not found${RESET}"
+        score_deduct 1
+    fi
+    local dev_count=0
+    for dev in /dev/nvidia*; do [[ -e "$dev" ]] && ((dev_count++)) || true; done
+    echo -e "  Device nodes:   ${BOLD}${dev_count} in /dev/nvidia*${RESET}"
+
+    header "Environment Conf"
+    if [[ -f "$ENV_CONF" ]]; then
+        echo -e "  File:           ${GREEN}${ENV_CONF}${RESET}"
+        local line_count
+        line_count=$(wc -l < "$ENV_CONF")
+        echo -e "  Variables:      ${BOLD}${line_count} lines${RESET}"
+    else
+        echo -e "  File:           ${DIM}Not created yet${RESET}"
+    fi
+
+    # Overall score
+    echo ""
+    local final_score=$((SCORE < 0 ? 0 : SCORE))
+    local score_color="$GREEN" score_desc="Excellent"
+    if [[ $final_score -le 7 ]]; then score_color="$YELLOW"; score_desc="Good — some issues"; fi
+    if [[ $final_score -le 5 ]]; then score_color="$YELLOW"; score_desc="Fair — needs attention"; fi
+    if [[ $final_score -le 3 ]]; then score_color="$RED"; score_desc="Poor — significant issues"; fi
+    echo -e "  ${score_color}${BOLD}NVIDIA Wayland: ${final_score}/10 — ${score_desc}${RESET}"
+    if [[ $ISSUES_FOUND -gt 0 ]]; then
+        echo -e "  ${YELLOW}${ISSUES_FOUND} issue(s) found. Run '${BOLD}24hg-nvidia-wayland fix${RESET}${YELLOW}' to auto-fix.${RESET}"
+    fi
+}
+
+# ── Command: diagnose ────────────────────────────────────────────────────────
+
+cmd_diagnose() {
+    echo -e "${BOLD}${MAGENTA}"
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║   24HG NVIDIA Wayland — Diagnostics    ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo -e "${RESET}"
+
+    if ! is_nvidia_loaded; then
+        err "NVIDIA kernel module not loaded!"
+        info "Possible causes:"
+        info "  - NVIDIA drivers not installed"
+        info "  - Secure Boot blocking unsigned modules"
+        info "  - Driver/kernel version mismatch after update"
+        info "Fix: sudo modprobe nvidia OR reinstall NVIDIA drivers"
+        exit 1
+    fi
+
+    local driver_ver driver_major
+    driver_ver=$(get_driver_version)
+    driver_major=$(get_driver_major)
+
+    # ── Xid errors in dmesg ──
+    header "GPU Errors (dmesg Xid events)"
+    local xid_errors
+    xid_errors=$(dmesg 2>/dev/null | grep -i 'NVRM.*Xid' | tail -10 || echo "")
+    if [[ -n "$xid_errors" ]]; then
+        err "Found NVIDIA Xid errors in dmesg:"
+        echo "$xid_errors" | while read -r line; do
+            echo -e "    ${RED}${line}${RESET}"
+        done
+        echo ""
+        # Decode common Xid codes
+        if echo "$xid_errors" | grep -q 'Xid.*: 13'; then
+            warn "Xid 13: Graphics engine fault — may indicate overheating or unstable overclock"
+        fi
+        if echo "$xid_errors" | grep -q 'Xid.*: 31'; then
+            warn "Xid 31: GPU memory page fault — possible driver bug or hardware issue"
+        fi
+        if echo "$xid_errors" | grep -q 'Xid.*: 32'; then
+            warn "Xid 32: Invalid or corrupted push buffer — try downgrading driver"
+        fi
+        if echo "$xid_errors" | grep -q 'Xid.*: 43'; then
+            warn "Xid 43: GPU stopped responding — check thermals and power supply"
+        fi
+        if echo "$xid_errors" | grep -q 'Xid.*: 45'; then
+            warn "Xid 45: Preemptive GPU recovery — driver attempted to recover"
+        fi
+        if echo "$xid_errors" | grep -q 'Xid.*: 56'; then
+            warn "Xid 56: Display engine error — often HDMI/DP link issue"
+        fi
+        if echo "$xid_errors" | grep -q 'Xid.*: 62'; then
+            warn "Xid 62: Internal microcontroller error — potential hardware failure"
+        fi
+        if echo "$xid_errors" | grep -q 'Xid.*: 79'; then
+            warn "Xid 79: GPU fallen off the bus — check PCIe slot and power"
+        fi
+        score_deduct 1
+    else
+        ok "No Xid errors found in dmesg"
+    fi
+
+    # ── Journal GPU crashes ──
+    header "GPU-related Journal Entries"
+    local gpu_crashes
+    gpu_crashes=$(journalctl -b --no-pager -p err 2>/dev/null | grep -iE 'nvidia|gpu|drm|kwin.*crash' | tail -10 || echo "")
+    if [[ -n "$gpu_crashes" ]]; then
+        warn "Found GPU-related errors in journal:"
+        echo "$gpu_crashes" | while read -r line; do
+            echo -e "    ${YELLOW}${line}${RESET}"
+        done
+        score_deduct 1
+    else
+        ok "No GPU-related errors in current boot journal"
+    fi
+
+    # ── Symptom checks ──
+    header "Symptom Analysis"
+
+    # Screen tearing
+    subhead "Screen Tearing"
+    local gsync="${__GL_GSYNC_ALLOWED:-0}"
+    local vrr="${__GL_VRR_ALLOWED:-0}"
+    if [[ "$gsync" != "1" ]] || [[ "$vrr" != "1" ]]; then
+        warn "VRR/GSync not enabled — screen tearing likely in games"
+        info "Fix: 24hg-nvidia-wayland sync enable"
+        score_deduct 1
+    else
+        ok "VRR/GSync enabled — tearing should not occur"
+    fi
+
+    # Flickering
+    subhead "XWayland Flickering"
+    local max_frames="${__GL_MaxFramesAllowed:-not set}"
+    if pgrep -x Xwayland &>/dev/null; then
+        if [[ "$max_frames" != "1" ]]; then
+            warn "XWayland running but __GL_MaxFramesAllowed not set"
+            info "XWayland games (Minecraft, Terraria, Factorio) may flicker"
+            info "Fix: 24hg-nvidia-wayland flicker-fix"
+            score_deduct 1
+        else
+            ok "XWayland flicker mitigation active"
+        fi
+    else
+        detail "XWayland not running — flicker check skipped"
+    fi
+
+    # Shader stutter
+    subhead "Shader Compilation Stutter"
+    local sc_size="${__GL_SHADER_DISK_CACHE_SIZE:-0}"
+    if [[ "$sc_size" == "0" ]] || [[ "$sc_size" == "not set" ]]; then
+        warn "Shader cache using default 128MB limit — shader stutter likely"
+        info "Fix: 24hg-nvidia-wayland fix (or env apply)"
+        score_deduct 1
+    elif [[ "$sc_size" -lt 1073741824 ]] 2>/dev/null; then
+        warn "Shader cache size ${sc_size} bytes — consider 4GB for stutter-free gaming"
+    else
+        ok "Shader cache size adequate: ${sc_size} bytes"
+    fi
+
+    # Black screen / modeset
+    subhead "Black Screen / Display Issues"
+    local modeset
+    modeset=$(get_modeset_status)
+    if [[ "$modeset" != "Y" ]] && [[ "$modeset" != "1" ]]; then
+        warn "nvidia-drm.modeset not enabled — may cause black screen or display issues"
+        info "Fix: 24hg-nvidia-wayland fix"
+        score_deduct 2
+    else
+        ok "DRM modeset enabled"
+    fi
+
+    # Crash on game launch — driver too old
+    subhead "Game Launch Crashes"
+    if [[ "$driver_major" != "unknown" ]] && ! version_ge "$driver_major" "535"; then
+        err "Driver ${driver_major} is very old — many modern games require 535+"
+        info "Fix: 24hg-nvidia-wayland driver-check"
+        score_deduct 2
+    elif [[ "$driver_major" != "unknown" ]] && ! version_ge "$driver_major" "545"; then
+        warn "Driver ${driver_major} is outdated — consider upgrading to 545+ for explicit sync"
+        info "Fix: 24hg-nvidia-wayland driver-check"
+        score_deduct 1
+    else
+        ok "Driver version ${driver_major} is current enough for modern games"
+    fi
+
+    # Performance — power management
+    subhead "Performance"
+    local yield="${__GL_YIELD:-not set}"
+    if [[ "$yield" != "USLEEP" ]]; then
+        warn "__GL_YIELD not set — CPU may spin-wait (wasted power, heat)"
+        score_deduct 1
+    else
+        ok "__GL_YIELD=USLEEP (efficient CPU waiting)"
+    fi
+
+    # PCIe generation
+    if command_exists nvidia-smi; then
+        local pcie_info
+        pcie_info=$(nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.gen.max --format=csv,noheader 2>/dev/null || echo "")
+        if [[ -n "$pcie_info" ]]; then
+            local current_gen max_gen
+            current_gen=$(echo "$pcie_info" | cut -d',' -f1 | tr -d ' ')
+            max_gen=$(echo "$pcie_info" | cut -d',' -f2 | tr -d ' ')
+            if [[ "$current_gen" != "$max_gen" ]] && [[ -n "$current_gen" ]] && [[ -n "$max_gen" ]]; then
+                warn "PCIe running at Gen${current_gen} (max Gen${max_gen}) — may impact performance"
+                detail "GPU might be in power-saving mode — normal when idle"
+            else
+                ok "PCIe link: Gen${current_gen} (maximum)"
+            fi
+        fi
+    fi
+
+    # Summary
+    echo ""
+    local final_score=$((SCORE < 0 ? 0 : SCORE))
+    local score_color="$GREEN"
+    [[ $final_score -le 7 ]] && score_color="$YELLOW"
+    [[ $final_score -le 4 ]] && score_color="$RED"
+    echo -e "  ${score_color}${BOLD}Diagnostic score: ${final_score}/10 — ${ISSUES_FOUND} issue(s) found${RESET}"
+
+    if [[ $ISSUES_FOUND -gt 0 ]]; then
+        echo ""
+        info "Run ${BOLD}24hg-nvidia-wayland fix${RESET} to auto-fix all detected issues"
+    fi
+}
+
+# ── Command: optimize ────────────────────────────────────────────────────────
+
+cmd_optimize() {
+    echo -e "${BOLD}${MAGENTA}"
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║   24HG NVIDIA Wayland — Optimize       ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo -e "${RESET}"
+
+    info "Running all standard fixes first..."
+    echo ""
+    cmd_fix
+
+    echo ""
+    header "Additional Gaming Optimizations"
+
+    # Max performance mode via nvidia-settings
+    if command_exists nvidia-settings; then
+        subhead "GPU Performance Mode"
+        if dry_run_guard "set GPU to max performance mode"; then
+            nvidia-settings -a "[gpu:0]/GpuPowerMizerMode=1" 2>/dev/null && \
+                ok "Set GPU to Prefer Maximum Performance" || \
+                warn "Could not set performance mode via nvidia-settings (expected in pure Wayland)"
+            ((FIXES_APPLIED++)) || true
+        fi
+    fi
+
+    # Max power limit
+    if command_exists nvidia-smi; then
+        subhead "Power Limit"
+        local max_power current_power
+        max_power=$(nvidia-smi --query-gpu=power.max_limit --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]')
+        current_power=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]')
+
+        if [[ -n "$max_power" ]] && [[ -n "$current_power" ]] && [[ "$max_power" != "[N/A]" ]]; then
+            if [[ "$current_power" != "$max_power" ]]; then
+                if dry_run_guard "set max power limit"; then
+                    if [[ $EUID -eq 0 ]]; then
+                        nvidia-smi -pl "$max_power" 2>/dev/null && \
+                            ok "Set power limit to ${max_power}W (was ${current_power}W)" || \
+                            warn "Could not set power limit"
+                    else
+                        sudo nvidia-smi -pl "$max_power" 2>/dev/null && \
+                            ok "Set power limit to ${max_power}W (was ${current_power}W)" || \
+                            warn "Could not set power limit (needs root)"
+                    fi
+                fi
+            else
+                ok "Power limit already at maximum: ${max_power}W"
+            fi
+        else
+            detail "Power limit info not available"
+        fi
+
+        # Max clock speeds
+        subhead "Clock Speeds"
+        local max_gfx_clock max_mem_clock
+        max_gfx_clock=$(nvidia-smi --query-gpu=clocks.max.graphics --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]')
+        max_mem_clock=$(nvidia-smi --query-gpu=clocks.max.memory --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]')
+
+        if [[ -n "$max_gfx_clock" ]] && [[ "$max_gfx_clock" != "[N/A]" ]]; then
+            detail "Max graphics clock: ${max_gfx_clock} MHz"
+            detail "Max memory clock: ${max_mem_clock} MHz"
+            info "Clock speeds are managed by the driver — set to max via performance mode above"
+        fi
+    fi
+
+    # Disable GPU audio device (saves PCIe bandwidth)
+    subhead "GPU Audio Device"
+    local nvidia_audio_pci
+    nvidia_audio_pci=$(lspci -D 2>/dev/null | grep -i 'nvidia.*audio\|nvidia.*hd audio' | awk '{print $1}' | head -1 || echo "")
+    if [[ -n "$nvidia_audio_pci" ]]; then
+        local audio_path="/sys/bus/pci/devices/${nvidia_audio_pci}"
+        if [[ -d "$audio_path" ]]; then
+            warn "NVIDIA GPU audio device found: $nvidia_audio_pci"
+            detail "Disabling saves PCIe bandwidth — you can still use HDMI audio via PulseAudio"
+            info "To disable: echo 1 | sudo tee ${audio_path}/remove"
+            info "Skipping auto-disable (may break HDMI audio for some users)"
+        fi
+    else
+        ok "No separate GPU audio device found (or already disabled)"
+    fi
+
+    echo ""
+    info "Optimization complete. Some changes require reboot."
+    info "Run ${BOLD}24hg-nvidia-wayland status${RESET} to verify."
+}
+
+# ── Command: env ─────────────────────────────────────────────────────────────
+
+cmd_env() {
+    local subcmd="${1:-show}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        show)
+            header "Current NVIDIA Environment Variables"
+            echo ""
+            local nvidia_vars=(
+                "__GL_GSYNC_ALLOWED"
+                "__GL_VRR_ALLOWED"
+                "__GL_YIELD"
+                "__GL_MaxFramesAllowed"
+                "__GL_SHADER_DISK_CACHE_SIZE"
+                "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP"
+                "__GL_SHADER_DISK_CACHE_PATH"
+                "__NV_PRIME_RENDER_OFFLOAD"
+                "__GLX_VENDOR_LIBRARY_NAME"
+                "GBM_BACKEND"
+                "VK_DRIVER_FILES"
+                "KWIN_DRM_NO_AMS"
+                "MOZ_ENABLE_WAYLAND"
+                "QT_QPA_PLATFORM"
+                "ELECTRON_OZONE_PLATFORM_HINT"
+            )
+
+            printf "  ${BOLD}%-42s  %s${RESET}\n" "Variable" "Value"
+            printf "  %-42s  %s\n" "──────────────────────────────────────────" "─────────────────────"
+            for var in "${nvidia_vars[@]}"; do
+                local val="${!var:-}"
+                if [[ -n "$val" ]]; then
+                    printf "  ${GREEN}%-42s${RESET}  %s\n" "$var" "$val"
+                else
+                    printf "  ${DIM}%-42s  (not set)${RESET}\n" "$var"
+                fi
+            done
+
+            echo ""
+            if [[ -f "$ENV_CONF" ]]; then
+                header "Persisted in ${ENV_CONF}"
+                echo ""
+                while IFS= read -r line; do
+                    [[ -z "$line" ]] || [[ "$line" == \#* ]] && continue
+                    echo -e "  ${CYAN}${line}${RESET}"
+                done < "$ENV_CONF"
+            else
+                info "No persisted environment file found."
+                info "Run '${BOLD}24hg-nvidia-wayland env apply${RESET}' to create one."
+            fi
+            ;;
+
+        apply)
+            header "Applying Optimized NVIDIA Environment"
+            echo ""
+            mkdir -p "$ENV_CONF_DIR"
+
+            local conf_content="# 24HG NVIDIA Wayland — Optimized environment variables
+# Generated by 24hg-nvidia-wayland on $(date '+%Y-%m-%d')
+# Loaded by systemd user session (environment.d)
+
+# Explicit sync / VRR
+__GL_GSYNC_ALLOWED=1
+__GL_VRR_ALLOWED=1
+
+# Power management
+__GL_YIELD=USLEEP
+
+# XWayland frame pacing
+__GL_MaxFramesAllowed=1
+
+# Shader cache (4GB, no pruning)
+__GL_SHADER_DISK_CACHE_SIZE=4294967296
+__GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
+__GL_SHADER_DISK_CACHE_PATH=${SHADER_CACHE_DIR}
+
+# GBM backend
+GBM_BACKEND=nvidia-drm
+
+# Wayland native apps
+MOZ_ENABLE_WAYLAND=1
+QT_QPA_PLATFORM=wayland
+ELECTRON_OZONE_PLATFORM_HINT=wayland"
+
+            # Add Optimus vars if applicable
+            if is_optimus; then
+                conf_content="${conf_content}
+
+# Optimus / Hybrid GPU
+__NV_PRIME_RENDER_OFFLOAD=1
+__GLX_VENDOR_LIBRARY_NAME=nvidia"
+            fi
+
+            if $DRY_RUN; then
+                info "[dry-run] Would write to ${ENV_CONF}:"
+                echo "$conf_content"
+            else
+                echo "$conf_content" > "$ENV_CONF"
+                mkdir -p "$SHADER_CACHE_DIR"
+                ok "Written to ${ENV_CONF}"
+                ok "Shader cache dir created: ${SHADER_CACHE_DIR}"
+                echo ""
+                info "Log out and back in for changes to take effect."
+                info "Or source it now: ${BOLD}set -a; source ${ENV_CONF}; set +a${RESET}"
+            fi
+            ;;
+
+        reset)
+            header "Resetting NVIDIA Environment"
+            if [[ -f "$ENV_CONF" ]]; then
+                if $DRY_RUN; then
+                    info "[dry-run] Would remove ${ENV_CONF}"
+                else
+                    rm -f "$ENV_CONF"
+                    ok "Removed ${ENV_CONF}"
+                    info "Log out and back in for changes to take effect."
+                fi
+            else
+                info "No environment file to remove."
+            fi
+            ;;
+
+        *)
+            err "Unknown env subcommand: ${subcmd}"
+            info "Usage: 24hg-nvidia-wayland env {show|apply|reset}"
+            exit 1
+            ;;
+    esac
+}
+
+# ── Command: flicker-fix ─────────────────────────────────────────────────────
+
+cmd_flicker_fix() {
+    echo -e "${BOLD}${CYAN}"
+    echo "  ╔══════════════════════════════════════════╗"
+    echo "  ║   24HG NVIDIA — XWayland Flicker Fix   ║"
+    echo "  ╚══════════════════════════════════════════╝"
+    echo -e "${RESET}"
+
+    local driver_ver driver_major
+    driver_ver=$(get_driver_version)
+    driver_major=$(get_driver_major)
+
+    info "Driver: ${BOLD}${driver_ver}${RESET}"
+
+    header "About XWayland Flickering"
+    echo -e "  The infamous 'black frame' / flickering bug affects XWayland games"
+    echo -e "  that use OpenGL — including Minecraft, Terraria, Factorio, and"
+    echo -e "  many older titles running through Proton/Wine."
+    echo ""
+
+    # Detect affected games that might be running
+    header "Detecting XWayland Game Processes"
+    local xwayland_games=()
+    local game_patterns=("java" "minecraft" "terraria" "factorio" "stardew" "celeste" "hollow_knight")
+    for pattern in "${game_patterns[@]}"; do
+        if pgrep -fi "$pattern" &>/dev/null; then
+            xwayland_games+=("$pattern")
+        fi
+    done
+    if [[ ${#xwayland_games[@]} -gt 0 ]]; then
+        warn "Potentially affected processes running: ${xwayland_games[*]}"
+    else
+        detail "No known XWayland-affected games currently running"
+    fi
+
+    header "Applying Fix"
+
+    # Strategy depends on driver + KDE version
+    if [[ "$driver_major" != "unknown" ]] && version_ge "$driver_major" "555"; then
+        info "Driver 555+ detected — using explicit sync approach"
+
+        if is_kde && command_exists kwriteconfig6; then
+            if dry_run_guard "enable KWin XWayland explicit sync"; then
+                kwriteconfig6 --file kwinrc --group Xwayland --key ExplicitSync true 2>/dev/null || true
+                kwriteconfig6 --file kwinrc --group Compositing --key ExplicitSync true 2>/dev/null || true
+                ok "Enabled KWin XWayland explicit sync"
+            fi
+        fi
+
+        # With explicit sync, MaxFramesAllowed=1 is still helpful as a belt-and-suspenders
+        if dry_run_guard "set frame pacing var"; then
+            write_env_var "__GL_MaxFramesAllowed" "1"
+            ok "Set __GL_MaxFramesAllowed=1"
+        fi
+
+        # Remove the old AMS workaround if no longer needed
+        if env_var_is_set "KWIN_DRM_NO_AMS"; then
+            info "KWIN_DRM_NO_AMS can likely be removed with driver 555+ and explicit sync"
+            info "Run: 24hg-nvidia-wayland env show (to check)"
+        fi
+
+    elif [[ "$driver_major" != "unknown" ]] && version_ge "$driver_major" "545"; then
+        info "Driver 545-554 detected — using partial explicit sync + AMS workaround"
+
+        if dry_run_guard "apply 545-554 flicker fixes"; then
+            write_env_var "__GL_MaxFramesAllowed" "1"
+            write_env_var "KWIN_DRM_NO_AMS" "1"
+            ok "Set __GL_MaxFramesAllowed=1 and KWIN_DRM_NO_AMS=1"
+        fi
+
+        if is_kde && command_exists kwriteconfig6; then
+            kwriteconfig6 --file kwinrc --group Compositing --key ExplicitSync true 2>/dev/null || true
+            ok "Enabled KWin compositor explicit sync"
+        fi
+
+    else
+        info "Driver <545 (or unknown) — using legacy AMS workaround"
+        if dry_run_guard "apply legacy flicker fixes"; then
+            write_env_var "__GL_MaxFramesAllowed" "1"
+            write_env_var "KWIN_DRM_NO_AMS" "1"
+            ok "Set __GL_MaxFramesAllowed=1 and KWIN_DRM_NO_AMS=1"
+        fi
+    fi
+
+    # Offer to test with a quick OpenGL window
+    echo ""
+    if command_exists glxgears; then
+        info "You can test with: ${BOLD}glxgears${RESET} (should render without flickering)"
+    elif command_exists vkcube; then
+        info "You can test with: ${BOLD}vkcube${RESET} (Vulkan — should render cleanly)"
+    else
+        info "Install mesa-demos (glxgears) or vulkan-tools (vkcube) to test"
+    fi
+
+    echo ""
+    info "Changes applied. Some may require KWin restart:"
+    info "  ${BOLD}qdbus org.kde.KWin /KWin reconfigure${RESET}"
+    info "Or log out and back in."
+}
+
+# ── Command: sync ────────────────────────────────────────────────────────────
+
+cmd_sync() {
+    local subcmd="${1:-status}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        status)
+            header "VRR / GSync Status"
+            echo ""
+
+            local gsync="${__GL_GSYNC_ALLOWED:-not set}"
+            local vrr="${__GL_VRR_ALLOWED:-not set}"
+
+            echo -e "  __GL_GSYNC_ALLOWED:  ${BOLD}${gsync}${RESET}"
+            echo -e "  __GL_VRR_ALLOWED:    ${BOLD}${vrr}${RESET}"
+
+            # KDE VRR status
+            if is_kde && command_exists kreadconfig6; then
+                local kde_vrr
+                kde_vrr=$(kreadconfig6 --file kwinrc --group Compositing --key AllowVRR 2>/dev/null || echo "not set")
+                echo -e "  KDE AllowVRR:        ${BOLD}${kde_vrr}${RESET}"
+
+                local kde_latency
+                kde_latency=$(kreadconfig6 --file kwinrc --group Compositing --key LatencyPolicy 2>/dev/null || echo "not set")
+                echo -e "  KDE LatencyPolicy:   ${BOLD}${kde_latency}${RESET}"
+            fi
+
+            # Monitor VRR capabilities
+            if command_exists nvidia-smi; then
+                echo ""
+                subhead "Connected Monitors"
+                # Try to get monitor info
+                if command_exists xrandr; then
+                    xrandr --query 2>/dev/null | grep ' connected' | while read -r line; do
+                        echo -e "    ${line}"
+                    done
+                elif command_exists kscreen-doctor; then
+                    kscreen-doctor --outputs 2>/dev/null | head -20
+                fi
+            fi
+
+            echo ""
+            if [[ "$gsync" == "1" ]] && [[ "$vrr" == "1" ]]; then
+                ok "VRR/GSync is enabled"
+            else
+                warn "VRR/GSync is not fully enabled"
+                info "Run: 24hg-nvidia-wayland sync enable"
+            fi
+            ;;
+
+        enable)
+            header "Enabling VRR / GSync"
+
+            if dry_run_guard "enable VRR env vars"; then
+                write_env_var "__GL_GSYNC_ALLOWED" "1"
+                write_env_var "__GL_VRR_ALLOWED" "1"
+                ok "Set __GL_GSYNC_ALLOWED=1 and __GL_VRR_ALLOWED=1"
+            fi
+
+            if is_kde; then
+                if command_exists kwriteconfig6; then
+                    if dry_run_guard "enable KDE VRR"; then
+                        # AllowVRR: 0=never, 1=always, 2=automatic
+                        kwriteconfig6 --file kwinrc --group Compositing --key AllowVRR 1 2>/dev/null || true
+                        # LatencyPolicy: ExtremelyLow, Low, Medium, High
+                        kwriteconfig6 --file kwinrc --group Compositing --key LatencyPolicy Low 2>/dev/null || true
+                        ok "Enabled KDE VRR (always) with Low latency"
+
+                        # Reconfigure KWin
+                        if command_exists qdbus6; then
+                            qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || true
+                            ok "KWin reconfigured"
+                        elif command_exists qdbus; then
+                            qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
+                            ok "KWin reconfigured"
+                        else
+                            info "Restart KWin or log out/in for changes to take effect"
+                        fi
+                    fi
+                elif command_exists kwriteconfig5; then
+                    if dry_run_guard "enable KDE VRR (Plasma 5)"; then
+                        kwriteconfig5 --file kwinrc --group Compositing --key AllowVRR 1 2>/dev/null || true
+                        ok "Enabled KDE VRR (Plasma 5)"
+                    fi
+                fi
+            fi
+
+            echo ""
+            ok "VRR/GSync enabled. Your monitor must also support VRR/FreeSync/GSync."
+            ;;
+
+        disable)
+            header "Disabling VRR / GSync"
+
+            if dry_run_guard "disable VRR"; then
+                write_env_var "__GL_GSYNC_ALLOWED" "0"
+                write_env_var "__GL_VRR_ALLOWED" "0"
+                ok "Set __GL_GSYNC_ALLOWED=0 and __GL_VRR_ALLOWED=0"
+            fi
+
+            if is_kde && command_exists kwriteconfig6; then
+                if dry_run_guard "disable KDE VRR"; then
+                    kwriteconfig6 --file kwinrc --group Compositing --key AllowVRR 0 2>/dev/null || true
+                    ok "Disabled KDE VRR"
+                    if command_exists qdbus6; then
+                        qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || true
+                    elif command_exists qdbus; then
+                        qdbus org.kde.KWin /KWin reconfigure 2>/dev/null || true
+                    fi
+                fi
+            fi
+
+            ok "VRR/GSync disabled."
+            ;;
+
+        *)
+            err "Unknown sync subcommand: ${subcmd}"
+            info "Usage: 24hg-nvidia-wayland sync {status|enable|disable}"
+            exit 1
+            ;;
+    esac
+}
+
+# ── Command: driver-check ────────────────────────────────────────────────────
+
+cmd_driver_check() {
+    header "NVIDIA Driver Check"
+
+    if ! is_nvidia_loaded; then
+        err "NVIDIA kernel module not loaded"
+        info "Either no NVIDIA GPU, or drivers are not installed"
+        exit 1
+    fi
+
+    local driver_ver driver_major gpu_name
+    driver_ver=$(get_driver_version)
+    driver_major=$(get_driver_major)
+    gpu_name=$(get_gpu_name)
+
+    echo -e "  GPU:             ${BOLD}${gpu_name}${RESET}"
+    echo -e "  Current driver:  ${BOLD}${driver_ver}${RESET}"
+    echo -e "  Kernel:          ${BOLD}$(get_kernel_version)${RESET}"
+
+    # Driver version assessment
+    echo ""
+    subhead "Driver Version Assessment"
+
+    if [[ "$driver_major" == "unknown" ]]; then
+        err "Could not determine driver version"
+        return 1
+    fi
+
+    local assessment=""
+    local rec_action=""
+
+    if version_ge "$driver_major" "570"; then
+        assessment="${GREEN}Excellent${RESET} — Latest stable branch"
+        rec_action="none"
+    elif version_ge "$driver_major" "560"; then
+        assessment="${GREEN}Good${RESET} — Recent production branch"
+        rec_action="consider upgrade"
+    elif version_ge "$driver_major" "555"; then
+        assessment="${GREEN}Good${RESET} — Explicit sync support, stable"
+        rec_action="consider upgrade"
+    elif version_ge "$driver_major" "550"; then
+        assessment="${YELLOW}Adequate${RESET} — Explicit sync support"
+        rec_action="upgrade recommended"
+    elif version_ge "$driver_major" "545"; then
+        assessment="${YELLOW}Adequate${RESET} — Minimum explicit sync"
+        rec_action="upgrade recommended"
+    elif version_ge "$driver_major" "535"; then
+        assessment="${YELLOW}Outdated${RESET} — No explicit sync"
+        rec_action="upgrade strongly recommended"
+    elif version_ge "$driver_major" "525"; then
+        assessment="${RED}Old${RESET} — Missing many Wayland fixes"
+        rec_action="upgrade required"
+    else
+        assessment="${RED}Very old${RESET} — Wayland support is minimal"
+        rec_action="upgrade required"
+    fi
+
+    echo -e "  Assessment:      ${assessment}"
+    echo -e "  Recommendation:  ${BOLD}${rec_action}${RESET}"
+
+    # Known issues by driver version
+    echo ""
+    subhead "Known Issues for Driver ${driver_major}"
+
+    if ! version_ge "$driver_major" "545"; then
+        echo -e "    ${RED}- No explicit sync (flickering in XWayland games)${RESET}"
+    fi
+    if ! version_ge "$driver_major" "535"; then
+        echo -e "    ${RED}- GBM backend issues${RESET}"
+        echo -e "    ${RED}- Frequent Wayland session crashes${RESET}"
+    fi
+    if [[ "$driver_major" == "545" ]] || [[ "$driver_major" == "546" ]]; then
+        echo -e "    ${YELLOW}- Some suspend/resume issues (fixed in 550+)${RESET}"
+    fi
+    if [[ "$driver_major" == "550" ]]; then
+        echo -e "    ${YELLOW}- Occasional shader compilation stalls (fixed in 555+)${RESET}"
+    fi
+    if version_ge "$driver_major" "555"; then
+        echo -e "    ${GREEN}- No major known gaming issues${RESET}"
+    fi
+
+    # Check akmod/dkms health
+    echo ""
+    subhead "Kernel Module Build Status"
+
+    if command_exists akmod; then
+        # Fedora / RPM Fusion
+        local akmod_status
+        akmod_status=$(akmods --check 2>/dev/null || echo "unknown")
+        echo -e "  akmod status:    ${BOLD}${akmod_status}${RESET}"
+    fi
+
+    if command_exists dkms; then
+        local dkms_status
+        dkms_status=$(dkms status nvidia 2>/dev/null || echo "not found")
+        echo -e "  DKMS status:     ${BOLD}${dkms_status}${RESET}"
+    fi
+
+    # Module matches running kernel?
+    local module_ver
+    module_ver=$(modinfo nvidia 2>/dev/null | awk '/^version:/{print $2}' | head -1 || echo "unknown")
+    if [[ "$module_ver" != "unknown" ]] && [[ "$module_ver" != "$driver_ver" ]]; then
+        warn "Module version ($module_ver) differs from running driver ($driver_ver)"
+        info "A reboot may be needed after driver update"
+    else
+        ok "Module version matches running driver"
+    fi
+
+    # Upgrade instructions
+    echo ""
+    if [[ "$rec_action" != "none" ]]; then
+        subhead "How to Update"
+        if command_exists rpm-ostree; then
+            info "Bazzite / Fedora Atomic:"
+            echo -e "    ${BOLD}rpm-ostree upgrade${RESET} (drivers bundled with OS updates)"
+            echo -e "    ${BOLD}systemctl reboot${RESET}"
+        elif [[ -f /etc/fedora-release ]]; then
+            info "Fedora (RPM Fusion):"
+            echo -e "    ${BOLD}sudo dnf update akmod-nvidia xorg-x11-drv-nvidia${RESET}"
+            echo -e "    ${BOLD}sudo akmods --force${RESET}"
+            echo -e "    ${BOLD}systemctl reboot${RESET}"
+        elif command_exists apt; then
+            info "Ubuntu / Debian:"
+            echo -e "    ${BOLD}sudo apt update && sudo apt install nvidia-driver-570${RESET}"
+            echo -e "    ${BOLD}systemctl reboot${RESET}"
+        elif command_exists pacman; then
+            info "Arch / Manjaro:"
+            echo -e "    ${BOLD}sudo pacman -Syu nvidia nvidia-utils${RESET}"
+            echo -e "    ${BOLD}systemctl reboot${RESET}"
+        else
+            info "Update your NVIDIA drivers through your distribution's package manager"
+        fi
+    fi
+
+    # Game-specific driver recommendations
+    echo ""
+    subhead "Game-Specific Notes"
+    echo -e "  ${DIM}Cyberpunk 2077:    545+ for RT stability${RESET}"
+    echo -e "  ${DIM}Baldur's Gate 3:   550+ for Vulkan perf${RESET}"
+    echo -e "  ${DIM}Elden Ring:        535+ minimum, 555+ recommended${RESET}"
+    echo -e "  ${DIM}Minecraft (Java):  555+ for XWayland flicker fix${RESET}"
+    echo -e "  ${DIM}Helldivers 2:      555+ (anti-cheat + Vulkan)${RESET}"
+    echo -e "  ${DIM}Star Citizen:      560+ recommended${RESET}"
+}
+
+# ── Usage / Help ─────────────────────────────────────────────────────────────
+
+show_help() {
+    echo -e "${BOLD}${CYAN}24HG NVIDIA Wayland Fix${RESET}"
+    echo -e "${DIM}Auto-detect and fix all NVIDIA + Wayland gaming issues${RESET}"
+    echo ""
+    echo -e "${BOLD}Usage:${RESET} 24hg-nvidia-wayland <command> [options]"
+    echo ""
+    echo -e "${BOLD}Commands:${RESET}"
+    echo -e "  ${GREEN}fix${RESET}            Auto-fix all known NVIDIA + Wayland issues"
+    echo -e "  ${GREEN}status${RESET}         Full NVIDIA Wayland status report with health score"
+    echo -e "  ${GREEN}diagnose${RESET}       Detailed problem diagnosis (dmesg, journal, symptoms)"
+    echo -e "  ${GREEN}optimize${RESET}       Fix + apply all gaming performance optimizations"
+    echo -e "  ${GREEN}env${RESET}            Manage NVIDIA environment variables"
+    echo -e "    ${DIM}env show${RESET}       Show all NVIDIA env vars"
+    echo -e "    ${DIM}env apply${RESET}      Write optimized env vars to environment.d"
+    echo -e "    ${DIM}env reset${RESET}      Remove custom env vars"
+    echo -e "  ${GREEN}flicker-fix${RESET}    Specifically fix XWayland flickering"
+    echo -e "  ${GREEN}sync${RESET}           VRR / GSync configuration"
+    echo -e "    ${DIM}sync status${RESET}    Show VRR/GSync state"
+    echo -e "    ${DIM}sync enable${RESET}    Enable VRR in KDE + NVIDIA"
+    echo -e "    ${DIM}sync disable${RESET}   Disable VRR"
+    echo -e "  ${GREEN}driver-check${RESET}   Check driver version and recommend updates"
+    echo ""
+    echo -e "${BOLD}Options:${RESET}"
+    echo -e "  ${YELLOW}--dry-run${RESET}      Preview changes without applying them"
+    echo -e "  ${YELLOW}--verbose${RESET}      Show extra debug output"
+    echo -e "  ${YELLOW}--help, -h${RESET}     Show this help"
+    echo ""
+    echo -e "${BOLD}Persisted settings:${RESET}"
+    echo -e "  ${DIM}~/.config/environment.d/nvidia-gaming.conf${RESET}  (env vars)"
+    echo -e "  ${DIM}/etc/modprobe.d/nvidia-24hg.conf${RESET}          (kernel modules)"
+    echo -e "  ${DIM}~/.config/kwinrc${RESET}                           (KDE compositor)"
+    echo ""
+    echo -e "${BOLD}Examples:${RESET}"
+    echo -e "  24hg-nvidia-wayland fix              # Fix everything"
+    echo -e "  24hg-nvidia-wayland status            # Health check"
+    echo -e "  24hg-nvidia-wayland diagnose           # Deep diagnosis"
+    echo -e "  24hg-nvidia-wayland fix --dry-run      # Preview fixes"
+    echo -e "  24hg-nvidia-wayland flicker-fix        # Fix XWayland flicker"
+    echo -e "  24hg-nvidia-wayland sync enable        # Enable VRR/GSync"
+    echo -e "  24hg-nvidia-wayland driver-check       # Check driver version"
+    echo ""
+    echo -e "${DIM}Part of 24HG — 24 Hour Gaming (24hgaming.com)${RESET}"
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+main() {
+    local cmd=""
+    local args=()
+
+    # Parse global flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --verbose)
+                VERBOSE=true
+                shift
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            -*)
+                err "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+            *)
+                if [[ -z "$cmd" ]]; then
+                    cmd="$1"
+                else
+                    args+=("$1")
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$cmd" ]]; then
+        show_help
+        exit 0
+    fi
+
+    case "$cmd" in
+        fix)          cmd_fix ;;
+        status)       cmd_status ;;
+        diagnose)     cmd_diagnose ;;
+        optimize)     cmd_optimize ;;
+        env)          cmd_env "${args[@]}" ;;
+        flicker-fix)  cmd_flicker_fix ;;
+        sync)         cmd_sync "${args[@]}" ;;
+        driver-check) cmd_driver_check ;;
+        *)
+            err "Unknown command: ${cmd}"
+            echo ""
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=24HG Quick Resume
+Comment=Save and restore desktop state
+Exec=/usr/bin/24hg-quick-resume
+Icon=24hg-logo
+Terminal=true
+Type=Application
+Categories=System;Utility;
+Keywords=save;restore;resume;state;desktop;

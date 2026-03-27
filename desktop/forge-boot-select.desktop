@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Forge Boot Selector
-Comment=Switch Desktop/Game mode
-Exec=/usr/bin/forge-boot-select
-Icon=forge-logo
-Terminal=true
-Type=Application
-Categories=System;
-Keywords=boot;mode;desktop;game;switch;

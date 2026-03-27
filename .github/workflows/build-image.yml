@@ -1,4 +1,4 @@
-name: Build 24HG Forge Image
+name: Build 24HG Image
 
 on:
   push:
@@ -15,7 +15,7 @@ on:
 
 env:
   IMAGE_REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/forge
+  IMAGE_NAME: ${{ github.repository_owner }}/24hg
 
 jobs:
   build:
@@ -74,7 +74,7 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### 24HG Forge Image Built (${{ matrix.variant }})" >> $GITHUB_STEP_SUMMARY
+          echo "### 24HG Image Built (${{ matrix.variant }})" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Images pushed:**" >> $GITHUB_STEP_SUMMARY
           echo "- \`${{ steps.meta.outputs.full_image }}:${{ matrix.variant }}-latest\`" >> $GITHUB_STEP_SUMMARY

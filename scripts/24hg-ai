@@ -1,0 +1,1134 @@
+#!/bin/bash
+set -euo pipefail
+# 24HG AI — AI-powered game assistant for Linux gaming
+# Uses the 24HG Hub API for AI-powered intelligent troubleshooting,
+# performance tuning, compatibility checks, and general gaming help.
+
+# ── Colors & Symbols ──────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
+BOLD='\033[1m'
+DIM='\033[2m'
+ITALIC='\033[3m'
+RESET='\033[0m'
+GRAY='\033[0;90m'
+
+CHECK="${GREEN}[ok]${RESET}"
+CROSS="${RED}[!!]${RESET}"
+WARN="${YELLOW}[!]${RESET}"
+INFO="${BLUE}[i]${RESET}"
+ARROW="${CYAN}>${RESET}"
+AI_PREFIX="${CYAN}[AI]${RESET}"
+YOU_PREFIX="${WHITE}[You]${RESET}"
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+API_URL="https://api.24hgaming.com"
+AI_ENDPOINT="/api/24hg/ai/chat"
+TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/24hg/hub-token"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/24hg/ai-conversations"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/24hg/ai"
+RATE_FILE="$CACHE_DIR/rate-limit"
+HG24_VERSION_FILE="/usr/share/24hg/version"
+LOG_TAG="24hg-ai"
+
+RATE_LIMIT=20           # messages per hour
+RATE_WINDOW=3600        # 1 hour in seconds
+MAX_HISTORY_FILES=100   # keep last N conversation files
+MAX_CONTEXT_ERRORS=5    # journal error lines to collect
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+CONVERSATION_ID=""
+CONVERSATION_FILE=""
+MESSAGE_COUNT=0
+SYSTEM_CONTEXT=""
+COLLECTED_CONTEXT=false
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+log() { logger -t "$LOG_TAG" "$*" 2>/dev/null || true; }
+
+die() {
+    echo -e "${CROSS} $1" >&2
+    exit 1
+}
+
+info() { echo -e "  ${INFO} $1"; }
+ok()   { echo -e "  ${CHECK} $1"; }
+warn() { echo -e "  ${WARN} $1"; }
+
+banner() {
+    echo -e "${BOLD}${CYAN}"
+    echo "  ╔═══════════════════════════════════════════╗"
+    echo "  ║         24HG AI Assistant           ║"
+    echo "  ║     Your Linux gaming expert sidekick     ║"
+    echo "  ╚═══════════════════════════════════════════╝"
+    echo -e "${RESET}"
+}
+
+small_banner() {
+    echo -e "${BOLD}${CYAN}── 24HG AI ──${RESET}"
+}
+
+separator() {
+    echo -e "${DIM}────────────────────────────────────────────────────────${RESET}"
+}
+
+ensure_dirs() {
+    mkdir -p "$DATA_DIR" "$CACHE_DIR"
+}
+
+# ── Token Management ──────────────────────────────────────────────────────────
+load_token() {
+    if [[ -f "$TOKEN_FILE" ]]; then
+        local token
+        token="$(< "$TOKEN_FILE")"
+        if [[ -n "$token" ]]; then
+            echo "$token"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+require_token() {
+    local token
+    if ! token=$(load_token); then
+        die "Hub token not found at $TOKEN_FILE
+  Log in to the 24HG Hub first:
+    24hg-hub-bridge login
+  Or manually place your token:
+    mkdir -p \"$(dirname "$TOKEN_FILE")\"
+    echo 'YOUR_TOKEN' > \"$TOKEN_FILE\""
+    fi
+    echo "$token"
+}
+
+# ── Rate Limiting ─────────────────────────────────────────────────────────────
+rate_limit_init() {
+    if [[ ! -f "$RATE_FILE" ]]; then
+        echo "[]" > "$RATE_FILE"
+    fi
+}
+
+rate_limit_check() {
+    rate_limit_init
+    local now cutoff count
+    now=$(date +%s)
+    cutoff=$((now - RATE_WINDOW))
+
+    # Read timestamps, filter expired ones
+    local timestamps
+    timestamps=$(python3 -c "
+import json, sys
+with open('$RATE_FILE') as f:
+    ts = json.load(f)
+ts = [t for t in ts if t > $cutoff]
+with open('$RATE_FILE', 'w') as f:
+    json.dump(ts, f)
+print(len(ts))
+" 2>/dev/null || echo "0")
+
+    if [[ "$timestamps" -ge "$RATE_LIMIT" ]]; then
+        return 1
+    fi
+    return 0
+}
+
+rate_limit_record() {
+    rate_limit_init
+    local now
+    now=$(date +%s)
+    python3 -c "
+import json
+with open('$RATE_FILE') as f:
+    ts = json.load(f)
+ts.append($now)
+with open('$RATE_FILE', 'w') as f:
+    json.dump(ts, f)
+" 2>/dev/null || true
+}
+
+rate_limit_status() {
+    rate_limit_init
+    local now cutoff count remaining
+    now=$(date +%s)
+    cutoff=$((now - RATE_WINDOW))
+
+    count=$(python3 -c "
+import json
+with open('$RATE_FILE') as f:
+    ts = json.load(f)
+ts = [t for t in ts if t > $cutoff]
+print(len(ts))
+" 2>/dev/null || echo "0")
+
+    remaining=$((RATE_LIMIT - count))
+    if [[ "$remaining" -lt 0 ]]; then
+        remaining=0
+    fi
+    echo -e "${DIM}Rate limit: ${remaining}/${RATE_LIMIT} messages remaining this hour${RESET}"
+}
+
+# ── System Context Collection ─────────────────────────────────────────────────
+
+collect_gpu() {
+    local gpu_info=""
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        local gpu_name driver_ver vram_total vram_used gpu_temp
+        gpu_name=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null | head -1 | xargs)
+        driver_ver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | xargs)
+        vram_total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader 2>/dev/null | head -1 | xargs)
+        vram_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null | head -1 | xargs)
+        gpu_temp=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null | head -1 | xargs)
+        gpu_info="NVIDIA ${gpu_name:-unknown}, driver ${driver_ver:-unknown}, VRAM ${vram_used:-?}/${vram_total:-?}, temp ${gpu_temp:-?}C"
+    else
+        local pci_gpu
+        pci_gpu=$(lspci 2>/dev/null | grep -i 'vga\|3d\|display' | head -1 | sed 's/.*: //' || echo "unknown")
+        local mesa_ver=""
+        if command -v glxinfo &>/dev/null; then
+            mesa_ver=$(glxinfo 2>/dev/null | grep "OpenGL version" | head -1 | sed 's/.*: //' || true)
+        fi
+        if [[ -n "$mesa_ver" ]]; then
+            gpu_info="${pci_gpu} (Mesa: ${mesa_ver})"
+        else
+            gpu_info="${pci_gpu}"
+        fi
+    fi
+    echo "$gpu_info"
+}
+
+collect_cpu() {
+    local cpu_model governor
+    cpu_model=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | sed 's/.*: //' | xargs || echo "unknown")
+    governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
+    echo "${cpu_model} (governor: ${governor})"
+}
+
+collect_ram() {
+    local total available used_pct
+    total=$(awk '/MemTotal/ {printf "%.1f", $2/1048576}' /proc/meminfo 2>/dev/null || echo "?")
+    available=$(awk '/MemAvailable/ {printf "%.1f", $2/1048576}' /proc/meminfo 2>/dev/null || echo "?")
+    echo "${available}GB available / ${total}GB total"
+}
+
+collect_kernel() {
+    uname -r 2>/dev/null || echo "unknown"
+}
+
+collect_os_version() {
+    if [[ -f /etc/os-release ]]; then
+        source /etc/os-release 2>/dev/null
+        echo "${PRETTY_NAME:-${NAME:-unknown} ${VERSION:-}}"
+    else
+        uname -o 2>/dev/null || echo "unknown"
+    fi
+}
+
+collect_proton_versions() {
+    local versions=""
+    local steam_dir="$HOME/.steam/steam"
+    local flatpak_steam="$HOME/.var/app/com.valvesoftware.Steam/.steam/steam"
+
+    # Check both native and flatpak Steam
+    for base in "$steam_dir" "$flatpak_steam"; do
+        local proton_dir="$base/compatibilitytools.d"
+        if [[ -d "$proton_dir" ]]; then
+            local found
+            found=$(ls -1 "$proton_dir" 2>/dev/null | head -10 | tr '\n' ', ' | sed 's/,$//')
+            if [[ -n "$found" ]]; then
+                versions="${versions:+$versions, }${found}"
+            fi
+        fi
+        # Also check Steam's built-in Proton
+        local steam_proton="$base/steamapps/common"
+        if [[ -d "$steam_proton" ]]; then
+            local builtin
+            builtin=$(ls -1 "$steam_proton" 2>/dev/null | grep -i "^Proton" | head -5 | tr '\n' ', ' | sed 's/,$//')
+            if [[ -n "$builtin" ]]; then
+                versions="${versions:+$versions, }${builtin}"
+            fi
+        fi
+    done
+
+    echo "${versions:-none found}"
+}
+
+collect_running_game() {
+    # Detect currently running games from process list
+    local game=""
+
+    # Check for common game processes via Steam
+    local steam_game
+    steam_game=$(ps aux 2>/dev/null | grep -i 'SteamLaunch\|steamapps\|proton.*run' | grep -v grep | head -1 || true)
+    if [[ -n "$steam_game" ]]; then
+        # Try to extract game name from path
+        game=$(echo "$steam_game" | grep -oP 'steamapps/common/\K[^/]+' || true)
+    fi
+
+    # Check for Lutris games
+    if [[ -z "$game" ]]; then
+        local lutris_game
+        lutris_game=$(ps aux 2>/dev/null | grep -i 'lutris.*game' | grep -v grep | head -1 || true)
+        if [[ -n "$lutris_game" ]]; then
+            game="Lutris game (running)"
+        fi
+    fi
+
+    # Check for wine/proton processes
+    if [[ -z "$game" ]]; then
+        local wine_proc
+        wine_proc=$(ps aux 2>/dev/null | grep -i 'wine.*\.exe\|proton.*\.exe' | grep -v grep | head -1 || true)
+        if [[ -n "$wine_proc" ]]; then
+            game=$(echo "$wine_proc" | grep -oP '[^ ]+\.exe' | tail -1 || echo "Wine application")
+        fi
+    fi
+
+    # Check for native Linux games (common ones)
+    if [[ -z "$game" ]]; then
+        local native_games=("factorio" "minecraft" "terraria" "valheim" "dota2" "csgo" "cs2"
+                           "hl2" "tf2" "deadcells" "hollowknight" "celeste" "Balatro")
+        for g in "${native_games[@]}"; do
+            if pgrep -xi "$g" &>/dev/null; then
+                game="$g"
+                break
+            fi
+        done
+    fi
+
+    echo "${game:-none detected}"
+}
+
+collect_journal_errors() {
+    # Get recent game-related errors from journal
+    local errors=""
+    if command -v journalctl &>/dev/null; then
+        errors=$(journalctl --user -p err -n "$MAX_CONTEXT_ERRORS" --no-pager \
+                 --since "1 hour ago" 2>/dev/null \
+                 | grep -iE 'game|steam|proton|wine|gpu|nvidia|amd|vulkan|shader|crash|segfault|oom' \
+                 | tail -"$MAX_CONTEXT_ERRORS" || true)
+        if [[ -z "$errors" ]]; then
+            # Fall back to system journal
+            errors=$(journalctl -p err -n "$MAX_CONTEXT_ERRORS" --no-pager \
+                     --since "1 hour ago" 2>/dev/null \
+                     | grep -iE 'game|steam|proton|wine|gpu|nvidia|amd|vulkan|shader|crash|segfault|oom' \
+                     | tail -"$MAX_CONTEXT_ERRORS" || true)
+        fi
+    fi
+    echo "${errors:-no recent errors}"
+}
+
+collect_mangohud_stats() {
+    # Try to find MangoHud log from last session
+    local mangohud_dir="$HOME/.local/share/MangoHud"
+    local stats=""
+    if [[ -d "$mangohud_dir" ]]; then
+        local latest_log
+        latest_log=$(ls -t "$mangohud_dir"/*.csv 2>/dev/null | head -1 || true)
+        if [[ -n "$latest_log" && -f "$latest_log" ]]; then
+            local game_name avg_fps p1_fps avg_frametime gpu_load cpu_load
+            game_name=$(basename "$latest_log" .csv | sed 's/_[0-9]*$//')
+            # Parse CSV for averages (skip header)
+            stats=$(awk -F',' 'NR>1 {
+                fps+=$1; ft+=$2; gpu+=$3; cpu+=$4; n++
+            } END {
+                if(n>0) printf "Game: %s, Avg FPS: %.1f, Avg frametime: %.1fms, Avg GPU: %.0f%%, Avg CPU: %.0f%% (%d samples)", \
+                    "'"$game_name"'", fps/n, ft/n, gpu/n, cpu/n, n
+            }' "$latest_log" 2>/dev/null || true)
+        fi
+    fi
+    echo "${stats:-no MangoHud data available}"
+}
+
+collect_hg24_version() {
+    if [[ -f "$HG24_VERSION_FILE" ]]; then
+        cat "$HG24_VERSION_FILE"
+    else
+        echo "unknown (dev/unpackaged)"
+    fi
+}
+
+collect_all_context() {
+    if $COLLECTED_CONTEXT; then
+        return
+    fi
+
+    echo -e "${DIM}Collecting system context...${RESET}"
+
+    local gpu cpu ram kernel os_ver proton game errors mangohud hg24_ver
+
+    # Collect in parallel where possible
+    gpu=$(collect_gpu)
+    cpu=$(collect_cpu)
+    ram=$(collect_ram)
+    kernel=$(collect_kernel)
+    os_ver=$(collect_os_version)
+    proton=$(collect_proton_versions)
+    game=$(collect_running_game)
+    errors=$(collect_journal_errors)
+    mangohud=$(collect_mangohud_stats)
+    hg24_ver=$(collect_hg24_version)
+
+    # Build JSON context
+    SYSTEM_CONTEXT=$(python3 -c "
+import json, sys
+ctx = {
+    'gpu': '''$gpu''',
+    'cpu': '''$cpu''',
+    'ram': '''$ram''',
+    'kernel': '''$kernel''',
+    'os': '''$os_ver''',
+    'proton_versions': '''$proton''',
+    'running_game': '''$game''',
+    'recent_errors': '''$errors''',
+    'mangohud_stats': '''$mangohud''',
+    'hg24_version': '''$hg24_ver'''
+}
+print(json.dumps(ctx))
+" 2>/dev/null)
+
+    if [[ -z "$SYSTEM_CONTEXT" ]]; then
+        # Fallback if python3 fails
+        SYSTEM_CONTEXT="{}"
+        warn "Could not serialize system context"
+    fi
+
+    COLLECTED_CONTEXT=true
+    log "System context collected"
+}
+
+show_context() {
+    collect_all_context
+    echo ""
+    echo -e "${BOLD}System context being sent to AI:${RESET}"
+    separator
+    echo "$SYSTEM_CONTEXT" | python3 -m json.tool 2>/dev/null | while IFS= read -r line; do
+        echo -e "  ${GRAY}${line}${RESET}"
+    done
+    separator
+    echo ""
+}
+
+# ── Conversation Management ──────────────────────────────────────────────────
+
+new_conversation() {
+    CONVERSATION_ID="$(date +%Y%m%d-%H%M%S)-$$"
+    CONVERSATION_FILE="$DATA_DIR/${CONVERSATION_ID}.jsonl"
+    MESSAGE_COUNT=0
+    touch "$CONVERSATION_FILE"
+    log "New conversation: $CONVERSATION_ID"
+}
+
+save_message() {
+    local role="$1" content="$2"
+    if [[ -n "$CONVERSATION_FILE" ]]; then
+        python3 -c "
+import json, sys
+msg = {
+    'role': '$role',
+    'content': sys.stdin.read(),
+    'timestamp': $(date +%s)
+}
+print(json.dumps(msg))
+" <<< "$content" >> "$CONVERSATION_FILE" 2>/dev/null || true
+    fi
+}
+
+# ── API Communication ─────────────────────────────────────────────────────────
+
+send_message() {
+    local message="$1"
+    local mode="${2:-chat}"
+    local token
+
+    token=$(require_token)
+
+    # Check rate limit
+    if ! rate_limit_check; then
+        echo -e "${CROSS} Rate limit reached (${RATE_LIMIT} messages/hour)."
+        echo -e "  ${DIM}Wait a few minutes and try again.${RESET}"
+        return 1
+    fi
+
+    # Ensure context is collected
+    collect_all_context
+
+    # Build request body
+    local request_body
+    request_body=$(python3 -c "
+import json, sys
+
+message = sys.stdin.read().strip()
+context = json.loads('''$SYSTEM_CONTEXT''')
+
+body = {
+    'message': message,
+    'context': context,
+    'conversation_id': '$CONVERSATION_ID',
+    'mode': '$mode'
+}
+
+print(json.dumps(body))
+" <<< "$message" 2>/dev/null)
+
+    if [[ -z "$request_body" ]]; then
+        echo -e "${CROSS} Failed to build request"
+        return 1
+    fi
+
+    # Save user message
+    save_message "user" "$message"
+    rate_limit_record
+
+    # Send to Hub API
+    local response http_code tmp_response tmp_headers
+    tmp_response=$(mktemp)
+    tmp_headers=$(mktemp)
+    trap "rm -f '$tmp_response' '$tmp_headers'" RETURN
+
+    http_code=$(curl -s -w "%{http_code}" \
+        -o "$tmp_response" \
+        -D "$tmp_headers" \
+        -X POST "${API_URL}${AI_ENDPOINT}" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -H "Accept: text/event-stream" \
+        --max-time 120 \
+        -d "$request_body" 2>/dev/null || echo "000")
+
+    case "$http_code" in
+        200)
+            # Process streamed response
+            local full_response=""
+            echo ""
+            while IFS= read -r line; do
+                # Handle SSE format: data: {...}
+                if [[ "$line" == data:* ]]; then
+                    local data="${line#data: }"
+                    if [[ "$data" == "[DONE]" ]]; then
+                        break
+                    fi
+                    local chunk
+                    chunk=$(python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read().strip())
+    text = d.get('text', d.get('content', d.get('delta', '')))
+    print(text, end='')
+except:
+    pass
+" <<< "$data" 2>/dev/null || true)
+                    if [[ -n "$chunk" ]]; then
+                        echo -ne "${CYAN}${chunk}${RESET}"
+                        full_response+="$chunk"
+                    fi
+                elif [[ -n "$line" && "$line" != :* ]]; then
+                    # Non-SSE response (plain text or full JSON)
+                    local text
+                    text=$(python3 -c "
+import json, sys
+raw = sys.stdin.read().strip()
+try:
+    d = json.loads(raw)
+    print(d.get('response', d.get('text', d.get('content', d.get('message', raw)))))
+except:
+    print(raw)
+" <<< "$line" 2>/dev/null || echo "$line")
+                    if [[ -n "$text" ]]; then
+                        echo -ne "${CYAN}${text}${RESET}"
+                        full_response+="$text"
+                    fi
+                fi
+            done < "$tmp_response"
+            echo ""
+            echo ""
+
+            # If no streaming data was parsed, try reading full response as JSON
+            if [[ -z "$full_response" && -s "$tmp_response" ]]; then
+                full_response=$(python3 -c "
+import json, sys
+raw = sys.stdin.read().strip()
+try:
+    d = json.loads(raw)
+    print(d.get('response', d.get('text', d.get('content', d.get('message', raw)))))
+except:
+    print(raw)
+" < "$tmp_response" 2>/dev/null || cat "$tmp_response")
+                echo -e "${CYAN}${full_response}${RESET}"
+                echo ""
+            fi
+
+            # Save AI response
+            if [[ -n "$full_response" ]]; then
+                save_message "assistant" "$full_response"
+            fi
+
+            MESSAGE_COUNT=$((MESSAGE_COUNT + 1))
+            ;;
+        401)
+            echo -e "${CROSS} Authentication failed. Your hub token may be expired."
+            echo -e "  Run ${BOLD}24hg-hub-bridge login${RESET} to refresh your token."
+            return 1
+            ;;
+        429)
+            echo -e "${CROSS} Server-side rate limit reached. Please wait a moment."
+            return 1
+            ;;
+        000)
+            echo -e "${CROSS} Could not connect to the 24HG Hub."
+            echo -e "  Check your internet connection and try again."
+            echo -e "  ${DIM}API: ${API_URL}${AI_ENDPOINT}${RESET}"
+            return 1
+            ;;
+        *)
+            local error_msg
+            error_msg=$(python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    print(d.get('error', d.get('message', 'Unknown error')))
+except:
+    print('HTTP $http_code')
+" < "$tmp_response" 2>/dev/null || echo "HTTP $http_code")
+            echo -e "${CROSS} API error: ${error_msg}"
+            return 1
+            ;;
+    esac
+}
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+cmd_chat() {
+    banner
+    rate_limit_status
+    echo ""
+    echo -e "  ${DIM}Type your message and press Enter. Commands:${RESET}"
+    echo -e "  ${DIM}  /clear    Reset conversation${RESET}"
+    echo -e "  ${DIM}  /context  Show system info being sent${RESET}"
+    echo -e "  ${DIM}  /rate     Show rate limit status${RESET}"
+    echo -e "  ${DIM}  /quit     Exit${RESET}"
+    echo -e "  ${DIM}  \\         Line continuation (multi-line input)${RESET}"
+    separator
+
+    new_conversation
+    collect_all_context
+
+    while true; do
+        echo ""
+        echo -ne "${YOU_PREFIX} "
+
+        # Read input with line continuation support
+        local input="" line=""
+        while true; do
+            if ! IFS= read -r -e line; then
+                # EOF (Ctrl-D)
+                echo ""
+                echo -e "${DIM}Goodbye.${RESET}"
+                return 0
+            fi
+
+            # Check for line continuation
+            if [[ "$line" == *'\' ]]; then
+                input+="${line%\\}"$'\n'
+                echo -ne "${DIM}...${RESET} "
+                continue
+            else
+                input+="$line"
+                break
+            fi
+        done
+
+        # Trim whitespace
+        input=$(echo "$input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        # Skip empty input
+        if [[ -z "$input" ]]; then
+            continue
+        fi
+
+        # Handle slash commands
+        case "$input" in
+            /clear)
+                new_conversation
+                COLLECTED_CONTEXT=false
+                collect_all_context
+                echo -e "${INFO} Conversation cleared."
+                continue
+                ;;
+            /context)
+                show_context
+                continue
+                ;;
+            /rate)
+                rate_limit_status
+                continue
+                ;;
+            /quit|/exit|/q)
+                echo -e "${DIM}Goodbye.${RESET}"
+                return 0
+                ;;
+            /help)
+                echo -e "  ${DIM}/clear    Reset conversation${RESET}"
+                echo -e "  ${DIM}/context  Show system info being sent${RESET}"
+                echo -e "  ${DIM}/rate     Show rate limit status${RESET}"
+                echo -e "  ${DIM}/quit     Exit${RESET}"
+                continue
+                ;;
+            /*)
+                echo -e "${WARN} Unknown command: $input"
+                echo -e "  ${DIM}Type /help for available commands${RESET}"
+                continue
+                ;;
+        esac
+
+        # Send message
+        echo -e "${AI_PREFIX} "
+        send_message "$input" "chat" || true
+    done
+}
+
+cmd_fix() {
+    local problem="$*"
+    if [[ -z "$problem" ]]; then
+        echo -e "${CROSS} Usage: 24hg-ai fix <description of problem>"
+        echo ""
+        echo "  Examples:"
+        echo "    24hg-ai fix \"CS2 crashes on launch\""
+        echo "    24hg-ai fix \"low fps in Elden Ring\""
+        echo "    24hg-ai fix \"Steam won't open after update\""
+        exit 1
+    fi
+
+    small_banner
+    echo -e "  ${INFO} Analyzing: ${BOLD}${problem}${RESET}"
+    echo ""
+
+    new_conversation
+    collect_all_context
+
+    local prompt="I have this problem and need a fix: ${problem}
+
+Please analyze my system context and provide:
+1. Most likely cause
+2. Step-by-step fix (with exact terminal commands where applicable)
+3. How to verify the fix worked
+4. Prevention tips
+
+Be concise and give me commands I can copy-paste."
+
+    echo -e "${AI_PREFIX}"
+    send_message "$prompt" "fix"
+}
+
+cmd_optimize() {
+    local game="$*"
+    if [[ -z "$game" ]]; then
+        echo -e "${CROSS} Usage: 24hg-ai optimize <game name>"
+        echo ""
+        echo "  Examples:"
+        echo "    24hg-ai optimize \"Cyberpunk 2077\""
+        echo "    24hg-ai optimize \"Baldur's Gate 3\""
+        echo "    24hg-ai optimize cs2"
+        exit 1
+    fi
+
+    small_banner
+    echo -e "  ${INFO} Optimizing: ${BOLD}${game}${RESET}"
+    echo ""
+
+    new_conversation
+    collect_all_context
+
+    local prompt="I want to optimize performance for: ${game}
+
+Based on my system specs, please provide:
+1. Recommended in-game graphics settings for a good FPS/quality balance
+2. Proton version recommendation (if Windows game)
+3. Launch options to set in Steam
+4. System-level tweaks (environment variables, kernel params, gamemode, etc.)
+5. MangoHud config suggestions for monitoring
+6. Any known Linux-specific issues or workarounds
+
+Target: stable 60fps (or highest achievable) with best possible visual quality.
+Give concrete settings and commands I can copy-paste."
+
+    echo -e "${AI_PREFIX}"
+    send_message "$prompt" "optimize"
+}
+
+cmd_compat() {
+    local game="$*"
+    if [[ -z "$game" ]]; then
+        echo -e "${CROSS} Usage: 24hg-ai compat <game name>"
+        echo ""
+        echo "  Examples:"
+        echo "    24hg-ai compat \"Elden Ring\""
+        echo "    24hg-ai compat \"Forza Horizon 5\""
+        echo "    24hg-ai compat valorant"
+        exit 1
+    fi
+
+    small_banner
+    echo -e "  ${INFO} Checking compatibility: ${BOLD}${game}${RESET}"
+    echo ""
+
+    new_conversation
+    collect_all_context
+
+    local prompt="Check Linux compatibility for: ${game}
+
+Based on my system, please provide:
+1. ProtonDB rating and overall Linux compatibility status
+2. Best Proton version to use
+3. Required dependencies or libraries
+4. Known issues and workarounds on Linux
+5. Anti-cheat status (EAC/BattlEye/custom) and if it works on Linux
+6. Step-by-step setup instructions if any special config is needed
+7. Controller support status on Linux
+
+Be specific to my GPU and driver version."
+
+    echo -e "${AI_PREFIX}"
+    send_message "$prompt" "compat"
+}
+
+cmd_explain() {
+    local command="$*"
+    if [[ -z "$command" ]]; then
+        echo -e "${CROSS} Usage: 24hg-ai explain <command>"
+        echo ""
+        echo "  Examples:"
+        echo "    24hg-ai explain 24hg-rescue"
+        echo "    24hg-ai explain 24hg-thermal"
+        echo "    24hg-ai explain \"MANGOHUD=1 gamemoderun %command%\""
+        exit 1
+    fi
+
+    small_banner
+    echo -e "  ${INFO} Explaining: ${BOLD}${command}${RESET}"
+    echo ""
+
+    new_conversation
+
+    local prompt="Explain what this command/tool does in the context of 24HG Linux gaming distro: ${command}
+
+Please provide:
+1. What it does (brief summary)
+2. Common usage examples
+3. Important flags/options
+4. When you would typically use it
+5. Related 24hg commands
+
+Keep it concise and practical. This is a 24HG system (based on Bazzite/Fedora Atomic)."
+
+    echo -e "${AI_PREFIX}"
+    send_message "$prompt" "explain"
+}
+
+cmd_diagnose() {
+    banner
+    echo -e "  ${INFO} Running system diagnostics..."
+    echo ""
+
+    new_conversation
+
+    # Collect extended diagnostics
+    local diag_data=""
+
+    # Basic context
+    collect_all_context
+
+    # GPU details
+    echo -e "  ${DIM}Checking GPU...${RESET}"
+    local gpu_extended=""
+    if command -v nvidia-smi &>/dev/null; then
+        gpu_extended=$(nvidia-smi 2>/dev/null | head -20 || true)
+    fi
+    local vulkan_info=""
+    if command -v vulkaninfo &>/dev/null; then
+        vulkan_info=$(vulkaninfo --summary 2>/dev/null | head -20 || echo "vulkaninfo not available")
+    fi
+
+    # Disk space
+    echo -e "  ${DIM}Checking disk space...${RESET}"
+    local disk_info
+    disk_info=$(df -h / /home /tmp 2>/dev/null | tail -n +2 || echo "unknown")
+
+    # Steam status
+    echo -e "  ${DIM}Checking Steam...${RESET}"
+    local steam_status="not running"
+    if pgrep -x steam &>/dev/null || pgrep -x steamwebhelper &>/dev/null; then
+        steam_status="running"
+    fi
+    local steam_compat_dir=""
+    for d in "$HOME/.steam/steam/compatibilitytools.d" "$HOME/.var/app/com.valvesoftware.Steam/.steam/steam/compatibilitytools.d"; do
+        if [[ -d "$d" ]]; then
+            steam_compat_dir=$(ls -la "$d" 2>/dev/null | tail -n +2 || true)
+            break
+        fi
+    done
+
+    # 24HG tools
+    echo -e "  ${DIM}Checking 24HG tools...${RESET}"
+    local hg24_tools=""
+    local hg24_cmds=("24hg-rescue" "24hg-thermal" "24hg-performance" "24hg-shader-cache"
+                      "24hg-proton-fix" "24hg-display" "24hg-audio" "24hg-controller")
+    for cmd in "${hg24_cmds[@]}"; do
+        if command -v "$cmd" &>/dev/null; then
+            hg24_tools+="$cmd: installed\n"
+        else
+            hg24_tools+="$cmd: NOT FOUND\n"
+        fi
+    done
+
+    # 24HG rescue scan (if available)
+    echo -e "  ${DIM}Running 24hg-rescue scan...${RESET}"
+    local rescue_output=""
+    if command -v 24hg-rescue &>/dev/null; then
+        rescue_output=$(timeout 30 24hg-rescue scan 2>&1 || echo "24hg-rescue scan failed or timed out")
+    else
+        rescue_output="24hg-rescue not available"
+    fi
+
+    # Thermal status
+    echo -e "  ${DIM}Checking thermals...${RESET}"
+    local thermal_output=""
+    if command -v 24hg-thermal &>/dev/null; then
+        thermal_output=$(timeout 10 24hg-thermal status 2>&1 || echo "24hg-thermal failed")
+    else
+        # Manual thermal check
+        thermal_output=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null \
+            | awk '{printf "Zone: %.1fC\n", $1/1000}' || echo "no thermal data")
+    fi
+
+    # Swap info
+    local swap_info
+    swap_info=$(swapon --show 2>/dev/null || echo "no swap")
+
+    # Kernel messages (last game-related)
+    echo -e "  ${DIM}Checking kernel logs...${RESET}"
+    local dmesg_errors
+    dmesg_errors=$(dmesg 2>/dev/null | grep -iE 'error|fail|gpu|nvidia|amd|oom|segfault' | tail -10 || echo "no access or no errors")
+
+    # Network (for online games)
+    echo -e "  ${DIM}Checking network...${RESET}"
+    local net_info
+    net_info=$(ip route get 1.1.1.1 2>/dev/null | head -1 || echo "no route")
+    local dns_test
+    dns_test=$(timeout 3 dig +short google.com 2>/dev/null | head -1 || echo "DNS check failed")
+
+    echo ""
+    separator
+    echo -e "  ${INFO} Sending diagnostics to AI for analysis..."
+    separator
+    echo ""
+
+    local prompt="I ran a full system diagnostic on my 24HG Linux gaming system. Analyze everything and tell me:
+
+1. Any problems detected (prioritized by severity)
+2. Performance bottlenecks
+3. Recommended fixes (with commands)
+4. General health assessment
+
+DIAGNOSTIC DATA:
+=================
+
+GPU Extended:
+${gpu_extended:-N/A}
+
+Vulkan:
+${vulkan_info:-N/A}
+
+Disk Space:
+${disk_info}
+
+Steam: ${steam_status}
+Compatibility tools:
+${steam_compat_dir:-none found}
+
+24HG Tools:
+$(echo -e "$hg24_tools")
+
+24HG Rescue Scan:
+${rescue_output}
+
+Thermal Status:
+${thermal_output}
+
+Swap:
+${swap_info}
+
+Kernel Errors (recent):
+${dmesg_errors}
+
+Network:
+Route: ${net_info}
+DNS: ${dns_test}
+
+Be specific, prioritize actionable fixes, and give copy-paste commands."
+
+    echo -e "${AI_PREFIX}"
+    send_message "$prompt" "diagnose"
+}
+
+cmd_history() {
+    ensure_dirs
+
+    local files
+    files=$(ls -1t "$DATA_DIR"/*.jsonl 2>/dev/null || true)
+
+    if [[ -z "$files" ]]; then
+        echo -e "${INFO} No conversation history found."
+        echo -e "  ${DIM}Start a conversation with: 24hg-ai chat${RESET}"
+        return 0
+    fi
+
+    small_banner
+    echo -e "  ${BOLD}Recent conversations:${RESET}"
+    echo ""
+
+    local count=0
+    while IFS= read -r file; do
+        if [[ $count -ge 20 ]]; then
+            echo -e "  ${DIM}... and more. Files in: $DATA_DIR${RESET}"
+            break
+        fi
+
+        local basename
+        basename=$(basename "$file" .jsonl)
+        local date_part="${basename%%-*}-${basename#*-}"
+
+        # Extract first user message as preview
+        local preview
+        preview=$(python3 -c "
+import json, sys
+for line in open('$file'):
+    try:
+        msg = json.loads(line)
+        if msg.get('role') == 'user':
+            text = msg.get('content', '')[:80]
+            text = text.replace('\n', ' ')
+            print(text)
+            break
+    except:
+        continue
+" 2>/dev/null || echo "(empty)")
+
+        local msg_count
+        msg_count=$(wc -l < "$file" 2>/dev/null || echo "0")
+
+        # Format date from filename
+        local display_date
+        display_date=$(echo "$basename" | sed 's/\([0-9]\{4\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)-\([0-9]\{2\}\)\([0-9]\{2\}\)\([0-9]\{2\}\).*/\1-\2-\3 \4:\5/' 2>/dev/null || echo "$basename")
+
+        echo -e "  ${CYAN}${display_date}${RESET}  ${DIM}(${msg_count} msgs)${RESET}"
+        echo -e "    ${preview}"
+        echo ""
+
+        count=$((count + 1))
+    done <<< "$files"
+
+    echo -e "  ${DIM}Conversation files: $DATA_DIR${RESET}"
+}
+
+# ── Housekeeping ──────────────────────────────────────────────────────────────
+
+cleanup_old_conversations() {
+    ensure_dirs
+    local file_count
+    file_count=$(find "$DATA_DIR" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l)
+    file_count="${file_count:-0}"
+
+    if [[ "$file_count" -gt "$MAX_HISTORY_FILES" ]]; then
+        local to_remove=$((file_count - MAX_HISTORY_FILES))
+        ls -1t "$DATA_DIR"/*.jsonl 2>/dev/null | tail -"$to_remove" | while read -r f; do
+            rm -f "$f"
+        done
+        log "Cleaned up $to_remove old conversation files"
+    fi
+}
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+
+usage() {
+    echo -e "${BOLD}${CYAN}24hg-ai${RESET} — AI-powered game assistant for 24HG"
+    echo ""
+    echo -e "${BOLD}USAGE:${RESET}"
+    echo "  24hg-ai [command] [arguments]"
+    echo ""
+    echo -e "${BOLD}COMMANDS:${RESET}"
+    echo -e "  ${CYAN}chat${RESET}              Interactive chat mode (default)"
+    echo -e "  ${CYAN}fix${RESET} <problem>     Describe a problem, get a solution"
+    echo -e "  ${CYAN}optimize${RESET} <game>   Performance tuning for a specific game"
+    echo -e "  ${CYAN}compat${RESET} <game>     Compatibility check and setup guide"
+    echo -e "  ${CYAN}explain${RESET} <command> Explain what a 24hg command does"
+    echo -e "  ${CYAN}diagnose${RESET}          Auto-collect system info and analyze"
+    echo -e "  ${CYAN}history${RESET}           Show past conversations"
+    echo ""
+    echo -e "${BOLD}EXAMPLES:${RESET}"
+    echo "  24hg-ai                              # Start interactive chat"
+    echo "  24hg-ai fix \"CS2 crashes on launch\"  # Get a fix"
+    echo "  24hg-ai optimize \"Cyberpunk 2077\"    # Performance tips"
+    echo "  24hg-ai compat \"Elden Ring\"          # Linux compatibility"
+    echo "  24hg-ai explain 24hg-rescue          # What does it do?"
+    echo "  24hg-ai diagnose                      # Full system check"
+    echo ""
+    echo -e "${BOLD}INTERACTIVE COMMANDS:${RESET}"
+    echo "  /clear    Reset conversation"
+    echo "  /context  Show system info being sent"
+    echo "  /rate     Show rate limit status"
+    echo "  /quit     Exit"
+    echo ""
+    echo -e "${DIM}Messages are sent to the 24HG Hub (${API_URL}).${RESET}"
+    echo -e "${DIM}Rate limit: ${RATE_LIMIT} messages per hour.${RESET}"
+    echo -e "${DIM}Conversations saved to: ${DATA_DIR}${RESET}"
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+    ensure_dirs
+    cleanup_old_conversations
+
+    local command="${1:-chat}"
+    shift 2>/dev/null || true
+
+    case "$command" in
+        chat|c)
+            cmd_chat
+            ;;
+        fix|f)
+            cmd_fix "$@"
+            ;;
+        optimize|opt|o)
+            cmd_optimize "$@"
+            ;;
+        compat|compatibility|comp)
+            cmd_compat "$@"
+            ;;
+        explain|ex|e)
+            cmd_explain "$@"
+            ;;
+        diagnose|diag|d)
+            cmd_diagnose
+            ;;
+        history|hist|h)
+            cmd_history
+            ;;
+        help|--help|-h)
+            usage
+            ;;
+        version|--version|-v)
+            echo "24hg-ai $(collect_hg24_version)"
+            ;;
+        *)
+            # If no recognized command, treat as a direct question
+            cmd_fix "$command $*"
+            ;;
+    esac
+}
+
+main "$@"

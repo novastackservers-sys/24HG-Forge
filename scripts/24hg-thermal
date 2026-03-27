@@ -1,0 +1,1498 @@
+#!/usr/bin/env bash
+# 24HG Thermal Guard — Temperature monitoring and protection for gaming
+# Usage: 24hg-thermal [monitor|status|warn|fan|log|limits] [options]
+
+set -euo pipefail
+
+# ─── Configuration paths ────────────────────────────────────────────────────────
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/24hg"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/24hg/thermal"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/24hg"
+CONFIG_FILE="$CONFIG_DIR/thermal.json"
+CACHE_FILE="$CACHE_DIR/thermal.json"
+LOG_DIR="$DATA_DIR"
+POLL_INTERVAL=3
+DAEMON_MODE=false
+
+# ─── Default thresholds ─────────────────────────────────────────────────────────
+GPU_WARN=85
+GPU_CRIT=95
+CPU_WARN=80
+CPU_CRIT=90
+SSD_WARN=60
+SSD_CRIT=70
+
+# ─── Colors ──────────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    ORANGE='\033[0;33m'
+    YELLOW='\033[1;33m'
+    GREEN='\033[0;32m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    RESET='\033[0m'
+else
+    RED='' ORANGE='' YELLOW='' GREEN='' CYAN='' BOLD='' DIM='' RESET=''
+fi
+
+# ─── Ensure directories exist ───────────────────────────────────────────────────
+mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$CACHE_DIR"
+
+# ─── Load saved thresholds ──────────────────────────────────────────────────────
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local val
+        val=$(python3 -c "
+import json, sys
+try:
+    c = json.load(open('$CONFIG_FILE'))
+    t = c.get('thresholds', {})
+    print(t.get('gpu_warn', $GPU_WARN))
+    print(t.get('gpu_crit', $GPU_CRIT))
+    print(t.get('cpu_warn', $CPU_WARN))
+    print(t.get('cpu_crit', $CPU_CRIT))
+    print(t.get('ssd_warn', $SSD_WARN))
+    print(t.get('ssd_crit', $SSD_CRIT))
+except:
+    print($GPU_WARN); print($GPU_CRIT); print($CPU_WARN)
+    print($CPU_CRIT); print($SSD_WARN); print($SSD_CRIT)
+" 2>/dev/null) || return 0
+        local -a lines
+        mapfile -t lines <<< "$val"
+        GPU_WARN="${lines[0]:-$GPU_WARN}"
+        GPU_CRIT="${lines[1]:-$GPU_CRIT}"
+        CPU_WARN="${lines[2]:-$CPU_WARN}"
+        CPU_CRIT="${lines[3]:-$CPU_CRIT}"
+        SSD_WARN="${lines[4]:-$SSD_WARN}"
+        SSD_CRIT="${lines[5]:-$SSD_CRIT}"
+    fi
+}
+
+save_config() {
+    python3 -c "
+import json, os
+path = '$CONFIG_FILE'
+try:
+    c = json.load(open(path))
+except:
+    c = {}
+c['thresholds'] = {
+    'gpu_warn': $GPU_WARN, 'gpu_crit': $GPU_CRIT,
+    'cpu_warn': $CPU_WARN, 'cpu_crit': $CPU_CRIT,
+    'ssd_warn': $SSD_WARN, 'ssd_crit': $SSD_CRIT
+}
+json.dump(c, open(path, 'w'), indent=2)
+" 2>/dev/null
+}
+
+load_config
+
+# ─── GPU vendor detection ────────────────────────────────────────────────────────
+GPU_VENDOR="unknown"
+detect_gpu() {
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        GPU_VENDOR="nvidia"
+    elif [[ -d /sys/class/drm/card0/device ]] && [[ -f /sys/class/drm/card0/device/vendor ]]; then
+        local vendor
+        vendor=$(< /sys/class/drm/card0/device/vendor)
+        case "$vendor" in
+            0x1002) GPU_VENDOR="amd" ;;
+            0x8086) GPU_VENDOR="intel" ;;
+            0x10de) GPU_VENDOR="nvidia" ;;
+        esac
+    fi
+}
+detect_gpu
+
+# ─── Temperature reading helpers ─────────────────────────────────────────────────
+
+# Read GPU temperature (returns integer °C)
+read_gpu_temp() {
+    local temp=0
+    case "$GPU_VENDOR" in
+        nvidia)
+            temp=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -1) || true
+            ;;
+        amd)
+            for hwmon in /sys/class/drm/card*/device/hwmon/hwmon*/temp1_input; do
+                if [[ -f "$hwmon" ]]; then
+                    temp=$(( $(< "$hwmon") / 1000 ))
+                    break
+                fi
+            done
+            ;;
+        intel)
+            for hwmon in /sys/class/drm/card*/device/hwmon/hwmon*/temp1_input; do
+                if [[ -f "$hwmon" ]]; then
+                    temp=$(( $(< "$hwmon") / 1000 ))
+                    break
+                fi
+            done
+            ;;
+    esac
+    # Fallback: try lm-sensors
+    if [[ "$temp" -eq 0 ]] && command -v sensors &>/dev/null; then
+        temp=$(sensors -j 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for chip in data.values():
+    if isinstance(chip, dict):
+        for k, v in chip.items():
+            if 'gpu' in k.lower() or 'edge' in k.lower() or 'junction' in k.lower():
+                if isinstance(v, dict):
+                    for sk, sv in v.items():
+                        if 'input' in sk.lower():
+                            print(int(float(sv)))
+                            sys.exit(0)
+" 2>/dev/null) || true
+    fi
+    echo "${temp:-0}"
+}
+
+# Read GPU power draw (watts)
+read_gpu_power() {
+    local power=0
+    case "$GPU_VENDOR" in
+        nvidia)
+            power=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits 2>/dev/null | head -1 | cut -d. -f1) || true
+            ;;
+        amd)
+            for pf in /sys/class/drm/card*/device/hwmon/hwmon*/power1_average; do
+                if [[ -f "$pf" ]]; then
+                    power=$(( $(< "$pf") / 1000000 ))
+                    break
+                fi
+            done
+            ;;
+    esac
+    echo "${power:-0}"
+}
+
+# Read GPU fan speed (RPM or %)
+read_gpu_fan() {
+    local fan=0
+    case "$GPU_VENDOR" in
+        nvidia)
+            fan=$(nvidia-smi --query-gpu=fan.speed --format=csv,noheader,nounits 2>/dev/null | head -1 | cut -d. -f1) || true
+            if [[ "${fan:-0}" -gt 0 ]]; then
+                echo "${fan}%"
+                return
+            fi
+            ;;
+        amd|intel)
+            for fp in /sys/class/drm/card*/device/hwmon/hwmon*/fan1_input; do
+                if [[ -f "$fp" ]]; then
+                    fan=$(< "$fp")
+                    echo "${fan} RPM"
+                    return
+                fi
+            done
+            ;;
+    esac
+    echo "${fan:-0}"
+}
+
+# Read CPU temperature (hottest core)
+read_cpu_temp() {
+    local max_temp=0 temp=0
+
+    # Try coretemp / k10temp via hwmon
+    for hwmon_dir in /sys/class/hwmon/hwmon*; do
+        [[ -d "$hwmon_dir" ]] || continue
+        local name=""
+        [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+        if [[ "$name" == "coretemp" || "$name" == "k10temp" || "$name" == "zenpower" ]]; then
+            for tf in "$hwmon_dir"/temp*_input; do
+                [[ -f "$tf" ]] || continue
+                temp=$(( $(< "$tf") / 1000 ))
+                (( temp > max_temp )) && max_temp=$temp
+            done
+        fi
+    done
+
+    # Fallback: lm-sensors
+    if [[ "$max_temp" -eq 0 ]] && command -v sensors &>/dev/null; then
+        max_temp=$(sensors -j 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+max_t = 0
+for chip_name, chip in data.items():
+    if not isinstance(chip, dict): continue
+    if any(x in chip_name.lower() for x in ['coretemp', 'k10temp', 'cpu', 'zenpower']):
+        for k, v in chip.items():
+            if isinstance(v, dict):
+                for sk, sv in v.items():
+                    if 'input' in sk.lower():
+                        t = int(float(sv))
+                        if t > max_t: max_t = t
+print(max_t)
+" 2>/dev/null) || true
+    fi
+
+    # Fallback: thermal zones
+    if [[ "${max_temp:-0}" -eq 0 ]]; then
+        for tz in /sys/class/thermal/thermal_zone*/temp; do
+            [[ -f "$tz" ]] || continue
+            temp=$(( $(< "$tz") / 1000 ))
+            (( temp > max_temp )) && max_temp=$temp
+        done
+    fi
+
+    echo "${max_temp:-0}"
+}
+
+# Read CPU power (from RAPL or hwmon)
+read_cpu_power() {
+    local power=0
+    # RAPL package power
+    for rapl in /sys/class/powercap/intel-rapl:0/energy_uj; do
+        if [[ -f "$rapl" ]]; then
+            local e1 e2
+            e1=$(< "$rapl")
+            sleep 0.1
+            e2=$(< "$rapl")
+            power=$(( (e2 - e1) / 100000 ))  # µJ over 0.1s → W
+            break
+        fi
+    done
+    # Fallback: hwmon
+    if [[ "$power" -eq 0 ]]; then
+        for hwmon_dir in /sys/class/hwmon/hwmon*; do
+            [[ -f "$hwmon_dir/name" ]] || continue
+            local name
+            name=$(< "$hwmon_dir/name")
+            if [[ "$name" == "coretemp" || "$name" == "k10temp" || "$name" == "zenpower" ]]; then
+                for pf in "$hwmon_dir"/power*_input; do
+                    [[ -f "$pf" ]] || continue
+                    power=$(( $(< "$pf") / 1000000 ))
+                    break 2
+                done
+            fi
+        done
+    fi
+    echo "${power:-0}"
+}
+
+# Read CPU fan speed
+read_cpu_fan() {
+    local fan=0
+    for hwmon_dir in /sys/class/hwmon/hwmon*; do
+        [[ -d "$hwmon_dir" ]] || continue
+        local name=""
+        [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+        # Common fan controllers: it87, nct*, asus-*, thinkpad
+        case "$name" in
+            it87*|nct*|asus*|thinkpad*|dell*|hp*|gigabyte*|nuvoton*)
+                for fp in "$hwmon_dir"/fan*_input; do
+                    [[ -f "$fp" ]] || continue
+                    fan=$(< "$fp")
+                    if [[ "$fan" -gt 0 ]]; then
+                        echo "${fan} RPM"
+                        return
+                    fi
+                done
+                ;;
+        esac
+    done
+    echo "${fan:-0}"
+}
+
+# Read SSD/NVMe temperatures — returns lines of "name:temp"
+read_ssd_temps() {
+    # NVMe via hwmon
+    for hwmon_dir in /sys/class/hwmon/hwmon*; do
+        [[ -d "$hwmon_dir" ]] || continue
+        local name=""
+        [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+        if [[ "$name" == nvme* ]]; then
+            local temp_file="$hwmon_dir/temp1_input"
+            if [[ -f "$temp_file" ]]; then
+                local temp=$(( $(< "$temp_file") / 1000 ))
+                echo "${name}:${temp}"
+            fi
+        fi
+    done
+
+    # SATA via drivetemp hwmon
+    for hwmon_dir in /sys/class/hwmon/hwmon*; do
+        [[ -d "$hwmon_dir" ]] || continue
+        local name=""
+        [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+        if [[ "$name" == "drivetemp" ]]; then
+            local temp_file="$hwmon_dir/temp1_input"
+            if [[ -f "$temp_file" ]]; then
+                local temp=$(( $(< "$temp_file") / 1000 ))
+                echo "sata:${temp}"
+            fi
+        fi
+    done
+}
+
+# Read chipset temperature
+read_chipset_temp() {
+    local temp=0
+    for hwmon_dir in /sys/class/hwmon/hwmon*; do
+        [[ -d "$hwmon_dir" ]] || continue
+        local name=""
+        [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+        if [[ "$name" == "pch_"* || "$name" == "acpitz" || "$name" == "iwlwifi"* ]]; then
+            for tf in "$hwmon_dir"/temp*_input; do
+                [[ -f "$tf" ]] || continue
+                temp=$(( $(< "$tf") / 1000 ))
+                break 2
+            done
+        fi
+    done
+    echo "${temp:-0}"
+}
+
+# ─── Detect running game ────────────────────────────────────────────────────────
+detect_game() {
+    local game=""
+    # Check gamescope/steam game processes
+    if command -v gamescope &>/dev/null; then
+        game=$(pgrep -a gamescope 2>/dev/null | head -1 | sed 's/.*-- //' | awk '{print $1}' | xargs basename 2>/dev/null) || true
+    fi
+    if [[ -z "$game" ]]; then
+        # Look for common game processes
+        local procs
+        procs=$(ps aux 2>/dev/null | grep -iE '(cs2|csgo|dota2|tf2|hl2|wine|proton|gameoverlayui)' | grep -v grep | head -1) || true
+        if [[ -n "$procs" ]]; then
+            game=$(echo "$procs" | awk '{print $NF}' | xargs basename 2>/dev/null) || true
+        fi
+    fi
+    # Try to get a nicer name
+    case "${game,,}" in
+        cs2*) echo "CS2" ;;
+        csgo*) echo "CS:GO" ;;
+        dota2*) echo "Dota 2" ;;
+        tf*_linux*) echo "TF2" ;;
+        hl2*) echo "Half-Life 2" ;;
+        wine*|proton*) echo "Proton Game" ;;
+        "") echo "" ;;
+        *) echo "$game" ;;
+    esac
+}
+
+# ─── Color helpers ───────────────────────────────────────────────────────────────
+
+# Get color and status label for a temperature given warn/crit thresholds
+temp_color_status() {
+    local temp=$1 warn=$2 crit=$3
+    local ok_limit=$(( warn - 15 ))  # Green zone upper bound
+    if (( temp >= crit )); then
+        echo "${RED}CRITICAL${RESET}"
+    elif (( temp >= warn )); then
+        echo "${ORANGE}HOT${RESET}"
+    elif (( temp >= ok_limit )); then
+        echo "${YELLOW}WARM${RESET}"
+    else
+        echo "${GREEN}OK${RESET}"
+    fi
+}
+
+# Get raw color escape for a temperature
+temp_color() {
+    local temp=$1 warn=$2 crit=$3
+    local ok_limit=$(( warn - 15 ))
+    if (( temp >= crit )); then
+        echo "$RED"
+    elif (( temp >= warn )); then
+        echo "$ORANGE"
+    elif (( temp >= ok_limit )); then
+        echo "$YELLOW"
+    else
+        echo "$GREEN"
+    fi
+}
+
+# ─── Bar chart ───────────────────────────────────────────────────────────────────
+# Draw a bar: filled/empty blocks, 24 chars wide, scaled to max_temp
+draw_bar() {
+    local temp=$1 max_temp=${2:-110} width=24
+    local filled=$(( temp * width / max_temp ))
+    (( filled > width )) && filled=$width
+    local empty=$(( width - filled ))
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    echo "$bar"
+}
+
+# ─── Sparkline from array of temps ──────────────────────────────────────────────
+sparkline() {
+    local -a vals=("$@")
+    local chars=("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█")
+    local min=999 max=0
+    for v in "${vals[@]}"; do
+        (( v < min )) && min=$v
+        (( v > max )) && max=$v
+    done
+    local range=$(( max - min ))
+    (( range == 0 )) && range=1
+    local out=""
+    for v in "${vals[@]}"; do
+        local idx=$(( (v - min) * 7 / range ))
+        out+="${chars[$idx]}"
+    done
+    echo "$out"
+}
+
+# ─── Desktop notification ───────────────────────────────────────────────────────
+notify() {
+    local urgency="$1" title="$2" body="$3"
+    if command -v notify-send &>/dev/null; then
+        notify-send -u "$urgency" -i "dialog-warning" -a "24HG Thermal Guard" "$title" "$body" 2>/dev/null || true
+    fi
+}
+
+# ─── Write cache JSON (for widgets / session summary) ────────────────────────────
+write_cache() {
+    local gpu_temp=$1 cpu_temp=$2 gpu_power=$3 cpu_power=$4
+    local gpu_fan=$5 cpu_fan=$6 game=$7
+
+    # Collect SSD temps into JSON fragment
+    local ssd_json="[]"
+    local ssd_data
+    ssd_data=$(read_ssd_temps)
+    if [[ -n "$ssd_data" ]]; then
+        ssd_json=$(echo "$ssd_data" | python3 -c "
+import sys, json
+ssds = []
+for line in sys.stdin:
+    line = line.strip()
+    if ':' in line:
+        name, temp = line.rsplit(':', 1)
+        ssds.append({'name': name, 'temp': int(temp)})
+print(json.dumps(ssds))
+" 2>/dev/null) || ssd_json="[]"
+    fi
+
+    python3 -c "
+import json, time
+data = {
+    'timestamp': int(time.time()),
+    'gpu': {'temp': $gpu_temp, 'power': $gpu_power, 'fan': '$gpu_fan'},
+    'cpu': {'temp': $cpu_temp, 'power': $cpu_power, 'fan': '$cpu_fan'},
+    'ssds': $ssd_json,
+    'game': '$game',
+    'gpu_vendor': '$GPU_VENDOR'
+}
+json.dump(data, open('$CACHE_FILE', 'w'), indent=2)
+" 2>/dev/null || true
+}
+
+# ─── Log entry ───────────────────────────────────────────────────────────────────
+LOG_FILE="$LOG_DIR/thermal-$(date +%Y-%m-%d).csv"
+
+log_entry() {
+    local gpu_temp=$1 cpu_temp=$2 gpu_power=$3 cpu_power=$4 game=$5
+    if [[ ! -f "$LOG_FILE" ]]; then
+        echo "timestamp,gpu_temp,cpu_temp,gpu_power,cpu_power,game" > "$LOG_FILE"
+    fi
+    echo "$(date +%s),$gpu_temp,$cpu_temp,$gpu_power,$cpu_power,$game" >> "$LOG_FILE"
+}
+
+# Rotate old logs (keep 7 days)
+rotate_logs() {
+    find "$LOG_DIR" -name "thermal-*.csv" -mtime +7 -delete 2>/dev/null || true
+}
+
+# ─── COMMAND: status ─────────────────────────────────────────────────────────────
+cmd_status() {
+    echo -e "${BOLD}24HG Thermal Guard — Status${RESET}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local gpu_temp cpu_temp chipset_temp
+    gpu_temp=$(read_gpu_temp)
+    cpu_temp=$(read_cpu_temp)
+    chipset_temp=$(read_chipset_temp)
+
+    local gpu_power cpu_power gpu_fan cpu_fan
+    gpu_power=$(read_gpu_power)
+    cpu_power=$(read_cpu_power)
+    gpu_fan=$(read_gpu_fan)
+    cpu_fan=$(read_cpu_fan)
+
+    # GPU
+    local gpu_color gpu_status
+    gpu_color=$(temp_color "$gpu_temp" "$GPU_WARN" "$GPU_CRIT")
+    gpu_status=$(temp_color_status "$gpu_temp" "$GPU_WARN" "$GPU_CRIT")
+    printf " GPU (%s):  ${gpu_color}%d°C${RESET}  [%b]" "$GPU_VENDOR" "$gpu_temp" "$gpu_status"
+    [[ "$gpu_power" -gt 0 ]] && printf "  %dW" "$gpu_power"
+    [[ "$gpu_fan" != "0" ]] && printf "  Fan: %s" "$gpu_fan"
+    echo ""
+
+    # CPU
+    local cpu_color cpu_status
+    cpu_color=$(temp_color "$cpu_temp" "$CPU_WARN" "$CPU_CRIT")
+    cpu_status=$(temp_color_status "$cpu_temp" "$CPU_WARN" "$CPU_CRIT")
+    printf " CPU:       ${cpu_color}%d°C${RESET}  [%b]" "$cpu_temp" "$cpu_status"
+    [[ "$cpu_power" -gt 0 ]] && printf "  %dW" "$cpu_power"
+    [[ "$cpu_fan" != "0" ]] && printf "  Fan: %s" "$cpu_fan"
+    echo ""
+
+    # SSDs
+    local ssd_data
+    ssd_data=$(read_ssd_temps)
+    if [[ -n "$ssd_data" ]]; then
+        while IFS=: read -r ssd_name ssd_temp; do
+            local ssd_color ssd_status
+            ssd_color=$(temp_color "$ssd_temp" "$SSD_WARN" "$SSD_CRIT")
+            ssd_status=$(temp_color_status "$ssd_temp" "$SSD_WARN" "$SSD_CRIT")
+            printf " %-10s ${ssd_color}%d°C${RESET}  [%b]\n" "$ssd_name:" "$ssd_temp" "$ssd_status"
+        done <<< "$ssd_data"
+    fi
+
+    # Chipset
+    if [[ "$chipset_temp" -gt 0 ]]; then
+        local ch_color ch_status
+        ch_color=$(temp_color "$chipset_temp" 70 90)
+        ch_status=$(temp_color_status "$chipset_temp" 70 90)
+        printf " Chipset:   ${ch_color}%d°C${RESET}  [%b]\n" "$chipset_temp" "$ch_status"
+    fi
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Warning check
+    local warnings=0
+    if (( gpu_temp >= GPU_WARN )); then
+        echo -e " ${ORANGE}⚠ GPU temperature is above warning threshold (${GPU_WARN}°C)${RESET}"
+        warnings=1
+    fi
+    if (( cpu_temp >= CPU_WARN )); then
+        echo -e " ${ORANGE}⚠ CPU temperature is above warning threshold (${CPU_WARN}°C)${RESET}"
+        warnings=1
+    fi
+    if (( warnings == 0 )); then
+        echo -e " ${GREEN}All temperatures within normal range.${RESET}"
+    fi
+}
+
+# ─── COMMAND: monitor ────────────────────────────────────────────────────────────
+cmd_monitor() {
+    local gpu_peak=0 cpu_peak=0 ssd_peak=0
+    local gpu_sum=0 cpu_sum=0 sample_count=0
+    local session_start
+    session_start=$(date +%s)
+    local gpu_hot_since=0 cpu_hot_since=0
+    local gpu_crit_since=0 cpu_crit_since=0
+    local fps_capped=false
+    local -a gpu_history=() cpu_history=()
+
+    rotate_logs
+
+    trap 'tput cnorm 2>/dev/null; echo; echo -e "${BOLD}Thermal Guard stopped.${RESET}"; exit 0' INT TERM
+
+    # Hide cursor
+    tput civis 2>/dev/null || true
+
+    while true; do
+        local gpu_temp cpu_temp gpu_power cpu_power gpu_fan cpu_fan
+        gpu_temp=$(read_gpu_temp)
+        cpu_temp=$(read_cpu_temp)
+        gpu_power=$(read_gpu_power)
+        cpu_power=$(read_cpu_power)
+        gpu_fan=$(read_gpu_fan)
+        cpu_fan=$(read_cpu_fan)
+
+        local game
+        game=$(detect_game)
+
+        # Track peaks
+        (( gpu_temp > gpu_peak )) && gpu_peak=$gpu_temp
+        (( cpu_temp > cpu_peak )) && cpu_peak=$cpu_temp
+
+        # Track averages
+        gpu_sum=$(( gpu_sum + gpu_temp ))
+        cpu_sum=$(( cpu_sum + cpu_temp ))
+        sample_count=$(( sample_count + 1 ))
+        local gpu_avg=$(( gpu_sum / sample_count ))
+        local cpu_avg=$(( cpu_sum / sample_count ))
+
+        # History for sparklines (keep last 60 samples = 3 min)
+        gpu_history+=("$gpu_temp")
+        cpu_history+=("$cpu_temp")
+        (( ${#gpu_history[@]} > 60 )) && gpu_history=("${gpu_history[@]:1}")
+        (( ${#cpu_history[@]} > 60 )) && cpu_history=("${cpu_history[@]:1}")
+
+        # SSD temps
+        local ssd_max=0
+        local ssd_data
+        ssd_data=$(read_ssd_temps)
+        local ssd_line=""
+        if [[ -n "$ssd_data" ]]; then
+            local first_ssd_temp
+            first_ssd_temp=$(echo "$ssd_data" | head -1 | cut -d: -f2)
+            ssd_max=${first_ssd_temp:-0}
+            (( ssd_max > ssd_peak )) && ssd_peak=$ssd_max
+        fi
+
+        # Session duration
+        local elapsed=$(( $(date +%s) - session_start ))
+        local mins=$(( elapsed / 60 ))
+
+        # Determine throttle state
+        local throttle_state="None"
+        if [[ "$GPU_VENDOR" == "nvidia" ]]; then
+            local perf_state
+            perf_state=$(nvidia-smi --query-gpu=pstate --format=csv,noheader 2>/dev/null | head -1) || true
+            if [[ -n "$perf_state" && "$perf_state" != "P0" && "$perf_state" != "P1" && "$perf_state" != "P2" ]]; then
+                throttle_state="GPU throttled ($perf_state)"
+            fi
+        fi
+        if (( gpu_temp >= GPU_CRIT || cpu_temp >= CPU_CRIT )); then
+            throttle_state="${RED}THERMAL LIMIT${RESET}"
+        elif (( gpu_temp >= GPU_WARN || cpu_temp >= CPU_WARN )); then
+            throttle_state="${ORANGE}Approaching limit${RESET}"
+        fi
+
+        # Determine mode label
+        local mode_label="IDLE"
+        [[ -n "$game" ]] && mode_label="GAMING MODE"
+
+        # ── Notification logic ──
+        local now
+        now=$(date +%s)
+
+        # GPU warnings
+        if (( gpu_temp >= GPU_CRIT )); then
+            if [[ "$gpu_crit_since" -eq 0 ]]; then
+                gpu_crit_since=$now
+                notify "critical" "GPU Critical: ${gpu_temp}°C" "GPU temperature is dangerously high. Consider reducing load."
+            elif (( now - gpu_crit_since >= 60 )) && [[ "$fps_capped" == "false" ]]; then
+                notify "critical" "GPU sustained at ${gpu_temp}°C" "Sustained critical temperature for 60s.\nConsider: reduce resolution, enable frame cap, improve airflow.\nRun: 24hg-thermal fan max"
+                # Offer to cap FPS via MangoHud
+                if [[ -n "$game" ]]; then
+                    notify "critical" "Auto-protect available" "Run 'mangohud fps_limit=60' or set MANGOHUD_CONFIG=fps_limit=60 to cap FPS."
+                fi
+                fps_capped=true
+            fi
+            gpu_hot_since=0
+        elif (( gpu_temp >= GPU_WARN )); then
+            gpu_crit_since=0
+            if [[ "$gpu_hot_since" -eq 0 ]]; then
+                gpu_hot_since=$now
+                notify "normal" "GPU at ${gpu_temp}°C" "GPU approaching thermal limit (warn: ${GPU_WARN}°C, critical: ${GPU_CRIT}°C)."
+            elif (( now - gpu_hot_since >= 30 )); then
+                notify "normal" "GPU sustained at ${gpu_temp}°C" "Sustained high temp for 30s+.\nSuggestions: reduce resolution, enable frame cap, improve airflow."
+                gpu_hot_since=$now  # Reset to avoid spamming
+            fi
+        else
+            gpu_hot_since=0
+            gpu_crit_since=0
+        fi
+
+        # CPU warnings
+        if (( cpu_temp >= CPU_CRIT )); then
+            if [[ "$cpu_crit_since" -eq 0 ]]; then
+                cpu_crit_since=$now
+                notify "critical" "CPU Critical: ${cpu_temp}°C" "CPU temperature is dangerously high."
+            elif (( now - cpu_crit_since >= 60 )); then
+                notify "critical" "CPU sustained at ${cpu_temp}°C" "Sustained critical temp. Consider: reduce settings, cap FPS, check cooling."
+                cpu_crit_since=$now
+            fi
+            cpu_hot_since=0
+        elif (( cpu_temp >= CPU_WARN )); then
+            cpu_crit_since=0
+            if [[ "$cpu_hot_since" -eq 0 ]]; then
+                cpu_hot_since=$now
+                notify "normal" "CPU at ${cpu_temp}°C" "CPU approaching thermal limit (warn: ${CPU_WARN}°C, critical: ${CPU_CRIT}°C)."
+            elif (( now - cpu_hot_since >= 30 )); then
+                notify "normal" "CPU sustained at ${cpu_temp}°C" "Sustained high temp for 30s+.\nSuggestions: reduce settings, cap FPS, improve airflow."
+                cpu_hot_since=$now
+            fi
+        else
+            cpu_hot_since=0
+            cpu_crit_since=0
+        fi
+
+        # ── Log + cache ──
+        log_entry "$gpu_temp" "$cpu_temp" "$gpu_power" "$cpu_power" "$game"
+        write_cache "$gpu_temp" "$cpu_temp" "$gpu_power" "$cpu_power" "$gpu_fan" "$cpu_fan" "$game"
+
+        # ── Daemon mode: skip display ──
+        if [[ "$DAEMON_MODE" == "true" ]]; then
+            sleep "$POLL_INTERVAL"
+            continue
+        fi
+
+        # ── Draw dashboard ──
+        local gpu_bar cpu_bar ssd_bar
+        gpu_bar=$(draw_bar "$gpu_temp" 110)
+        cpu_bar=$(draw_bar "$cpu_temp" 110)
+
+        local gpu_color cpu_color
+        gpu_color=$(temp_color "$gpu_temp" "$GPU_WARN" "$GPU_CRIT")
+        cpu_color=$(temp_color "$cpu_temp" "$CPU_WARN" "$CPU_CRIT")
+        local gpu_status cpu_status
+        gpu_status=$(temp_color_status "$gpu_temp" "$GPU_WARN" "$GPU_CRIT")
+        cpu_status=$(temp_color_status "$cpu_temp" "$CPU_WARN" "$CPU_CRIT")
+
+        # Clear screen
+        tput clear 2>/dev/null || echo -en "\033[H\033[2J"
+
+        echo -e " ${BOLD}24HG Thermal Guard${RESET}                          ${DIM}[${mode_label}]${RESET}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        printf " GPU:  ${gpu_color}%3d°C${RESET}  %s  [%b]     Peak: %d°C\n" "$gpu_temp" "$gpu_bar" "$gpu_status" "$gpu_peak"
+        printf " CPU:  ${cpu_color}%3d°C${RESET}  %s  [%b]     Peak: %d°C\n" "$cpu_temp" "$cpu_bar" "$cpu_status" "$cpu_peak"
+
+        # SSD line
+        if [[ -n "$ssd_data" ]]; then
+            while IFS=: read -r ssd_name ssd_temp; do
+                local ssd_b ssd_c ssd_s
+                ssd_b=$(draw_bar "$ssd_temp" 80)
+                ssd_c=$(temp_color "$ssd_temp" "$SSD_WARN" "$SSD_CRIT")
+                ssd_s=$(temp_color_status "$ssd_temp" "$SSD_WARN" "$SSD_CRIT")
+                printf " SSD:  ${ssd_c}%3d°C${RESET}  %s  [%b]     Peak: %d°C\n" "$ssd_temp" "$ssd_b" "$ssd_s" "$ssd_peak"
+            done <<< "$ssd_data"
+        fi
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Fan + power line
+        local fan_info=""
+        [[ "$gpu_fan" != "0" ]] && fan_info+="$gpu_fan (GPU)"
+        [[ "$cpu_fan" != "0" ]] && { [[ -n "$fan_info" ]] && fan_info+=" | "; fan_info+="$cpu_fan (CPU)"; }
+        [[ -n "$fan_info" ]] && printf " Fan:  %s\n" "$fan_info"
+
+        local power_info=""
+        [[ "$gpu_power" -gt 0 ]] && power_info+="${gpu_power}W (GPU)"
+        [[ "$cpu_power" -gt 0 ]] && { [[ -n "$power_info" ]] && power_info+=" | "; power_info+="${cpu_power}W (CPU)"; }
+        [[ -n "$power_info" ]] && printf " Power: %s\n" "$power_info"
+
+        printf " Throttle: %b\n" "$throttle_state"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Session line
+        local session_info=" Session:"
+        [[ -n "$game" ]] && session_info+=" $game |"
+        session_info+=" ${mins}m | Avg GPU: ${gpu_avg}°C | Avg CPU: ${cpu_avg}°C"
+        echo -e "$session_info"
+
+        # Sparklines
+        if (( ${#gpu_history[@]} >= 5 )); then
+            local gpu_spark cpu_spark
+            gpu_spark=$(sparkline "${gpu_history[@]}")
+            cpu_spark=$(sparkline "${cpu_history[@]}")
+            echo -e " ${DIM}GPU: $gpu_spark  CPU: $cpu_spark  (last ${#gpu_history[@]} samples)${RESET}"
+        fi
+
+        sleep "$POLL_INTERVAL"
+    done
+}
+
+# ─── COMMAND: warn ───────────────────────────────────────────────────────────────
+cmd_warn() {
+    local subcmd="${1:-show}"
+    shift || true
+
+    case "$subcmd" in
+        set)
+            local component="${1:-}"
+            local value="${2:-}"
+            if [[ -z "$component" || -z "$value" ]]; then
+                echo "Usage: 24hg-thermal warn set <gpu|cpu|ssd> <temperature>"
+                echo "       24hg-thermal warn set gpu-crit <temperature>"
+                echo "       24hg-thermal warn set cpu-crit <temperature>"
+                exit 1
+            fi
+            case "$component" in
+                gpu)      GPU_WARN=$value ;;
+                gpu-crit) GPU_CRIT=$value ;;
+                cpu)      CPU_WARN=$value ;;
+                cpu-crit) CPU_CRIT=$value ;;
+                ssd)      SSD_WARN=$value ;;
+                ssd-crit) SSD_CRIT=$value ;;
+                *)
+                    echo "Unknown component: $component (use gpu, cpu, ssd, gpu-crit, cpu-crit, ssd-crit)"
+                    exit 1
+                    ;;
+            esac
+            save_config
+            echo -e "${GREEN}Updated ${component} threshold to ${value}°C${RESET}"
+            echo ""
+            cmd_warn show
+            ;;
+        show)
+            echo -e "${BOLD}24HG Thermal Guard — Warning Thresholds${RESET}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            printf " GPU:   warn = ${YELLOW}%d°C${RESET}   critical = ${RED}%d°C${RESET}\n" "$GPU_WARN" "$GPU_CRIT"
+            printf " CPU:   warn = ${YELLOW}%d°C${RESET}   critical = ${RED}%d°C${RESET}\n" "$CPU_WARN" "$CPU_CRIT"
+            printf " SSD:   warn = ${YELLOW}%d°C${RESET}   critical = ${RED}%d°C${RESET}\n" "$SSD_WARN" "$SSD_CRIT"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            echo "Color ranges (GPU):  <${GREEN}$((GPU_WARN - 15))°C${RESET} OK | ${YELLOW}$((GPU_WARN - 15))-${GPU_WARN}°C${RESET} WARM | ${ORANGE}${GPU_WARN}-${GPU_CRIT}°C${RESET} HOT | ${RED}>${GPU_CRIT}°C${RESET} CRITICAL"
+            echo "Color ranges (CPU):  <${GREEN}$((CPU_WARN - 15))°C${RESET} OK | ${YELLOW}$((CPU_WARN - 15))-${CPU_WARN}°C${RESET} WARM | ${ORANGE}${CPU_WARN}-${CPU_CRIT}°C${RESET} HOT | ${RED}>${CPU_CRIT}°C${RESET} CRITICAL"
+            echo ""
+            echo "Set thresholds: 24hg-thermal warn set <gpu|cpu|ssd> <temp>"
+            [[ -f "$CONFIG_FILE" ]] && echo -e "${DIM}Config: $CONFIG_FILE${RESET}"
+            ;;
+        *)
+            echo "Usage: 24hg-thermal warn [set|show]"
+            exit 1
+            ;;
+    esac
+}
+
+# ─── COMMAND: fan ────────────────────────────────────────────────────────────────
+cmd_fan() {
+    local subcmd="${1:-status}"
+    shift || true
+
+    case "$subcmd" in
+        status)
+            echo -e "${BOLD}24HG Thermal Guard — Fan Status${RESET}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            local gpu_fan cpu_fan
+            gpu_fan=$(read_gpu_fan)
+            cpu_fan=$(read_cpu_fan)
+
+            printf " GPU Fan:  %s\n" "${gpu_fan:-not detected}"
+            printf " CPU Fan:  %s\n" "${cpu_fan:-not detected}"
+
+            # Show all detected fan inputs
+            local found_fans=false
+            for hwmon_dir in /sys/class/hwmon/hwmon*; do
+                [[ -d "$hwmon_dir" ]] || continue
+                local name=""
+                [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+                for fp in "$hwmon_dir"/fan*_input; do
+                    [[ -f "$fp" ]] || continue
+                    local fan_val
+                    fan_val=$(< "$fp")
+                    local fan_label
+                    fan_label=$(basename "$fp" | sed 's/_input//')
+                    if [[ "$fan_val" -gt 0 ]]; then
+                        printf " %-10s %s RPM  (%s)\n" "$fan_label:" "$fan_val" "$name"
+                        found_fans=true
+                    fi
+                done
+            done
+
+            # Show PWM values
+            echo ""
+            echo " PWM Control:"
+            for hwmon_dir in /sys/class/hwmon/hwmon*; do
+                for pwm in "$hwmon_dir"/pwm*; do
+                    [[ -f "$pwm" ]] || continue
+                    [[ "$(basename "$pwm")" == pwm[0-9]* ]] || continue
+                    [[ "$(basename "$pwm")" == *_* ]] && continue
+                    local pwm_val name=""
+                    pwm_val=$(< "$pwm")
+                    [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+                    local pct=$(( pwm_val * 100 / 255 ))
+                    printf "   %-20s PWM: %3d (%d%%)  [%s]\n" "$(basename "$pwm"):" "$pwm_val" "$pct" "$name"
+                done
+            done
+
+            if [[ "$found_fans" == "false" ]]; then
+                echo -e " ${DIM}No fan sensors detected. Your system may use firmware-controlled fans.${RESET}"
+            fi
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            ;;
+        auto)
+            echo "Setting fans to automatic control..."
+            local changed=false
+
+            # NVIDIA
+            if [[ "$GPU_VENDOR" == "nvidia" ]]; then
+                if command -v nvidia-settings &>/dev/null; then
+                    nvidia-settings -a "[gpu:0]/GPUFanControlState=0" &>/dev/null && changed=true
+                    echo -e " ${GREEN}NVIDIA GPU fan set to auto${RESET}"
+                fi
+            fi
+
+            # Generic hwmon PWM — set enable to 2 (automatic)
+            for hwmon_dir in /sys/class/hwmon/hwmon*; do
+                for pwm_enable in "$hwmon_dir"/pwm*_enable; do
+                    [[ -f "$pwm_enable" ]] || continue
+                    if echo 2 > "$pwm_enable" 2>/dev/null; then
+                        local name=""
+                        [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+                        echo -e " ${GREEN}Set $(basename "$pwm_enable") to auto ($name)${RESET}"
+                        changed=true
+                    fi
+                done
+            done
+
+            if [[ "$changed" == "false" ]]; then
+                echo -e " ${YELLOW}No fan controls could be modified. May need root access or fan control is not supported.${RESET}"
+                echo "  Try: sudo 24hg-thermal fan auto"
+            fi
+            ;;
+        max)
+            echo "Setting fans to maximum speed..."
+            local changed=false
+
+            # NVIDIA
+            if [[ "$GPU_VENDOR" == "nvidia" ]]; then
+                if command -v nvidia-settings &>/dev/null; then
+                    nvidia-settings -a "[gpu:0]/GPUFanControlState=1" -a "[fan:0]/GPUTargetFanSpeed=100" &>/dev/null && changed=true
+                    echo -e " ${GREEN}NVIDIA GPU fan set to 100%${RESET}"
+                fi
+            fi
+
+            # Generic hwmon PWM — set enable to 1 (manual) then PWM to 255
+            for hwmon_dir in /sys/class/hwmon/hwmon*; do
+                for pwm_enable in "$hwmon_dir"/pwm*_enable; do
+                    [[ -f "$pwm_enable" ]] || continue
+                    local pwm_file="${pwm_enable%_enable}"
+                    [[ -f "$pwm_file" ]] || continue
+                    if echo 1 > "$pwm_enable" 2>/dev/null && echo 255 > "$pwm_file" 2>/dev/null; then
+                        local name=""
+                        [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+                        echo -e " ${GREEN}Set $(basename "$pwm_file") to max ($name)${RESET}"
+                        changed=true
+                    fi
+                done
+            done
+
+            if [[ "$changed" == "false" ]]; then
+                echo -e " ${YELLOW}No fan controls could be modified. May need root access.${RESET}"
+                echo "  Try: sudo 24hg-thermal fan max"
+            else
+                echo ""
+                echo -e " ${YELLOW}Note: Run '24hg-thermal fan auto' to restore automatic control when done.${RESET}"
+            fi
+            ;;
+        quiet)
+            echo "Setting fans to quiet mode..."
+            local changed=false
+
+            # NVIDIA — set to ~40%
+            if [[ "$GPU_VENDOR" == "nvidia" ]]; then
+                if command -v nvidia-settings &>/dev/null; then
+                    nvidia-settings -a "[gpu:0]/GPUFanControlState=1" -a "[fan:0]/GPUTargetFanSpeed=40" &>/dev/null && changed=true
+                    echo -e " ${GREEN}NVIDIA GPU fan set to 40%${RESET}"
+                fi
+            fi
+
+            # Generic hwmon — set PWM to ~100 (~40%)
+            for hwmon_dir in /sys/class/hwmon/hwmon*; do
+                for pwm_enable in "$hwmon_dir"/pwm*_enable; do
+                    [[ -f "$pwm_enable" ]] || continue
+                    local pwm_file="${pwm_enable%_enable}"
+                    [[ -f "$pwm_file" ]] || continue
+                    if echo 1 > "$pwm_enable" 2>/dev/null && echo 100 > "$pwm_file" 2>/dev/null; then
+                        local name=""
+                        [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+                        echo -e " ${GREEN}Set $(basename "$pwm_file") to quiet ($name)${RESET}"
+                        changed=true
+                    fi
+                done
+            done
+
+            if [[ "$changed" == "false" ]]; then
+                echo -e " ${YELLOW}No fan controls could be modified. May need root access.${RESET}"
+                echo "  Try: sudo 24hg-thermal fan quiet"
+            else
+                echo ""
+                echo -e " ${ORANGE}Warning: Monitor temps closely in quiet mode. Run '24hg-thermal fan auto' if temps rise.${RESET}"
+            fi
+            ;;
+        *)
+            echo "Usage: 24hg-thermal fan [status|auto|max|quiet]"
+            exit 1
+            ;;
+    esac
+}
+
+# ─── COMMAND: log ────────────────────────────────────────────────────────────────
+cmd_log() {
+    local subcmd="${1:-show}"
+    shift || true
+
+    case "$subcmd" in
+        show)
+            echo -e "${BOLD}24HG Thermal Guard — Temperature History${RESET}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            local log_file="$LOG_DIR/thermal-$(date +%Y-%m-%d).csv"
+            if [[ ! -f "$log_file" ]]; then
+                echo " No temperature data logged today."
+                echo " Start monitoring with: 24hg-thermal monitor"
+                return
+            fi
+
+            # Parse recent entries and show sparklines
+            python3 -c "
+import csv, sys, os
+from datetime import datetime
+
+log_file = '$log_file'
+gpu_temps = []
+cpu_temps = []
+entries = []
+
+with open(log_file, 'r') as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        try:
+            ts = int(row['timestamp'])
+            gt = int(row['gpu_temp'])
+            ct = int(row['cpu_temp'])
+            gp = int(row.get('gpu_power', 0))
+            cp = int(row.get('cpu_power', 0))
+            game = row.get('game', '')
+            gpu_temps.append(gt)
+            cpu_temps.append(ct)
+            entries.append((ts, gt, ct, gp, cp, game))
+        except:
+            continue
+
+if not entries:
+    print(' No valid data found.')
+    sys.exit(0)
+
+# Sparkline
+chars = '▁▂▃▄▅▆▇█'
+def spark(vals):
+    if not vals: return ''
+    mn, mx = min(vals), max(vals)
+    rng = mx - mn if mx != mn else 1
+    return ''.join(chars[min(int((v - mn) * 7 / rng), 7)] for v in vals[-60:])
+
+print(f' Today: {len(entries)} samples over {(entries[-1][0] - entries[0][0]) // 60}m')
+print()
+print(f' GPU temps: min={min(gpu_temps)}°C  avg={sum(gpu_temps)//len(gpu_temps)}°C  max={max(gpu_temps)}°C')
+print(f'   {spark(gpu_temps)}')
+print()
+print(f' CPU temps: min={min(cpu_temps)}°C  avg={sum(cpu_temps)//len(cpu_temps)}°C  max={max(cpu_temps)}°C')
+print(f'   {spark(cpu_temps)}')
+
+# Show game sessions
+games = set(e[5] for e in entries if e[5])
+if games:
+    print()
+    print(' Games detected:', ', '.join(games))
+" 2>/dev/null || echo " Error reading log data."
+
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            # Show available log files
+            echo ""
+            echo " Available logs:"
+            for lf in "$LOG_DIR"/thermal-*.csv; do
+                [[ -f "$lf" ]] || continue
+                local lines
+                lines=$(wc -l < "$lf")
+                local size
+                size=$(du -h "$lf" | cut -f1)
+                echo "   $(basename "$lf")  ($((lines - 1)) samples, $size)"
+            done
+            ;;
+        session)
+            echo -e "${BOLD}24HG Thermal Guard — Last Gaming Session${RESET}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            local log_file="$LOG_DIR/thermal-$(date +%Y-%m-%d).csv"
+            if [[ ! -f "$log_file" ]]; then
+                echo " No data for today. Try: 24hg-thermal log show"
+                return
+            fi
+
+            python3 -c "
+import csv
+from datetime import datetime
+
+log_file = '$log_file'
+entries = []
+with open(log_file, 'r') as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        try:
+            entries.append({
+                'ts': int(row['timestamp']),
+                'gpu': int(row['gpu_temp']),
+                'cpu': int(row['cpu_temp']),
+                'gpu_power': int(row.get('gpu_power', 0)),
+                'cpu_power': int(row.get('cpu_power', 0)),
+                'game': row.get('game', '')
+            })
+        except:
+            continue
+
+if not entries:
+    print(' No session data found.')
+    exit(0)
+
+# Find last gaming session (contiguous entries with a game)
+game_entries = []
+for e in reversed(entries):
+    if e['game']:
+        game_entries.insert(0, e)
+    elif game_entries:
+        break
+
+if not game_entries:
+    print(' No gaming session found in today\\'s data.')
+    print(' Showing overall summary instead:')
+    game_entries = entries
+
+duration = (game_entries[-1]['ts'] - game_entries[0]['ts']) // 60
+gpus = [e['gpu'] for e in game_entries]
+cpus = [e['cpu'] for e in game_entries]
+game = game_entries[-1].get('game', 'Unknown')
+
+start = datetime.fromtimestamp(game_entries[0]['ts']).strftime('%H:%M')
+end = datetime.fromtimestamp(game_entries[-1]['ts']).strftime('%H:%M')
+
+print(f' Game: {game if game else \"N/A\"}')
+print(f' Time: {start} - {end} ({duration}m)')
+print(f' Samples: {len(game_entries)}')
+print()
+print(f' GPU:  min={min(gpus)}°C  avg={sum(gpus)//len(gpus)}°C  max={max(gpus)}°C')
+print(f' CPU:  min={min(cpus)}°C  avg={sum(cpus)//len(cpus)}°C  max={max(cpus)}°C')
+
+# ASCII chart (last 40 entries or all if fewer)
+display = game_entries[-40:]
+chart_height = 10
+all_vals = [e['gpu'] for e in display] + [e['cpu'] for e in display]
+mn = min(all_vals) - 5
+mx = max(all_vals) + 5
+rng = mx - mn if mx != mn else 1
+
+print()
+print(' Temperature chart:')
+for row in range(chart_height, -1, -1):
+    threshold = mn + (rng * row // chart_height)
+    line = f' {threshold:3d}°C │'
+    for e in display:
+        gpu_pos = (e['gpu'] - mn) * chart_height // rng
+        cpu_pos = (e['cpu'] - mn) * chart_height // rng
+        if gpu_pos == row and cpu_pos == row:
+            line += '╋'
+        elif gpu_pos == row:
+            line += '●'
+        elif cpu_pos == row:
+            line += '○'
+        else:
+            line += ' '
+    print(line)
+print('       └' + '─' * len(display))
+print('       ● GPU  ○ CPU')
+" 2>/dev/null || echo " Error reading session data."
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            ;;
+        export)
+            local export_file="${1:-$HOME/thermal-export-$(date +%Y%m%d-%H%M%S).csv}"
+            echo -e "${BOLD}Exporting temperature logs...${RESET}"
+
+            # Combine all log files
+            local header_written=false
+            for lf in "$LOG_DIR"/thermal-*.csv; do
+                [[ -f "$lf" ]] || continue
+                if [[ "$header_written" == "false" ]]; then
+                    cp "$lf" "$export_file"
+                    header_written=true
+                else
+                    tail -n +2 "$lf" >> "$export_file"
+                fi
+            done
+
+            if [[ "$header_written" == "true" ]]; then
+                local lines
+                lines=$(( $(wc -l < "$export_file") - 1 ))
+                local size
+                size=$(du -h "$export_file" | cut -f1)
+                echo -e " ${GREEN}Exported $lines entries ($size) to:${RESET}"
+                echo "   $export_file"
+            else
+                echo " No log data found to export."
+            fi
+            ;;
+        *)
+            echo "Usage: 24hg-thermal log [show|session|export [file]]"
+            exit 1
+            ;;
+    esac
+}
+
+# ─── COMMAND: limits ─────────────────────────────────────────────────────────────
+cmd_limits() {
+    echo -e "${BOLD}24HG Thermal Guard — Hardware Thermal Limits${RESET}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local gpu_temp cpu_temp
+    gpu_temp=$(read_gpu_temp)
+    cpu_temp=$(read_cpu_temp)
+
+    # GPU limits
+    echo -e "\n ${BOLD}GPU ($GPU_VENDOR):${RESET}"
+    case "$GPU_VENDOR" in
+        nvidia)
+            local slowdown shutdown max_temp
+            slowdown=$(nvidia-smi --query-gpu=temperature.gpu.tlimit --format=csv,noheader,nounits 2>/dev/null | head -1) || true
+            # Alternative: query-gpu provides slowdown and shutdown temps
+            local gpu_info
+            gpu_info=$(nvidia-smi --query-gpu=gpu_name,temperature.gpu,power.max_limit --format=csv,noheader 2>/dev/null | head -1) || true
+            if [[ -n "$gpu_info" ]]; then
+                local gpu_name
+                gpu_name=$(echo "$gpu_info" | cut -d, -f1 | xargs)
+                echo "   Model: $gpu_name"
+            fi
+
+            # Try to get slowdown temp from nvidia-smi -q
+            local nv_detail
+            nv_detail=$(nvidia-smi -q -d TEMPERATURE 2>/dev/null) || true
+            if [[ -n "$nv_detail" ]]; then
+                slowdown=$(echo "$nv_detail" | grep -i "GPU Slowdown Temp" | head -1 | grep -oP '\d+') || true
+                shutdown=$(echo "$nv_detail" | grep -i "GPU Shutdown Temp" | head -1 | grep -oP '\d+') || true
+                max_temp=$(echo "$nv_detail" | grep -i "GPU Max Operating Temp" | head -1 | grep -oP '\d+') || true
+            fi
+
+            if [[ -n "${slowdown:-}" && "$slowdown" -gt 0 ]]; then
+                local headroom=$(( slowdown - gpu_temp ))
+                echo "   Slowdown temp:  ${slowdown}°C"
+                [[ -n "${shutdown:-}" && "$shutdown" -gt 0 ]] && echo "   Shutdown temp:  ${shutdown}°C"
+                [[ -n "${max_temp:-}" && "$max_temp" -gt 0 ]] && echo "   Max operating:  ${max_temp}°C"
+                echo "   Current:        ${gpu_temp}°C"
+                if (( headroom > 20 )); then
+                    echo -e "   ${GREEN}Plenty of headroom (${headroom}°C below slowdown).${RESET}"
+                elif (( headroom > 5 )); then
+                    echo -e "   ${YELLOW}Getting warm (${headroom}°C below slowdown).${RESET}"
+                else
+                    echo -e "   ${RED}Very close to throttling! Only ${headroom}°C below slowdown.${RESET}"
+                fi
+            else
+                echo "   Could not read thermal limits from nvidia-smi."
+                echo "   Typical NVIDIA limits: slowdown ~92-97°C, shutdown ~100-105°C"
+                echo "   Current: ${gpu_temp}°C"
+            fi
+            ;;
+        amd)
+            echo "   Reading AMD GPU thermal limits..."
+            local trip_point=""
+            for hwmon_dir in /sys/class/drm/card*/device/hwmon/hwmon*; do
+                for tf in "$hwmon_dir"/temp1_crit "$hwmon_dir"/temp1_emergency; do
+                    if [[ -f "$tf" ]]; then
+                        local val=$(( $(< "$tf") / 1000 ))
+                        local label
+                        label=$(basename "$tf")
+                        echo "   ${label}: ${val}°C"
+                        trip_point=$val
+                    fi
+                done
+            done
+            echo "   Current: ${gpu_temp}°C"
+            if [[ -n "$trip_point" && "$trip_point" -gt 0 ]]; then
+                local headroom=$(( trip_point - gpu_temp ))
+                if (( headroom > 20 )); then
+                    echo -e "   ${GREEN}Plenty of headroom (${headroom}°C below critical).${RESET}"
+                elif (( headroom > 5 )); then
+                    echo -e "   ${YELLOW}Getting warm (${headroom}°C below critical).${RESET}"
+                else
+                    echo -e "   ${RED}Very close to limit! Only ${headroom}°C below critical.${RESET}"
+                fi
+            else
+                echo "   Typical AMD GPU limits: junction ~100-110°C"
+            fi
+            ;;
+        *)
+            echo "   GPU vendor not detected. Cannot determine limits."
+            echo "   Current: ${gpu_temp}°C"
+            ;;
+    esac
+
+    # CPU limits
+    echo -e "\n ${BOLD}CPU:${RESET}"
+    local cpu_crit_found=false
+    for hwmon_dir in /sys/class/hwmon/hwmon*; do
+        [[ -d "$hwmon_dir" ]] || continue
+        local name=""
+        [[ -f "$hwmon_dir/name" ]] && name=$(< "$hwmon_dir/name")
+        if [[ "$name" == "coretemp" || "$name" == "k10temp" || "$name" == "zenpower" ]]; then
+            echo "   Sensor: $name"
+            for tf in "$hwmon_dir"/temp*_crit; do
+                [[ -f "$tf" ]] || continue
+                local crit_val=$(( $(< "$tf") / 1000 ))
+                local core_label
+                core_label=$(basename "$tf" | sed 's/_crit//')
+                # Try to get the label
+                local label_file="${tf%_crit}_label"
+                local lbl="$core_label"
+                [[ -f "$label_file" ]] && lbl=$(< "$label_file")
+                echo "   ${lbl} critical: ${crit_val}°C"
+                cpu_crit_found=true
+                break  # Just show the first/package
+            done
+            for tf in "$hwmon_dir"/temp*_max; do
+                [[ -f "$tf" ]] || continue
+                local max_val=$(( $(< "$tf") / 1000 ))
+                local label_file="${tf%_max}_label"
+                local lbl
+                lbl=$(basename "$tf" | sed 's/_max//')
+                [[ -f "$label_file" ]] && lbl=$(< "$label_file")
+                echo "   ${lbl} max: ${max_val}°C"
+                break
+            done
+            break
+        fi
+    done
+    echo "   Current: ${cpu_temp}°C"
+    if [[ "$cpu_crit_found" == "false" ]]; then
+        echo "   Typical CPU Tjmax: Intel ~100°C, AMD ~95°C"
+    fi
+
+    # Try reading from thermal zones for additional info
+    local tj_max=""
+    for tz_dir in /sys/class/thermal/thermal_zone*; do
+        [[ -d "$tz_dir" ]] || continue
+        local tz_type=""
+        [[ -f "$tz_dir/type" ]] && tz_type=$(< "$tz_dir/type")
+        if [[ "$tz_type" == "x86_pkg_temp" || "$tz_type" == *"cpu"* ]]; then
+            for trip in "$tz_dir"/trip_point_*_temp; do
+                [[ -f "$trip" ]] || continue
+                local tv=$(( $(< "$trip") / 1000 ))
+                if (( tv > 50 && tv < 150 )); then
+                    tj_max=$tv
+                fi
+            done
+        fi
+    done
+    if [[ -n "$tj_max" ]]; then
+        local headroom=$(( tj_max - cpu_temp ))
+        echo "   Tjmax (thermal zone): ${tj_max}°C"
+        if (( headroom > 20 )); then
+            echo -e "   ${GREEN}Plenty of headroom (${headroom}°C below Tjmax).${RESET}"
+        elif (( headroom > 5 )); then
+            echo -e "   ${YELLOW}Getting warm (${headroom}°C below Tjmax).${RESET}"
+        else
+            echo -e "   ${RED}Very close to Tjmax! Only ${headroom}°C margin.${RESET}"
+        fi
+    fi
+
+    # SSD limits
+    local ssd_data
+    ssd_data=$(read_ssd_temps)
+    if [[ -n "$ssd_data" ]]; then
+        echo -e "\n ${BOLD}Storage:${RESET}"
+        while IFS=: read -r ssd_name ssd_temp; do
+            echo "   ${ssd_name}: ${ssd_temp}°C"
+            # Check for critical temp in hwmon
+            for hwmon_dir in /sys/class/hwmon/hwmon*; do
+                local hname=""
+                [[ -f "$hwmon_dir/name" ]] && hname=$(< "$hwmon_dir/name")
+                if [[ "$hname" == "$ssd_name" ]]; then
+                    for tf in "$hwmon_dir"/temp*_crit "$hwmon_dir"/temp*_max; do
+                        [[ -f "$tf" ]] || continue
+                        local sv=$(( $(< "$tf") / 1000 ))
+                        echo "   Max operating: ${sv}°C"
+                        local sh=$(( sv - ssd_temp ))
+                        if (( sh > 15 )); then
+                            echo -e "   ${GREEN}Good thermal margin (${sh}°C).${RESET}"
+                        else
+                            echo -e "   ${YELLOW}Thermal margin: ${sh}°C — consider improving airflow.${RESET}"
+                        fi
+                        break 2
+                    done
+                fi
+            done
+        done <<< "$ssd_data"
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+# ─── Help ────────────────────────────────────────────────────────────────────────
+show_help() {
+    cat <<'HELP'
+24HG Thermal Guard — Temperature monitoring and protection for gaming
+
+Usage: 24hg-thermal <command> [options]
+
+Commands:
+  monitor       Real-time temperature dashboard (default)
+  status        Quick one-shot temperature check
+  warn          Configure warning thresholds
+  fan           Fan speed information and control
+  log           Temperature history and export
+  limits        Show hardware thermal limits and headroom
+
+Monitor options:
+  --daemon      Run in background (log + notify only, no display)
+  --interval N  Poll interval in seconds (default: 3)
+
+Warning thresholds:
+  warn show                  Show current thresholds
+  warn set gpu <temp>        Set GPU warning temperature
+  warn set cpu <temp>        Set CPU warning temperature
+  warn set ssd <temp>        Set SSD warning temperature
+  warn set gpu-crit <temp>   Set GPU critical temperature
+  warn set cpu-crit <temp>   Set CPU critical temperature
+
+Fan control:
+  fan status    Show fan speeds and PWM values
+  fan auto      Set fans to automatic control
+  fan max       Set fans to maximum (heavy gaming)
+  fan quiet     Reduce fan speed (lower noise)
+
+Log commands:
+  log show      Show today's temperature history with sparklines
+  log session   Show temps during last gaming session
+  log export    Export all logs to CSV
+
+Data locations:
+  Config:    ~/.config/24hg/thermal.json
+  Logs:      ~/.local/share/24hg/thermal/
+  Cache:     ~/.cache/24hg/thermal.json (for widgets)
+
+Temperature ranges:
+  GPU:  <70°C OK | 70-85°C WARM | 85-95°C HOT | >95°C CRITICAL
+  CPU:  <65°C OK | 65-80°C WARM | 80-90°C HOT | >90°C CRITICAL
+  (Thresholds are configurable via '24hg-thermal warn set')
+
+The monitor will NEVER forcefully kill a game — it only warns and suggests
+actions like reducing resolution, enabling frame caps, or improving airflow.
+HELP
+}
+
+# ─── Parse global flags ─────────────────────────────────────────────────────────
+COMMAND=""
+ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --daemon)
+            DAEMON_MODE=true
+            shift
+            ;;
+        --interval)
+            POLL_INTERVAL="${2:-3}"
+            shift 2
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            if [[ -z "$COMMAND" ]]; then
+                COMMAND="$1"
+            else
+                ARGS+=("$1")
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Default command
+[[ -z "$COMMAND" ]] && COMMAND="monitor"
+
+# ─── Dispatch ────────────────────────────────────────────────────────────────────
+case "$COMMAND" in
+    monitor)  cmd_monitor "${ARGS[@]+"${ARGS[@]}"}" ;;
+    status)   cmd_status "${ARGS[@]+"${ARGS[@]}"}" ;;
+    warn)     cmd_warn "${ARGS[@]+"${ARGS[@]}"}" ;;
+    fan)      cmd_fan "${ARGS[@]+"${ARGS[@]}"}" ;;
+    log)      cmd_log "${ARGS[@]+"${ARGS[@]}"}" ;;
+    limits)   cmd_limits "${ARGS[@]+"${ARGS[@]}"}" ;;
+    help)     show_help ;;
+    *)
+        echo "Unknown command: $COMMAND"
+        echo "Run '24hg-thermal --help' for usage."
+        exit 1
+        ;;
+esac
