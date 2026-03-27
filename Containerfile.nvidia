@@ -27,7 +27,6 @@ LABEL org.opencontainers.image.vendor="24 Hour Gaming"
 # Run ./stage-build.sh first to prepare .build-staging/
 COPY .build-staging/ /tmp/24hg-build/
 
-
 # ── Single RUN: install packages, deploy files, configure, cleanup ──
 RUN rpm-ostree install \
     chromium \
@@ -106,12 +105,14 @@ RUN rpm-ostree install \
     # ── Wallpapers ── \
     && mkdir -p /usr/share/24hg/wallpapers \
     && cp /tmp/24hg-build/branding/wallpapers/*.png /usr/share/24hg/wallpapers/ \
+    && mkdir -p /usr/share/gnome-background-properties \
     && cp /tmp/24hg-build/usr/share/gnome-background-properties/24hg-wallpapers.xml \
           /usr/share/gnome-background-properties/24hg-wallpapers.xml \
     \
     # ── Icons ── \
     && mkdir -p /usr/share/icons/24hg \
     && cp -r /tmp/24hg-build/branding/icons/* /usr/share/icons/24hg/ \
+    && mkdir -p /usr/share/pixmaps \
     && cp /tmp/24hg-build/branding/icons/24hg-logo.svg /usr/share/pixmaps/24hg-logo.svg \
     && cp /tmp/24hg-build/branding/icons/24hg-logo.svg /usr/share/pixmaps/system-logo-white.png 2>/dev/null || true \
     && cp /tmp/24hg-build/branding/icons/24hg-logo.svg /usr/share/pixmaps/fedora-logo.png 2>/dev/null || true \
@@ -160,7 +161,7 @@ RUN rpm-ostree install \
     && mkdir -p /etc/skel/Desktop \
     && cp /tmp/24hg-build/skel-desktop/*.desktop /etc/skel/Desktop/ \
     \
-    # ── Sound theme (uses freedesktop defaults) \
+    # ── Sound theme (uses freedesktop defaults) ── \
     \
     # ── KDE Plasma Hub Widget (Plasmoid) ── \
     && mkdir -p /usr/share/plasma/plasmoids/com.24hg.hubwidget \
@@ -201,6 +202,7 @@ RUN rpm-ostree install \
     # ── First-boot wizard + autostart ── \
     && install -m 755 /tmp/24hg-build/bin/24hg-first-boot /usr/bin/24hg-first-boot \
     && cp /tmp/24hg-build/desktop/24hg-first-boot.desktop /usr/share/applications/ \
+    \
     \
     # ── CLI tools ── \
     && install -m 755 /tmp/24hg-build/bin/24hg-neofetch /usr/bin/24hg-neofetch \
@@ -317,6 +319,7 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/24hg-build/bin/24hg-snapshot /usr/bin/24hg-snapshot \
     && install -m 755 /tmp/24hg-build/bin/24hg-windows-import /usr/bin/24hg-windows-import \
     \
+    \
     # ── Wave 18: Server Hosting + Streaming + Hardware + QoL ── \
     && install -m 755 /tmp/24hg-build/bin/24hg-host /usr/bin/24hg-host \
     && install -m 755 /tmp/24hg-build/bin/24hg-go-live /usr/bin/24hg-go-live \
@@ -398,7 +401,10 @@ RUN rpm-ostree install \
     && install -m 755 /tmp/24hg-build/lib/24hg-update-guard-hook.sh /usr/lib/24hg/ \
     && install -m 755 /tmp/24hg-build/lib/24hg-i18n.sh /usr/lib/24hg/24hg-i18n.sh \
     \
+    # ── User systemd services ── \
     # ── User systemd services (installed but NOT auto-enabled) ── \
+    # Services are available for users to enable via: systemctl --user enable <service> \
+    # Only essential timers are auto-enabled to avoid overwhelming first login \
     && mkdir -p /etc/skel/.config/systemd/user/default.target.wants \
     && mkdir -p /etc/skel/.config/systemd/user/timers.target.wants \
     && cp /tmp/24hg-build/systemd-user/24hg-server-status.service /etc/skel/.config/systemd/user/ \
